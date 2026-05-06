@@ -1468,7 +1468,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	}
 
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	if err := saveSettingsToTarget(ctx, settings, targetFile); err != nil {
+	if err := saveEnabledState(ctx, settings, targetFile == EntireSettingsFile); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
 
