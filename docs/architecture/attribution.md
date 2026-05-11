@@ -50,6 +50,37 @@ When the user commits, we calculate final attribution by:
 3. Calculating agent work (base → shadow minus accumulated user edits)
 4. Computing the final percentage
 
+### Attribution Metadata Fields
+
+Attribution is calculated for commits associated with an Entire-tracked agent
+session/checkpoint. It does not track keystrokes or exact authorship. The
+metrics are inferred from line diffs and hook timing: changes detected before an
+agent turn starts, or after the latest checkpoint before commit, are treated as
+user-side changes.
+
+- `agent_lines` - agent-attributed added lines that remain in the commit
+- `agent_removed` - agent-attributed deletions that remain deleted in the commit
+- `human_added` - user-side additions that are not paired with removals as modifications
+- `human_modified` - estimated replacement-style user-side changes, calculated from paired additions and removals
+- `human_removed` - user-side removals that are not paired with additions as modifications
+- `total_committed` - legacy net-additions metric
+- `total_lines_changed` - total changed lines used as the attribution denominator
+- `agent_percentage` - agent changed lines divided by total changed lines
+
+For example, if a user-side diff removes 5 lines and adds 2 replacement lines,
+the model classifies that as:
+
+```text
+human_modified: 2
+human_removed: 3
+human_added: 0
+```
+
+The 2 added lines are still counted as user-side work, but under
+`human_modified` because they replaced existing lines. If the user instead adds
+2 lines on top of the existing content without removing anything, those lines
+count as `human_added: 2`.
+
 ### Key Files
 
 - `manual_commit_attribution.go` - Core attribution calculation logic
