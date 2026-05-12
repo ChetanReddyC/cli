@@ -172,6 +172,7 @@ const (
 	AgentNameFactoryAIDroid types.AgentName = "factoryai-droid"
 	AgentNameGemini         types.AgentName = "gemini"
 	AgentNameOpenCode       types.AgentName = "opencode"
+	AgentNamePi             types.AgentName = "pi"
 )
 
 // Agent type constants (type identifiers stored in metadata/trailers)
@@ -183,6 +184,7 @@ const (
 	AgentTypeFactoryAIDroid types.AgentType = "Factory AI Droid"
 	AgentTypeGemini         types.AgentType = "Gemini CLI"
 	AgentTypeOpenCode       types.AgentType = "OpenCode"
+	AgentTypePi             types.AgentType = "Pi"
 	AgentTypeUnknown        types.AgentType = "Unknown"
 )
 
@@ -263,6 +265,18 @@ func AllProtectedFiles() []string {
 	}
 	slices.Sort(files)
 	return files
+}
+
+// LauncherFor returns the Launcher implementation for the given agent name,
+// or ok=false if the agent does not support subprocess launching. Callers
+// should tell the user to start the agent manually in that case.
+func LauncherFor(name types.AgentName) (Launcher, bool) {
+	a, err := Get(name)
+	if err != nil {
+		return nil, false
+	}
+	l, ok := a.(Launcher)
+	return l, ok
 }
 
 // Default returns the default agent.

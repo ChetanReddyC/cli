@@ -235,6 +235,13 @@ func (r *HookRunner) runHookWithInput(flag string, input interface{}) error {
 }
 
 func (r *HookRunner) runHookInRepoDir(hookName string, inputJSON []byte) error {
+	return r.runHookInRepoDirWithExtraEnv(hookName, inputJSON, nil)
+}
+
+// runHookInRepoDirWithExtraEnv is like runHookInRepoDir but appends additional
+// env vars to the subprocess environment. Used by review-env adoption tests that
+// need ENTIRE_REVIEW_* vars present in the hook child process.
+func (r *HookRunner) runHookInRepoDirWithExtraEnv(hookName string, inputJSON []byte, extraEnv []string) error {
 	// Run using the shared test binary
 	// Command structure: entire hooks claude-code <hook-name>
 	cmd := exec.Command(getTestBinary(), "hooks", "claude-code", hookName)
@@ -243,6 +250,7 @@ func (r *HookRunner) runHookInRepoDir(hookName string, inputJSON []byte) error {
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+r.ClaudeProjectDir,
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -252,6 +260,27 @@ func (r *HookRunner) runHookInRepoDir(hookName string, inputJSON []byte) error {
 
 	r.T.Logf("Hook %s output: %s", hookName, output)
 	return nil
+}
+
+// SimulateUserPromptSubmitWithReviewEnvVars simulates the UserPromptSubmit
+// hook with ENTIRE_REVIEW_* env vars set on the subprocess, as `entire review`
+// would set them on the spawned agent process. The hook child process inherits
+// these vars, triggering env-based review adoption in the lifecycle handler.
+func (r *HookRunner) SimulateUserPromptSubmitWithReviewEnvVars(sessionID, prompt string, extraEnv []string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": "",
+		"prompt":          prompt,
+	}
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("failed to marshal hook input: %w", err)
+	}
+
+	return r.runHookInRepoDirWithExtraEnv("user-prompt-submit", inputJSON, extraEnv)
 }
 
 // Session represents a simulated Claude Code session.
@@ -316,6 +345,15 @@ func (env *TestEnv) SimulateUserPromptSubmitWithPrompt(sessionID, prompt string)
 	env.T.Helper()
 	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
 	return runner.SimulateUserPromptSubmitWithPrompt(sessionID, prompt)
+}
+
+// SimulateUserPromptSubmitWithReviewEnvVars is a convenience method on TestEnv.
+// It simulates the UserPromptSubmit hook with ENTIRE_REVIEW_* env vars set on
+// the subprocess, reproducing what `entire review` does before spawning the agent.
+func (env *TestEnv) SimulateUserPromptSubmitWithReviewEnvVars(sessionID, prompt string, extraEnv []string) error {
+	env.T.Helper()
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	return runner.SimulateUserPromptSubmitWithReviewEnvVars(sessionID, prompt, extraEnv)
 }
 
 // SimulateUserPromptSubmitWithTranscriptPath is a convenience method on TestEnv.
@@ -572,6 +610,73 @@ func (env *TestEnv) WriteSessionState(sessionID string, state *strategy.SessionS
 		return fmt.Errorf("failed to write session state: %w", err)
 	}
 	return nil
+}
+
+// CodexHookRunner executes Codex hooks in the test environment.
+type CodexHookRunner struct {
+	RepoDir string
+	T       interface {
+		Helper()
+		Fatalf(format string, args ...interface{})
+		Logf(format string, args ...interface{})
+	}
+}
+
+// NewCodexHookRunner creates a new Codex hook runner for the given repo directory.
+func NewCodexHookRunner(repoDir string, t interface {
+	Helper()
+	Fatalf(format string, args ...interface{})
+	Logf(format string, args ...interface{})
+}) *CodexHookRunner {
+	return &CodexHookRunner{
+		RepoDir: repoDir,
+		T:       t,
+	}
+}
+
+// runCodexHook runs a Codex hook subcommand with the given JSON stdin.
+func (r *CodexHookRunner) runCodexHook(hookName string, inputJSON []byte) error {
+	r.T.Helper()
+	cmd := exec.Command(getTestBinary(), "hooks", "codex", hookName)
+	cmd.Dir = r.RepoDir
+	cmd.Stdin = bytes.NewReader(inputJSON)
+	cmd.Env = testutil.GitIsolatedEnv()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("hook %s failed: %w\nInput: %s\nOutput: %s",
+			hookName, err, inputJSON, output)
+	}
+	r.T.Logf("Codex hook %s output: %s", hookName, output)
+	return nil
+}
+
+// SimulateCodexPostToolUseApplyPatch simulates the Codex PostToolUse hook for an
+// apply_patch tool invocation. The patch envelope is the canonical Codex
+// plain-text format ("*** Add File: …", etc.) carried in tool_input.command,
+// matching the on-wire shape of codex-rs PostToolUseCommandInput. The
+// lifecycle dispatcher routes it to handleLifecycleToolUse, which merges the
+// extracted paths into the session's FilesTouched.
+func (r *CodexHookRunner) SimulateCodexPostToolUseApplyPatch(sessionID, cwd, patch string) error {
+	r.T.Helper()
+	input := map[string]any{
+		"session_id":      sessionID,
+		"turn_id":         "test-turn",
+		"transcript_path": nil,
+		"cwd":             cwd,
+		"hook_event_name": "PostToolUse",
+		"model":           "gpt-5",
+		"permission_mode": "default",
+		"tool_name":       "apply_patch",
+		"tool_use_id":     "test-call",
+		"tool_input":      map[string]string{"command": patch},
+		"tool_response":   "Success.",
+	}
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("marshal hook input: %w", err)
+	}
+	return r.runCodexHook("post-tool-use", inputJSON)
 }
 
 // GeminiHookRunner executes Gemini CLI hooks in the test environment.

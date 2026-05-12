@@ -169,6 +169,46 @@ func TestV2ReadSessionMetadataAndPrompts_ReturnsWithoutTranscript(t *testing.T) 
 	assert.Empty(t, content.Transcript)
 }
 
+func TestV2ReadSessionMetadata_DoesNotRequireRawTranscript(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo, "origin")
+	cpID := id.MustCheckpointID("f2f3f4f5f6f7")
+	ctx := context.Background()
+
+	err := store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-1",
+		Strategy:     "manual-commit",
+		Prompts:      []string{"prompt"},
+		Agent:        "Claude Code",
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	})
+	require.NoError(t, err)
+
+	metadata, err := store.ReadSessionMetadata(ctx, cpID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, metadata)
+	assert.Equal(t, "session-1", metadata.SessionID)
+	assert.Equal(t, "Claude Code", string(metadata.Agent))
+}
+
+func TestV2ReadSessionMetadata_ContextCancellation(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo, "origin")
+	cpID := id.MustCheckpointID("f2f3f4f5f6f8")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := store.ReadSessionMetadata(ctx, cpID, 0)
+	require.ErrorIs(t, err, context.Canceled, "ReadSessionMetadata error = %v, want context.Canceled", err)
+
+	_, err = store.ReadSessionMetadataAndPrompts(ctx, cpID, 0)
+	require.ErrorIs(t, err, context.Canceled, "ReadSessionMetadataAndPrompts error = %v, want context.Canceled", err)
+}
+
 func TestV2ReadSessionMetadata_ReturnsMetadata(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
@@ -210,7 +250,7 @@ func TestV2ReadSessionMetadata_FetchesMissingMetadataBlob(t *testing.T) {
 
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
-	repoRoot := wt.Filesystem.Root()
+	repoRoot := wt.Filesystem().Root()
 	mainTree := v2MainTree(t, repo)
 	sessionTree, err := mainTree.Tree(cpID.Path() + "/0")
 	require.NoError(t, err)

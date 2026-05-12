@@ -50,6 +50,7 @@ branch, or lists all trails if no trail exists for the current branch.`,
 	cmd.AddCommand(newTrailListCmd())
 	cmd.AddCommand(newTrailCreateCmd())
 	cmd.AddCommand(newTrailUpdateCmd())
+	cmd.AddCommand(newTrailWatchCmd())
 
 	return cmd
 }
@@ -91,7 +92,12 @@ func runTrailShow(ctx context.Context, w io.Writer, insecureHTTP bool) error {
 
 func printTrailDetails(w io.Writer, m *trail.Metadata) {
 	fmt.Fprintf(w, "Trail: %s\n", m.Title)
-	fmt.Fprintf(w, "  ID:      %s\n", m.TrailID)
+	if m.Number > 0 {
+		fmt.Fprintf(w, "  Number:  %d\n", m.Number)
+	}
+	if !m.TrailID.IsEmpty() {
+		fmt.Fprintf(w, "  ID:      %s\n", m.TrailID)
+	}
 	fmt.Fprintf(w, "  Branch:  %s\n", m.Branch)
 	fmt.Fprintf(w, "  Base:    %s\n", m.Base)
 	fmt.Fprintf(w, "  Status:  %s\n", m.Status)
@@ -545,6 +551,12 @@ func buildTrailUpdateRequest(current *api.TrailResource, statusStr, title, body 
 
 // defaultBaseBranch is the fallback base branch name when it cannot be determined.
 const defaultBaseBranch = "main"
+
+// masterBaseBranch is the secondary fallback for repos still using "master"
+// (pre-git-2.28 defaults, forks of older projects, etc.). Extracted as a
+// constant so goconst stays quiet across the several call sites in the cli
+// package.
+const masterBaseBranch = "master"
 
 func formatValidStatuses() string {
 	statuses := trail.ValidStatuses()
