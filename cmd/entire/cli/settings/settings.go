@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,7 +17,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
 const (
@@ -24,6 +27,8 @@ const (
 	EntireSettingsFile = ".entire/settings.json"
 	// EntireSettingsLocalFile is the path to the local settings override file (not committed)
 	EntireSettingsLocalFile = ".entire/settings.local.json"
+	// ClonePreferencesFile is the path inside the git common dir for clone-local preferences.
+	ClonePreferencesFile = "entire/preferences.json"
 	// defaultGenerationRetentionDays is the default retention window for archived
 	// checkpoints v2 raw-transcript generations when no override is configured.
 	defaultGenerationRetentionDays = 14
@@ -97,9 +102,9 @@ type EntireSettings struct {
 
 	// SummaryTimeoutSeconds is an optional hard deadline (in seconds) for
 	// `entire explain --generate` summary generation. Zero or negative means
-	// "unset" -- the caller picks the default. Not yet consumed by the
-	// generate path; present so settings round-trip for a follow-up change
-	// that wires it into the deadline selection.
+	// "unset" -- falls back to the per-run --summary-timeout-seconds flag
+	// (if set) or the package default (5 minutes). Raise for very large
+	// transcripts; lower (e.g. 30) for fast-fail in CI.
 	SummaryTimeoutSeconds int `json:"summary_timeout_seconds,omitempty"`
 
 	// SignCheckpointCommits controls whether checkpoint commits are signed.
@@ -109,6 +114,23 @@ type EntireSettings struct {
 	// Deprecated: no longer used. Exists to tolerate old settings files
 	// that still contain "strategy": "auto-commit" or similar.
 	Strategy string `json:"strategy,omitempty"`
+}
+
+// ClonePreferences stores clone-local, uncommitted preferences that should be
+// shared by linked worktrees in the same git clone.
+//
+// Stored in the git common dir (not the worktree) so multiple worktrees of the
+// same clone see the same preferences. Not committed because the file lives
+// inside .git/.
+type ClonePreferences struct {
+	Review         map[string]ReviewConfig `json:"review,omitempty"`
+	ReviewFixAgent string                  `json:"review_fix_agent,omitempty"`
+
+	// ReviewMigrationDismissed records that the user declined the one-shot
+	// migration of review keys from project settings to clone-local prefs.
+	// Once true, `entire review` stops prompting on every invocation; the
+	// user can re-enable by editing this file or deleting the key.
+	ReviewMigrationDismissed bool `json:"review_migration_dismissed,omitempty"`
 }
 
 // SummaryGenerationSettings configures provider selection for on-demand
@@ -159,6 +181,15 @@ func (s *SummaryGenerationSettings) SetProvider(newProvider, newModel string) {
 // RedactionSettings configures redaction behavior beyond the default secret detection.
 type RedactionSettings struct {
 	PII *PIISettings `json:"pii,omitempty"`
+
+	// CustomRedactions is a label → RE2 regex map for user-defined patterns
+	// to scrub from transcripts. Use it for internal credential shapes the
+	// bundled detectors don't know about, project codenames, or any other
+	// string pattern you don't want stored. Each match is replaced with the
+	// bare "REDACTED" token used by the built-in secret layers, not the
+	// "[REDACTED_<LABEL>]" token used by PII. Failed regex compilations are
+	// logged via slog.Warn and the rule is skipped.
+	CustomRedactions map[string]string `json:"custom_redactions,omitempty"`
 }
 
 // PIISettings configures PII detection categories.
@@ -230,9 +261,10 @@ func (s *EntireSettings) ReviewConfigFor(agentName string) ReviewConfig {
 	return s.Review[agentName]
 }
 
-// Load loads the Entire settings from .entire/settings.json,
-// then applies any overrides from .entire/settings.local.json if it exists.
-// Returns default settings if neither file exists.
+// Load loads the Entire settings from .entire/settings.json, then applies
+// clone-local preferences from the git common dir, then applies any overrides
+// from .entire/settings.local.json if it exists.
+// Returns default settings if no settings or preferences file exists.
 // Works correctly from any subdirectory within the repository.
 func Load(ctx context.Context) (*EntireSettings, error) {
 	// Get absolute paths for settings files
@@ -240,19 +272,39 @@ func Load(ctx context.Context) (*EntireSettings, error) {
 	if err != nil {
 		settingsFileAbs = EntireSettingsFile // Fallback to relative
 	}
+	preferencesFileAbs := ""
+	if path, prefErr := ClonePreferencesPath(ctx); prefErr == nil {
+		preferencesFileAbs = path
+	} else {
+		// Log at Debug rather than silently dropping the preferences layer.
+		// "Not in a git repo" is a legitimate case (some commands run outside
+		// a repo), but a git PATH issue or .git/ permission failure is worth
+		// finding via `ENTIRE_LOG_LEVEL=debug` when users report "my picker
+		// choices vanished".
+		logging.Debug(ctx, "clone preferences path unresolved; skipping preferences layer",
+			slog.String("error", prefErr.Error()))
+	}
 	localSettingsFileAbs, err := paths.AbsPath(ctx, EntireSettingsLocalFile)
 	if err != nil {
 		localSettingsFileAbs = EntireSettingsLocalFile // Fallback to relative
 	}
 
-	return loadMergedSettings(settingsFileAbs, localSettingsFileAbs)
+	return loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
 }
 
-func loadMergedSettings(settingsFileAbs, localSettingsFileAbs string) (*EntireSettings, error) {
+func loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAbs string) (*EntireSettings, error) {
 	// Load base settings
 	settings, err := loadFromFile(settingsFileAbs)
 	if err != nil {
 		return nil, fmt.Errorf("reading settings file: %w", err)
+	}
+
+	if preferencesFileAbs != "" {
+		preferences, err := loadClonePreferencesFromFile(preferencesFileAbs)
+		if err != nil {
+			return nil, fmt.Errorf("reading clone preferences file: %w", err)
+		}
+		applyClonePreferences(settings, preferences)
 	}
 
 	// Apply local overrides if they exist
@@ -284,6 +336,107 @@ func loadMergedSettings(settingsFileAbs, localSettingsFileAbs string) (*EntireSe
 // Use this when you need to display individual settings files separately.
 func LoadFromFile(filePath string) (*EntireSettings, error) {
 	return loadFromFile(filePath)
+}
+
+// LoadProjectRaw reads .entire/settings.json as a generic JSON object so
+// callers can inspect or mutate individual keys without losing unrelated
+// fields to round-trip decoding.
+//
+// Returns:
+//   - path: absolute path of the project settings file.
+//   - raw: parsed JSON object, or an empty map when the file is missing.
+//   - exists: false when the file does not exist (raw is empty); true otherwise.
+//   - err: parse error or read error other than ENOENT.
+//
+// Pair with SaveProjectRaw for read-modify-write flows like the review-key
+// migration. Owning the path resolution and raw IO here keeps callers from
+// duplicating settings parsing in violation of the "Settings access must go
+// through the settings package" rule in CLAUDE.md.
+func LoadProjectRaw(ctx context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error) {
+	path, err = paths.AbsPath(ctx, EntireSettingsFile)
+	if err != nil {
+		path = EntireSettingsFile
+	}
+	data, readErr := os.ReadFile(path) //nolint:gosec // path is from AbsPath or a project-relative constant
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return path, map[string]json.RawMessage{}, false, nil
+		}
+		return path, nil, false, fmt.Errorf("reading project settings: %w", readErr)
+	}
+	raw = map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return path, nil, true, fmt.Errorf("parsing project settings: %w", err)
+	}
+	return path, raw, true, nil
+}
+
+// LoadLocalRaw reads .entire/settings.local.json as a generic JSON object,
+// mirroring LoadProjectRaw for the per-developer overrides file. Returns
+// exists=false (and an empty raw map) when the file does not exist — the
+// common case for users who haven't created the local override file.
+//
+// Pair with the migration flow: callers can use this to detect when local
+// overrides would mask a freshly-migrated setting, then warn the user
+// before performing the migration.
+func LoadLocalRaw(ctx context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error) {
+	path, err = paths.AbsPath(ctx, EntireSettingsLocalFile)
+	if err != nil {
+		path = EntireSettingsLocalFile
+	}
+	data, readErr := os.ReadFile(path) //nolint:gosec // path is from AbsPath or a project-relative constant
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return path, map[string]json.RawMessage{}, false, nil
+		}
+		return path, nil, false, fmt.Errorf("reading local settings: %w", readErr)
+	}
+	raw = map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return path, nil, true, fmt.Errorf("parsing local settings: %w", err)
+	}
+	return path, raw, true, nil
+}
+
+// SaveProjectRaw writes a generic JSON object back to .entire/settings.json
+// atomically (temp file + rename). Callers should mutate the map returned by
+// LoadProjectRaw and pass it back here so unrelated fields are preserved.
+func SaveProjectRaw(path string, raw map[string]json.RawMessage) error {
+	data, err := jsonutil.MarshalIndentWithNewline(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal project settings: %w", err)
+	}
+	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
+		return fmt.Errorf("writing project settings: %w", err)
+	}
+	return nil
+}
+
+// ClonePreferencesPath returns the clone-local preferences path in the git common dir.
+func ClonePreferencesPath(ctx context.Context) (string, error) {
+	commonDir, err := session.GetGitCommonDir(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve git common dir: %w", err)
+	}
+	return filepath.Join(commonDir, ClonePreferencesFile), nil
+}
+
+// LoadClonePreferences loads clone-local preferences from the git common dir.
+func LoadClonePreferences(ctx context.Context) (*ClonePreferences, error) {
+	path, err := ClonePreferencesPath(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return loadClonePreferencesFromFile(path)
+}
+
+// SaveClonePreferences saves clone-local preferences to the git common dir.
+func SaveClonePreferences(ctx context.Context, prefs *ClonePreferences) error {
+	path, err := ClonePreferencesPath(ctx)
+	if err != nil {
+		return err
+	}
+	return saveClonePreferencesToFile(prefs, path)
 }
 
 // LoadFromBytes parses settings from raw JSON bytes without merging local overrides.
@@ -331,8 +484,70 @@ func loadFromFile(filePath string) (*EntireSettings, error) {
 	return settings, nil
 }
 
+func loadClonePreferencesFromFile(filePath string) (*ClonePreferences, error) {
+	prefs := &ClonePreferences{}
+
+	data, err := os.ReadFile(filePath) //nolint:gosec // path is from caller
+	if err != nil {
+		if os.IsNotExist(err) {
+			return prefs, nil
+		}
+		return nil, fmt.Errorf("%w", err)
+	}
+
+	// Lenient decoding here (vs. strict via DisallowUnknownFields in
+	// loadFromFile for EntireSettings). Two reasons clone preferences need
+	// the looser contract:
+	//   1. They are rewritten on every picker save — a newer binary can
+	//      introduce a field the older binary then sees as unknown, which
+	//      under strict decoding would brick settings.Load for that older
+	//      binary across the whole clone.
+	//   2. The file lives in .git/, so users rarely hand-edit it; the
+	//      typo-silently-ignored downside is theoretical here.
+	// EntireSettings stays strict because it's committed and team-edited,
+	// where unknown keys usually mean typos worth surfacing immediately.
+	if err := json.Unmarshal(data, prefs); err != nil {
+		return nil, fmt.Errorf("parsing preferences file: %w", err)
+	}
+	return prefs, nil
+}
+
+func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error {
+	if prefs == nil {
+		prefs = &ClonePreferences{}
+	}
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("creating preferences directory: %w", err)
+	}
+
+	data, err := jsonutil.MarshalIndentWithNewline(prefs, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling preferences: %w", err)
+	}
+
+	if err := jsonutil.WriteFileAtomic(filePath, data, 0o644); err != nil {
+		return fmt.Errorf("writing preferences file: %w", err)
+	}
+	return nil
+}
+
+func applyClonePreferences(settings *EntireSettings, prefs *ClonePreferences) {
+	if prefs == nil {
+		return
+	}
+	if prefs.Review != nil {
+		settings.Review = prefs.Review
+	}
+	if prefs.ReviewFixAgent != "" {
+		settings.ReviewFixAgent = prefs.ReviewFixAgent
+	}
+}
+
 // mergeJSON merges JSON data into existing settings.
-// Only non-zero values from the JSON override existing settings.
+// Most fields only apply non-zero values from JSON. The review map is replaced
+// whenever the key is present, so override files can clear or fully replace
+// project-level review configuration.
 func mergeJSON(settings *EntireSettings, data []byte) error {
 	// Validate that there are no unknown keys using strict decoding.
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -359,6 +574,13 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 	}
 	if err := mergeCommitLinking(settings, raw); err != nil {
 		return err
+	}
+	if reviewRaw, ok := raw["review"]; ok {
+		var review map[string]ReviewConfig
+		if err := json.Unmarshal(reviewRaw, &review); err != nil {
+			return fmt.Errorf("parsing review field: %w", err)
+		}
+		settings.Review = review
 	}
 
 	// Merge redaction sub-fields if present (field-level, not wholesale replace).
@@ -555,6 +777,19 @@ func mergeRedaction(dst *RedactionSettings, data json.RawMessage) error {
 		}
 		if err := mergePIISettings(dst.PII, piiRaw); err != nil {
 			return err
+		}
+	}
+	if csRaw, ok := raw["custom_redactions"]; ok {
+		var cs map[string]string
+		if err := json.Unmarshal(csRaw, &cs); err != nil {
+			return fmt.Errorf("parsing redaction.custom_redactions: %w", err)
+		}
+		if dst.CustomRedactions == nil {
+			dst.CustomRedactions = cs
+		} else {
+			for k, v := range cs {
+				dst.CustomRedactions[k] = v
+			}
 		}
 	}
 	return nil
@@ -951,8 +1186,7 @@ func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) 
 		return fmt.Errorf("marshaling settings: %w", err)
 	}
 
-	//nolint:gosec // G306: settings file is config, not secrets; 0o644 is appropriate
-	if err := os.WriteFile(filePathAbs, data, 0o644); err != nil {
+	if err := jsonutil.WriteFileAtomic(filePathAbs, data, 0o644); err != nil {
 		return fmt.Errorf("writing settings file: %w", err)
 	}
 	return nil

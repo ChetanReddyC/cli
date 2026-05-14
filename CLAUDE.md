@@ -708,7 +708,7 @@ The key is the agent name. The value is a `ReviewConfig` with `skills` (skill in
 
 #### How It Works (env-var handshake)
 
-1. `entire review` selects the configured agent (override → alphabetically first → prompt if multiple), composes the review prompt via `review.ComposeReviewPrompt`, and computes scope (closest-ancestor branch via `review.ComputeScopeStats`).
+1. `entire review` selects the configured agent (override → alphabetically first → prompt if multiple), composes the review prompt via `review.ComposeReviewPrompt`, and computes scope (mainline base ref via `review.ComputeScopeStats`, overridable with `--base`).
 2. **For launchable agents** (claude-code, codex, gemini-cli): the spawned agent process is given env vars `ENTIRE_REVIEW_{SESSION,AGENT,SKILLS,PROMPT,STARTING_SHA}` that the agent's `UserPromptSubmit` lifecycle hook reads to tag the session as `Kind = "agent_review"` with the configured skills/prompt. Each spawned process has its own env, so multiple worktrees and multi-agent runs are correct by construction (no shared marker file, no race).
 3. **For non-launchable agents** (cursor, opencode, factoryai-droid): `RunMarkerFallback` writes a `PendingReviewMarker` file and prints guidance — the user opens the agent themselves and runs the skills. Single shared file (`review/marker_fallback.go`); adding new non-launchable agents is a registry entry, not a new file.
 4. The agent runs the review skills; the session ends naturally.
@@ -731,7 +731,7 @@ Review metadata is stored at two levels on `entire/checkpoints/v1`:
 - **`Run(ctx, reviewer, cfg, sinks)`** (`cmd/entire/cli/review/run.go`): single-agent orchestrator. Forwards events to all sinks via `AgentEvent`, calls `RunFinished` once at end with a populated `RunSummary`. Sink dispatch is serialized; sinks need not internally synchronize.
 - **`RunMulti(ctx, reviewers, cfg, sinks)`** (`cmd/entire/cli/review/run_multi.go`): N-agent orchestrator. Each agent runs concurrently in its own goroutine; events fan into a single dispatch loop so the serial-dispatch contract is preserved. Per-agent skills/prompts are injected via `perAgentConfiguredReviewer` adapter (each reviewer sees its own `RunConfig` despite the shared API surface).
 - **Env-var contract** (`cmd/entire/cli/review/env.go`): single source of truth for `ENTIRE_REVIEW_*` constants used by spawn-side and lifecycle adoption.
-- **Scope detection** (`cmd/entire/cli/review/scope.go`): `detectScopeBaseRef` finds the closest non-self ancestor branch by tip timestamp, with fallback chain `origin/HEAD → origin/main → origin/master → main → master`. Banner output: "Reviewing feat/X vs main: 3 commits, 7 files changed, 2 uncommitted".
+- **Scope detection** (`cmd/entire/cli/review/scope.go`): `detectScopeBaseRef` returns the first existing ref from the fallback chain `origin/HEAD → origin/main → origin/master → main → master`. Overridable per-invocation via `--base <ref>` (validated through go-git's `ResolveRevision`). Banner output: "Reviewing feat/X vs main: 3 commits, 7 files changed, 2 uncommitted".
 
 #### Multi-Agent UI
 
@@ -758,7 +758,7 @@ The redesign eliminated several constructs from the prior implementation. None s
 - `--track-only` flag (intentionally removed by #1009)
 - `--postreview` / `--finalize` / empty review commits / `/entire-review:finish` skill installer
 - `Launcher` + `HeadlessLauncher` as separate interfaces (single `AgentReviewer`)
-- `filterCodexOutput` in shared multi-agent code (lives in codex's adapter)
+- Codex chrome-line filtering or any agent-specific stdout post-processing in shared multi-agent code (per-agent parsers own their format; shared code only sees `Event` variants)
 - `sync.Once`-guarded onCancel + parallel `signal.Notify` goroutine (single cancel from start)
 
 #### Key Files
@@ -772,7 +772,7 @@ The redesign eliminated several constructs from the prior implementation. None s
 - `cmd/entire/cli/review/synthesis_sink.go` / `synthesis_prompt.go` — opt-in cross-agent verdict
 - `cmd/entire/cli/review/types/{reviewer,sink,template}.go` — interface contracts (CU2 + CU4 + CU5b)
 - `cmd/entire/cli/review/env.go` — `ENTIRE_REVIEW_*` constants + `EncodeSkills`/`DecodeSkills` + `AppendReviewEnv`
-- `cmd/entire/cli/agent/{claudecode,codex,geminicli}/reviewer.go` — per-agent `AgentReviewer` implementations (claude-code, codex with chrome filter, gemini-cli)
+- `cmd/entire/cli/agent/{claudecode,codex,geminicli}/reviewer.go` — per-agent `AgentReviewer` implementations (claude-code, codex, gemini-cli)
 - `cmd/entire/cli/agent/claudecode/discovery.go` — skill discovery + `pickLatestVersion` plugin-cache dedupe
 - `cmd/entire/cli/lifecycle.go` — `adoptReviewEnv` reads `ENTIRE_REVIEW_*` from process env; replaces marker-file adoption
 - `cmd/entire/cli/review_bridge.go` / `review_helpers.go` — bridge code in `cli` package for cycle-bound functions (`headHasReviewCheckpoint`, `launchableReviewerFor`, `newReviewAttachCmd`, `lazySynthesisProvider`)
