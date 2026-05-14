@@ -45,8 +45,6 @@ import (
 	"golang.org/x/term"
 )
 
-const defaultCheckpointSummaryTimeout = 5 * time.Minute
-
 const (
 	pagerEnvVar       = "PAGER"
 	lessEnvVar        = "LESS"
@@ -55,16 +53,14 @@ const (
 	windowsGOOS       = "windows"
 )
 
-var checkpointSummaryTimeout = defaultCheckpointSummaryTimeout
-
 var generateTranscriptSummary = summarize.GenerateFromTranscript
 
 // resolveSummaryTimeout picks the effective deadline for `explain --generate`
-// using the precedence: per-run flag > settings.summary_timeout_seconds >
-// package default. Zero or negative values at any layer mean "unset; consult
-// the next layer down" — matching SummaryTimeoutValue() semantics.
+// using the precedence: per-run flag > settings.summary_timeout_seconds > 0.
+// Returns 0 to mean "no deadline" — the caller skips context.WithTimeout
+// entirely and the provider call inherits the parent context unchanged.
 //
-// Settings load failures are logged at debug and fall through to the default;
+// Settings load failures are logged at debug and fall through to 0;
 // a parsing hiccup must not break summary generation.
 func resolveSummaryTimeout(ctx context.Context, flagSeconds int) time.Duration {
 	if flagSeconds > 0 {
@@ -72,14 +68,14 @@ func resolveSummaryTimeout(ctx context.Context, flagSeconds int) time.Duration {
 	}
 	s, err := settings.Load(ctx)
 	if err != nil {
-		logging.Debug(ctx, "summary timeout: settings load failed, using default",
+		logging.Debug(ctx, "summary timeout: settings load failed; no deadline",
 			slog.String("error", err.Error()))
-		return checkpointSummaryTimeout
+		return 0
 	}
 	if v := s.SummaryTimeoutValue(); v > 0 {
 		return v
 	}
-	return checkpointSummaryTimeout
+	return 0
 }
 
 // errCannotGenerateTemporaryCheckpoint is returned by runExplainCheckpoint when
@@ -936,9 +932,9 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 	timeout := resolveSummaryTimeout(ctx, summaryTimeoutSeconds)
 
 	start := time.Now()
-	summary, appliedDeadline, err := generateCheckpointAISummary(ctx, scopedTranscript, cpSummary.FilesTouched, content.Metadata.Agent, provider.Generator, timeout)
+	summary, err := generateCheckpointAISummary(ctx, scopedTranscript, cpSummary.FilesTouched, content.Metadata.Agent, provider.Generator, timeout)
 	if err != nil {
-		label, rows, structured := formatCheckpointSummaryError(err, appliedDeadline)
+		label, rows, structured := formatCheckpointSummaryError(err, timeout)
 		styles := newStatusStyles(errW)
 		fmt.Fprint(errW, styles.renderFailure(label, rows))
 		return NewSilentError(structured)
@@ -1042,39 +1038,40 @@ func transcriptHasSummaryContent(transcriptBytes []byte, agentType types.AgentTy
 	return err == nil && len(entries) > 0
 }
 
-// generateCheckpointAISummary returns the generated summary, the effective
-// deadline applied to the underlying call (which may be shorter than the
-// requested timeout if the parent context had an earlier deadline), and any
-// error. The effective deadline is returned so the caller can render the
-// true timeout value in user-facing error messages instead of always
-// showing the requested value.
-func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, filesTouched []string, agentType types.AgentType, generator summarize.Generator, timeout time.Duration) (*checkpoint.Summary, time.Duration, error) {
-	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
-	timeoutDuration := timeout
-	if deadline, ok := timeoutCtx.Deadline(); ok {
-		timeoutDuration = time.Until(deadline)
+// generateCheckpointAISummary generates a checkpoint summary using the given
+// generator. When timeout > 0 a context.WithTimeout is applied; when timeout
+// is 0 the provider call inherits the parent context unchanged (no deadline
+// unless the parent already has one).
+func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, filesTouched []string, agentType types.AgentType, generator summarize.Generator, timeout time.Duration) (*checkpoint.Summary, error) {
+	runCtx := ctx
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
-	defer cancel()
 
 	// scopedTranscript is either read from checkpoint storage (redacted on
 	// write) or replaced by external compact output redacted before use.
-	summary, err := generateTranscriptSummary(timeoutCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, agentType, generator, nil) // wired in chunk 6
+	summary, err := generateTranscriptSummary(runCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, agentType, generator, nil) // wired in chunk 6
 	if err != nil {
 		// Only classify as ctx cancel/deadline when the error chain actually
-		// contains the sentinel. Relying on timeoutCtx.Err() here loses typed
+		// contains the sentinel. Relying on runCtx.Err() here loses typed
 		// errors (e.g. *ClaudeError) when the subprocess returned a real
-		// structured failure while timeoutCtx.Err() is non-nil for any reason
+		// structured failure while runCtx.Err() is non-nil for any reason
 		// (parent cancelled, deadline already elapsed, etc.).
 		if errors.Is(err, context.Canceled) {
-			return nil, timeoutDuration, fmt.Errorf("summary generation canceled: %w", err)
+			return nil, fmt.Errorf("summary generation canceled: %w", err)
 		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, timeoutDuration, fmt.Errorf("summary generation timed out after %s: %w", formatSummaryTimeout(timeoutDuration), err)
+		if errors.Is(err, context.DeadlineExceeded) || (cancel != nil && errors.Is(runCtx.Err(), context.DeadlineExceeded)) {
+			if timeout > 0 {
+				return nil, fmt.Errorf("summary generation timed out after %s: %w", formatSummaryTimeout(timeout), context.DeadlineExceeded)
+			}
+			return nil, fmt.Errorf("summary generation timed out (parent context deadline): %w", context.DeadlineExceeded)
 		}
-		return nil, timeoutDuration, err
+		return nil, err
 	}
 
-	return summary, timeoutDuration, nil
+	return summary, nil
 }
 
 // formatCheckpointSummaryError maps typed Claude CLI errors and context
