@@ -12,13 +12,31 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
 
+// TextGenerationError carries captured subprocess output alongside a
+// TextGenerator's error so the explain layer can build a meaningful
+// timeout diagnostic ("provider produced no output" vs "was generating
+// output when killed"). Wraps the original error so errors.As against
+// the inner type (e.g. *ClaudeError) keeps working.
+type TextGenerationError struct {
+	Err         error
+	Stderr      string
+	StdoutBytes int
+}
+
+func (e *TextGenerationError) Error() string { return e.Err.Error() }
+func (e *TextGenerationError) Unwrap() error { return e.Err }
+
 // TextCommandRunner matches exec.CommandContext and allows tests to inject a runner.
 type TextCommandRunner func(ctx context.Context, name string, args ...string) *exec.Cmd
 
 // RunIsolatedTextGeneratorCLI executes a text-generation CLI in an isolated temp
 // directory with all GIT_* environment variables removed. This avoids recursive
 // hook triggers and repo side effects while preserving provider-specific flags.
-func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, binary, displayName string, args []string, stdin string) (string, error) {
+//
+// Returns (result, capturedStderr, stdoutByteCount, err). capturedStderr and
+// stdoutByteCount are populated even on error so callers can wrap them into a
+// *agent.TextGenerationError for timeout diagnostics.
+func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, binary, displayName string, args []string, stdin string) (string, string, int, error) { //nolint:unparam // capturedStderr (result 1) is used by sub-package callers (codex, geminicli, etc.) even though intra-package tests blank it
 	if runner == nil {
 		runner = exec.CommandContext
 	}
@@ -35,35 +53,37 @@ func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, 
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		capturedStderr := strings.TrimSpace(stderr.String())
+		stdoutBytes := stdout.Len()
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", context.DeadlineExceeded
+			return "", capturedStderr, stdoutBytes, context.DeadlineExceeded
 		}
 		if errors.Is(ctx.Err(), context.Canceled) {
-			return "", context.Canceled
+			return "", capturedStderr, stdoutBytes, context.Canceled
 		}
 		var execErr *exec.Error
 		if errors.As(err, &execErr) {
-			return "", fmt.Errorf("%s CLI not found: %w", displayName, err)
+			return "", capturedStderr, stdoutBytes, fmt.Errorf("%s CLI not found: %w", displayName, err)
 		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			detail := strings.TrimSpace(stderr.String())
+			detail := capturedStderr
 			if detail == "" {
 				detail = strings.TrimSpace(stdout.String())
 			}
 			if detail == "" {
 				detail = err.Error()
 			}
-			return "", fmt.Errorf("%s CLI failed (exit %d): %s: %w", displayName, exitErr.ExitCode(), detail, err)
+			return "", capturedStderr, stdoutBytes, fmt.Errorf("%s CLI failed (exit %d): %s: %w", displayName, exitErr.ExitCode(), detail, err)
 		}
-		return "", fmt.Errorf("failed to run %s CLI: %w", displayName, err)
+		return "", capturedStderr, stdoutBytes, fmt.Errorf("failed to run %s CLI: %w", displayName, err)
 	}
 
 	result := strings.TrimSpace(stdout.String())
 	if result == "" {
-		return "", fmt.Errorf("%s CLI returned empty output", displayName)
+		return "", "", 0, fmt.Errorf("%s CLI returned empty output", displayName)
 	}
-	return result, nil
+	return result, "", stdout.Len(), nil
 }
 
 // summaryProviderBinaries maps agent names to the CLI binary that

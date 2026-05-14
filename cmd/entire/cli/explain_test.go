@@ -93,7 +93,7 @@ func rowsHaveValue(rows []explainRow, want string) bool {
 
 func TestFormatCheckpointSummaryError_Auth(t *testing.T) {
 	t.Parallel()
-	label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorAuth, Message: "Invalid API key"}, 0)
+	label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorAuth, Message: "Invalid API key"}, newSummaryAttempt("claude-code", 0))
 	if !strings.Contains(strings.ToLower(label), "authentication failed") {
 		t.Errorf("missing 'authentication failed' in label %q", label)
 	}
@@ -107,7 +107,7 @@ func TestFormatCheckpointSummaryError_Auth(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_RateLimit(t *testing.T) {
 	t.Parallel()
-	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorRateLimit, Message: "429"}, 0)
+	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorRateLimit, Message: "429"}, newSummaryAttempt("claude-code", 0))
 	if !strings.Contains(label, "rate limit") {
 		t.Errorf("missing rate-limit phrasing in label: %q", label)
 	}
@@ -118,7 +118,7 @@ func TestFormatCheckpointSummaryError_RateLimit(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_Config(t *testing.T) {
 	t.Parallel()
-	_, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorConfig, Message: "model not found"}, 0)
+	_, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorConfig, Message: "model not found"}, newSummaryAttempt("claude-code", 0))
 	if !rowsHaveValue(rows, "model not found") {
 		t.Errorf("envelope message not surfaced in rows: %+v", rows)
 	}
@@ -129,7 +129,7 @@ func TestFormatCheckpointSummaryError_Config(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_CLIMissing(t *testing.T) {
 	t.Parallel()
-	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorCLIMissing}, 0)
+	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorCLIMissing}, newSummaryAttempt("claude-code", 0))
 	if !strings.Contains(label, "not installed") {
 		t.Errorf("missing cli-missing phrasing in label: %q", label)
 	}
@@ -152,7 +152,7 @@ func TestFormatCheckpointSummaryError_TypedBranchesHandleEmptyMessage(t *testing
 	for _, kind := range kinds {
 		t.Run(string(kind), func(t *testing.T) {
 			t.Parallel()
-			label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: kind}, 0)
+			label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: kind}, newSummaryAttempt("claude-code", 0))
 			if err == nil {
 				t.Fatal("expected structured error")
 			}
@@ -172,8 +172,9 @@ func TestFormatCheckpointSummaryError_TypedBranchesHandleEmptyMessage(t *testing
 
 func TestFormatCheckpointSummaryError_DeadlineExceeded(t *testing.T) {
 	t.Parallel()
-	label, rows, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.DeadlineExceeded), 5*time.Minute)
-	if !strings.Contains(label, "timed out") {
+	attempt := newSummaryAttempt("codex", 5*time.Minute)
+	label, rows, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.DeadlineExceeded), attempt)
+	if !strings.Contains(strings.ToLower(label), "timed out") {
 		t.Errorf("expected 'timed out' in label, got %q", label)
 	}
 	if !strings.Contains(label, "5m") {
@@ -206,7 +207,7 @@ func TestFormatCheckpointSummaryError_DeadlineExceeded(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_Canceled(t *testing.T) {
 	t.Parallel()
-	label, _, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.Canceled), 0)
+	label, _, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.Canceled), newSummaryAttempt("claude-code", 0))
 	if !strings.Contains(label, "canceled") {
 		t.Errorf("missing canceled in label: %q", label)
 	}
@@ -217,7 +218,7 @@ func TestFormatCheckpointSummaryError_Canceled(t *testing.T) {
 
 func TestFormatCheckpointSummaryError_Passthrough(t *testing.T) {
 	t.Parallel()
-	_, rows, err := formatCheckpointSummaryError(errors.New("something else"), 0)
+	_, rows, err := formatCheckpointSummaryError(errors.New("something else"), newSummaryAttempt("claude-code", 0))
 	if err == nil {
 		t.Fatal("expected structured error")
 	}
@@ -252,7 +253,7 @@ func TestFormatCheckpointSummaryError_Unknown(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			label, rows, err := formatCheckpointSummaryError(tc.err, 0)
+			label, rows, err := formatCheckpointSummaryError(tc.err, newSummaryAttempt("claude-code", 0))
 			if err == nil {
 				t.Fatal("expected structured error")
 			}
@@ -835,7 +836,7 @@ func TestGenerateCheckpointAISummary_ExplicitTimeoutApplied(t *testing.T) {
 	}
 
 	start := time.Now()
-	summary, err := generateCheckpointAISummary(context.Background(), []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, explicitTimeout)
+	summary, err := generateCheckpointAISummary(context.Background(), []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, explicitTimeout, nil, newSummaryAttempt("claude-code", explicitTimeout))
 	if err != nil {
 		t.Fatalf("generateCheckpointAISummary() error = %v", err)
 	}
@@ -924,9 +925,7 @@ func TestGenerateCheckpointAISummary_NoTimeoutInheritsParent(t *testing.T) {
 	parentCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	// Chunk-5 signature: ctx, transcript, files, agentType, generator, timeout.
-	// Chunk 6 will add progress and attempt — update this test's call accordingly then.
-	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, 0)
+	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, 0, nil, newSummaryAttempt("claude-code", 0))
 	// Parent deadline (50ms) should fire, not our absence of a deadline.
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected DeadlineExceeded from parent, got %v", err)
@@ -961,7 +960,7 @@ func TestGenerateCheckpointAISummary_PreservesClaudeErrorWhenCtxIsDone(t *testin
 		return nil, claudeErr
 	}
 
-	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, 0)
+	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, 0, nil, newSummaryAttempt("claude-code", 0))
 	var ce *claudecode.ClaudeError
 	if !errors.As(err, &ce) {
 		t.Fatalf("errors.As did not recover *ClaudeError; got %v", err)
@@ -1145,7 +1144,7 @@ func TestGenerateCheckpointAISummary_ExplicitTimeoutNarrowsLongParent(t *testing
 	}
 
 	start := time.Now()
-	summary, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, explicitTimeout)
+	summary, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, explicitTimeout, nil, newSummaryAttempt("claude-code", explicitTimeout))
 	if err != nil {
 		t.Fatalf("generateCheckpointAISummary() error = %v", err)
 	}
@@ -1180,7 +1179,7 @@ func TestGenerateCheckpointAISummary_UsesCancellationSentinel(t *testing.T) {
 		return nil, ctx.Err()
 	}
 
-	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, 0)
+	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, 0, nil, newSummaryAttempt("claude-code", 0))
 	if err == nil {
 		t.Fatal("expected cancellation error")
 	}
@@ -5809,5 +5808,176 @@ func TestRunExplainBranchWithFilter_DetachedHead(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "HEAD") && !strings.Contains(output, "detached") {
 		t.Errorf("expected output to indicate detached HEAD state, got: %s", output)
+	}
+}
+func TestSummaryProgressWriter_NonTTY(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	attempt := newSummaryAttempt("claude-code", 0)
+	pw := newSummaryProgressWriter(&buf, attempt)
+
+	// Throttling rule: emit on first PhaseGenerating, then on 500ms OR 25% jump.
+	// The two events here are back-to-back (~0ms) but the second is a 100% jump,
+	// so both should emit.
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseConnecting})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseFirstToken, TTFTms: 935, CachedInputTokens: 35892})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 100})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 200})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseDone, OutputTokens: 200, DurationMs: 3100})
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("expected 5 lines, got %d: %q", len(lines), buf.String())
+	}
+	wantSubstr := []string{
+		"Sending request to provider",
+		"Provider responded",
+		"Writing summary",
+		"Writing summary",
+		"Summary generated",
+	}
+	for i, ws := range wantSubstr {
+		if !strings.Contains(lines[i], ws) {
+			t.Errorf("line %d = %q, want substring %q", i, lines[i], ws)
+		}
+	}
+	if strings.Contains(buf.String(), "\r") {
+		t.Error("non-TTY output should not contain carriage returns")
+	}
+}
+
+func TestSummaryProgressWriter_NonTTYGenerateThrottle(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	attempt := newSummaryAttempt("claude-code", 0)
+	pw := newSummaryProgressWriter(&buf, attempt)
+
+	// First Generating event always emits (no prior state).
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 100})
+	// Tiny jump (10%) within 500ms → suppressed.
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 110})
+	// 30% jump from baseline of 100 → emits (>=25% rule).
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: 130})
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Errorf("expected 2 emitted Generating lines, got %d: %q", len(lines), buf.String())
+	}
+}
+
+func TestSummaryProgressWriter_Accessible(t *testing.T) {
+	// Cannot use t.Parallel() — t.Setenv mutates process-global state.
+	// (Strictly, t.Setenv IS compatible with t.Parallel() in Go 1.17+ when
+	// Setenv is called BEFORE Parallel, but the project convention is to
+	// avoid pairing them to keep the rules simple.)
+	t.Setenv("ACCESSIBLE", "1")
+	var buf bytes.Buffer
+	attempt := newSummaryAttempt("claude-code", 0)
+	pw := newSummaryProgressWriter(&buf, attempt)
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseConnecting})
+
+	out := buf.String()
+	if strings.Contains(out, "→") {
+		t.Errorf("accessible mode should not contain unicode arrow: %q", out)
+	}
+	if !strings.Contains(out, "->") {
+		t.Errorf("accessible mode should contain ASCII arrow: %q", out)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("accessible mode should not contain ANSI escapes: %q", out)
+	}
+}
+
+func TestSummaryProgressWriter_PopulatesAttempt(t *testing.T) {
+	t.Parallel()
+
+	attempt := newSummaryAttempt("claude-code", 30*time.Second)
+	pw := newSummaryProgressWriter(&bytes.Buffer{}, attempt)
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseConnecting})
+	pw.handle(agent.GenerationProgress{Phase: agent.PhaseFirstToken})
+
+	if !attempt.streaming {
+		t.Error("expected attempt.streaming=true after any progress event")
+	}
+	if !attempt.phasesReached[agent.PhaseConnecting] {
+		t.Error("expected PhaseConnecting recorded in attempt")
+	}
+	if !attempt.phasesReached[agent.PhaseFirstToken] {
+		t.Error("expected PhaseFirstToken recorded in attempt")
+	}
+	if attempt.phasesReached[agent.PhaseDone] {
+		t.Error("did not expect PhaseDone yet")
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingStuckBeforeConnecting(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true // streaming was attempted but no events fired
+
+	label, rows := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "never sent its request") {
+		t.Errorf("label = %q, want 'never sent its request'", label)
+	}
+	if !rowsHaveValue(rows, "claude") {
+		t.Errorf("rows should suggest running 'claude' directly: %v", rows)
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingStuckBeforeFirstToken(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true
+	attempt.phasesReached[agent.PhaseConnecting] = true
+
+	label, _ := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "received no response") {
+		t.Errorf("label = %q, want 'received no response'", label)
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingStuckMidGeneration(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true
+	attempt.phasesReached[agent.PhaseConnecting] = true
+	attempt.phasesReached[agent.PhaseFirstToken] = true
+	attempt.phasesReached[agent.PhaseGenerating] = true
+
+	label, _ := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "did not finish") {
+		t.Errorf("label = %q, want 'did not finish'", label)
+	}
+}
+
+func TestTimeoutDiagnostic_NonStreamingNoOutput(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("codex", 5*time.Second)
+	attempt.stderrCaptured = "failed to look up host: nodename nor servname provided"
+	attempt.stdoutByteCount = 0
+
+	label, rows := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "produced no output") {
+		t.Errorf("label = %q, want 'produced no output'", label)
+	}
+	if !rowsHaveValue(rows, "failed to look up host") {
+		t.Errorf("rows should surface stderr, got: %v", rows)
+	}
+}
+
+func TestTimeoutDiagnostic_NonStreamingWithOutput(t *testing.T) {
+	t.Parallel()
+	attempt := newSummaryAttempt("codex", 5*time.Second)
+	attempt.stderrCaptured = "model is processing your request"
+	attempt.stdoutByteCount = 1024
+
+	label, rows := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "was generating output when killed") {
+		t.Errorf("label = %q, want 'was generating output when killed'", label)
+	}
+	if !rowsHaveValue(rows, "model is processing") {
+		t.Errorf("rows should surface stderr, got: %v", rows)
 	}
 }

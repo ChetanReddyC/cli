@@ -400,7 +400,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream stored checkpoint transcript bytes to stdout")
 	cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "Session index within a multi-session checkpoint (0-based, defaults to latest)")
 	cmd.Flags().IntVar(&listLimit, "limit", 0, "Cap the list view at N checkpoints (default: 100). Only meaningful with --json.")
-	cmd.Flags().IntVar(&summaryTimeoutSecondsFlag, "summary-timeout-seconds", 0, "Hard deadline in seconds for --generate summary generation; overrides summary_timeout_seconds setting. 0 = use setting or 5m default.")
+	cmd.Flags().IntVar(&summaryTimeoutSecondsFlag, "summary-timeout-seconds", 0, "Hard deadline in seconds for --generate summary generation; overrides summary_timeout_seconds setting. 0 = use setting; if setting is also unset or 0, no automatic deadline applies.")
 
 	// Verbosity / transcript output modes are mutually exclusive
 	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "transcript", "json")
@@ -926,15 +926,24 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 	// Generate summary using shared helper
 	logging.Info(ctx, "generating checkpoint summary")
 	if errW != nil {
-		fmt.Fprintln(errW, "Generating checkpoint summary...")
+		fmt.Fprintf(errW, "Generating checkpoint summary... (transcript: %s, provider: %s)\n",
+			humanizeBytes(len(scopedTranscript)), provider.Name)
 	}
 
 	timeout := resolveSummaryTimeout(ctx, summaryTimeoutSeconds)
 
+	attempt := newSummaryAttempt(provider.Name, timeout)
+	progressWriter := newSummaryProgressWriter(errW, attempt)
+
 	start := time.Now()
-	summary, err := generateCheckpointAISummary(ctx, scopedTranscript, cpSummary.FilesTouched, content.Metadata.Agent, provider.Generator, timeout)
+	summary, err := generateCheckpointAISummary(
+		ctx, scopedTranscript, cpSummary.FilesTouched,
+		content.Metadata.Agent, provider.Generator,
+		timeout, progressWriter.handle, attempt,
+	)
 	if err != nil {
-		label, rows, structured := formatCheckpointSummaryError(err, timeout)
+		progressWriter.Flush()
+		label, rows, structured := formatCheckpointSummaryError(err, attempt)
 		styles := newStatusStyles(errW)
 		fmt.Fprint(errW, styles.renderFailure(label, rows))
 		return NewSilentError(structured)
@@ -1042,7 +1051,7 @@ func transcriptHasSummaryContent(transcriptBytes []byte, agentType types.AgentTy
 // generator. When timeout > 0 a context.WithTimeout is applied; when timeout
 // is 0 the provider call inherits the parent context unchanged (no deadline
 // unless the parent already has one).
-func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, filesTouched []string, agentType types.AgentType, generator summarize.Generator, timeout time.Duration) (*checkpoint.Summary, error) {
+func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, filesTouched []string, agentType types.AgentType, generator summarize.Generator, timeout time.Duration, progress agent.ProgressFn, attempt *summaryAttempt) (*checkpoint.Summary, error) {
 	runCtx := ctx
 	var cancel context.CancelFunc
 	if timeout > 0 {
@@ -1052,8 +1061,15 @@ func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, f
 
 	// scopedTranscript is either read from checkpoint storage (redacted on
 	// write) or replaced by external compact output redacted before use.
-	summary, err := generateTranscriptSummary(runCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, agentType, generator, nil) // wired in chunk 6
+	summary, err := generateTranscriptSummary(runCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, agentType, generator, progress) // wired in chunk 6
 	if err != nil {
+		// Populate attempt with captured subprocess output before classifying
+		// the error, so the timeout-diagnostic path can surface stderr / byte count.
+		var failure *agent.TextGenerationError
+		if errors.As(err, &failure) {
+			attempt.stderrCaptured = failure.Stderr
+			attempt.stdoutByteCount = failure.StdoutBytes
+		}
 		// Only classify as ctx cancel/deadline when the error chain actually
 		// contains the sentinel. Relying on runCtx.Err() here loses typed
 		// errors (e.g. *ClaudeError) when the subprocess returned a real
@@ -1082,7 +1098,7 @@ func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, f
 // renders to errW via newStatusStyles(...).renderFailure(label, rows). This
 // split keeps the formatting policy in one place (the failure block) while
 // letting the caller still return a *SilentError for main.go's exit handling.
-func formatCheckpointSummaryError(err error, deadline time.Duration) (string, []explainRow, error) {
+func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, []explainRow, error) {
 	var claudeErr *claudecode.ClaudeError
 	switch {
 	case errors.As(err, &claudeErr):
@@ -1126,24 +1142,116 @@ func formatCheckpointSummaryError(err error, deadline time.Duration) (string, []
 			return label, rows, fmt.Errorf("Claude failed to generate the summary%s", suffix) //nolint:staticcheck // ST1005
 		}
 	case errors.Is(err, context.DeadlineExceeded):
-		// Deliberately provider-neutral: explain --generate supports multiple
-		// summary providers (claude-code, codex, gemini, ...), so hardcoding
-		// "Claude" / "sonnet" / "Anthropic" here would misdirect users who
-		// selected a different provider in .entire/settings.json.
-		label := "Summary generation timed out after " + formatSummaryTimeout(deadline)
-		rows := []explainRow{
-			{Label: "causes", Value: ""},
-			{Label: "", Value: "• the selected model is taking longer than expected on a large transcript"},
-			{Label: "", Value: "• the summary provider's CLI cannot reach its API (network, VPN, firewall)"},
-			{Label: "", Value: "• the provider's API is degraded"},
-			{Label: "try", Value: "run the provider CLI directly to confirm it works"},
+		label, rows := timeoutDiagnostic(err, attempt)
+		structured := errors.New("summary generation timed out")
+		if attempt.deadline > 0 {
+			structured = fmt.Errorf("summary generation did not return within the %s safety deadline", formatSummaryTimeout(attempt.deadline))
 		}
-		return label, rows, fmt.Errorf("summary generation did not return within the %s safety deadline", formatSummaryTimeout(deadline))
+		return label, rows, structured
 	case errors.Is(err, context.Canceled):
 		return "Summary generation canceled", nil, errors.New("summary generation canceled")
 	default:
 		return "Failed to generate summary", []explainRow{{Label: "detail", Value: err.Error()}}, fmt.Errorf("failed to generate summary: %w", err)
 	}
+}
+
+// CLI binary names for each provider. Kept as package-level constants so
+// goconst is satisfied — these literals also appear in test fixtures and
+// adjacent registries; centralizing them here gives goconst a single
+// constant per string to point at.
+const (
+	providerCLIBinaryClaude  = "claude"
+	providerCLIBinaryCodex   = "codex"
+	providerCLIBinaryGemini  = "gemini"
+	providerCLIBinaryCopilot = "copilot"
+	providerCLIBinaryCursor  = "agent" // Cursor's CLI binary is named `agent`.
+	providerCLIBinaryDroid   = "droid"
+)
+
+// providerCLIName returns the user-facing CLI binary name for an agent.
+// Empty string means "we don't know" — diagnostic copy then says
+// "the provider CLI" generically.
+func providerCLIName(name types.AgentName) string {
+	switch name {
+	case agent.AgentNameClaudeCode:
+		return providerCLIBinaryClaude
+	case agent.AgentNameCodex:
+		return providerCLIBinaryCodex
+	case agent.AgentNameGemini:
+		return providerCLIBinaryGemini
+	case agent.AgentNameCopilotCLI:
+		return providerCLIBinaryCopilot
+	case agent.AgentNameCursor:
+		return providerCLIBinaryCursor
+	case agent.AgentNameFactoryAIDroid:
+		return providerCLIBinaryDroid
+	default:
+		return ""
+	}
+}
+
+// timeoutDiagnostic builds the label and supporting rows for a
+// context.DeadlineExceeded failure. The deadline can be: (a) the user's
+// --summary-timeout-seconds / summary_timeout_seconds, captured in
+// attempt.deadline; or (b) a parent-context deadline imposed externally,
+// in which case attempt.deadline is 0. We render the label without a
+// concrete duration when the latter is the only signal we have.
+func timeoutDiagnostic(_ error, attempt *summaryAttempt) (string, []explainRow) {
+	// Prefix the label: "Timed out after Xs:" when we know X; "Timed out:" otherwise.
+	prefix := "Timed out: "
+	if attempt.deadline > 0 {
+		prefix = "Timed out after " + formatSummaryTimeout(attempt.deadline) + ": "
+	}
+	tryRunCLI := "run the provider CLI directly to confirm it works"
+	if cli := providerCLIName(attempt.provider); cli != "" {
+		tryRunCLI = fmt.Sprintf("run `%s` directly to confirm it works", cli)
+	}
+
+	if attempt.streaming {
+		switch {
+		case !attempt.phasesReached[agent.PhaseConnecting]:
+			return prefix + "provider never sent its request",
+				[]explainRow{
+					{Label: "cause", Value: "the provider CLI may be stalled before subprocess startup"},
+					{Label: "try", Value: tryRunCLI},
+				}
+		case !attempt.phasesReached[agent.PhaseFirstToken]:
+			return prefix + "provider sent request but received no response",
+				[]explainRow{
+					{Label: "cause", Value: "network/firewall, provider API degraded, or auth check stuck"},
+					{Label: "try", Value: "check connectivity to the provider, then retry"},
+				}
+		case !attempt.phasesReached[agent.PhaseDone]:
+			return prefix + "model responded but did not finish",
+				[]explainRow{
+					{Label: "cause", Value: "transcript may be too large for the chosen cap, or model is slow"},
+					{Label: "try", Value: "raise --summary-timeout-seconds or pick a faster model"},
+				}
+		}
+	}
+
+	stderr := strings.TrimSpace(attempt.stderrCaptured)
+	stdoutBytes := attempt.stdoutByteCount
+
+	if stdoutBytes == 0 {
+		rows := []explainRow{
+			{Label: "cause", Value: "provider CLI produced no output (likely network/auth/CLI path issue)"},
+			{Label: "try", Value: tryRunCLI},
+		}
+		if stderr != "" {
+			rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+		}
+		return prefix + "provider produced no output", rows
+	}
+
+	rows := []explainRow{
+		{Label: "cause", Value: "provider was generating output but did not finish before cap"},
+		{Label: "try", Value: "raise --summary-timeout-seconds"},
+	}
+	if stderr != "" {
+		rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+	}
+	return prefix + "provider was generating output when killed", rows
 }
 
 // formatMessageSuffix formats ": <msg>" when msg is non-empty and "" otherwise.
@@ -1190,6 +1298,180 @@ func formatSummaryTimeout(d time.Duration) string {
 		return d.Round(10 * time.Millisecond).String()
 	}
 	return d.Round(time.Second).String()
+}
+
+// formatMs formats a millisecond count as "1.5s" / "120ms".
+func formatMs(ms int) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.1fs", float64(ms)/1000.0)
+}
+
+// humanizeBytes formats a byte count as a short human-readable string
+// (e.g., 0 B, 500 B, 1.5 KB, 47 KB, 1.2 MB). Uses 1024-based units.
+func humanizeBytes(n int) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := int64(n) / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	suffix := []string{"KB", "MB", "GB", "TB"}[exp]
+	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), suffix)
+}
+
+// summaryAttempt accumulates observable state during a single --generate
+// summary call. The progress writer populates the streaming fields as
+// events fire; the non-streaming Generate path populates stderrCaptured /
+// stdoutByteCount via *agent.TextGenerationError.
+// formatCheckpointSummaryError reads this struct at DeadlineExceeded to
+// build the timeout diagnostic message.
+type summaryAttempt struct {
+	streaming       bool
+	phasesReached   map[agent.ProgressPhase]bool
+	stderrCaptured  string
+	stdoutByteCount int
+	deadline        time.Duration
+	provider        types.AgentName
+}
+
+func newSummaryAttempt(provider types.AgentName, deadline time.Duration) *summaryAttempt {
+	return &summaryAttempt{
+		phasesReached: make(map[agent.ProgressPhase]bool),
+		deadline:      deadline,
+		provider:      provider,
+	}
+}
+
+// summaryProgressWriter renders agent.GenerationProgress events to the
+// configured writer using existing statusStyles, and side-effectfully
+// updates the supplied *summaryAttempt so the timeout-diagnostic path
+// can attribute failure to a specific phase. On a TTY (and outside
+// ACCESSIBLE mode) it rewrites the current line for the running token
+// count; otherwise it appends one line per event.
+//
+// Provider-neutral phrasing — "provider" stands in for the configured
+// summary provider. The provider name is interpolated into the initial
+// "Generating checkpoint summary..." line by generateCheckpointSummary,
+// not by this writer.
+type summaryProgressWriter struct {
+	w        io.Writer
+	inplace  bool
+	lastLine string
+	arrow    string // precomputed styled glyph
+	check    string // precomputed styled glyph
+	attempt  *summaryAttempt
+
+	// Throttle state for PhaseGenerating updates in non-TTY mode.
+	lastGenerateAt     time.Time
+	lastGenerateTokens int
+}
+
+func newSummaryProgressWriter(w io.Writer, attempt *summaryAttempt) *summaryProgressWriter {
+	styles := newStatusStyles(w)
+	inplace := interactive.IsTerminalWriter(w) && !IsAccessibleMode()
+	arrow := "->"
+	check := "*"
+	if !IsAccessibleMode() {
+		arrow = styles.render(styles.cyan, "→")
+		check = styles.render(styles.green, "✓")
+	}
+	return &summaryProgressWriter{
+		w:       w,
+		inplace: inplace,
+		arrow:   arrow,
+		check:   check,
+		attempt: attempt,
+	}
+}
+
+// shouldEmitGenerating decides whether a PhaseGenerating event should be
+// rendered in non-TTY mode. TTY mode dedupes natively via inplace updates
+// and the lastLine short-circuit, so this rule applies only to non-TTY.
+// Rule: emit at most one update per 500ms OR per 25% jump in OutputTokens,
+// whichever fires first.
+func (s *summaryProgressWriter) shouldEmitGenerating(p agent.GenerationProgress) bool {
+	if s.inplace {
+		return true // TTY: always — updateLine dedupes
+	}
+	now := time.Now()
+	if s.lastGenerateAt.IsZero() {
+		s.lastGenerateAt = now
+		s.lastGenerateTokens = p.OutputTokens
+		return true
+	}
+	if now.Sub(s.lastGenerateAt) >= 500*time.Millisecond {
+		s.lastGenerateAt = now
+		s.lastGenerateTokens = p.OutputTokens
+		return true
+	}
+	if s.lastGenerateTokens > 0 && p.OutputTokens >= s.lastGenerateTokens*5/4 {
+		s.lastGenerateAt = now
+		s.lastGenerateTokens = p.OutputTokens
+		return true
+	}
+	return false
+}
+
+func (s *summaryProgressWriter) handle(p agent.GenerationProgress) {
+	if s.attempt != nil {
+		s.attempt.streaming = true
+		s.attempt.phasesReached[p.Phase] = true
+	}
+
+	switch p.Phase {
+	case agent.PhaseConnecting:
+		s.printLine(s.arrow + " Sending request to provider...")
+	case agent.PhaseFirstToken:
+		s.printLine(fmt.Sprintf(
+			"%s Provider responded (TTFT %s, %s cached input tokens) -- generating...",
+			s.arrow, formatMs(p.TTFTms), formatTokenCount(p.CachedInputTokens)))
+	case agent.PhaseGenerating:
+		if !s.shouldEmitGenerating(p) {
+			return
+		}
+		s.updateLine(fmt.Sprintf(
+			"%s Writing summary... (~%s tokens)",
+			s.arrow, formatTokenCount(p.OutputTokens)))
+	case agent.PhaseDone:
+		s.printLine(fmt.Sprintf(
+			"%s Summary generated (%s, %s output tokens)",
+			s.check, formatMs(p.DurationMs), formatTokenCount(p.OutputTokens)))
+	}
+}
+
+// Flush clears any pending in-place line (e.g. mid-"Writing summary..." update)
+// so the caller can render an error block on a fresh row. No-op on non-TTY
+// since each event already terminates with a newline there.
+func (s *summaryProgressWriter) Flush() {
+	if s.inplace && s.lastLine != "" {
+		fmt.Fprint(s.w, "\r\033[2K")
+		s.lastLine = ""
+	}
+}
+
+func (s *summaryProgressWriter) printLine(line string) {
+	if s.inplace && s.lastLine != "" {
+		fmt.Fprint(s.w, "\r\033[2K")
+	}
+	fmt.Fprintln(s.w, line)
+	s.lastLine = ""
+}
+
+func (s *summaryProgressWriter) updateLine(line string) {
+	if s.lastLine == line {
+		return
+	}
+	if s.inplace {
+		fmt.Fprintf(s.w, "\r\033[2K%s", line)
+	} else {
+		fmt.Fprintln(s.w, line)
+	}
+	s.lastLine = line
 }
 
 // explainTemporaryCheckpoint finds and formats a temporary checkpoint by shadow commit hash prefix.

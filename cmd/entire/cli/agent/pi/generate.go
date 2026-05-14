@@ -17,7 +17,7 @@ func (a *PiAgent) GenerateText(ctx context.Context, prompt string, model string)
 	}
 	args = append(args, prompt)
 
-	result, err := agent.RunIsolatedTextGeneratorCLI(ctx, nil, "pi", "pi", args, "")
+	result, _, _, err := agent.RunIsolatedTextGeneratorCLI(ctx, nil, "pi", "pi", args, "")
 	if err != nil {
 		return "", fmt.Errorf("pi text generation failed: %w", err)
 	}

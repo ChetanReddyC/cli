@@ -24,7 +24,7 @@ func TestRunIsolatedTextGeneratorCLI_EmptyOutput(t *testing.T) {
 			return exec.CommandContext(ctx, "printf", "")
 		}
 	}
-	_, err := RunIsolatedTextGeneratorCLI(context.Background(), runner, "test", "test-agent", nil, "")
+	_, _, _, err := RunIsolatedTextGeneratorCLI(context.Background(), runner, "test", "test-agent", nil, "")
 	if err == nil {
 		t.Fatal("expected error for empty output")
 	}
@@ -39,7 +39,7 @@ func TestRunIsolatedTextGeneratorCLI_NonZeroExit(t *testing.T) {
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "sh", "-c", "echo 'some error' >&2; exit 1")
 	}
-	_, err := RunIsolatedTextGeneratorCLI(context.Background(), runner, "test", "myagent", nil, "")
+	_, _, _, err := RunIsolatedTextGeneratorCLI(context.Background(), runner, "test", "myagent", nil, "")
 	if err == nil {
 		t.Fatal("expected error for non-zero exit")
 	}
@@ -58,7 +58,7 @@ func TestRunIsolatedTextGeneratorCLI_NonZeroExitFallsBackToStdout(t *testing.T) 
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "sh", "-c", "echo 'stdout detail'; exit 1")
 	}
-	_, err := RunIsolatedTextGeneratorCLI(context.Background(), runner, "test", "myagent", nil, "")
+	_, _, _, err := RunIsolatedTextGeneratorCLI(context.Background(), runner, "test", "myagent", nil, "")
 	if err == nil {
 		t.Fatal("expected error for non-zero exit")
 	}
@@ -70,7 +70,7 @@ func TestRunIsolatedTextGeneratorCLI_NonZeroExitFallsBackToStdout(t *testing.T) 
 func TestRunIsolatedTextGeneratorCLI_BinaryNotFound(t *testing.T) {
 	t.Parallel()
 
-	_, err := RunIsolatedTextGeneratorCLI(context.Background(), nil, "nonexistent-binary-12345", "myagent", nil, "")
+	_, _, _, err := RunIsolatedTextGeneratorCLI(context.Background(), nil, "nonexistent-binary-12345", "myagent", nil, "")
 	if err == nil {
 		t.Fatal("expected error for missing binary")
 	}
@@ -83,7 +83,7 @@ func TestRunIsolatedTextGeneratorCLI_NilRunnerDefaultsToExec(t *testing.T) {
 	t.Parallel()
 
 	// With nil runner, it defaults to exec.CommandContext, so "echo" should work
-	result, err := RunIsolatedTextGeneratorCLI(context.Background(), nil, "echo", "echo", []string{"hello"}, "")
+	result, _, _, err := RunIsolatedTextGeneratorCLI(context.Background(), nil, "echo", "echo", []string{"hello"}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestRunIsolatedTextGeneratorCLI_CanceledContextPreservesSentinel(t *testing
 		cancel()
 	}()
 
-	_, err := RunIsolatedTextGeneratorCLI(ctx, runner, "test", "test", nil, "")
+	_, _, _, err := RunIsolatedTextGeneratorCLI(ctx, runner, "test", "test", nil, "")
 	if err == nil {
 		t.Fatal("expected cancellation error")
 	}
