@@ -827,6 +827,7 @@ func TestGenerateCheckpointAISummary_AddsDefaultTimeoutWithoutParentDeadline(t *
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		deadline, ok := ctx.Deadline()
 		if !ok {
@@ -922,6 +923,7 @@ func TestGenerateCheckpointAISummary_UsesParentDeadlineAndWrapsSentinel(t *testi
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		gotDeadline, _ = ctx.Deadline()
 		<-ctx.Done()
@@ -980,6 +982,7 @@ func TestGenerateCheckpointAISummary_PreservesClaudeErrorWhenCtxIsDone(t *testin
 		[]string,
 		types.AgentType,
 		summarize.Generator,
+		agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		return nil, claudeErr
 	}
@@ -1076,7 +1079,7 @@ func stubSummaryProviderForTest(t *testing.T) {
 		return &stubTextAgent{name: name, kind: agent.AgentTypeClaudeCode}, nil
 	}
 	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
-	generateTranscriptSummary = func(context.Context, redact.RedactedBytes, []string, types.AgentType, summarize.Generator) (*checkpoint.Summary, error) {
+	generateTranscriptSummary = func(context.Context, redact.RedactedBytes, []string, types.AgentType, summarize.Generator, agent.ProgressFn) (*checkpoint.Summary, error) {
 		return &checkpoint.Summary{Intent: "i", Outcome: "o"}, nil
 	}
 }
@@ -1156,6 +1159,7 @@ func TestGenerateCheckpointAISummary_ClampsLongParentDeadlineToDefaultTimeout(t 
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		deadline, ok := ctx.Deadline()
 		if !ok {
@@ -1197,6 +1201,7 @@ func TestGenerateCheckpointAISummary_UsesCancellationSentinel(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		cancel()
 		<-ctx.Done()
@@ -1629,6 +1634,7 @@ func TestRunExplainCheckpoint_GenerateV1OnlyReloadsFromV1(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		sawV1Transcript = strings.Contains(string(transcript.Bytes()), "v1-only generate prompt")
 		return &checkpoint.Summary{Intent: "generated intent", Outcome: "generated outcome"}, nil
@@ -1698,6 +1704,7 @@ func TestRunExplainCheckpoint_GenerateV1ModeUsesSelectedStore(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		sawV1Transcript = strings.Contains(string(transcript.Bytes()), "v1-mode generate prompt")
 		return &checkpoint.Summary{Intent: "generated v1 intent", Outcome: "generated v1 outcome"}, nil
@@ -1774,6 +1781,7 @@ func TestRunExplainCheckpoint_GenerateWritesV1Store(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		return &checkpoint.Summary{Intent: "selected v1 intent", Outcome: "selected v1 outcome"}, nil
 	}
@@ -1851,6 +1859,7 @@ func TestRunExplainCheckpoint_GenerateReloadsAfterV1Write(t *testing.T) {
 		_ []string,
 		_ types.AgentType,
 		_ summarize.Generator,
+		_ agent.ProgressFn,
 	) (*checkpoint.Summary, error) {
 		return &checkpoint.Summary{Intent: "generated v1 intent", Outcome: "generated v1 outcome"}, nil
 	}

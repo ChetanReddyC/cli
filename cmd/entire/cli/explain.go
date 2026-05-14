@@ -1058,7 +1058,7 @@ func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, f
 
 	// scopedTranscript is either read from checkpoint storage (redacted on
 	// write) or replaced by external compact output redacted before use.
-	summary, err := generateTranscriptSummary(timeoutCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, agentType, generator)
+	summary, err := generateTranscriptSummary(timeoutCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, agentType, generator, nil) // wired in chunk 6
 	if err != nil {
 		// Only classify as ctx cancel/deadline when the error chain actually
 		// contains the sentinel. Relying on timeoutCtx.Err() here loses typed
