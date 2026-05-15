@@ -90,6 +90,11 @@ func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, 
 // RunIsolatedTextGeneratorCLI will exec. Used by IsSummaryCLIAvailable to
 // check PATH instead of repo-level DetectPresence, because a repo can use
 // one agent for development while a different agent generates summaries.
+//
+// This is the single source of truth for summary-capable provider binaries.
+// Callers outside this package that need the binary name (e.g., the explain
+// diagnostic's "run `claude` directly" suggestion) should use
+// SummaryCLIBinaryName rather than duplicating the mapping.
 var summaryProviderBinaries = map[types.AgentName]string{
 	AgentNameClaudeCode: "claude",
 	AgentNameCodex:      "codex",
@@ -99,14 +104,22 @@ var summaryProviderBinaries = map[types.AgentName]string{
 	AgentNamePi:         "pi",
 }
 
+// SummaryCLIBinaryName returns the CLI binary name for a summary-capable
+// agent (e.g. "claude" for ClaudeCode, "agent" for Cursor). Returns "" for
+// agents that are not summary-capable; callers should treat that as "we
+// don't know" rather than guessing.
+func SummaryCLIBinaryName(name types.AgentName) string {
+	return summaryProviderBinaries[name]
+}
+
 // IsSummaryCLIAvailable reports whether the CLI binary for a summary-capable
 // agent is on PATH. This is distinct from DetectPresence, which checks
 // repo-level agent configuration — a repo configured with Claude Code for
 // development can still use Codex or Gemini for summary generation as long
 // as the binary is installed.
 func IsSummaryCLIAvailable(name types.AgentName) bool {
-	binary, ok := summaryProviderBinaries[name]
-	if !ok {
+	binary := SummaryCLIBinaryName(name)
+	if binary == "" {
 		return false
 	}
 	_, err := exec.LookPath(binary)

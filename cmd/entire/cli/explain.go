@@ -1078,7 +1078,15 @@ func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, f
 		if errors.Is(err, context.Canceled) {
 			return nil, fmt.Errorf("summary generation canceled: %w", err)
 		}
-		if errors.Is(err, context.DeadlineExceeded) || (cancel != nil && errors.Is(runCtx.Err(), context.DeadlineExceeded)) {
+		// Trust err's chain only: if the subprocess returned an envelope
+		// error (e.g. *agent.TextGenerationError carrying a 404) while ctx
+		// happened to fire concurrently, we want the typed error to surface
+		// to the explain layer, not a generic "timed out" message. The
+		// inner generator (claudecode.GenerateTextStreaming) already gives
+		// envelope errors priority over ctx.Err(), so by the time err
+		// reaches us, DeadlineExceeded is only present in err if the
+		// timeout was actually the cause.
+		if errors.Is(err, context.DeadlineExceeded) {
 			if timeout > 0 {
 				return nil, fmt.Errorf("summary generation timed out after %s: %w", formatSummaryTimeout(timeout), context.DeadlineExceeded)
 			}
@@ -1155,39 +1163,17 @@ func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, [
 	}
 }
 
-// CLI binary names for each provider. Kept as package-level constants so
-// goconst is satisfied — these literals also appear in test fixtures and
-// adjacent registries; centralizing them here gives goconst a single
-// constant per string to point at.
-const (
-	providerCLIBinaryClaude  = "claude"
-	providerCLIBinaryCodex   = "codex"
-	providerCLIBinaryGemini  = "gemini"
-	providerCLIBinaryCopilot = "copilot"
-	providerCLIBinaryCursor  = "agent" // Cursor's CLI binary is named `agent`.
-	providerCLIBinaryDroid   = "droid"
-)
-
-// providerCLIName returns the user-facing CLI binary name for an agent.
-// Empty string means "we don't know" — diagnostic copy then says
+// providerCLIName returns the user-facing CLI binary name for an agent,
+// delegating to the canonical map in the agent package. Empty string
+// means "not a summary-capable provider" — diagnostic copy then says
 // "the provider CLI" generically.
+//
+// Kept as a tiny wrapper here so timeoutDiagnostic doesn't import the
+// agent package directly for this single lookup, and so the diagnostic
+// stays consistent with which providers are actually summary-capable
+// (FactoryAIDroid and OpenCode are not, and never reach this code path).
 func providerCLIName(name types.AgentName) string {
-	switch name {
-	case agent.AgentNameClaudeCode:
-		return providerCLIBinaryClaude
-	case agent.AgentNameCodex:
-		return providerCLIBinaryCodex
-	case agent.AgentNameGemini:
-		return providerCLIBinaryGemini
-	case agent.AgentNameCopilotCLI:
-		return providerCLIBinaryCopilot
-	case agent.AgentNameCursor:
-		return providerCLIBinaryCursor
-	case agent.AgentNameFactoryAIDroid:
-		return providerCLIBinaryDroid
-	default:
-		return ""
-	}
+	return agent.SummaryCLIBinaryName(name)
 }
 
 // timeoutDiagnostic builds the label and supporting rows for a
