@@ -123,17 +123,22 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 	return "", errors.New("claude exited without producing a result")
 }
 
-// envelopeErrorMessage formats an is_error result envelope as a user-facing
-// error. Preserves the CLI's result text and HTTP status when present.
+// envelopeErrorMessage formats an is_error result envelope as a typed
+// *ClaudeError so the explain layer's formatCheckpointSummaryError branches
+// (auth / rate-limit / config / cli-missing) map it to actionable user
+// guidance. The non-streaming path returns *ClaudeError via classifyEnvelopeError;
+// the streaming path must do the same or users lose the specific remediation
+// hints (e.g. "Run `claude login` and retry") on the streaming code path.
+//
+// exitCode is 0 because envelope errors arrive on stdout while the CLI itself
+// exits successfully — Claude's is_error envelope semantics distinguish
+// "operational failure with structured details" from "subprocess crash".
 func envelopeErrorMessage(final *streamEvent) error {
-	msg := "claude CLI reported error"
-	if final.Result != nil && *final.Result != "" {
-		msg = fmt.Sprintf("%s: %s", msg, *final.Result)
+	resultText := ""
+	if final.Result != nil {
+		resultText = *final.Result
 	}
-	if final.APIErrorStatus != nil {
-		msg = fmt.Sprintf("%s (HTTP %d)", msg, *final.APIErrorStatus)
-	}
-	return errors.New(msg)
+	return classifyEnvelopeError(resultText, final.APIErrorStatus, 0)
 }
 
 // makeProgressDispatcher returns a per-event handler that translates raw
@@ -144,7 +149,11 @@ func makeProgressDispatcher(progress agent.ProgressFn) func(streamEvent) {
 	if progress == nil {
 		return func(streamEvent) {}
 	}
-	var outputTokensEstimate int
+	// Accumulate raw character count; compute the token estimate from the
+	// running total. Per-delta `len(text)/4` would truncate to 0 for tiny
+	// deltas (single-character or single-token streaming) and the UI would
+	// stay at "~0 tokens" until a chunky delta arrived.
+	var totalChars int
 	return func(ev streamEvent) {
 		switch {
 		case ev.Type == "system" && ev.Subtype == "status" && ev.Status == "requesting":
@@ -161,8 +170,8 @@ func makeProgressDispatcher(progress agent.ProgressFn) func(streamEvent) {
 			if text == "" {
 				text = ev.Event.Delta.Thinking
 			}
-			outputTokensEstimate += len(text) / 4 // rough estimate: ~4 chars/token
-			progress(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: outputTokensEstimate})
+			totalChars += len(text)
+			progress(agent.GenerationProgress{Phase: agent.PhaseGenerating, OutputTokens: totalChars / 4})
 		}
 	}
 }

@@ -109,8 +109,18 @@ func TestGenerateTextStreaming_EnvelopeErrorSurfaced(t *testing.T) {
 	if errors.Is(err, context.Canceled) {
 		t.Errorf("expected envelope error, got Canceled")
 	}
-	if !strings.Contains(err.Error(), "404") {
-		t.Errorf("error %q should mention 404", err)
+	// Streaming envelope errors must surface as typed *ClaudeError so the
+	// explain layer's formatCheckpointSummaryError can route on Kind
+	// (auth/rate-limit/config) instead of substring-matching err.Error().
+	var claudeErr *ClaudeError
+	if !errors.As(err, &claudeErr) {
+		t.Fatalf("expected *ClaudeError, got %T: %v", err, err)
+	}
+	if claudeErr.APIStatus != 404 {
+		t.Errorf("APIStatus = %d, want 404", claudeErr.APIStatus)
+	}
+	if claudeErr.Kind != ClaudeErrorConfig {
+		t.Errorf("Kind = %q, want %q", claudeErr.Kind, ClaudeErrorConfig)
 	}
 }
 
