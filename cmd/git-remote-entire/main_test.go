@@ -232,7 +232,7 @@ func TestResolveEnvTokenCreds_UntrustedAudAborts(t *testing.T) {
 	if creds != nil {
 		t.Fatal("expected nil creds when aud is untrusted")
 	}
-	if !strings.Contains(err.Error(), "not a trusted core") {
+	if !strings.Contains(err.Error(), "not a trusted login server") {
 		t.Fatalf("expected trust-gate error, got: %v", err)
 	}
 }
