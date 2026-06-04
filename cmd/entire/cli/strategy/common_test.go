@@ -968,7 +968,7 @@ func TestEnsureMetadataBranch(t *testing.T) {
 			t.Fatalf("failed to open repo: %v", err)
 		}
 
-		if err := EnsureMetadataBranch(repo); err != nil {
+		if err := EnsureMetadataBranch(t.Context(), repo); err != nil {
 			t.Fatalf("EnsureMetadataBranch() failed: %v", err)
 		}
 
@@ -1032,7 +1032,7 @@ func TestEnsureMetadataBranch(t *testing.T) {
 			t.Fatalf("failed to set ref: %v", err)
 		}
 
-		if err := EnsureMetadataBranch(repo); err != nil {
+		if err := EnsureMetadataBranch(t.Context(), repo); err != nil {
 			t.Fatalf("EnsureMetadataBranch() failed: %v", err)
 		}
 
@@ -1054,7 +1054,7 @@ func TestEnsureMetadataBranch(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to open repo: %v", err)
 		}
-		if err := EnsureMetadataBranch(repo); err != nil {
+		if err := EnsureMetadataBranch(t.Context(), repo); err != nil {
 			t.Fatalf("EnsureMetadataBranch() failed: %v", err)
 		}
 
@@ -1098,7 +1098,7 @@ func TestEnsureMetadataBranch_WritesVercelConfigWhenEnabled(t *testing.T) {
 		t.Fatalf("InitSettings() failed: %v", err)
 	}
 
-	if err := EnsureMetadataBranch(repo); err != nil {
+	if err := EnsureMetadataBranch(t.Context(), repo); err != nil {
 		t.Fatalf("EnsureMetadataBranch() failed: %v", err)
 	}
 
@@ -1129,6 +1129,33 @@ func TestEnsureMetadataBranch_WritesVercelConfigWhenEnabled(t *testing.T) {
 	if !vercelconfig.DeploymentDisabled(config) {
 		t.Fatalf("expected %s to disable %s, got %s", vercelconfig.FileName, vercelconfig.BranchPattern, content)
 	}
+}
+
+// Not parallel: uses t.Chdir so settings.Load picks up the v1.1 opt-in.
+func TestEnsureMetadataBranch_MirrorsV11WhenSeedingFromRemote(t *testing.T) {
+	bareDir := initBareWithMetadataBranch(t)
+	cloneDir, _ := cloneWithConfig(t, bareDir)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(cloneDir, ".entire", paths.SettingsFileName),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
+		0o644,
+	))
+	t.Chdir(cloneDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(cloneDir)
+	require.NoError(t, err)
+
+	require.NoError(t, EnsureMetadataBranch(t.Context(), repo))
+
+	v1Ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err, "local v1 branch should be seeded from origin")
+
+	mirrorRef, err := repo.Reference(plumbing.ReferenceName(paths.MetadataRefName), true)
+	require.NoError(t, err, "v1.1 mirror should track the v1 write performed by EnsureMetadataBranch")
+	assert.Equal(t, v1Ref.Hash(), mirrorRef.Hash())
 }
 
 // cloneWithConfig clones bareDir into a new temp directory, configures git identity,
@@ -1188,7 +1215,7 @@ func TestEnsureMetadataBranch_DisconnectedBranchesNotReconciledInEnable(t *testi
 		t.Fatalf("local branch not found: %v", err)
 	}
 
-	if err := EnsureMetadataBranch(repo); err != nil {
+	if err := EnsureMetadataBranch(t.Context(), repo); err != nil {
 		t.Fatalf("EnsureMetadataBranch() failed: %v", err)
 	}
 
@@ -1215,7 +1242,7 @@ func TestEnsureMetadataBranch_DoesNotFastForwardWhenBehind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open repo: %v", err)
 	}
-	if err := EnsureMetadataBranch(repo); err != nil {
+	if err := EnsureMetadataBranch(t.Context(), repo); err != nil {
 		t.Fatalf("first EnsureMetadataBranch() failed: %v", err)
 	}
 
@@ -1255,7 +1282,7 @@ func TestEnsureMetadataBranch_DoesNotFastForwardWhenBehind(t *testing.T) {
 		t.Fatalf("failed to reopen repo: %v", err)
 	}
 
-	if err := EnsureMetadataBranch(repo); err != nil {
+	if err := EnsureMetadataBranch(t.Context(), repo); err != nil {
 		t.Fatalf("second EnsureMetadataBranch() failed: %v", err)
 	}
 

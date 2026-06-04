@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.3] - 2026-06-02
+
+### Fixed
+
+- Fixed a bug where internal API calls didn't follow a redirect properly ([#1327](https://github.com/entireio/cli/pull/1327))
+
+## [0.7.2] - 2026-06-02
+
+### Fixed
+
+- macOS release binaries are Developer ID signed and notarized again. Adding the `git-remote-entire` binary in 0.7.0 gave the release builds explicit ids that no longer matched the notarization step's default filter, so 0.7.0 shipped ad-hoc-signed binaries that macOS Gatekeeper refused to run — surfacing as Homebrew shell-completion errors and `killed` on launch ([#1324](https://github.com/entireio/cli/pull/1324))
+
+### Housekeeping
+
+- The release workflow now fails closed when any macOS binary is not Developer ID signed, so an un-notarized build can no longer ship silently ([#1324](https://github.com/entireio/cli/pull/1324))
+
+## [0.7.0] - 2026-06-02
+
+### Added
+
+- The `git-remote-entire` remote helper now ships inside the CLI and activates from a shared `contexts.json` login, so `entire://` remotes work without a separately installed helper ([#1306](https://github.com/entireio/cli/pull/1306))
+- Control-plane CLI backed by a generated Core API client — manage orgs, projects, repos, grants, and mirrors directly from `entire` (work in progress) ([#1299](https://github.com/entireio/cli/pull/1299))
+- Checkpoints v1.1 (work in progress): committed checkpoints can be mirrored to a v1 custom ref (opt-in, local-only), with v1.1 write support and `entire explain` reading the new format ([#1300](https://github.com/entireio/cli/pull/1300), [#1315](https://github.com/entireio/cli/pull/1315), [#1311](https://github.com/entireio/cli/pull/1311))
+- `entire investigate` labs command: an experimental multi-agent investigation loop ([#1231](https://github.com/entireio/cli/pull/1231))
+- Skill event metadata is now captured for Claude and Pi ([#1292](https://github.com/entireio/cli/pull/1292))
+
+### Changed
+
+- `entire login` is simpler — dropped the clipboard copy and code-entry prompt added in 0.6.3 ([#1322](https://github.com/entireio/cli/pull/1322))
+- Internal auth rework spanning auth contexts, cluster trust, and the control-plane client: simplified contexts (removed the cluster-binding model and command surface, "login server" wording, clear `current_context` on delete), hardened cluster trust with ephemeral binding and a `HostInCluster` specificity floor, auto-select v2 auth on split-host, routed `status`/`list`/`revoke`/`logout` through `TokenForResource`, pinned the `AuthBaseURL` default, added a control-plane client keyring deadline, and raised the dial timeout 500ms → 2s ([#1318](https://github.com/entireio/cli/pull/1318), [#1319](https://github.com/entireio/cli/pull/1319), [#1309](https://github.com/entireio/cli/pull/1309), [#1290](https://github.com/entireio/cli/pull/1290), [#1258](https://github.com/entireio/cli/pull/1258), [#1297](https://github.com/entireio/cli/pull/1297), [#1307](https://github.com/entireio/cli/pull/1307), [#1317](https://github.com/entireio/cli/pull/1317))
+- Checkpoints v1 restored as the source of truth — the v2 dual-read path was removed ([#1285](https://github.com/entireio/cli/pull/1285))
+- Pi model is now backfilled into checkpoint metadata from the transcript ([#1298](https://github.com/entireio/cli/pull/1298))
+
+### Fixed
+
+- `entire install` points Windows users at Scoop instead of failing ([#1289](https://github.com/entireio/cli/pull/1289))
+- Checkpoint commits reachable only through relative `alternates` (shared clones) are now resolvable by go-git ([#1288](https://github.com/entireio/cli/pull/1288))
+- `entire trail` preserves the forge identifier from `entire://` remote URLs ([#1286](https://github.com/entireio/cli/pull/1286))
+- Checkpoint git subprocesses are bounded to their context deadline, so a hung git call can't wedge a hook ([#1282](https://github.com/entireio/cli/pull/1282))
+- The CLI no longer reports an unknown revision after a `go install` upgrade ([#1273](https://github.com/entireio/cli/pull/1273))
+- Local-dev builds fall back to the `PATH` binary when the local build is broken ([#1274](https://github.com/entireio/cli/pull/1274))
+- Mirror connection reuse: the probe body is now drained before close so the idle connection pool actually works ([#1320](https://github.com/entireio/cli/pull/1320))
+
+### Housekeeping
+
+- Per-phase perf spans added to checkpoint pre-push ([#1281](https://github.com/entireio/cli/pull/1281))
+- Removed dead code and deduped redundant review/strategy tests ([#1303](https://github.com/entireio/cli/pull/1303), [#1302](https://github.com/entireio/cli/pull/1302), [#1301](https://github.com/entireio/cli/pull/1301))
+- Trimmed the CLAUDE.md file, added the current Pi extension config, and ship the `git-remote-entire` helper during `mise run dev:publish` ([#1295](https://github.com/entireio/cli/pull/1295), [#1314](https://github.com/entireio/cli/pull/1314), [#1308](https://github.com/entireio/cli/pull/1308))
+- Dependency bumps: go-dependencies group, `goreleaser/goreleaser-action` 7.2.1 → 7.2.2 ([#1293](https://github.com/entireio/cli/pull/1293), [#1227](https://github.com/entireio/cli/pull/1227))
+
 ## [0.6.3] - 2026-05-27
 
 ### Added

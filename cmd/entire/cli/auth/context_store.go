@@ -52,9 +52,12 @@ func RemoveCurrentContext() error {
 	}
 	// Best-effort keychain cleanup, sequenced off the context just removed.
 	// A missing entry is fine — the contexts.json removal above is what makes
-	// us "logged out".
+	// us "logged out". Both the access slot and its paired refresh slot must
+	// go: leaving the long-lived refresh token behind would let any later
+	// keyring-capable process mint fresh access tokens after logout.
 	if svc != "" && handle != "" {
-		_ = tokenstore.Delete(svc, handle) //nolint:errcheck // best-effort; contexts.json removal is the source of truth for logout
+		_ = tokenstore.Delete(svc, handle)                            //nolint:errcheck // best-effort; contexts.json removal is the source of truth for logout
+		_ = tokenstore.Delete(tokenstore.RefreshService(svc), handle) //nolint:errcheck // best-effort; absent refresh slot is fine
 	}
 	return nil
 }
@@ -71,7 +74,11 @@ func RemoveAllContexts() (int, error) {
 		}
 		for _, c := range f.Contexts {
 			if c.KeychainService != "" && c.Handle != "" {
-				_ = tokenstore.Delete(c.KeychainService, c.Handle) //nolint:errcheck // best-effort; the contexts.json clear below is authoritative
+				// Delete both slots: the access token and its paired refresh
+				// token. Dropping the refresh slot is what actually scrubs the
+				// machine — otherwise a leftover refresh token outlives logout.
+				_ = tokenstore.Delete(c.KeychainService, c.Handle)                            //nolint:errcheck // best-effort; the contexts.json clear below is authoritative
+				_ = tokenstore.Delete(tokenstore.RefreshService(c.KeychainService), c.Handle) //nolint:errcheck // best-effort; absent refresh slot is fine
 			}
 			removed++
 		}

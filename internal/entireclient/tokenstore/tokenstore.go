@@ -49,6 +49,15 @@ func CoreKeyringService(coreURL string) string {
 	return CoreKeyringPrefix + strings.TrimRight(coreURL, "/")
 }
 
+// RefreshService returns the paired refresh-token service name for an
+// access-token service, following the "<service>:refresh" convention
+// documented in this package's service-name conventions. Callers store the
+// raw refresh token under (RefreshService(service), user) alongside the
+// access token at (service, user).
+func RefreshService(service string) string {
+	return service + ":refresh"
+}
+
 // KeyringServiceForIssuerKey infers the right service prefix from a
 // raw issuer key (entire-core URL or entiredb cluster host). URL-shaped
 // keys (anything beginning with a scheme) are treated as entire-core

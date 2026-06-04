@@ -684,7 +684,6 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		}
 		// Reload to get the updated summary.
 		stopLoad = startSpinner(errW, fmt.Sprintf("Reloading checkpoint %s", fullCheckpointID))
-		checkpoint.SyncCommittedReadRef(ctx, lookup.repo)
 		lookup.store = checkpoint.NewCommittedReadStore(ctx, lookup.repo)
 		lookup.store.SetBlobFetcher(FetchBlobsByHash)
 		content, err = checkpoint.ReadLatestSessionContent(ctx, lookup.store, fullCheckpointID, summary)
@@ -849,7 +848,6 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 	// `git fetch` fails against partial-clone repos with "did not send all
 	// necessary objects"). Falls back to a full metadata-branch fetch if
 	// fetch-pack also can't reach the blobs.
-	checkpoint.SyncCommittedReadRef(ctx, repo)
 	store := checkpoint.NewCommittedReadStore(ctx, repo)
 	store.SetBlobFetcher(FetchBlobsByHash)
 
@@ -925,9 +923,9 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store *ch
 		return fmt.Errorf("failed to save summary: %w", err)
 	}
 
-	if settings.MirrorsToV1CustomRef(ctx) {
-		if err := mirrorToV1CustomRef(store.Repository()); err != nil {
-			return fmt.Errorf("summary was written to %s, but failed to mirror to %s: %w", paths.MetadataBranchName, paths.MetadataRefName, err)
+	if refs := checkpoint.ResolveCommittedRefs(ctx); refs.HasMirror() {
+		if err := strategy.MirrorCommittedMetadataRef(ctx, store.Repository(), refs); err != nil {
+			return fmt.Errorf("summary was written to %s, but failed to mirror to %s: %w", refs.Primary, refs.Mirror, err)
 		}
 	}
 
@@ -2004,7 +2002,6 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	// Warn (once per process) if metadata branches are disconnected
 	strategy.WarnIfMetadataDisconnected()
 
-	checkpoint.SyncCommittedReadRef(ctx, repo)
 	store := checkpoint.NewCommittedReadStore(ctx, repo)
 
 	// Get all committed checkpoints for lookup.

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -24,6 +25,45 @@ func makeJWT(t *testing.T, payloadJSON string) string {
 	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
 }
 
+// RecordLoginContext must persist the refresh token before the access token,
+// so a failed access write never commits a fresh access JWT against a stale
+// refresh token left over from an earlier login.
+func TestRecordLoginContext_RefreshFirstOrdering(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+
+	const coreURL = "https://core.example.com"
+	const handle = "alice"
+	svc := tokenstore.CoreKeyringService(coreURL)
+	path := filepath.Join(t.TempDir(), "tokens.json")
+
+	// A prior login left a stale refresh token in the slot.
+	seedRestore := tokenstore.UseFileBackendForTesting(path)
+	if err := tokenstore.Set(tokenstore.RefreshService(svc), handle, "entr_stale"); err != nil {
+		t.Fatalf("seed stale refresh: %v", err)
+	}
+	seedRestore()
+
+	// Fail the access-token write only.
+	failAccess := func(service, _ string) bool { return service == svc }
+	restore := tokenstore.UseFailingBackendForTesting(path, failAccess)
+	t.Cleanup(restore)
+
+	exp := time.Now().Add(2 * time.Hour).Unix()
+	token := makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":%q,"exp":%d}`, coreURL, handle, exp))
+	if _, err := RecordLoginContext(token, "entr_login_new", true); err == nil {
+		t.Fatal("RecordLoginContext: want error when access write fails")
+	}
+	// The refresh token must already be the new one (written first), and no
+	// access token may sit alongside the stale refresh token.
+	if r, _ := tokenstore.Get(tokenstore.RefreshService(svc), handle); r != "entr_login_new" { //nolint:errcheck // read-back
+		t.Fatalf("refresh slot = %q, want entr_login_new persisted before the access write", r)
+	}
+	if v, err := tokenstore.Get(svc, handle); !errors.Is(err, tokenstore.ErrNotFound) {
+		t.Fatalf("access slot = %q (err=%v); a fresh access token must not be committed when its write failed", v, err)
+	}
+}
+
 func TestRecordLoginContext_WritesContextAndToken(t *testing.T) {
 	// Sets ENTIRE_CONFIG_DIR and swaps the keyring backend — process-global
 	// state, so this test cannot run in parallel.
@@ -37,7 +77,7 @@ func TestRecordLoginContext_WritesContextAndToken(t *testing.T) {
 	exp := time.Now().Add(2 * time.Hour).Unix()
 	token := makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":%q,"exp":%d}`, coreURL, handle, exp))
 
-	name, err := RecordLoginContext(token, true)
+	name, err := RecordLoginContext(token, "", true)
 	if err != nil {
 		t.Fatalf("RecordLoginContext: %v", err)
 	}
@@ -176,7 +216,7 @@ func TestContextStore_PrefersCurrentContextThenLegacy(t *testing.T) {
 	// Record a context: its token now wins over the legacy entry.
 	exp := time.Now().Add(time.Hour).Unix()
 	ctxToken := makeJWT(t, fmt.Sprintf(`{"iss":"https://core.example.com","handle":"alice","exp":%d}`, exp))
-	if _, err := RecordLoginContext(ctxToken, true); err != nil {
+	if _, err := RecordLoginContext(ctxToken, "", true); err != nil {
 		t.Fatalf("RecordLoginContext: %v", err)
 	}
 	got, err := store.GetToken(api.AuthBaseURL())
@@ -196,11 +236,15 @@ func TestRemoveCurrentContext(t *testing.T) {
 
 	exp := time.Now().Add(time.Hour).Unix()
 	token := makeJWT(t, fmt.Sprintf(`{"iss":"https://core.example.com","handle":"alice","exp":%d}`, exp))
-	if _, err := RecordLoginContext(token, true); err != nil {
+	if _, err := RecordLoginContext(token, "entr_refresh", true); err != nil {
 		t.Fatalf("RecordLoginContext: %v", err)
 	}
 	if _, ok := CurrentContextToken(); !ok {
 		t.Fatal("precondition: expected a current context token")
+	}
+	svc := tokenstore.CoreKeyringService("https://core.example.com")
+	if r, _ := tokenstore.Get(tokenstore.RefreshService(svc), "alice"); r != "entr_refresh" { //nolint:errcheck // read-back; only the value matters
+		t.Fatalf("precondition: expected refresh slot seeded, got %q", r)
 	}
 
 	if err := RemoveCurrentContext(); err != nil {
@@ -208,6 +252,15 @@ func TestRemoveCurrentContext(t *testing.T) {
 	}
 	if _, ok := CurrentContextToken(); ok {
 		t.Fatal("after RemoveCurrentContext, expected no current context token")
+	}
+	// Logout must scrub both slots: the access token and the long-lived
+	// refresh token. A leftover refresh token would let any keyring-capable
+	// process mint fresh access tokens after logout.
+	if v, err := tokenstore.Get(svc, "alice"); !errors.Is(err, tokenstore.ErrNotFound) {
+		t.Fatalf("access slot survived logout: value=%q err=%v", v, err)
+	}
+	if v, err := tokenstore.Get(tokenstore.RefreshService(svc), "alice"); !errors.Is(err, tokenstore.ErrNotFound) {
+		t.Fatalf("refresh slot survived logout: value=%q err=%v", v, err)
 	}
 
 	// Idempotent: a second call with nothing current is a no-op.
@@ -223,10 +276,10 @@ func TestRemoveAllContexts(t *testing.T) {
 	t.Cleanup(restore)
 
 	exp := time.Now().Add(time.Hour).Unix()
-	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), true); err != nil {
+	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), "entr_a", true); err != nil {
 		t.Fatalf("record a: %v", err)
 	}
-	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"bob","exp":%d}`, exp)), true); err != nil {
+	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"bob","exp":%d}`, exp)), "entr_b", true); err != nil {
 		t.Fatalf("record b: %v", err)
 	}
 	n, err := RemoveAllContexts()
@@ -242,6 +295,19 @@ func TestRemoveAllContexts(t *testing.T) {
 	}
 	if len(f.Contexts) != 0 || f.CurrentContext != "" {
 		t.Fatalf("expected fully cleared, got contexts=%d current=%q", len(f.Contexts), f.CurrentContext)
+	}
+	// Every refresh slot must be gone too, for both removed contexts.
+	for _, tc := range []struct{ iss, handle string }{
+		{"https://a.example.com", "alice"},
+		{"https://b.example.com", "bob"},
+	} {
+		svc := tokenstore.CoreKeyringService(tc.iss)
+		if v, err := tokenstore.Get(svc, tc.handle); !errors.Is(err, tokenstore.ErrNotFound) {
+			t.Fatalf("access slot for %s survived: value=%q err=%v", tc.handle, v, err)
+		}
+		if v, err := tokenstore.Get(tokenstore.RefreshService(svc), tc.handle); !errors.Is(err, tokenstore.ErrNotFound) {
+			t.Fatalf("refresh slot for %s survived: value=%q err=%v", tc.handle, v, err)
+		}
 	}
 
 	// Idempotent.
@@ -261,10 +327,10 @@ func TestRemoveCurrentContext_DoesNotSwitchToAnother(t *testing.T) {
 	t.Cleanup(restore)
 
 	exp := time.Now().Add(time.Hour).Unix()
-	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), true); err != nil {
+	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), "", true); err != nil {
 		t.Fatalf("record a: %v", err)
 	}
-	active, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"alice","exp":%d}`, exp)), true)
+	active, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"alice","exp":%d}`, exp)), "", true)
 	if err != nil {
 		t.Fatalf("record b: %v", err)
 	}
@@ -297,10 +363,10 @@ func TestSetCurrentContext(t *testing.T) {
 
 	// Two contexts from two cores; the second becomes current on login.
 	exp := time.Now().Add(time.Hour).Unix()
-	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), true); err != nil {
+	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), "", true); err != nil {
 		t.Fatalf("record a: %v", err)
 	}
-	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"alice","exp":%d}`, exp)), true); err != nil {
+	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"alice","exp":%d}`, exp)), "", true); err != nil {
 		t.Fatalf("record b: %v", err)
 	}
 
@@ -342,11 +408,11 @@ func TestRecordLoginContext_SameCoreDifferentHandlesCoexist(t *testing.T) {
 	const coreURL = "https://core.example.com"
 	exp := time.Now().Add(time.Hour).Unix()
 
-	aliceName, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"alice","exp":%d}`, coreURL, exp)), true)
+	aliceName, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"alice","exp":%d}`, coreURL, exp)), "", true)
 	if err != nil {
 		t.Fatalf("record alice: %v", err)
 	}
-	bobName, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"bob","exp":%d}`, coreURL, exp)), true)
+	bobName, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"bob","exp":%d}`, coreURL, exp)), "", true)
 	if err != nil {
 		t.Fatalf("record bob: %v", err)
 	}
@@ -374,7 +440,7 @@ func TestRecordLoginContext_SameCoreDifferentHandlesCoexist(t *testing.T) {
 	}
 
 	// Re-login as alice updates her context in place (no third entry).
-	again, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"alice","exp":%d}`, coreURL, exp)), true)
+	again, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"alice","exp":%d}`, coreURL, exp)), "", true)
 	if err != nil {
 		t.Fatalf("re-login alice: %v", err)
 	}
@@ -400,7 +466,7 @@ func TestMigrateLegacyLoginContext_PreservesCurrentContext(t *testing.T) {
 	exp := time.Now().Add(time.Hour).Unix()
 
 	// An existing, active context for one core.
-	active, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://active.example.com","handle":"alice","exp":%d}`, exp)), true)
+	active, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://active.example.com","handle":"alice","exp":%d}`, exp)), "", true)
 	if err != nil {
 		t.Fatalf("seed active context: %v", err)
 	}
@@ -441,7 +507,7 @@ func TestMigrateLegacyLoginContext_DifferentHandleSameCore(t *testing.T) {
 	exp := time.Now().Add(time.Hour).Unix()
 
 	// contexts.json already has alice@core (e.g. from another CLI).
-	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"alice","exp":%d}`, coreURL, exp)), true); err != nil {
+	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"alice","exp":%d}`, coreURL, exp)), "", true); err != nil {
 		t.Fatalf("seed alice: %v", err)
 	}
 
@@ -474,7 +540,7 @@ func TestRecordLoginContext_RejectsTokenWithoutIssuer(t *testing.T) {
 	t.Cleanup(restore)
 
 	token := makeJWT(t, `{"handle":"alice"}`)
-	if _, err := RecordLoginContext(token, true); err == nil {
+	if _, err := RecordLoginContext(token, "", true); err == nil {
 		t.Fatal("expected error for token without iss claim, got nil")
 	}
 }

@@ -12,6 +12,16 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
+// ErrRepoTargetUnknown reports that the cluster's STS refused the exchange
+// with RFC 8693 `invalid_target`: it has no servable mirror at the
+// requested audience. The placement row may well exist but be suspended —
+// the data plane's auth gate deliberately hides suspended mirrors behind
+// invalid_target rather than disclosing their state (an enumeration guard;
+// see entiredb's validateMirrorRepoExchange). Callers that already know the
+// mirror exists (e.g. the create flow's clone probe) use this to render an
+// actionable message instead of the raw OAuth error.
+var ErrRepoTargetUnknown = errors.New("cluster has no servable mirror at this audience")
+
 // repoExchangeTransportForTest, when non-nil, is used as the sts.Client
 // transport by RepoScopedToken instead of the default. Test-only seam so
 // the wire form (audience / scope / client_id) can be asserted without a
@@ -105,6 +115,14 @@ func RepoScopedToken(ctx context.Context, clusterBaseURL, repoSlug, action strin
 		Extra: url.Values{"client_id": {provider.ClientID}},
 	})
 	if err != nil {
+		// A typed invalid_target means the cluster has no servable mirror at
+		// this audience (commonly a suspended placement). Surface the
+		// sentinel for callers that branch on it, preserving the verbatim STS
+		// text (second %w) for those that don't.
+		var xe *sts.ExchangeError
+		if errors.As(err, &xe) && xe.Code == "invalid_target" {
+			return "", fmt.Errorf("repo-scoped token exchange: %w: %w", ErrRepoTargetUnknown, err)
+		}
 		return "", fmt.Errorf("repo-scoped token exchange: %w", err)
 	}
 	return set.AccessToken, nil

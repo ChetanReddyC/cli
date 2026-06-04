@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 )
@@ -94,10 +95,17 @@ Try:
 }
 
 func renderExperimentalCommands(commands []experimentalCommandInfo) string {
+	width := 0
+	for _, info := range commands {
+		if w := utf8.RuneCountInString(info.Invocation); w > width {
+			width = w
+		}
+	}
+
 	var out strings.Builder
 	for _, info := range commands {
 		out.WriteString("  ")
-		out.WriteString(padRight(info.Invocation, 16))
+		out.WriteString(padRight(info.Invocation, width))
 		out.WriteByte(' ')
 		out.WriteString(info.Summary)
 		out.WriteByte('\n')
@@ -106,8 +114,9 @@ func renderExperimentalCommands(commands []experimentalCommandInfo) string {
 }
 
 func padRight(value string, width int) string {
-	if len(value) >= width {
+	n := utf8.RuneCountInString(value)
+	if n >= width {
 		return value
 	}
-	return value + strings.Repeat(" ", width-len(value))
+	return value + strings.Repeat(" ", width-n)
 }

@@ -49,7 +49,7 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store := s.getCheckpointStore(repo)
+	store := s.getCommittedReadStore(ctx, repo)
 
 	committed, err := store.ListCommitted(ctx)
 	if err != nil {
@@ -263,7 +263,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	// Mirror the committed write to the v1 custom ref when opted in
 	// (local-only, never pushed; failures are logged, not fatal).
-	mirrorMetadataToV1CustomRef(ctx, repo)
+	MirrorCommittedMetadataRefBestEffort(ctx, repo)
 
 	logging.Debug(logCtx, "condense timings",
 		slog.String("session_id", state.SessionID),

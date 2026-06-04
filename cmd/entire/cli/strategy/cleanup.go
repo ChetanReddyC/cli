@@ -333,6 +333,7 @@ func DeleteOrphanedCheckpoints(ctx context.Context, checkpointIDs []string) (del
 	if err := repo.Storer.SetReference(newRef); err != nil {
 		return nil, nil, fmt.Errorf("failed to update branch: %w", err)
 	}
+	MirrorCommittedMetadataRefBestEffort(ctx, repo)
 
 	// All checkpoints deleted successfully
 	return checkpointIDs, []string{}, nil

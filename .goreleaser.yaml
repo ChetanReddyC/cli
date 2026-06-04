@@ -50,7 +50,15 @@ builds:
 
 notarize:
   macos:
+    # Must list every darwin build id explicitly. When omitted, goreleaser
+    # defaults the id filter to the project name ("cli"), which matched the
+    # old single unnamed build but matches neither named build above — the
+    # notarize pipe then silently skips and ships ad-hoc-signed binaries that
+    # Gatekeeper kills on launch.
     - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      ids:
+        - entire
+        - git-remote-entire
       sign:
         certificate: "{{.Env.MACOS_SIGN_P12}}"
         password: "{{.Env.MACOS_SIGN_PASSWORD}}"

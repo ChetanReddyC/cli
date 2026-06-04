@@ -47,12 +47,13 @@ func pktLine(s string) string {
 func TestRun_Capabilities(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		mode Mode
-		want string
+		name            string
+		protocolVersion int
+		want            string
 	}{
-		{"default", ModeConnect, "connect\noption\n\n"},
-		{"stateless", ModeStateless, "stateless-connect\npush\noption\n\n"},
+		{"v0_advertises_connect", 0, "connect\noption\n\n"},
+		{"v1_advertises_connect", 1, "connect\noption\n\n"},
+		{"v2_advertises_stateless_connect", 2, "stateless-connect\npush\noption\n\n"},
 	}
 
 	for _, tt := range tests {
@@ -62,7 +63,7 @@ func TestRun_Capabilities(t *testing.T) {
 			defer server.Close()
 			stdin := strings.NewReader("capabilities\n\n")
 			var stdout bytes.Buffer
-			if err := Run(context.Background(), testTransport(server), tt.mode, stdin, &stdout); err != nil {
+			if err := Run(context.Background(), testTransport(server), tt.protocolVersion, stdin, &stdout); err != nil {
 				t.Fatalf("Run failed: %v", err)
 			}
 			if stdout.String() != tt.want {
@@ -79,7 +80,7 @@ func TestRun_OptionCommandReplies(t *testing.T) {
 
 	stdin := strings.NewReader("option dry-run true\noption weird true\n\n")
 	var stdout bytes.Buffer
-	if err := Run(context.Background(), testTransport(server), ModeConnect, stdin, &stdout); err != nil {
+	if err := Run(context.Background(), testTransport(server), 1, stdin, &stdout); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 	got := stdout.String()
@@ -126,7 +127,7 @@ func TestRun_ConnectUploadPackUsesV0(t *testing.T) {
 	stdin := strings.NewReader("connect git-upload-pack\n" + wantPkt + "0000" + donePkt)
 	var stdout bytes.Buffer
 
-	if err := Run(context.Background(), testTransport(server), ModeConnect, stdin, &stdout); err != nil {
+	if err := Run(context.Background(), testTransport(server), 1, stdin, &stdout); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 

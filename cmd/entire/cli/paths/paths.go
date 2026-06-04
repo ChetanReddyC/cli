@@ -42,9 +42,8 @@ const MetadataBranchName = "entire/checkpoints/v1"
 // when checkpoints_version is "1.1". It lives under refs/entire/ (not
 // refs/heads/) so it stays invisible to `git branch -a` and is not pulled by a
 // default `git clone`. v1 remains the source of truth; this ref is a local-only
-// mirror. When v1.1 is enabled, the `entire explain` command resolves committed
-// reads against this ref after syncing it from v1, falling back to v1 when sync
-// cannot establish a trustworthy mirror; it is never pushed.
+// mirror. When v1.1 is enabled, committed reads resolve against this ref as-is;
+// active v1 write/fetch paths update the mirror, and it is never pushed.
 const MetadataRefName = "refs/entire/checkpoints/v1.1"
 
 // TrailsBranchName is the orphan branch used to store trail metadata.

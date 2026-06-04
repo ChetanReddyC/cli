@@ -183,6 +183,7 @@ func ReconcileDisconnectedMetadataBranch(
 		if err := repo.Storer.SetReference(ref); err != nil {
 			return fmt.Errorf("failed to reset metadata branch to remote: %w", err)
 		}
+		MirrorCommittedMetadataRefBestEffort(ctx, repo)
 		fmt.Fprintln(w, "[entire] Done — local had no checkpoint data, reset to remote")
 		return nil
 	}
@@ -199,6 +200,7 @@ func ReconcileDisconnectedMetadataBranch(
 	if err := repo.Storer.SetReference(ref); err != nil {
 		return fmt.Errorf("failed to update metadata branch: %w", err)
 	}
+	MirrorCommittedMetadataRefBestEffort(ctx, repo)
 
 	fmt.Fprintln(w, "[entire] Done — all local and remote checkpoints preserved")
 	return nil

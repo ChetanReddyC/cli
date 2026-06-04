@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -398,6 +399,7 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 
 	// If local is already at or behind remote, fast-forward
 	if localRef.Hash() == remoteRef.Hash() {
+		mirrorSyncedMetadataBranch(ctx, repo, branchName)
 		return nil
 	}
 
@@ -420,6 +422,7 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 		if usedTempRef {
 			_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
 		}
+		mirrorSyncedMetadataBranch(ctx, repo, branchName)
 		return nil
 	}
 
@@ -441,6 +444,7 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 		if usedTempRef {
 			_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
 		}
+		mirrorSyncedMetadataBranch(ctx, repo, branchName)
 		return nil
 	}
 
@@ -465,7 +469,24 @@ func fetchAndRebaseSessionsCommon(ctx context.Context, target, branchName string
 		_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
 	}
 
+	mirrorSyncedMetadataBranch(ctx, repo, branchName)
 	return nil
+}
+
+func mirrorSyncedMetadataBranch(ctx context.Context, repo *git.Repository, branchName string) {
+	refs := checkpoint.ResolveCommittedRefs(ctx)
+	if !refs.Primary.IsBranch() {
+		logging.Debug(ctx, "committed-ref mirror skipped after sync: primary metadata ref is not a branch",
+			slog.String("primary", refs.Primary.String()))
+		return
+	}
+	if branchName != refs.Primary.Short() {
+		logging.Debug(ctx, "committed-ref mirror skipped after sync: branch name does not match primary",
+			slog.String("branch_name", branchName),
+			slog.String("primary_short", refs.Primary.Short()))
+		return
+	}
+	MirrorCommittedMetadataRefBestEffort(ctx, repo)
 }
 
 // getMergeBase returns the merge base hash of two commits, or an error if they

@@ -23,7 +23,7 @@ func TestRun_StdinCloseExitsCleanly(t *testing.T) {
 	defer server.Close()
 
 	var out bytes.Buffer
-	if err := Run(context.Background(), testTransport(server), ModeConnect, strings.NewReader(""), &out); err != nil {
+	if err := Run(context.Background(), testTransport(server), 1, strings.NewReader(""), &out); err != nil {
 		t.Fatalf("Run on empty stdin: %v", err)
 	}
 	if out.Len() != 0 {
@@ -43,7 +43,7 @@ func TestRun_PartialCommandLineErrors(t *testing.T) {
 	defer server.Close()
 
 	var out bytes.Buffer
-	err := Run(context.Background(), testTransport(server), ModeConnect, strings.NewReader("capab"), &out)
+	err := Run(context.Background(), testTransport(server), 1, strings.NewReader("capab"), &out)
 	if err == nil {
 		t.Fatal("expected error on partial / unknown command")
 	}
@@ -88,7 +88,7 @@ func TestRun_CtxCancelDuringFetchSurfacesError(t *testing.T) {
 	var out bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, testTransport(server), ModeConnect, stdin, &out)
+		done <- Run(ctx, testTransport(server), 1, stdin, &out)
 	}()
 	select {
 	case err := <-done:
@@ -134,7 +134,7 @@ func TestRun_ParentContextCancelStopsBlockedRead(t *testing.T) {
 	var out bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, testTransport(server), ModeConnect, br, &out)
+		done <- Run(ctx, testTransport(server), 1, br, &out)
 	}()
 
 	// Give Run time to enter the read; then cancel. Run won't return

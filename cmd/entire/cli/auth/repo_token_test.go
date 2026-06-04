@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -11,6 +12,53 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
+
+// statusTransport returns a canned non-200 response with the given body so
+// the STS error-decoding path (sts.readAPIError) can be exercised offline.
+type statusTransport struct {
+	status int
+	body   string
+}
+
+func (s statusTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: s.status,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(s.body)),
+		Request:    req,
+	}, nil
+}
+
+// TestRepoScopedToken_InvalidTarget asserts that a 400 invalid_target STS
+// response — what the data plane returns for a suspended (or otherwise
+// non-servable) mirror — surfaces as ErrRepoTargetUnknown while still
+// preserving the verbatim OAuth code + description for callers that don't
+// branch on the sentinel.
+func TestRepoScopedToken_InvalidTarget(t *testing.T) {
+	t.Setenv(api.AuthBaseURLEnvVar, "https://us.auth.entire.io")
+
+	prevBackend := chooseBackend
+	chooseBackend = func() tokenBackend { return fakeBackend{token: "login.jwt.value"} }
+	t.Cleanup(func() { chooseBackend = prevBackend })
+
+	t.Cleanup(SetRepoExchangeTransportForTest(statusTransport{
+		status: http.StatusBadRequest,
+		body:   `{"error":"invalid_target","error_description":"no mirror at this URL"}`,
+	}))
+
+	_, err := RepoScopedToken(context.Background(),
+		"https://aws-us-east-2.entire.io", "/gh/octocat/hello", "pull")
+	if err == nil {
+		t.Fatal("RepoScopedToken: expected error, got nil")
+	}
+	if !errors.Is(err, ErrRepoTargetUnknown) {
+		t.Errorf("error %v does not wrap ErrRepoTargetUnknown", err)
+	}
+	// Verbatim STS detail must remain in the chain.
+	if !strings.Contains(err.Error(), "no mirror at this URL") {
+		t.Errorf("error %q dropped the STS description", err)
+	}
+}
 
 // captureTransport records the last request's parsed form body and
 // returns a canned RFC 8693 token-exchange success response.

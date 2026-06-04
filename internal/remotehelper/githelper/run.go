@@ -11,29 +11,24 @@ import (
 	"github.com/entireio/cli/internal/remotehelper/debuglog"
 )
 
-// Mode selects the helper's capability advertisement.
-type Mode int
-
-const (
-	// ModeConnect (the default) advertises `connect`: git speaks the
-	// raw smart-HTTP protocol and the helper relays request/response
-	// bodies. Works against any receive-pack endpoint without
-	// depending on send-pack's stateless-rpc behaviour.
-	ModeConnect Mode = iota
-	// ModeStateless advertises `stateless-connect` + `push`: v2 fetch
-	// over framed HTTP RPC, push via send-pack subprocess.
-	ModeStateless
-)
-
 // Run drives the git-remote-helper protocol loop against the given
 // Transport. It reads commands from stdin one line at a time and
 // writes responses to stdout until git closes the pipe or sends an
 // unsupported command (which terminates the loop with an error).
 //
+// protocolVersion selects which capability set to advertise. v2 (the
+// upstream default since Git 2.26) advertises `stateless-connect` +
+// `push` so Git negotiates wire-protocol v2 over framed HTTP RPC.
+// v0/v1 advertises `connect`, giving Git a raw pipe to speak the
+// legacy smart-HTTP protocol through. Upstream Git's
+// transport-helper.c always prefers `connect` over `stateless-connect`
+// when both are present, so the advertised set has to match the
+// resolved protocol.version rather than offering both.
+//
 // The Transport interface decouples this loop from any specific HTTP
 // implementation — see the entire/transport package for the
 // production wiring.
-func Run(ctx context.Context, t Transport, mode Mode, stdin io.Reader, stdout io.Writer) error {
+func Run(ctx context.Context, t Transport, protocolVersion int, stdin io.Reader, stdout io.Writer) error {
 	commandReader := bufio.NewReader(stdin)
 	opts := &Options{}
 
@@ -53,7 +48,7 @@ func Run(ctx context.Context, t Transport, mode Mode, stdin io.Reader, stdout io
 
 		switch {
 		case line == "capabilities":
-			if mode == ModeStateless {
+			if protocolVersion >= 2 {
 				fmt.Fprintln(stdout, "stateless-connect")
 				fmt.Fprintln(stdout, "push")
 			} else {

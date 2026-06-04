@@ -964,12 +964,6 @@ func TestFetchAndRebase_FlaggedOriginTarget_UsesTempRef(t *testing.T) {
 	gitRun(cloneDir, "config", "user.name", "Test User")
 	gitRun(cloneDir, "config", "commit.gpgsign", "false")
 	gitRun(cloneDir, "branch", branchName, "origin/"+branchName)
-	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(cloneDir, ".entire", "settings.json"),
-		[]byte(`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`),
-		0o644,
-	))
 
 	gitRun(cloneDir, "checkout", "--orphan", "temp-orphan")
 	gitRun(cloneDir, "rm", "-rf", ".")
@@ -981,6 +975,12 @@ func TestFetchAndRebase_FlaggedOriginTarget_UsesTempRef(t *testing.T) {
 	gitRun(cloneDir, "commit", "-m", "Checkpoint: cccccccccccc")
 	gitRun(cloneDir, "branch", "-f", branchName, "temp-orphan")
 	gitRun(cloneDir, "checkout", "main")
+	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(cloneDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"filtered_fetches": true, "checkpoints_version": "1.1"}}`),
+		0o644,
+	))
 
 	repo, err := git.PlainOpen(cloneDir)
 	require.NoError(t, err)
@@ -993,6 +993,7 @@ func TestFetchAndRebase_FlaggedOriginTarget_UsesTempRef(t *testing.T) {
 	require.NoError(t, repo.Storer.SetReference(staleOriginRef))
 
 	t.Chdir(cloneDir)
+	paths.ClearWorktreeRootCache()
 
 	err = fetchAndRebaseSessionsCommon(ctx, "origin", branchName)
 	require.NoError(t, err)
@@ -1002,6 +1003,9 @@ func TestFetchAndRebase_FlaggedOriginTarget_UsesTempRef(t *testing.T) {
 
 	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
 	require.NoError(t, err)
+	customRef, err := repo.Reference(plumbing.ReferenceName(paths.MetadataRefName), true)
+	require.NoError(t, err)
+	assert.Equal(t, localRef.Hash(), customRef.Hash(), "fetchAndRebaseSessionsCommon should mirror synced v1 metadata to the v1.1 custom ref")
 
 	tipCommit, err := repo.CommitObject(localRef.Hash())
 	require.NoError(t, err)

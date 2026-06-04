@@ -96,73 +96,10 @@ func writeSettings(t *testing.T, dir, version string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", paths.SettingsFileName), []byte(body), 0o644))
 }
 
-// blockCustomRefWrite occupies refs/entire with a file so refs/entire/* writes fail.
-func blockCustomRefWrite(t *testing.T, dir string) {
-	t.Helper()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "refs", "entire"), []byte("blocked"), 0o644))
-}
-
 func TestGitStore_CommittedReadRef(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, v1BranchRef(), NewGitStore(nil).CommittedReadRef())
 	assert.Equal(t, customRef(), NewGitStoreWithRef(nil, customRef()).CommittedReadRef())
-}
-
-func TestSyncV1CustomRefForRead(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		setup func(t *testing.T, dir string, repo *git.Repository, init plumbing.Hash) (want plumbing.Hash, exists bool)
-	}{
-		{"seeds from local v1 when missing", func(t *testing.T, _ string, repo *git.Repository, init plumbing.Hash) (plumbing.Hash, bool) {
-			setRef(t, repo, v1BranchRef(), init)
-			return init, true
-		}},
-		{"seeds from origin when local v1 missing", func(t *testing.T, _ string, repo *git.Repository, init plumbing.Hash) (plumbing.Hash, bool) {
-			setRef(t, repo, originV1Ref(), init)
-			return init, true
-		}},
-		{"no-op when equal", func(t *testing.T, _ string, repo *git.Repository, init plumbing.Hash) (plumbing.Hash, bool) {
-			setRef(t, repo, v1BranchRef(), init)
-			setRef(t, repo, customRef(), init)
-			return init, true
-		}},
-		{"advances when ancestor", func(t *testing.T, dir string, repo *git.Repository, init plumbing.Hash) (plumbing.Hash, bool) {
-			setRef(t, repo, customRef(), init)
-			newHash := commitFile(t, repo, dir, "f2.txt", "more", "second")
-			setRef(t, repo, v1BranchRef(), newHash)
-			return newHash, true
-		}},
-		{"leaves non-ancestor ref", func(t *testing.T, dir string, repo *git.Repository, init plumbing.Hash) (plumbing.Hash, bool) {
-			ahead := commitFile(t, repo, dir, "f2.txt", "more", "second")
-			setRef(t, repo, v1BranchRef(), init) // parent
-			setRef(t, repo, customRef(), ahead)  // child, not an ancestor of v1
-			return ahead, true
-		}},
-		{"no v1 tip", func(_ *testing.T, _ string, _ *git.Repository, _ plumbing.Hash) (plumbing.Hash, bool) {
-			return plumbing.ZeroHash, false
-		}},
-		{"write failure leaves ref unset", func(t *testing.T, dir string, repo *git.Repository, init plumbing.Hash) (plumbing.Hash, bool) {
-			setRef(t, repo, v1BranchRef(), init)
-			blockCustomRefWrite(t, dir)
-			return plumbing.ZeroHash, false
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			dir, repo, init := newTestRepo(t)
-			want, exists := tt.setup(t, dir, repo, init)
-
-			syncV1CustomRefForRead(context.Background(), repo)
-
-			got, ok := customRefHash(t, repo)
-			require.Equal(t, exists, ok)
-			if exists {
-				assert.Equal(t, want, got)
-			}
-		})
-	}
 }
 
 // Not parallel: uses t.Chdir() so settings.Load resolves the test repo.
@@ -178,27 +115,35 @@ func TestNewCommittedReadStore_SelectsRefByVersion(t *testing.T) {
 	assert.Equal(t, customRef(), NewCommittedReadStore(context.Background(), repo).CommittedReadRef())
 }
 
-// v1.1 reads always go through the custom ref (no v1 fallback): a checkpoint is
-// found when the ref can be synced to v1, and not found when it can't.
+// v1.1 reads always go through the custom ref as-is (no v1 fallback, and no
+// read-time seeding from v1).
 // Not parallel: subtests use t.Chdir().
 func TestNewCommittedReadStore_V11Reads(t *testing.T) {
 	tests := []struct {
 		name      string
-		mutate    func(t *testing.T, dir string, repo *git.Repository)
+		mutate    func(t *testing.T, dir string, repo *git.Repository) (wantCustomHash plumbing.Hash, wantCustomExists bool)
 		wantFound bool
 	}{
-		{"reads v1 data via custom ref", func(_ *testing.T, _ string, _ *git.Repository) {}, true},
-		{"reads remote-only metadata", func(t *testing.T, _ string, repo *git.Repository) {
+		{"reads metadata when custom ref points at v1", func(t *testing.T, _ string, repo *git.Repository) (plumbing.Hash, bool) {
+			ref, err := repo.Reference(v1BranchRef(), true)
+			require.NoError(t, err)
+			setRef(t, repo, customRef(), ref.Hash())
+			return ref.Hash(), true
+		}, true},
+		{"does not seed missing custom ref from local v1", func(_ *testing.T, _ string, _ *git.Repository) (plumbing.Hash, bool) {
+			return plumbing.ZeroHash, false
+		}, false},
+		{"does not seed missing custom ref from origin v1", func(t *testing.T, _ string, repo *git.Repository) (plumbing.Hash, bool) {
 			ref, err := repo.Reference(v1BranchRef(), true)
 			require.NoError(t, err)
 			setRef(t, repo, originV1Ref(), ref.Hash())
 			require.NoError(t, repo.Storer.RemoveReference(v1BranchRef()))
-		}, true},
-		{"sync write fails", func(t *testing.T, dir string, _ *git.Repository) {
-			blockCustomRefWrite(t, dir)
+			return plumbing.ZeroHash, false
 		}, false},
-		{"custom ref diverges", func(t *testing.T, dir string, repo *git.Repository) {
-			setRef(t, repo, customRef(), commitFile(t, repo, dir, "other.txt", "diverged", "diverged"))
+		{"reads custom ref as-is when it differs from v1", func(t *testing.T, dir string, repo *git.Repository) (plumbing.Hash, bool) {
+			hash := commitFile(t, repo, dir, "other.txt", "diverged", "diverged")
+			setRef(t, repo, customRef(), hash)
+			return hash, true
 		}, false},
 	}
 	for _, tt := range tests {
@@ -207,9 +152,8 @@ func TestNewCommittedReadStore_V11Reads(t *testing.T) {
 			enableV11(t, dir)
 			cpID := id.MustCheckpointID("a1b2c3d4e5f6")
 			writeV1Checkpoint(t, repo, cpID)
-			tt.mutate(t, dir, repo)
+			wantCustomHash, wantCustomExists := tt.mutate(t, dir, repo)
 
-			SyncCommittedReadRef(context.Background(), repo)
 			store := NewCommittedReadStore(context.Background(), repo)
 			require.Equal(t, customRef(), store.CommittedReadRef(), "must read the custom ref, not fall back to v1")
 
@@ -220,6 +164,12 @@ func TestNewCommittedReadStore_V11Reads(t *testing.T) {
 				assert.Equal(t, cpID, summary.CheckpointID)
 			} else {
 				assert.Nil(t, summary, "must not fall back to v1")
+			}
+
+			gotCustomHash, gotCustomExists := customRefHash(t, repo)
+			require.Equal(t, wantCustomExists, gotCustomExists)
+			if wantCustomExists {
+				assert.Equal(t, wantCustomHash, gotCustomHash)
 			}
 		})
 	}

@@ -76,7 +76,7 @@ func EnsureSetup(ctx context.Context) error {
 	if err := vercelconfig.InitSettings(ctx); err != nil {
 		return fmt.Errorf("failed to initialize vercel settings: %w", err)
 	}
-	if err := EnsureMetadataBranch(repo); err != nil {
+	if err := EnsureMetadataBranch(ctx, repo); err != nil {
 		return fmt.Errorf("failed to ensure metadata branch: %w", err)
 	}
 
@@ -305,7 +305,7 @@ func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	// Warn (once per process) if metadata branches are disconnected
 	WarnIfMetadataDisconnected()
 
-	store := checkpoint.NewGitStore(repo)
+	store := checkpoint.NewCommittedReadStore(ctx, repo)
 	committed, err := store.ListCommitted(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list committed checkpoints: %w", err)
@@ -453,7 +453,7 @@ func resolveAgentType(ctxAgentType types.AgentType, state *SessionState) types.A
 // If the remote-tracking branch (origin/entire/checkpoints/v1) exists and the local
 // branch is missing or empty, creates/updates the local branch from it.
 // Otherwise creates an empty orphan.
-func EnsureMetadataBranch(repo *git.Repository) error {
+func EnsureMetadataBranch(ctx context.Context, repo *git.Repository) error {
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 
 	// Check if remote-tracking branch exists (e.g., after clone/fetch)
@@ -478,12 +478,13 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 				if setErr := repo.Storer.SetReference(ref); setErr != nil {
 					return fmt.Errorf("failed to update metadata branch from remote: %w", setErr)
 				}
+				MirrorCommittedMetadataRefBestEffort(ctx, repo)
 				fmt.Fprintf(os.Stderr, "[entire] Updated local branch '%s' from origin\n", paths.MetadataBranchName)
 			} else {
 				// Local has real data and differs from remote — if disconnected
 				// (no common ancestor), reconciliation happens at pre-push time
 				// or via 'entire doctor'. Read paths warn but do not auto-fix.
-				logging.Debug(context.Background(), "metadata branch differs from remote, reconciliation deferred to read/write time",
+				logging.Debug(ctx, "metadata branch differs from remote, reconciliation deferred to read/write time",
 					"local_hash", localRef.Hash().String()[:7],
 					"remote_hash", remoteRef.Hash().String()[:7],
 				)
@@ -501,6 +502,7 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 		if err := repo.Storer.SetReference(ref); err != nil {
 			return fmt.Errorf("failed to create metadata branch from remote: %w", err)
 		}
+		MirrorCommittedMetadataRefBestEffort(ctx, repo)
 		fmt.Fprintf(os.Stderr, "✓ Created local branch '%s' from origin\n", paths.MetadataBranchName)
 		return nil
 	}
@@ -543,7 +545,7 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 	// signatures" ruleset on entire/* refs reject the very first push of
 	// the metadata branch with GH013, even though every later commit on it
 	// is correctly signed.
-	checkpoint.SignCommitBestEffort(context.Background(), commit)
+	checkpoint.SignCommitBestEffort(ctx, commit)
 
 	commitObj := repo.Storer.NewEncodedObject()
 	if err := commit.Encode(commitObj); err != nil {
@@ -559,6 +561,7 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 	if err := repo.Storer.SetReference(ref); err != nil {
 		return fmt.Errorf("failed to create metadata branch: %w", err)
 	}
+	MirrorCommittedMetadataRefBestEffort(ctx, repo)
 
 	fmt.Fprintf(os.Stderr, "  ✓ Created orphan branch %s for session metadata\n", paths.MetadataBranchName)
 	return nil

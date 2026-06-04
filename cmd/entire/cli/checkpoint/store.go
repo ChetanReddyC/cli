@@ -21,8 +21,8 @@ type GitStore struct {
 	//
 	// Writes intentionally do NOT use this ref: committed writes always target
 	// the v1 branch (the durable source of truth) and are mirrored to the v1.1
-	// custom ref separately by the strategy's write-time mirror. Pointing writes
-	// here would let a v1.1 read store write ahead of v1 and diverge from it.
+	// custom ref separately by the strategy mirror paths. Pointing writes here
+	// would let a v1.1 read store write ahead of v1 and diverge from it.
 	committedReadRef plumbing.ReferenceName
 }
 
