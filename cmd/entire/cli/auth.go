@@ -167,7 +167,10 @@ func newAuthStatusCmd() *cobra.Command {
 			if err := requireSecureBaseURL(insecureHTTPAuth); err != nil {
 				return err
 			}
-			target := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, api.AuthBaseURL())
+			target, err := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, api.AuthBaseURL())
+			if err != nil {
+				return err
+			}
 			// We send the session token to target.coreURL; enforce TLS on it
 			// too (it may differ from AuthBaseURL when a context is active).
 			if !insecureHTTPAuth {
@@ -220,25 +223,31 @@ type statusTarget struct {
 // active contexts.json context wins (so `auth use` retargets status onto that
 // login server); otherwise it falls back to the legacy keyring entry keyed by
 // the configured auth host.
-func resolveStatusTarget(store tokenStore, listContexts contextsProvider, fallbackBaseURL string) statusTarget {
+//
+// A genuine contexts.json read/parse error is surfaced, not swallowed — a
+// missing file reads as "no contexts" (no error), so an error here means the
+// file is corrupt or unreadable, which the user must see. This keeps status
+// symmetric with the control-plane commands (auth.ResolveControlPlaneTarget),
+// which fail the same way rather than silently degrading to a stale identity.
+func resolveStatusTarget(store tokenStore, listContexts contextsProvider, fallbackBaseURL string) (statusTarget, error) {
 	all, current, err := listContexts()
-	total := 0
-	if err == nil {
-		total = len(all)
-		for _, c := range all {
-			if c.Name != current || c.CoreURL == "" {
-				continue
-			}
-			if tok, terr := auth.LoginTokenForContext(c); terr == nil && tok != "" {
-				return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total}
-			}
+	if err != nil {
+		return statusTarget{}, fmt.Errorf("load contexts: %w", err)
+	}
+	total := len(all)
+	for _, c := range all {
+		if c.Name != current || c.CoreURL == "" {
+			continue
+		}
+		if tok, terr := auth.LoginTokenForContext(c); terr == nil && tok != "" {
+			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total}, nil
 		}
 	}
 	tok, gerr := store.GetToken(fallbackBaseURL)
 	if gerr != nil {
 		tok = "" // best-effort: a keyring read failure just reads as "no token"
 	}
-	return statusTarget{coreURL: fallbackBaseURL, token: tok, totalContexts: total}
+	return statusTarget{coreURL: fallbackBaseURL, token: tok, totalContexts: total}, nil
 }
 
 // defaultFetchProfile fetches a user's profile from coreURL's GET /me with the

@@ -55,18 +55,13 @@ const (
 
 ## Interface
 
-### Session Operations
+### Session Access
 
-Sessions are accessed via standalone functions in `strategy/session.go`:
-
-```go
-// ListSessions returns all sessions from entire/checkpoints/v1,
-// plus additional sessions from strategies implementing SessionSource.
-func ListSessions() ([]Session, error)
-
-// GetSession finds a session by ID (supports prefix matching).
-func GetSession(sessionID string) (*Session, error)
-```
+`strategy/session.go` keeps the `Session` and `Checkpoint` data types used by
+status/explain formatting. Active session state is read from `.git/entire-sessions/`
+through `session.StateStore`; committed checkpoint/session content is read through
+the committed checkpoint store (`checkpoint.NewCommittedReadStore(...)`) and
+command-specific strategy methods such as `GetSessionInfo`.
 
 ### Checkpoint Storage (Low-Level)
 
@@ -224,7 +219,12 @@ remote-tracking ref is the deliberate exception — it does not mirror and is
 skipped entirely in v1.1 mode.
 
 Read paths do not create, repair, or advance the mirror before use; they read
-the configured committed-read ref as-is.
+the configured committed-read ref as-is. The repair tool is `entire doctor`:
+it diagnoses a missing, stale (behind v1), or diverged mirror via
+`strategy.DiagnoseCommittedMetadataMirror` and — with confirmation, or
+automatically under `--force` — points the mirror back at the v1 tip.
+`entire doctor bundle` captures the entire-related refs and the mirror
+diagnosis in `entire-refs.txt`.
 
 **Root-level metadata.json (`CheckpointSummary`):**
 ```json
@@ -340,7 +340,7 @@ The checkpoint ID creates a **bidirectional link**: user commits can find their 
 
 ```
 strategy/
-├── session.go           # Session and Checkpoint types, ListSessions(), GetSession()
+├── session.go           # Session and Checkpoint types
 
 session/
 ├── state.go             # Active session state (StateStore, .git/entire-sessions/)

@@ -74,7 +74,10 @@ func newLogoutCmd() *cobra.Command {
 
 			// Revoke against the active context's core (matching what
 			// `auth status` lists), not a static AuthBaseURL.
-			target := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, api.AuthBaseURL())
+			target, err := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, api.AuthBaseURL())
+			if err != nil {
+				return err
+			}
 			if !insecureHTTPAuth {
 				if err := api.RequireSecureURL(target.coreURL); err != nil {
 					return fmt.Errorf("context login server URL check: %w", err)

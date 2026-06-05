@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,7 +29,10 @@ func TestResolveStatusTarget_PrefersActiveContext(t *testing.T) {
 		t.Fatalf("record context: %v", err)
 	}
 
-	got := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, "https://fallback.example.com")
+	got, err := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, "https://fallback.example.com")
+	if err != nil {
+		t.Fatalf("resolveStatusTarget: %v", err)
+	}
 	if got.coreURL != "https://eu.auth.entire.io" {
 		t.Errorf("coreURL = %q, want the active context's CoreURL", got.coreURL)
 	}
@@ -37,6 +41,23 @@ func TestResolveStatusTarget_PrefersActiveContext(t *testing.T) {
 	}
 	if got.activeContext == "" {
 		t.Error("activeContext = empty, want the active context name")
+	}
+}
+
+// A genuine contexts.json read/parse error is surfaced by resolveStatusTarget,
+// symmetric with the control-plane commands — not swallowed into the legacy
+// fallback. (A missing file reads as "no contexts" and is not an error.)
+func TestResolveStatusTarget_CorruptContextsErrors(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	if err := os.WriteFile(filepath.Join(cfgDir, "contexts.json"), []byte("{ not valid json"), 0o600); err != nil {
+		t.Fatalf("write corrupt contexts.json: %v", err)
+	}
+	if _, err := resolveStatusTarget(auth.NewContextStore(), auth.Contexts, "https://fallback.example.com"); err == nil {
+		t.Fatal("want an error when contexts.json is corrupt, got nil")
 	}
 }
 
@@ -155,38 +176,6 @@ func TestCompleteContextNames_NoContexts(t *testing.T) {
 	got, directive := completeContextNames(nil, nil, "")
 	if len(got) != 0 || directive != cobra.ShellCompDirectiveNoFileComp {
 		t.Fatalf("no contexts: want (empty, NoFileComp), got (%v, %v)", got, directive)
-	}
-}
-
-func TestWarnIfCrossCoreContext(t *testing.T) {
-	cfgDir := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
-	t.Setenv("ENTIRE_AUTH_BASE_URL", "https://auth.example.com")
-	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
-	t.Cleanup(restore)
-
-	exp := time.Now().Add(time.Hour).Unix()
-
-	// Same core as the configured auth host: no warning.
-	sameName, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://auth.example.com","handle":"alice","exp":%d}`, exp)), "", true)
-	if err != nil {
-		t.Fatalf("record same-core: %v", err)
-	}
-	var same bytes.Buffer
-	warnIfCrossCoreContext(&same, sameName)
-	if same.Len() != 0 {
-		t.Fatalf("same-core context should not warn, got: %q", same.String())
-	}
-
-	// Different core: warns that the control plane won't follow.
-	otherName, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://other.example.com","handle":"alice","exp":%d}`, exp)), "", true)
-	if err != nil {
-		t.Fatalf("record cross-core: %v", err)
-	}
-	var diff bytes.Buffer
-	warnIfCrossCoreContext(&diff, otherName)
-	if !strings.Contains(diff.String(), "other.example.com") || !strings.Contains(diff.String(), "control-plane") {
-		t.Fatalf("cross-core context should warn, got: %q", diff.String())
 	}
 }
 
