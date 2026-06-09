@@ -246,6 +246,20 @@ type State struct {
 	ContextTokens     int   `json:"context_tokens,omitempty"`
 	ContextWindowSize int   `json:"context_window_size,omitempty"`
 
+	// PromptWindowBase is the SessionTurnCount value at the start of the current
+	// checkpoint window. The number of prompts attributed to the next checkpoint is
+	// SessionTurnCount - PromptWindowBase (floored at 1 when written). It is only
+	// advanced (deferred reset) the next time a turn is counted after a checkpoint
+	// was written, so two checkpoints with no prompt between them report the same
+	// count. Zero-value safe on old state files: base 0 ⇒ window = SessionTurnCount,
+	// i.e. "all prompts so far" (correct first-checkpoint semantics).
+	PromptWindowBase int `json:"prompt_window_base,omitempty"`
+
+	// PromptWindowResetPending indicates a checkpoint was just written and the
+	// window base must be re-anchored to the current SessionTurnCount the next time
+	// a turn is counted. Deferred so back-to-back checkpoints share a count.
+	PromptWindowResetPending bool `json:"prompt_window_reset_pending,omitempty"`
+
 	// Deprecated: TranscriptLinesAtStart is replaced by CheckpointTranscriptStart.
 	// Kept for backward compatibility with existing state files.
 	TranscriptLinesAtStart int `json:"transcript_lines_at_start,omitempty"`

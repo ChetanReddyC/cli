@@ -45,6 +45,31 @@ var hostToForge = map[string]string{
 	"github.com": "gh",
 }
 
+// forgeToHost is the reverse of hostToForge: it maps a forge identifier back to
+// its canonical public host. Used to recover the real forge host from an
+// entire:// remote, whose Host is the Entire cluster rather than the forge.
+var forgeToHost = func() map[string]string {
+	m := make(map[string]string, len(hostToForge))
+	for host, forge := range hostToForge {
+		m[forge] = host
+	}
+	return m
+}()
+
+// CanonicalHost returns the canonical public host of the upstream forge.
+//
+// For direct git URLs this is just Host. For entire:// remotes — whose Host is
+// the Entire cluster (e.g. aws-us-east-2.entire.io) rather than the forge — it
+// maps the forge prefix back to the forge's host (gh → github.com). Falls back
+// to Host when the forge is unknown (e.g. a self-hosted GitHub Enterprise),
+// preserving the only host we know for it.
+func (i *Info) CanonicalHost() string {
+	if host, ok := forgeToHost[i.Forge]; ok {
+		return host
+	}
+	return i.Host
+}
+
 // HostPort returns Host, or "Host:Port" when Port is non-empty.
 func (i *Info) HostPort() string {
 	if i.Port == "" {

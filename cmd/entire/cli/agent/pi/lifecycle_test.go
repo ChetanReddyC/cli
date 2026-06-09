@@ -71,6 +71,41 @@ func TestParseHookEvent_BeforeAgentStart_WithSkillEvent(t *testing.T) {
 	}
 }
 
+// TestParseHookEvent_BeforeAgentStart_MultipleSkillEvents locks live capture of
+// every /skill:<name> in a turn (the path backing all live Pi sessions).
+func TestParseHookEvent_BeforeAgentStart_MultipleSkillEvents(t *testing.T) {
+	t.Parallel()
+	a := &PiAgent{}
+	stdin := strings.NewReader(`{"type":"before_agent_start","session_file":"/tmp/2026-05-09T12-00-00-000Z_abc-123.jsonl","prompt":"expanded","skill_events":[{"skill_name":"review-pr","invocation":"/skill:review-pr","timestamp":"2026-05-25T12:34:56Z"},{"skill_name":"test-auditor","invocation":"/skill:test-auditor","timestamp":"2026-05-25T12:35:10Z"}]}`)
+	ev, err := a.ParseHookEvent(context.Background(), HookNameBeforeAgentStart, stdin)
+	if err != nil {
+		t.Fatalf("ParseHookEvent: %v", err)
+	}
+	got := make(map[string]bool)
+	for _, se := range ev.SkillEvents {
+		got[se.Skill.Name] = true
+		if se.Source.Agent != string(agent.AgentNamePi) {
+			t.Errorf("Source.Agent = %q, want pi", se.Source.Agent)
+		}
+	}
+	for _, want := range []string{"review-pr", "test-auditor"} {
+		if !got[want] {
+			t.Errorf("missing live skill event for %q; got %v", want, got)
+		}
+	}
+}
+
+// TestPiAgent_UsesLiveSkillCaptureNotTranscriptExtraction guards Pi's
+// live-capture model: a transcript extractor would double-count at
+// condensation (see piSkillEvents).
+func TestPiAgent_UsesLiveSkillCaptureNotTranscriptExtraction(t *testing.T) {
+	t.Parallel()
+	if _, ok := agent.AsSkillEventExtractor(NewPiAgent()); ok {
+		t.Fatal("PiAgent must not implement SkillEventExtractor: Pi captures skills live; " +
+			"a transcript extractor would double-count at condensation (see piSkillEvents)")
+	}
+}
+
 func TestParseHookEvent_SessionShutdown_NoLifecycleEvent(t *testing.T) {
 	t.Parallel()
 	a := &PiAgent{}

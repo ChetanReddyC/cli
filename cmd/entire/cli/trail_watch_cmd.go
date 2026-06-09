@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// SSE control events for the agent-native code-review stream. Domain events
+// SSE control events for the agent-native finding stream. Domain events
 // (for example "session.started" or "comment.created") are emitted as their
 // code_review_events.event_type values.
 const (
@@ -47,8 +47,8 @@ func newTrailWatchCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "watch [<number>]",
-		Short: "Tail a trail's code-review events live",
-		Long: `Subscribe to the trail-scoped agent-native code-review SSE stream and
+		Short: "Tail a trail's finding events live",
+		Long: `Subscribe to the trail-scoped agent-native finding SSE stream and
 print events as they arrive. Reconnects automatically when the server caps the
 connection (~50s) and on transient network errors.
 
@@ -59,7 +59,7 @@ GET /api/v1/trails/<id>/reviews/events with Accept: text/event-stream.
 
 Events emitted by the server:
   ready              initial frame, includes trail and cursor
-  <event_type>       code-review domain event (session.started, comment.created, ...)
+  <event_type>       finding domain event (sessions, findings, suggested changes, ...)
   reconnect          server cap reached; re-establishing
   forbidden          access was revoked; stream ends
   error              server-side error; treated as reconnect`,
@@ -85,9 +85,6 @@ Events emitted by the server:
 
 func runTrailWatch(cmd *cobra.Command, number int, jsonOutput, showPings, once bool) error {
 	ctx := cmd.Context()
-	w := cmd.OutOrStdout()
-	errW := cmd.ErrOrStderr()
-
 	client, err := NewAuthenticatedAPIClient(ctx, trailInsecureHTTP(cmd))
 	if err != nil {
 		return fmt.Errorf("authentication required: %w", err)
@@ -97,6 +94,13 @@ func runTrailWatch(cmd *cobra.Command, number int, jsonOutput, showPings, once b
 	if err != nil {
 		return err
 	}
+	return runTrailWatchResolved(cmd, client, trailID, description, jsonOutput, showPings, once)
+}
+
+func runTrailWatchResolved(cmd *cobra.Command, client *api.Client, trailID, description string, jsonOutput, showPings, once bool) error {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	errW := cmd.ErrOrStderr()
 	streamPath := reviewEventsPath(trailID)
 
 	fmt.Fprintf(errW, "Watching %s — Ctrl+C to stop\n", description)
@@ -520,34 +524,34 @@ func printReviewStreamEvent(w io.Writer, ev reviewStreamEvent) {
 		severity := payloadString(ev.Payload, "severity")
 		switch {
 		case file != "" && severity != "":
-			fmt.Fprintf(w, "%scomment created by %s on %s (%s) — %s\n", prefix, actor, file, severity, ev.TargetID)
+			fmt.Fprintf(w, "%sfinding created by %s on %s (%s) — %s\n", prefix, actor, file, severity, ev.TargetID)
 		case file != "":
-			fmt.Fprintf(w, "%scomment created by %s on %s — %s\n", prefix, actor, file, ev.TargetID)
+			fmt.Fprintf(w, "%sfinding created by %s on %s — %s\n", prefix, actor, file, ev.TargetID)
 		default:
-			fmt.Fprintf(w, "%scomment created by %s — %s\n", prefix, actor, ev.TargetID)
+			fmt.Fprintf(w, "%sfinding created by %s — %s\n", prefix, actor, ev.TargetID)
 		}
 	case "comment.status_changed":
-		fmt.Fprintf(w, "%scomment %s status %s → %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "from"), payloadString(ev.Payload, "to"))
+		fmt.Fprintf(w, "%sfinding %s status %s → %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "from"), payloadString(ev.Payload, "to"))
 	case "comment.updated":
-		fmt.Fprintf(w, "%scomment %s updated by %s\n", prefix, ev.TargetID, actor)
+		fmt.Fprintf(w, "%sfinding %s updated by %s\n", prefix, ev.TargetID, actor)
 	case "comment.stale_checked":
-		fmt.Fprintf(w, "%scomment %s marked %s (%s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "outcome"), payloadString(ev.Payload, "reason"))
+		fmt.Fprintf(w, "%sfinding %s marked %s (%s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "outcome"), payloadString(ev.Payload, "reason"))
 	case "suggested_change.created":
-		fmt.Fprintf(w, "%ssuggested change %s created for comment %s (%s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "review_comment_id"), payloadString(ev.Payload, "change_type"))
+		fmt.Fprintf(w, "%ssuggested change %s created for finding %s (%s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "review_comment_id"), payloadString(ev.Payload, "change_type"))
 	case "suggested_change.updated":
 		fmt.Fprintf(w, "%ssuggested change %s updated by %s\n", prefix, ev.TargetID, actor)
 	case "suggested_change.check_result", "suggested_change.apply_result":
 		fmt.Fprintf(w, "%s%s for %s: %s\n", prefix, ev.EventType, payloadString(ev.Payload, "suggested_change_id"), payloadString(ev.Payload, "status"))
 	case "thread.created":
-		fmt.Fprintf(w, "%sthread %s created for comment %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "review_comment_id"))
+		fmt.Fprintf(w, "%sthread %s created for finding %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "review_comment_id"))
 	case "thread.message_added":
 		fmt.Fprintf(w, "%sthread message %s added by %s\n", prefix, ev.TargetID, actor)
 	case "thread.message_edited":
 		fmt.Fprintf(w, "%sthread message %s edited by %s\n", prefix, ev.TargetID, actor)
 	case "comment.linked":
-		fmt.Fprintf(w, "%scomment link created: %s → %s\n", prefix, payloadString(ev.Payload, "source_comment_id"), payloadString(ev.Payload, "target_comment_id"))
+		fmt.Fprintf(w, "%sfinding link created: %s → %s\n", prefix, payloadString(ev.Payload, "source_comment_id"), payloadString(ev.Payload, "target_comment_id"))
 	case "comment.unlinked":
-		fmt.Fprintf(w, "%scomment link removed: %s → %s\n", prefix, payloadString(ev.Payload, "source_comment_id"), payloadString(ev.Payload, "target_comment_id"))
+		fmt.Fprintf(w, "%sfinding link removed: %s → %s\n", prefix, payloadString(ev.Payload, "source_comment_id"), payloadString(ev.Payload, "target_comment_id"))
 	default:
 		fmt.Fprintf(w, "%s%s %s/%s by %s\n", prefix, ev.EventType, ev.TargetType, ev.TargetID, actor)
 	}

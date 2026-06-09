@@ -227,8 +227,16 @@ type WriteCommittedOptions struct {
 	// FilesTouched are files modified during the session
 	FilesTouched []string
 
-	// CheckpointsCount is the number of checkpoints in this session
+	// CheckpointsCount is the displayed "steps" count for this session: the number
+	// of user prompts attributed to this checkpoint (floored at 1). Despite the
+	// historical name/JSON tag, it is no longer a count of checkpoints.
 	CheckpointsCount int
+
+	// SaveStepCount is the number of SaveStep-recorded steps (shadow-branch
+	// commits) for this session. Distinct from CheckpointsCount (the displayed
+	// prompt count): this is the honest "did real checkpoint work happen" signal
+	// used to gate combined attribution. 0 means a commit-only / fallback session.
+	SaveStepCount int
 
 	// EphemeralBranch is the shadow branch name (for manual-commit strategy)
 	EphemeralBranch string
@@ -417,7 +425,9 @@ type CommittedInfo struct {
 	// CreatedAt is when the checkpoint was created
 	CreatedAt time.Time
 
-	// CheckpointsCount is the total number of checkpoints across all sessions
+	// CheckpointsCount is the aggregate displayed "steps" count across sessions:
+	// the sum of per-session prompt-window counts. Despite the historical name,
+	// it is not a count of checkpoint records.
 	CheckpointsCount int
 
 	// FilesTouched are files modified during all sessions
@@ -465,7 +475,12 @@ type CommittedMetadata struct {
 	CreatedAt        time.Time       `json:"created_at"`
 	Branch           string          `json:"branch,omitempty"` // Branch where checkpoint was created (empty if detached HEAD)
 	CheckpointsCount int             `json:"checkpoints_count"`
-	FilesTouched     []string        `json:"files_touched"`
+	// SaveStepCount is the number of SaveStep-recorded steps for this session.
+	// Honest "real checkpoint work happened" signal (0 = commit-only/fallback
+	// session), kept separate from the displayed CheckpointsCount prompt count.
+	// Added after CheckpointsCount stopped being a reliable did-SaveStep-run signal.
+	SaveStepCount int      `json:"save_step_count,omitempty"`
+	FilesTouched  []string `json:"files_touched"`
 
 	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")
 	Agent types.AgentType `json:"agent,omitempty"`

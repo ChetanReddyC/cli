@@ -49,7 +49,7 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store := s.getCommittedReadStore(ctx, repo)
+	store := s.getCheckpointStore(ctx, repo)
 
 	committed, err := store.ListCommitted(ctx)
 	if err != nil {
@@ -68,7 +68,7 @@ func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointI
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected()
-	store := s.getCheckpointStore(repo)
+	store := s.getCheckpointStore(ctx, repo)
 
 	summary, err := cpkg.ReadCommittedCheckpoint(ctx, store, checkpointID)
 	if err != nil {
@@ -100,6 +100,20 @@ type condenseOpts struct {
 }
 
 var redactSessionJSONLBytes = redact.JSONLBytes
+
+// checkpointStepCount returns the number of user prompts attributed to the
+// checkpoint being written: the turns counted since the current window's base.
+// The base is re-anchored (deferred) the next time a turn is counted after a
+// checkpoint write, so back-to-back checkpoints with no prompt between them share
+// a count. Floored at 1 so we never record 0 (covers a fast-path checkpoint
+// before any turn, and exec-mode gaps where turns weren't counted). Attach has
+// its own count (see attachStepCount); it does not go through this path.
+func checkpointStepCount(s *SessionState) int {
+	if w := s.SessionTurnCount - s.PromptWindowBase; w >= 1 {
+		return w
+	}
+	return 1
+}
 
 // CondenseSession condenses a session's shadow branch to permanent storage.
 // checkpointID is the 12-hex-char value from the Entire-Checkpoint trailer.
@@ -184,7 +198,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return skipped, nil
 	}
 
-	store := s.getCheckpointStore(repo)
+	store := s.getCheckpointStore(ctx, repo)
 
 	// Get author info
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
@@ -227,7 +241,8 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		Transcript:                  redactedTranscript,
 		Prompts:                     sessionData.Prompts,
 		FilesTouched:                sessionData.FilesTouched,
-		CheckpointsCount:            state.StepCount,
+		CheckpointsCount:            checkpointStepCount(state),
+		SaveStepCount:               state.StepCount,
 		EphemeralBranch:             shadowBranchName,
 		AuthorName:                  authorName,
 		AuthorEmail:                 authorEmail,
@@ -261,9 +276,15 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	writeCommittedSpan.End()
 	writeV1Duration := time.Since(writeV1Start)
 
-	// Mirror the committed write to the v1 custom ref when opted in
-	// (local-only, never pushed; failures are logged, not fatal).
-	MirrorCommittedMetadataRefBestEffort(ctx, repo)
+	// Deferred prompt-window reset: a checkpoint was written, so the window base
+	// must be re-anchored — but not now. We defer until the next counted turn (in
+	// persistEventMetadataToState) so two checkpoints with no prompt between them
+	// report the same count instead of the second showing 0.
+	state.PromptWindowResetPending = true
+
+	// Mirror the committed write to refs.Mirror when configured (best-effort;
+	// failures are logged, not fatal).
+	mirrorCommittedMetadataRefBestEffort(ctx, repo, store.Refs())
 
 	logging.Debug(logCtx, "condense timings",
 		slog.String("session_id", state.SessionID),
@@ -280,7 +301,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	return &CondenseResult{
 		CheckpointID:         checkpointID,
 		SessionID:            state.SessionID,
-		CheckpointsCount:     state.StepCount,
+		CheckpointsCount:     checkpointStepCount(state),
 		FilesTouched:         sessionData.FilesTouched,
 		Prompts:              sessionData.Prompts,
 		TotalTranscriptLines: sessionData.FullTranscriptLines,

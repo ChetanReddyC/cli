@@ -3089,3 +3089,86 @@ func TestConfigureCmd_FreshRepo_PointsAtEnable(t *testing.T) {
 		t.Errorf("expected hint pointing at 'entire enable', got stderr: %s", stderr.String())
 	}
 }
+
+func TestCleanRemoteURLForReport(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		rawURL  string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:   "https without credentials is normalized",
+			rawURL: "https://github.com/entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "https token credentials are stripped",
+			rawURL: "https://ghp_secrettoken@github.com/entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "https user:password credentials are stripped",
+			rawURL: "https://x-access-token:ghp_secret@github.com/entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "query parameters are dropped",
+			rawURL: "https://github.com/entireio/cli.git?token=secret",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "scp-style ssh remote is normalized to https and the user is dropped",
+			rawURL: "git@github.com:entireio/cli.git",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "missing .git suffix is added",
+			rawURL: "https://github.com/entireio/cli",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "entire:// mirror origin maps the forge back to its real host",
+			rawURL: "entire://aws-us-east-2.entire.io/gh/entireio/cli",
+			want:   "https://github.com/entireio/cli.git",
+		},
+		{
+			name:   "unknown forge host is preserved (self-hosted enterprise)",
+			rawURL: "git@ghe.corp.example.com:entireio/cli.git",
+			want:   "https://ghe.corp.example.com/entireio/cli.git",
+		},
+		{
+			name:    "unparseable single-segment path errors",
+			rawURL:  "https://github.com/onlyowner.git",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := cleanRemoteURLForReport(tt.rawURL)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got %q", tt.rawURL, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tt.rawURL, err)
+			}
+			if got != tt.want {
+				t.Errorf("cleanRemoteURLForReport(%q) = %q, want %q", tt.rawURL, got, tt.want)
+			}
+			// The cleaned URL must never carry the original credentials.
+			for _, secret := range []string{"ghp_secrettoken", "ghp_secret", "x-access-token", "token=secret"} {
+				if strings.Contains(got, secret) {
+					t.Errorf("cleaned URL %q leaked credential %q", got, secret)
+				}
+			}
+		})
+	}
+}

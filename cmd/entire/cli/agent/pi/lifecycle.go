@@ -70,6 +70,11 @@ type piSkillEventInput struct {
 	Timestamp  string `json:"timestamp,omitempty"`
 }
 
+// piSkillEvents converts the Pi extension's live skill-invocation reports into
+// agent.SkillEvents. This is Pi's only skill-capture path. PiAgent intentionally
+// does NOT implement agent.SkillEventExtractor: a transcript extractor would
+// double-count these live events at condensation (see
+// TestPiAgent_UsesLiveSkillCaptureNotTranscriptExtraction).
 func piSkillEvents(in []piSkillEventInput) []agent.SkillEvent {
 	if len(in) == 0 {
 		return nil

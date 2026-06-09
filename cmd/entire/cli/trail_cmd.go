@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -39,6 +40,7 @@ func newTrailCmd() *cobra.Command {
 		Use:    "trail",
 		Short:  "Manage trails for your branches",
 		Hidden: true,
+		Args:   cobra.NoArgs,
 		Long: `Trails are branch-centric work tracking abstractions. They describe the
 "why" and "what" of your work, while checkpoints capture the "how" and "when".
 
@@ -58,6 +60,7 @@ branch, or lists recent trails if no trail exists for the current branch.`,
 	cmd.AddCommand(newTrailListCmd())
 	cmd.AddCommand(newTrailCreateCmd())
 	cmd.AddCommand(newTrailUpdateCmd())
+	cmd.AddCommand(newTrailFindingCmd())
 	cmd.AddCommand(newTrailWatchCmd())
 
 	return cmd
@@ -418,12 +421,25 @@ func printTrailRows(w io.Writer, trails []*trail.Metadata, showAuthor bool) {
 	// tabwriter aligns by display columns instead of bytes, so multi-byte
 	// branch names or logins don't throw off the table.
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if showAuthor {
+		fmt.Fprintln(tw, "  NUM\tBRANCH\tTITLE\tAUTHOR\tUPDATED")
+	} else {
+		fmt.Fprintln(tw, "  NUM\tBRANCH\tTITLE\tUPDATED")
+	}
 	for _, t := range trails {
+		number := "-"
+		if t.Number > 0 {
+			number = strconv.Itoa(t.Number)
+		}
+		title := truncateOneLine(t.Title, 60)
+		if title == "" {
+			title = "(untitled)"
+		}
 		if showAuthor {
-			fmt.Fprintf(tw, "  %s\t%s\t%s\n", t.Branch, t.AuthorLogin(), timeAgo(t.UpdatedAt))
+			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", number, t.Branch, title, t.AuthorLogin(), timeAgo(t.UpdatedAt))
 			continue
 		}
-		fmt.Fprintf(tw, "  %s\t%s\n", t.Branch, timeAgo(t.UpdatedAt))
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", number, t.Branch, title, timeAgo(t.UpdatedAt))
 	}
 	_ = tw.Flush()
 }

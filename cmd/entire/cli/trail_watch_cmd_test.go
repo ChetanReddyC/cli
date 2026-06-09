@@ -75,7 +75,7 @@ func TestStreamOnce_PrintsReadyAndReviewEvents(t *testing.T) {
 		t.Errorf("lastID = %q, want %q", lastID, "3")
 	}
 	out := stdout.String()
-	for _, want := range []string{"trail trl_1", "session started", "comment created", "src/foo.ts", "session ended"} {
+	for _, want := range []string{"trail trl_1", "session started", "finding created", "src/foo.ts", "session ended"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q in output, got: %q", want, out)
 		}

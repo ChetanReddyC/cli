@@ -554,3 +554,34 @@ func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T)
 	require.Equal(t, "0123456789ab", meta.InvestigateRunID, "per-session InvestigateRunID")
 	require.Equal(t, "Why is checkout flaky?", meta.InvestigateTopic, "per-session InvestigateTopic")
 }
+
+// TestCheckpointStepCount covers the prompt-window math that produces the
+// displayed "steps" count: SessionTurnCount - PromptWindowBase, floored at 1.
+func TestCheckpointStepCount(t *testing.T) {
+	tests := []struct {
+		name             string
+		sessionTurnCount int
+		promptWindowBase int
+		want             int
+	}{
+		{"first window of three prompts", 3, 0, 3},
+		{"second window of two prompts", 5, 3, 2},
+		{"no turns counted floors to 1", 0, 0, 1},
+		// Back-to-back checkpoint: base not yet re-anchored, so it reports the same
+		// count as the prior checkpoint rather than 0.
+		{"back-to-back reports same as prior", 3, 0, 3},
+		{"empty window floors to 1", 3, 3, 1},
+		{"negative guard floors to 1", 2, 5, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &SessionState{
+				SessionTurnCount: tt.sessionTurnCount,
+				PromptWindowBase: tt.promptWindowBase,
+			}
+			if got := checkpointStepCount(s); got != tt.want {
+				t.Errorf("checkpointStepCount() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

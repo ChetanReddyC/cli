@@ -136,6 +136,30 @@ func TestExtractOwnerFromRemoteURL(t *testing.T) {
 	}
 }
 
+func TestInfo_CanonicalHost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"direct https github", "https://github.com/org/repo.git", "github.com"},
+		{"direct ssh github", "git@github.com:org/repo.git", "github.com"},
+		{"entire mirror maps forge to host", "entire://aws-us-east-2.entire.io/gh/org/repo", "github.com"},
+		{"unknown forge falls back to host", "git@ghe.corp.example.com:org/repo.git", "ghe.corp.example.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			info, err := ParseURL(tt.url)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, info.CanonicalHost())
+		})
+	}
+}
+
 func TestRedactURL(t *testing.T) {
 	t.Parallel()
 
