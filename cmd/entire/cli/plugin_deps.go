@@ -122,17 +122,26 @@ func planDeps(ctx context.Context, reqs []PluginRequirement, idx *PluginIndex, p
 		plan.Actions = append(plan.Actions, action)
 
 		// Recurse into what the dependency itself requires, using metadata
-		// only — nothing is downloaded during planning.
+		// only — nothing is downloaded during planning. Inspection
+		// failures don't fail the plan (the install will surface hard
+		// errors itself), but they must not be silent either: a confirmed
+		// plan that quietly omitted nested dependencies would look
+		// complete while leaving gaps for doctor to find.
 		tag := ""
 		if tags, err := listRemoteSemverTags(ctx, action.RepoURL); err == nil && len(tags) > 0 {
 			tag = tags[0]
 		}
 		if tag == "" {
-			continue // install will fail with a clearer error later
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf("could not list tags for %q (%s); its own dependencies were not inspected — 'entire plugin doctor' will report any gaps", req.Name, action.RepoURL))
+			continue
 		}
 		meta, err := fetchPluginMetadataAtTag(ctx, action.RepoURL, tag)
-		if err != nil || meta == nil {
+		if err != nil {
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf("could not read %s for %q at %s; its own dependencies were not inspected — 'entire plugin doctor' will report any gaps", pluginMetadataFileName, req.Name, tag))
 			continue
+		}
+		if meta == nil {
+			continue // no metadata file: no declared dependencies
 		}
 		if err := planDeps(ctx, meta.Requires, idx, plan, visited, depth+1); err != nil {
 			return err
@@ -295,6 +304,11 @@ func RunPluginDoctor(ctx context.Context) ([]PluginDoctorIssue, error) {
 // means "not quarantined". The attribute appears when a user manually
 // drops a browser-downloaded binary into the managed dir — CLI downloads
 // don't set it.
+//
+// Checking the bin entry is sufficient even though remote installs link
+// bin/entire-<name> to the real binary under pkg/: macOS xattr follows
+// symlinks by default (-s is the flag to act on the link itself), so both
+// the probe here and the suggested `xattr -d` fix operate on the target.
 func quarantinedPath(ctx context.Context, path string) string {
 	if runtime.GOOS != darwinGOOS {
 		return ""

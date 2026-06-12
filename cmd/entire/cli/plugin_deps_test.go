@@ -191,3 +191,31 @@ func TestPlanDependencyInstalls_WalksSatisfiedTransitives(t *testing.T) { //noli
 		t.Errorf("actions = %+v, want [leaf] via satisfied sem's manifest", plan.Actions)
 	}
 }
+
+func TestPlanDependencyInstalls_WarnsOnUninspectableDep(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	withIsolatedPath(t)
+	// The dependency's repo has no tags, so its own requirements can't be
+	// inspected during planning. The action must still be planned, with a
+	// warning instead of silence.
+	untaggedRepo := newTaggedPluginRepo(t, "") // commit, no tags
+	idx := &PluginIndex{Version: 1, Plugins: []PluginIndexEntry{
+		{Name: "leaf", RepoURL: untaggedRepo},
+	}}
+	plan, err := PlanDependencyInstalls(context.Background(), []PluginRequirement{{Name: "leaf"}}, idx)
+	if err != nil {
+		t.Fatalf("PlanDependencyInstalls: %v", err)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Name != "leaf" {
+		t.Fatalf("actions = %+v, want [leaf]", plan.Actions)
+	}
+	found := false
+	for _, w := range plan.Warnings {
+		if strings.Contains(w, "leaf") && strings.Contains(w, "not inspected") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %v, want uninspectable-dep warning naming leaf", plan.Warnings)
+	}
+}

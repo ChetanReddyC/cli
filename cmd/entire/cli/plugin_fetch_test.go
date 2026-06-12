@@ -397,3 +397,31 @@ func TestFetchAndVerify_RemovesPartialFileOnMismatch(t *testing.T) {
 		t.Errorf("partial download left behind after checksum mismatch: stat err = %v", err)
 	}
 }
+
+func TestDownloadPluginAsset_StaleManifestFallsThroughToProbe(t *testing.T) {
+	t.Parallel()
+	// The root checksums.txt lists only a foreign platform, but the real
+	// asset is published under its conventional name. A stale manifest
+	// must not block the install: selection falls through to the probe.
+	payload := makeTarGz(t, map[string][]byte{"entire-run": []byte("bin")})
+	asset := fmt.Sprintf("entire-run_1.0.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "checksums.txt"):
+			_, _ = w.Write([]byte("abc  entire-run_1.0.0_plan9_mips.tar.gz\n")) //nolint:errcheck // test server write
+		case strings.HasSuffix(r.URL.Path, asset):
+			_, _ = w.Write(payload) //nolint:errcheck // test server write
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	meta := &PluginMetadata{DownloadURL: srv.URL + "/dl/{asset}"}
+	fa, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir())
+	if err != nil {
+		t.Fatalf("downloadPluginAsset with stale manifest: %v", err)
+	}
+	if fa.Asset != asset {
+		t.Errorf("Asset = %q, want %q via probe fallback", fa.Asset, asset)
+	}
+}

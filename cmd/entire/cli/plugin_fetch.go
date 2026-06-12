@@ -209,7 +209,14 @@ func downloadPluginAsset(ctx context.Context, meta *PluginMetadata, repoURL, nam
 		}
 		asset, digest, ok := selectAssetFromChecksums(parseChecksums(data), name, tag)
 		if !ok {
-			return nil, fmt.Errorf("%w: %s lists no asset for %s/%s", errAssetNotFound, cs, runtime.GOOS, runtime.GOARCH)
+			// This manifest lists nothing for the platform. Keep going: a
+			// stale or hand-written root checksums.txt must not mask a
+			// goreleaser manifest under another candidate name, or a
+			// published asset still reachable by the probe fallback.
+			// Falling through doesn't weaken verification — an attacker
+			// who controls the manifest could list a malicious digest
+			// directly.
+			continue
 		}
 		au, err := assetURL(asset)
 		if err != nil {
