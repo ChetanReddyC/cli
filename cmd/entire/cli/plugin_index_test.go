@@ -144,6 +144,11 @@ func TestClassifyInstallArg(t *testing.T) {
 		"../entire-run":                          installFromPath,
 		"run":                                    installFromIndex,
 		"brain":                                  installFromIndex,
+		// Bare names are index lookups even when a same-named file exists
+		// in the CWD — classification is pure string logic, never stat,
+		// so a stray local file can't shadow an index name. Local files
+		// need an explicit ./ prefix.
+		"entire-run": installFromIndex,
 	} {
 		if got := classifyInstallArg(arg); got != want {
 			t.Errorf("classifyInstallArg(%q) = %d, want %d", arg, got, want)

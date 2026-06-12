@@ -69,17 +69,18 @@ const (
 )
 
 // classifyInstallArg distinguishes the three install sources. URLs are
-// anything with a scheme or scp-like git@ prefix; paths are anything that
-// looks like (or exists as) a filesystem path; everything else is a bare
-// name for index lookup.
+// anything with a scheme or scp-like git@ prefix; paths must be explicit —
+// a separator or a leading dot (./entire-foo) — and everything else is a
+// bare name for index lookup. Deliberately NOT stat-based: a stray file or
+// directory in the CWD sharing a plugin's name must not shadow the index
+// (and could never install anyway — path installs require an entire-
+// basename). The spaces stay disjoint because validatePluginName rejects
+// separators in plugin names.
 func classifyInstallArg(arg string) installArgKind {
 	if strings.Contains(arg, "://") || strings.HasPrefix(arg, "git@") {
 		return installFromURL
 	}
 	if strings.ContainsAny(arg, `/\`) || strings.HasPrefix(arg, ".") {
-		return installFromPath
-	}
-	if _, err := os.Stat(arg); err == nil {
 		return installFromPath
 	}
 	return installFromIndex
@@ -103,8 +104,11 @@ Three source forms:
          checksums.txt when one is published:
              entire plugin install https://github.com/entireio/entire-run
   path   Local executables are linked into the managed directory (symlink
-         first, so rebuilds are picked up immediately):
+         first, so rebuilds are picked up immediately). Paths must be
+         explicit — a separator or leading ./ — so a stray local file can
+         never shadow an index name:
              entire plugin install ./dist/entire-run
+             entire plugin install ./entire-run
 
 Installing from a URL that is not listed in the plugin index asks for
 confirmation; pass --yes to skip (required in non-interactive runs).
@@ -159,6 +163,12 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 		}
 		entry := idx.Find(arg)
 		if entry == nil {
+			// Bare names never resolve to local files (see
+			// classifyInstallArg), but a user who typed one expecting a
+			// path install deserves the pointer.
+			if _, statErr := os.Stat(arg); statErr == nil {
+				return fmt.Errorf("plugin %q is not in the index; to install the local file, use an explicit path: entire plugin install ./%s", arg, arg)
+			}
 			return fmt.Errorf("plugin %q is not in the index; pass the repository URL to install from a specific repo (try 'entire plugin search %s')", arg, arg)
 		}
 		if len(entry.Platforms) > 0 && !slices.Contains(entry.Platforms, runtime.GOOS) {
@@ -188,7 +198,12 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 			// exits cleanly; real prompt failures surface wrapped.
 			return handleFormCancellation(out, "Install", err)
 		case !ok:
-			return errors.New("install cancelled")
+			// Same outcome as an abort: nothing installed, clean exit.
+			// Exit codes must not differ between Esc and answering "No" —
+			// and automation never reaches this prompt at all (the
+			// non-interactive path fails above with the --yes hint).
+			fmt.Fprintln(out, "Install cancelled.")
+			return nil
 		}
 	}
 
