@@ -150,3 +150,28 @@ func TestClassifyInstallArg(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncPluginIndex_RecoversFromPartialClone(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	url, _ := newIndexRepo(t, `{"version":1,"plugins":[{"name":"run","repo_url":"https://x.example/entire-run"}]}`)
+	// Simulate an interrupted first clone: cache dir exists, is non-empty,
+	// but has no .git. git clone refuses non-empty targets, so sync must
+	// sweep the partial dir instead of staying wedged.
+	dir, err := pluginIndexCacheDir(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "leftover"), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := SyncPluginIndex(context.Background(), url, false)
+	if err != nil {
+		t.Fatalf("SyncPluginIndex after partial clone: %v", err)
+	}
+	if len(idx.Plugins) != 1 {
+		t.Errorf("plugins = %d, want 1", len(idx.Plugins))
+	}
+}

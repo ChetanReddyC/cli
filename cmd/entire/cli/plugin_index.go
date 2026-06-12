@@ -171,6 +171,13 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 
 	switch {
 	case !cloned:
+		// A previously interrupted clone can leave a partial directory
+		// without .git. git refuses to clone into a non-empty target, so
+		// without this sweep, discovery would stay wedged until the user
+		// cleared the cache by hand.
+		if err := os.RemoveAll(dir); err != nil {
+			return nil, fmt.Errorf("clear stale index cache: %w", err)
+		}
 		if err := os.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
 			return nil, fmt.Errorf("create index cache dir: %w", err)
 		}

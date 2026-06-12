@@ -167,3 +167,27 @@ func TestRunPluginDoctor_FlagsMissingAndOutdatedDeps(t *testing.T) { //nolint:pa
 		t.Errorf("doctor missed manifest-without-bin: %s", joined)
 	}
 }
+
+func TestPlanDependencyInstalls_WalksSatisfiedTransitives(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	withIsolatedPath(t)
+	// sem is installed and satisfied, but its own recorded requirement
+	// ("leaf") is missing — e.g. removed with --force after install.
+	// Planning a parent that requires sem must surface leaf.
+	if err := SavePluginManifest(&PluginManifest{
+		Name: "sem", RepoURL: "https://x.example/entire-sem", Tag: "v1.0.0",
+		Requires: []PluginRequirement{{Name: "leaf"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	idx := &PluginIndex{Version: 1, Plugins: []PluginIndexEntry{
+		{Name: "leaf", RepoURL: newTaggedPluginRepo(t, "", "v1.0.0")},
+	}}
+	plan, err := PlanDependencyInstalls(context.Background(), []PluginRequirement{{Name: "sem"}}, idx)
+	if err != nil {
+		t.Fatalf("PlanDependencyInstalls: %v", err)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Name != "leaf" {
+		t.Errorf("actions = %+v, want [leaf] via satisfied sem's manifest", plan.Actions)
+	}
+}

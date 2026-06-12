@@ -75,6 +75,22 @@ func planDeps(ctx context.Context, reqs []PluginRequirement, idx *PluginIndex, p
 			plan.Warnings = append(plan.Warnings, warning)
 		}
 		if satisfied {
+			// An already-satisfied managed dependency can itself have
+			// gaps (e.g. its own dep was removed with --force since
+			// install). Walk its recorded requirements — offline, from
+			// the manifest — so installing a parent repairs the whole
+			// chain instead of stopping at the first satisfied node.
+			// PATH/local-dev installs have no manifest; doctor covers
+			// those.
+			m, err := LoadPluginManifest(req.Name)
+			if err != nil {
+				return err
+			}
+			if m != nil {
+				if err := planDeps(ctx, m.Requires, idx, plan, visited, depth+1); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 
