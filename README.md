@@ -27,6 +27,7 @@ With Entire, you can:
   - [Strategy](#strategy)
 - [Local Device Auth Testing](#local-device-auth-testing)
 - [Commands Reference](#commands-reference)
+- [Plugins](#plugins)
 - [Configuration](#configuration)
 - [Security & Privacy](#security--privacy)
 - [Troubleshooting](#troubleshooting)
@@ -247,6 +248,7 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire checkpoint explain` | Explain a session, commit, or checkpoint                                               |
 | `entire checkpoint rewind` | Rewind to a previous checkpoint (deprecated, will be removed in a future release)       |
 | `entire login`   | Authenticate the CLI with Entire device auth                                                      |
+| `entire plugin`  | Discover, install, upgrade, and remove plugins (see [Plugins](#plugins))                          |
 | `entire session` | View and manage agent sessions tracked by Entire                                                  |
 | `entire session resume`    | Switch to a branch, restore latest checkpointed session metadata, and show command(s) |
 | `entire session attach`    | Attach to a previously detached session                                                |
@@ -314,6 +316,27 @@ entire configure --checkpoint-remote github:myorg/checkpoints-private
 entire agent add claude-code
 entire agent remove claude-code
 ```
+
+## Plugins
+
+Plugins extend the CLI with new verbs: any executable named `entire-<name>` on `$PATH` runs as `entire <name>`, kubectl-style — stdio passes through, exit codes propagate, no SDK or protocol required.
+
+```sh
+entire plugin search                                    # browse the plugin index
+entire plugin install upgrade                           # install by name (index lookup)
+entire plugin install https://github.com/you/entire-x   # install from any git host
+entire plugin install ./dist/entire-x                   # link a local build
+entire upgrade                                          # run an installed plugin
+entire plugin upgrade --all                             # update remote-installed plugins
+entire plugin doctor                                    # check for broken installs and missing dependencies
+entire plugin remove x
+```
+
+Remote installs are forge-agnostic: the newest semver tag is resolved over the git protocol, and the platform's release asset is downloaded and verified against the release's `checksums.txt`. Plugins can declare dependencies on other plugins in an `entire-plugin.yml`; missing ones are installed after a single confirmation.
+
+Discovery uses a git-synced catalog, [entireio/plugin-index](https://github.com/entireio/plugin-index) by default. Organizations can point the CLI at an internal catalog via `plugins.index_url` in `.entire/settings.json`, the `ENTIRE_PLUGIN_INDEX_URL` environment variable, or `--index`.
+
+For the full contract — resolution rules, environment filtering, release-asset conventions, and how to author a plugin — see [External Commands](docs/architecture/external-commands.md).
 
 ## Configuration
 
