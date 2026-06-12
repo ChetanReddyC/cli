@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"golang.org/x/mod/semver"
 )
 
 // Remote install orchestration: resolve tag → fetch metadata → download +
@@ -185,14 +187,20 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 	if len(tags) == 0 {
 		return nil, fmt.Errorf("%s has no semver tags", m.RepoURL)
 	}
-	if tags[0] == m.Tag {
+	// Semver comparison, not string equality: "v0.2.0" and "0.2.0" are the
+	// same version, and a remote that re-tagged with the other spelling
+	// must not trigger a reinstall.
+	if semver.Compare(canonicalSemver(tags[0]), canonicalSemver(m.Tag)) <= 0 {
 		return &UpgradeOutcome{Name: name, UpToDate: true}, nil
 	}
 	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: m.RepoURL, Force: true})
 	if err != nil {
 		return nil, err
 	}
-	if res.Manifest.Tag == m.Tag {
+	// The install may have fallen back past an asset-less newest tag and
+	// landed on the version already installed — that's up-to-date, not an
+	// upgrade line claiming X → X.
+	if semver.Compare(canonicalSemver(res.Manifest.Tag), canonicalSemver(m.Tag)) <= 0 {
 		return &UpgradeOutcome{Name: name, UpToDate: true}, nil
 	}
 	return &UpgradeOutcome{Name: name, FromTag: m.Tag, ToTag: res.Manifest.Tag}, nil

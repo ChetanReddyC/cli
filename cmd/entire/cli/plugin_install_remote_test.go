@@ -210,3 +210,46 @@ func TestRemoveManagedPlugin_CleansBinAndPkg(t *testing.T) { //nolint:parallelte
 		t.Error("manifest survived removal")
 	}
 }
+
+func TestUpgradeInstalledPlugin_EquivalentTagSpellingIsUpToDate(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	withIsolatedPath(t)
+	// Manifest recorded the bare spelling; the remote tag carries the v
+	// prefix. Equivalent semver must not trigger a reinstall — the repo
+	// has no release server at all, so any download attempt would fail.
+	repoURL := newTaggedPluginRepo(t, "", "v0.2.0")
+	if err := SavePluginManifest(&PluginManifest{Name: "demo", RepoURL: repoURL, Tag: "0.2.0"}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := UpgradeInstalledPlugin(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("UpgradeInstalledPlugin: %v", err)
+	}
+	if !o.UpToDate {
+		t.Errorf("outcome = %+v, want UpToDate for equivalent tag spellings", o)
+	}
+}
+
+func TestUpgradeInstalledPlugin_AssetlessNewestTagReportsUpToDate(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	withIsolatedPath(t)
+	ctx := context.Background()
+	// Assets exist only for 0.1.0; v0.2.0 is tagged but unpublished.
+	// Upgrade falls back to the installed version and must report
+	// up-to-date, not a misleading "v0.1.0 → v0.1.0" upgrade line.
+	srv := pluginReleaseServer(t, "0.1.0")
+	defer srv.Close()
+	meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
+	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+	if _, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: repoURL}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	gitTag(t, repoURL, remoteTestTagMid) // newer tag, no assets
+	o, err := UpgradeInstalledPlugin(ctx, "demo")
+	if err != nil {
+		t.Fatalf("UpgradeInstalledPlugin: %v", err)
+	}
+	if !o.UpToDate {
+		t.Errorf("outcome = %+v, want UpToDate when fallback lands on the installed tag", o)
+	}
+}
