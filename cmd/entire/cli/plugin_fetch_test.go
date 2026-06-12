@@ -369,3 +369,31 @@ func TestDownloadPluginAsset_NoAssetForPlatform(t *testing.T) {
 		t.Errorf("err = %v, want errAssetNotFound", err)
 	}
 }
+
+func TestFetchAndVerify_RejectsUnsafeAssetNames(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("x")) //nolint:errcheck // test server write; failure surfaces as a client error
+	}))
+	defer srv.Close()
+	for _, asset := range []string{"", ".", "..", "../escape", "a/b", `a\b`} {
+		if _, err := fetchAndVerify(context.Background(), srv.URL, asset, "", t.TempDir()); err == nil {
+			t.Errorf("fetchAndVerify accepted unsafe asset name %q", asset)
+		}
+	}
+}
+
+func TestFetchAndVerify_RemovesPartialFileOnMismatch(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("payload")) //nolint:errcheck // test server write; failure surfaces as a client error
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	if _, err := fetchAndVerify(context.Background(), srv.URL+"/a", "a", strings.Repeat("0", 64), dir); err == nil {
+		t.Fatal("fetchAndVerify accepted a wrong digest")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "a")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("partial download left behind after checksum mismatch: stat err = %v", err)
+	}
+}

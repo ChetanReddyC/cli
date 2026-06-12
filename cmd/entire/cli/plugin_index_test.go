@@ -2,7 +2,7 @@ package cli
 
 import (
 	"context"
-	"os/exec"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -98,8 +98,8 @@ func TestSyncPluginIndex_OfflineUsesStaleCopy(t *testing.T) { //nolint:parallelt
 		t.Fatalf("initial sync: %v", err)
 	}
 	// Simulate the remote disappearing (laptop offline / index moved).
-	if out, err := exec.CommandContext(t.Context(), "rm", "-rf", dir).CombinedOutput(); err != nil {
-		t.Fatalf("rm: %v: %s", err, out)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove remote dir: %v", err)
 	}
 	idx, err := SyncPluginIndex(ctx, url, true) // force → refresh fails → stale copy
 	if err != nil {

@@ -126,9 +126,9 @@ are listed and installed after a single confirmation (or with --yes);
 				warnIfShadowsBuiltin(cmd, p.Name)
 				return nil
 			}
-			return runRemoteInstall(ctx, cmd, arg, remoteInstallFlags{
+			return silencePluginCancel(ctx, runRemoteInstall(ctx, cmd, arg, remoteInstallFlags{
 				force: force, yes: yes, noDeps: noDeps, pin: pin, index: indexFlag,
-			})
+			}))
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "Replace an existing entry with the same name")
@@ -177,13 +177,17 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 	}
 
 	if !trusted {
-		ok, err := confirmPluginAction(cmd,
+		ok, err := confirmPluginAction(ctx,
 			fmt.Sprintf("Install from %s? The repository is not listed in the plugin index.", repoURL),
 			flags.yes)
-		if err != nil {
-			return err
-		}
-		if !ok {
+		switch {
+		case errors.Is(err, errConfirmNeedsTerminal):
+			return err // untrusted source can't proceed unconfirmed
+		case err != nil:
+			// Ctrl+C/Esc in the prompt prints "Install cancelled." and
+			// exits cleanly; real prompt failures surface wrapped.
+			return handleFormCancellation(out, "Install", err)
+		case !ok:
 			return errors.New("install cancelled")
 		}
 	}
@@ -230,10 +234,26 @@ func installPlannedDeps(ctx context.Context, cmd *cobra.Command, reqs []PluginRe
 			fmt.Fprintf(out, "  %s  (%s)\n", a.Name, a.RepoURL)
 		}
 	}
-	ok, err := confirmPluginAction(cmd, "Install them now?", yes)
-	if err != nil || !ok {
+	ok, err := confirmPluginAction(ctx, "Install them now?", yes)
+	switch {
+	case errors.Is(err, errConfirmNeedsTerminal):
+		// Non-interactive without --yes: the main install already
+		// succeeded, so skip with a pointer instead of failing late.
+		fmt.Fprintln(errOut, "Skipping dependency installs (no terminal for confirmation; re-run with --yes). 'entire plugin doctor' will report what's missing.")
+		return nil
+	case err != nil:
+		// User abort prints "Dependency install cancelled." and falls
+		// through to the skip note; real prompt failures are returned —
+		// claiming "skipped" for an error the user never saw would be
+		// misreporting.
+		if cancelErr := handleFormCancellation(errOut, "Dependency install", err); cancelErr != nil {
+			return cancelErr
+		}
+		fmt.Fprintln(errOut, "'entire plugin doctor' will report what's missing.")
+		return nil
+	case !ok:
 		fmt.Fprintln(errOut, "Skipping dependency installs; 'entire plugin doctor' will report what's missing.")
-		return nil //nolint:nilerr // declining deps is not a failure; the main install succeeded
+		return nil
 	}
 	if err := ExecuteDepPlan(ctx, plan); err != nil {
 		return err
@@ -244,24 +264,48 @@ func installPlannedDeps(ctx context.Context, cmd *cobra.Command, reqs []PluginRe
 	return nil
 }
 
+// errConfirmNeedsTerminal signals that a confirmation was required but no
+// terminal is available and --yes was not passed. Callers decide whether
+// that is fatal (untrusted install) or an informed skip (dependency
+// installs after the main install already succeeded).
+var errConfirmNeedsTerminal = errors.New("confirmation required but no terminal available; re-run with --yes")
+
 // confirmPluginAction asks a yes/no question. assumeYes short-circuits;
-// non-interactive runs without --yes refuse rather than guess.
-func confirmPluginAction(cmd *cobra.Command, prompt string, assumeYes bool) (bool, error) {
+// non-interactive runs without --yes return errConfirmNeedsTerminal rather
+// than guessing. Prompt errors (including huh.ErrUserAborted on Ctrl+C/Esc)
+// are returned raw for callers to map via handleFormCancellation.
+func confirmPluginAction(ctx context.Context, prompt string, assumeYes bool) (bool, error) {
 	if assumeYes {
 		return true, nil
 	}
 	if !interactive.CanPromptInteractively() {
-		return false, fmt.Errorf("confirmation required but no terminal available; re-run with --yes (%s)", prompt)
+		return false, fmt.Errorf("%w (%s)", errConfirmNeedsTerminal, prompt)
 	}
 	confirmed := false
 	form := NewAccessibleForm(huh.NewGroup(
 		huh.NewConfirm().Title(prompt).Value(&confirmed),
 	))
-	if err := form.Run(); err != nil {
+	if err := form.RunWithContext(ctx); err != nil {
+		// %w keeps huh.ErrUserAborted reachable for handleFormCancellation.
 		return false, fmt.Errorf("confirm: %w", err)
 	}
-	_ = cmd // reserved for future output-stream plumbing
 	return confirmed, nil
+}
+
+// silencePluginCancel maps Ctrl+C-induced failures to a SilentError per the
+// codebase convention (clean.go, activity_cmd.go) — printing "context
+// canceled" at a user who just interrupted a clone or download is noise.
+// The ctx.Err() check matters because a killed git child surfaces as
+// "signal: killed", not context.Canceled, when the cancellation raced the
+// subprocess.
+func silencePluginCancel(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return NewSilentError(err)
+	}
+	return err
 }
 
 // warnIfShadowsBuiltin prints a one-line note to stderr when the just-installed
@@ -415,7 +459,7 @@ installed with --pin are skipped until reinstalled without the pin.`,
 					fmt.Fprintf(out, "%-20s %s → %s\n", name, o.FromTag, o.ToTag)
 				}
 			}
-			return firstErr
+			return silencePluginCancel(ctx, firstErr)
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Upgrade every remote-installed plugin")
@@ -436,7 +480,7 @@ func newPluginSearchCmd() *cobra.Command {
 			}
 			idx, err := SyncPluginIndex(ctx, resolvePluginIndexURL(ctx, indexFlag), false)
 			if err != nil {
-				return err
+				return silencePluginCancel(ctx, err)
 			}
 			entries := idx.Search(term)
 			if len(entries) == 0 {
@@ -546,7 +590,7 @@ func newPluginBrowseCmd() *cobra.Command {
 			}
 			idx, err := SyncPluginIndex(ctx, resolvePluginIndexURL(ctx, indexFlag), false)
 			if err != nil {
-				return err
+				return silencePluginCancel(ctx, err)
 			}
 			if len(idx.Plugins) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "The plugin index is empty.")
@@ -565,13 +609,13 @@ func newPluginBrowseCmd() *cobra.Command {
 			form := NewAccessibleForm(huh.NewGroup(
 				huh.NewSelect[string]().Title("Install a plugin").Options(options...).Value(&choice),
 			))
-			if err := form.Run(); err != nil {
-				return fmt.Errorf("browse: %w", err)
+			if err := form.RunWithContext(ctx); err != nil {
+				return handleFormCancellation(cmd.OutOrStdout(), "Browse", err)
 			}
 			if choice == "" {
 				return nil
 			}
-			return runRemoteInstall(ctx, cmd, choice, remoteInstallFlags{index: indexFlag})
+			return silencePluginCancel(ctx, runRemoteInstall(ctx, cmd, choice, remoteInstallFlags{index: indexFlag}))
 		},
 	}
 	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides settings and "+pluginIndexEnvVar+")")
@@ -618,7 +662,7 @@ func newPluginIndexCmd() *cobra.Command {
 			url := resolvePluginIndexURL(ctx, indexFlag)
 			idx, err := SyncPluginIndex(ctx, url, true)
 			if err != nil {
-				return err
+				return silencePluginCancel(ctx, err)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Index %s: %d plugin(s).\n", url, len(idx.Plugins))
 			return nil

@@ -93,8 +93,11 @@ requires:
 		t.Errorf("parsed %+v", meta)
 	}
 
-	// Unknown keys are author typos; strict decoding surfaces them.
-	if _, err := ParsePluginMetadata([]byte("name: x\nrequires:\n  - name: y\n")); err == nil {
+	// Unknown keys are author typos; strict decoding surfaces them. The
+	// key must NOT be a near-miss spelling of a real field: a spell-fixing
+	// formatter pass once rewrote such a key into the correctly-spelled
+	// field name, which made the input valid and the test vacuous.
+	if _, err := ParsePluginMetadata([]byte("name: x\nnot_a_real_field:\n  - name: y\n")); err == nil {
 		t.Error("ParsePluginMetadata accepted unknown key")
 	}
 	// Reserved names rejected.

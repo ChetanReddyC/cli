@@ -260,8 +260,20 @@ func httpGetSmall(ctx context.Context, rawURL string) ([]byte, error) {
 
 // fetchAndVerify downloads rawURL into stagingDir, streaming the SHA-256 as
 // it writes. A non-empty wantDigest is enforced; an empty one records the
-// computed digest. 404/410 map to errAssetNotFound.
+// computed digest. 404/410 map to errAssetNotFound. Partial files are
+// removed on verification failure so a hostile or truncated download never
+// lingers in staging.
 func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir string) (*fetchedAsset, error) {
+	// The asset name is normally one of our own candidates, but the
+	// single-URL download_url template path derives it from the URL and a
+	// future caller could pass a name straight from a remote manifest.
+	// Refuse anything that wouldn't stay inside stagingDir. Backslash is
+	// rejected on every platform — it's a separator on Windows, and a
+	// literal backslash in an asset name is never legitimate.
+	if asset == "" || asset == "." || asset == ".." ||
+		strings.ContainsAny(asset, `/\`) || asset != filepath.Base(asset) {
+		return nil, fmt.Errorf("unsafe release asset name %q", asset)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request for %s: %w", rawURL, err)
@@ -288,16 +300,20 @@ func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir s
 	n, err := io.Copy(io.MultiWriter(out, h), io.LimitReader(resp.Body, maxPluginAssetSize+1))
 	closeErr := out.Close()
 	if err != nil {
+		_ = os.Remove(dest)
 		return nil, fmt.Errorf("download %s: %w", rawURL, err)
 	}
 	if closeErr != nil {
+		_ = os.Remove(dest)
 		return nil, fmt.Errorf("write staging file: %w", closeErr)
 	}
 	if n > maxPluginAssetSize {
+		_ = os.Remove(dest)
 		return nil, fmt.Errorf("download %s: exceeds %d byte limit", rawURL, int64(maxPluginAssetSize))
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if wantDigest != "" && !strings.EqualFold(got, wantDigest) {
+		_ = os.Remove(dest)
 		return nil, fmt.Errorf("checksum mismatch for %s: got %s, want %s", asset, got, wantDigest)
 	}
 	return &fetchedAsset{Path: dest, Asset: asset, SHA256: got}, nil
