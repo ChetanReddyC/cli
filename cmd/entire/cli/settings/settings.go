@@ -125,9 +125,81 @@ type EntireSettings struct {
 	// nil/true = sign (default), false = skip signing.
 	SignCheckpointCommits *bool `json:"sign_checkpoint_commits,omitempty"`
 
+	// Plugins configures the external-command plugin layer (index discovery
+	// and remote install). Plugin state (what's installed, pins, manifests)
+	// lives in the managed plugin directory, never in settings. Nil means
+	// all defaults.
+	Plugins *PluginSettings `json:"plugins,omitempty"`
+
 	// Deprecated: no longer used. Exists to tolerate old settings files
 	// that still contain "strategy": "auto-commit" or similar.
 	Strategy string `json:"strategy,omitempty"`
+}
+
+// PluginSettings configures plugin discovery and remote install behavior.
+//
+// Settings are repo-level by design: a repository can commit plugins.index_url
+// to point contributors at an internal plugin catalog. The managed plugin
+// store itself is per-user; these settings only steer discovery. Precedence
+// for the effective index URL (resolved in the cli package, not here):
+// --index flag > ENTIRE_PLUGIN_INDEX_URL > settings.local.json >
+// settings.json > built-in default.
+type PluginSettings struct {
+	// IndexURL is the git URL of the plugin index repository. Empty means
+	// the built-in default index.
+	IndexURL string `json:"index_url,omitempty"`
+
+	// IndexTTLHours is how long a synced index copy is considered fresh
+	// before plugin search/install trigger a re-sync. Zero means "unset"
+	// — the caller applies the default (24). `entire plugin index update`
+	// always forces a refresh regardless of TTL.
+	IndexTTLHours int `json:"index_ttl_hours,omitempty"`
+}
+
+// Validate returns an error for semantically invalid plugin settings.
+// IndexURL must look like a git-cloneable URL: https://, ssh://, file://,
+// or scp-like git@host:path. The load path calls this after merging.
+func (p *PluginSettings) Validate() error {
+	if p == nil {
+		return nil
+	}
+	if p.IndexTTLHours < 0 {
+		return fmt.Errorf("plugins.index_ttl_hours must be >= 0, got %d", p.IndexTTLHours)
+	}
+	if p.IndexURL == "" {
+		return nil
+	}
+	for _, prefix := range []string{"https://", "ssh://", "file://", "git@"} {
+		if strings.HasPrefix(p.IndexURL, prefix) {
+			return nil
+		}
+	}
+	return fmt.Errorf("plugins.index_url %q must start with https://, ssh://, file://, or git@", p.IndexURL)
+}
+
+// IndexTTL returns the configured index freshness window. Zero or negative
+// IndexTTLHours (or a nil receiver) yields the 24h default.
+func (p *PluginSettings) IndexTTL() time.Duration {
+	if p == nil || p.IndexTTLHours < 1 {
+		return 24 * time.Hour
+	}
+	return time.Duration(p.IndexTTLHours) * time.Hour
+}
+
+// PluginIndexURL returns the configured index URL, or "" when unset.
+func (s *EntireSettings) PluginIndexURL() string {
+	if s == nil || s.Plugins == nil {
+		return ""
+	}
+	return s.Plugins.IndexURL
+}
+
+// PluginIndexTTL returns the effective index freshness window (default 24h).
+func (s *EntireSettings) PluginIndexTTL() time.Duration {
+	if s == nil {
+		return 24 * time.Hour
+	}
+	return s.Plugins.IndexTTL()
 }
 
 // ClonePreferences stores clone-local, uncommitted preferences that should be
@@ -411,6 +483,9 @@ func loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAb
 	if err := settings.SummaryGeneration.Validate(); err != nil {
 		return nil, fmt.Errorf("merged settings invalid: %w", err)
 	}
+	if err := settings.Plugins.Validate(); err != nil {
+		return nil, fmt.Errorf("merged settings invalid: %w", err)
+	}
 
 	return settings, nil
 }
@@ -681,6 +756,26 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		return err
 	}
 
+	if err := mergePlugins(settings, raw); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// mergePlugins replaces the plugin config from the override (whole-object
+// replacement, parallel to mergeInvestigate — the schema is small and
+// per-field merge semantics aren't worth the machinery).
+func mergePlugins(settings *EntireSettings, raw map[string]json.RawMessage) error {
+	pluginsRaw, ok := raw["plugins"]
+	if !ok {
+		return nil
+	}
+	var cfg PluginSettings
+	if err := unmarshalField("plugins", pluginsRaw, &cfg); err != nil {
+		return err
+	}
+	settings.Plugins = &cfg
 	return nil
 }
 
