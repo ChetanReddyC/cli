@@ -26,7 +26,52 @@ Users can drop binaries anywhere on `$PATH`, but a per-user managed directory is
 
 The CLI prepends this directory to `$PATH` at startup via `cli.PrependPluginBinDirToPATH()` so the existing `exec.LookPath` resolution finds managed installs without any special-casing. This is purely additive — the kubectl-style `$PATH` model is unchanged.
 
-`entire plugin install/list/remove` manage the contents of this directory. Authors who prefer the raw "drop a binary on `$PATH`" model don't need to use it.
+`entire plugin install/list/remove/upgrade` manage the contents of this directory. Authors who prefer the raw "drop a binary on `$PATH`" model don't need to use it.
+
+### Remote install
+
+`entire plugin install` accepts three source forms:
+
+| Form | Example | Behavior |
+|---|---|---|
+| bare name | `entire plugin install run` | Resolved through the [plugin index](#plugin-index-discovery) |
+| repository URL | `entire plugin install https://github.com/entireio/entire-run` | Installs from any git host |
+| local path | `entire plugin install ./dist/entire-run` | Symlink/copy into the managed dir (unchanged) |
+
+Remote installs are deliberately forge-agnostic:
+
+1. **Version resolution** uses `git ls-remote --tags` — identical on GitHub, GitLab, Gitea/Forgejo, and self-hosted servers; inherits the user's git auth and proxy config. The highest semver tag wins; `--pin <tag>` installs exactly that tag and marks the manifest pinned (skipped by `upgrade`).
+2. **Metadata** is read from `entire-plugin.yml` at the repo root via a blobless shallow clone (with a plain shallow-clone fallback for servers that don't allow partial-clone filters). The file is optional; without it the plugin name derives from the repo basename (`entire-run` → `run`).
+3. **Asset download** is the one forge-specific step, contained in a small URL-convention table: GitHub/Gitea-style `<repo>/releases/download/<tag>/<asset>`, GitLab-style `<repo>/-/releases/<tag>/downloads/<asset>`, unknown hosts default to GitHub-style. Authors on other hosts declare a `download_url` template in `entire-plugin.yml` (placeholders: `{name}` `{tag}` `{version}` `{os}` `{arch}` `{asset}`).
+4. **Asset selection** prefers the release's `checksums.txt`: the manifest lists what was actually published, and the download is verified against it. Without one, goreleaser-conventional candidate names are probed (`entire-<name>_<version>_<os>_<arch>.tar.gz` and friends, with `x86_64`/`aarch64` aliases and a `darwin_all` universal-binary fallback). A pushed tag with no published assets falls back to the next-highest tag with a warning.
+5. The binary lands in `pkg/<name>/` next to a `manifest.yml` recording provenance (repo URL, tag, asset, SHA-256, pin state, dependency list), and is linked into `bin/` through the same symlink→hardlink→copy fallback as local installs. The dispatcher never changes.
+
+Installing from a URL not listed in the index prints the source and asks for confirmation (`--yes` to skip; required in non-interactive runs). Index-listed repos install without prompting.
+
+### Plugin index (discovery)
+
+Discovery rides on a git-synced index, krew-style: the index is itself a git repository containing `index.json`, shallow-cloned into the user cache (keyed by a hash of the URL) and refreshed on a TTL. `entire plugin search [term]`, `info <name>`, and `browse` read it; `entire plugin index update` forces a refresh. When a refresh fails but a cached copy exists, the stale copy is used — discovery doesn't hard-fail offline.
+
+The effective index URL resolves as: `--index` flag > `ENTIRE_PLUGIN_INDEX_URL` > `plugins.index_url` in `.entire/settings.local.json`/`.entire/settings.json` > the built-in default (`https://github.com/entireio/plugin-index`). The repo-level setting is deliberate: a company can commit `plugins.index_url` to point contributors at an internal catalog. `plugins.index_ttl_hours` tunes freshness (default 24).
+
+`index.json` schema (version 1): `{"version": 1, "plugins": [{"name", "repo_url", "description", "official", "platforms"}]}`. Entries with invalid names (e.g. the reserved `agent-` prefix) or missing repo URLs are filtered on load, not fatal.
+
+### Dependencies
+
+A plugin declares dependencies in `entire-plugin.yml`:
+
+```yaml
+name: brain
+requires:
+  - name: sem
+    repo_url: https://github.com/entireio/entire-sem  # where to get it if missing
+    min_version: v0.2.0                                # minimum only; no ranges
+```
+
+Resolution is **install-time only** — dispatch stays zero-cost. After installing the main plugin, missing dependencies are resolved transitively (metadata-only, nothing downloaded during planning; a visited set plus depth bound make metadata cycles an error, not a hang), listed apt-style, and installed after one confirmation (`--yes` skips, `--no-deps` opts out). A declined plan is a warning, not a failure. Dependencies already satisfied from raw `$PATH` or a local-dev install count as satisfied, with a warning when `min_version` can't be verified. The requirement list is copied into the install manifest so reverse-dependency checks work offline:
+
+- `entire plugin remove sem` refuses when another manifest requires it (`--force` overrides).
+- `entire plugin doctor` reports missing/outdated dependencies, manifest/bin-dir drift, dangling local-dev symlinks, and (macOS) a `com.apple.quarantine` attribute that would block execution. Exit code 1 when issues are found.
 
 > **Compatibility note:** the `entire plugin` command group is itself a built-in. Per the "built-ins win" rule above, it shadows any external command named `entire-plugin` that may have existed on `$PATH` previously. The collision is intentional — managing plugins is a built-in concern — but worth flagging for anyone who shipped an `entire-plugin` external command before this layer landed.
 
@@ -152,6 +197,13 @@ Key files:
 - `cmd/entire/cli/plugin_env.go` — `pluginEnv`, the allowlist, and `ENTIRE_PLUGIN_ENV` parsing
 - `cmd/entire/cli/plugin_official.go` — `officialPlugins` allowlist, `IsOfficialPlugin`
 - `cmd/entire/cli/plugin_store.go` — managed install directory, `PluginBinDir`, `PluginDataDir`, `InstallPluginFromPath`, `ListInstalledPlugins`, `RemoveInstalledPlugin`, `PrependPluginBinDirToPATH`
-- `cmd/entire/cli/plugin_group.go` — `entire plugin install/list/remove` Cobra commands
+- `cmd/entire/cli/plugin_manifest.go` — `pkg/<name>/manifest.yml` provenance records, `entire-plugin.yml` schema
+- `cmd/entire/cli/plugin_gitremote.go` — `git ls-remote` tag resolution, blobless metadata fetch
+- `cmd/entire/cli/plugin_fetch.go` — forge URL conventions, checksum verification, archive extraction
+- `cmd/entire/cli/plugin_install_remote.go` — remote install/upgrade orchestration
+- `cmd/entire/cli/plugin_index.go` — git-synced index cache, URL precedence
+- `cmd/entire/cli/plugin_deps.go` — dependency planning, remove guard, `plugin doctor`
+- `cmd/entire/cli/plugin_group.go` — `entire plugin install/list/remove/upgrade/search/info/browse/doctor/index` Cobra commands
 - `cmd/entire/cli/telemetry/detached.go` — `BuildPluginEventPayload`, `TrackPluginDetached`
 - `cmd/entire/cli/integration_test/external_command_test.go` — end-to-end coverage of the resolution path
+- `cmd/entire/cli/integration_test/plugin_remote_install_test.go` — end-to-end remote install, dependencies, doctor

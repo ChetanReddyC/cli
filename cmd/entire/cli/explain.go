@@ -52,6 +52,7 @@ const (
 	lessPagerName     = "less"
 	lessRawControlEnv = "LESS=-R"
 	windowsGOOS       = "windows"
+	darwinGOOS        = "darwin"
 )
 
 var checkpointSummaryTimeout = defaultCheckpointSummaryTimeout
