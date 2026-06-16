@@ -2,7 +2,11 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -140,13 +144,86 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 		return nil, err
 	}
 
-	var matching []*SessionState
+	var exact []*SessionState
 	for _, state := range allStates {
 		if state.WorktreePath == worktreePath {
-			matching = append(matching, state)
+			exact = append(exact, state)
 		}
 	}
-	return matching, nil
+	if len(exact) > 0 {
+		return exact, nil
+	}
+
+	worktreeCommonDir := gitCommonDirForWorktreeOrEmpty(ctx, worktreePath)
+	if worktreeCommonDir == "" {
+		return nil, nil
+	}
+
+	var parentWorktreeMatches []*SessionState
+	var commonDirMatches []*SessionState
+	for _, state := range allStates {
+		if state.WorktreePath == "" {
+			continue
+		}
+
+		stateCommonDir, err := gitCommonDirForWorktree(ctx, state.WorktreePath)
+		if err != nil || stateCommonDir != worktreeCommonDir {
+			continue
+		}
+
+		if isNestedWorktreeOfRecordedRepo(state.WorktreePath, worktreePath) {
+			parentWorktreeMatches = append(parentWorktreeMatches, state)
+			continue
+		}
+
+		commonDirMatches = append(commonDirMatches, state)
+	}
+
+	if len(parentWorktreeMatches) > 0 {
+		return parentWorktreeMatches, nil
+	}
+	if len(commonDirMatches) == 1 {
+		return commonDirMatches, nil
+	}
+	return nil, nil
+}
+
+func gitCommonDirForWorktreeOrEmpty(ctx context.Context, worktreePath string) string {
+	commonDir, err := gitCommonDirForWorktree(ctx, worktreePath)
+	if err != nil {
+		return ""
+	}
+	return commonDir
+}
+
+func gitCommonDirForWorktree(ctx context.Context, worktreePath string) (string, error) {
+	if worktreePath == "" {
+		return "", errors.New("empty worktree path")
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "rev-parse", "--git-common-dir")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get git common dir for %s: %w", worktreePath, err)
+	}
+
+	commonDir := strings.TrimSpace(string(output))
+	if commonDir == "" {
+		return "", fmt.Errorf("empty git common dir for %s", worktreePath)
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(worktreePath, commonDir)
+	}
+	commonDir = filepath.Clean(commonDir)
+	if resolved, err := filepath.EvalSymlinks(commonDir); err == nil {
+		commonDir = resolved
+	}
+	return commonDir, nil
+}
+
+func isNestedWorktreeOfRecordedRepo(recordedWorktreePath, commitWorktreePath string) bool {
+	nestedWorktreesDir := filepath.Join(filepath.Clean(recordedWorktreePath), ".worktrees")
+	return paths.IsSubpath(nestedWorktreesDir, filepath.Clean(commitWorktreePath))
 }
 
 type rewritePair struct {
