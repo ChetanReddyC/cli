@@ -143,24 +143,29 @@ var extractSessionImages = func(agentType types.AgentType, transcript []byte) ([
 	return rewritten, out, nil
 }
 
-// externalizeSessionImages runs the opt-in image-externalization step over the
-// session transcript, in place, before redaction. When enabled it rewrites
-// sessionData.Transcript to carry placeholders and returns the extracted assets;
-// when disabled, unsupported for the agent, or on error it leaves the transcript
-// untouched and returns nil (the checkpoint still stores the inline transcript).
-func externalizeSessionImages(ctx, logCtx context.Context, state *SessionState, sessionData *ExtractedSessionData) []cpkg.TranscriptAsset {
+// externalizeSessionImages runs the opt-in image-externalization step over a
+// session transcript before redaction. When enabled it returns the rewritten
+// (placeholder-bearing) transcript plus the extracted assets; when disabled,
+// unsupported for the agent, or on error it returns the transcript unchanged with
+// nil assets (the checkpoint then stores the inline transcript).
+//
+// It deliberately does NOT mutate the caller's transcript: the raw transcript is
+// still needed for CondenseResult.Transcript (trail titles) and, critically, as
+// the CheckpointTranscriptSize growth baseline, which is compared against the raw
+// inline shadow-branch blob — feeding it the shrunken externalized size would
+// report spurious growth on every subsequent commit.
+func externalizeSessionImages(ctx, logCtx context.Context, state *SessionState, transcript []byte) ([]byte, []cpkg.TranscriptAsset) {
 	if !settings.IsImageExternalizationEnabled(ctx) {
-		return nil
+		return transcript, nil
 	}
-	rewritten, assets, err := extractSessionImages(state.AgentType, sessionData.Transcript)
+	rewritten, assets, err := extractSessionImages(state.AgentType, transcript)
 	if err != nil {
 		logging.Warn(logCtx, "image externalization failed; leaving transcript inline",
 			slog.String("session_id", state.SessionID),
 			slog.String("error", err.Error()))
-		return nil
+		return transcript, nil
 	}
-	sessionData.Transcript = rewritten
-	return assets
+	return rewritten, assets
 }
 
 // checkpointStepCount returns the number of user prompts attributed to the
@@ -270,10 +275,12 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	// Externalize inline images BEFORE redaction: base64 is high-entropy and
 	// redaction would otherwise flag/destroy it. Opt-in; a no-codec agent or a
-	// transcript with no externalizable images is a no-op.
-	extractedAssets := externalizeSessionImages(ctx, logCtx, state, sessionData)
+	// transcript with no externalizable images is a no-op. sessionData.Transcript
+	// is left as the raw transcript (used for the result / growth baseline); only
+	// the redacted, externalized copy is stored.
+	externalizedTranscript, extractedAssets := externalizeSessionImages(ctx, logCtx, state, sessionData.Transcript)
 
-	redactedTranscript, redactDuration := redactOrDrop(logCtx, sessionData.Transcript, state.SessionID, checkpointID)
+	redactedTranscript, redactDuration := redactOrDrop(logCtx, externalizedTranscript, state.SessionID, checkpointID)
 	if skipped := skipIfPostRedactionEmpty(logCtx, redactedTranscript, sessionData, state, checkpointID); skipped != nil {
 		return skipped, nil
 	}

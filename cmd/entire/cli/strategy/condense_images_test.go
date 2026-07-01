@@ -31,17 +31,16 @@ func TestExternalizeSessionImages_DisabledIsNoOp(t *testing.T) {
 	t.Chdir(t.TempDir()) // isolate settings; externalization defaults off
 	line, b64 := claudeImageLine(t, "disabled-noop-bytes-padded-long-enough-to-externalize")
 	raw := []byte(line + "\n")
-	sd := &ExtractedSessionData{Transcript: append([]byte(nil), raw...)}
 	state := &SessionState{SessionID: "s1", AgentType: agent.AgentTypeClaudeCode}
 
-	assets := externalizeSessionImages(context.Background(), context.Background(), state, sd)
+	rewritten, assets := externalizeSessionImages(context.Background(), context.Background(), state, raw)
 	if assets != nil {
 		t.Errorf("expected no assets when flag off, got %d", len(assets))
 	}
-	if string(sd.Transcript) != string(raw) {
+	if string(rewritten) != string(raw) {
 		t.Error("transcript must be unchanged when externalization is off")
 	}
-	if !strings.Contains(string(sd.Transcript), b64) {
+	if !strings.Contains(string(rewritten), b64) {
 		t.Error("base64 image should still be inline when externalization is off")
 	}
 }
@@ -51,18 +50,21 @@ func TestExternalizeSessionImages_EnabledExtracts(t *testing.T) {
 	t.Setenv("ENTIRE_EXTERNALIZE_IMAGES", "1")
 	line, b64 := claudeImageLine(t, "enabled-extract-bytes-padded-long-enough-to-externalize")
 	raw := []byte(line + "\n")
-	sd := &ExtractedSessionData{Transcript: append([]byte(nil), raw...)}
 	state := &SessionState{SessionID: "s2", AgentType: agent.AgentTypeClaudeCode}
 
-	assets := externalizeSessionImages(context.Background(), context.Background(), state, sd)
+	rewritten, assets := externalizeSessionImages(context.Background(), context.Background(), state, raw)
 	if len(assets) != 1 {
 		t.Fatalf("expected 1 asset when flag on, got %d", len(assets))
 	}
-	if strings.Contains(string(sd.Transcript), b64) {
+	if strings.Contains(string(rewritten), b64) {
 		t.Error("base64 image should be externalized out of the transcript")
 	}
-	if !strings.Contains(string(sd.Transcript), "entire-asset:assets/") {
+	if !strings.Contains(string(rewritten), "entire-asset:assets/") {
 		t.Error("transcript should carry a placeholder after externalization")
+	}
+	// The caller's raw transcript must be left untouched (growth-baseline / result).
+	if !strings.Contains(string(raw), b64) {
+		t.Error("the input transcript must not be mutated by externalization")
 	}
 }
 
@@ -71,14 +73,13 @@ func TestExternalizeSessionImages_NonImageAgentIsNoOp(t *testing.T) {
 	t.Setenv("ENTIRE_EXTERNALIZE_IMAGES", "1") // on, but agent has no codec
 	line, b64 := claudeImageLine(t, "codex-noop-bytes-padded-long-enough-to-externalize")
 	raw := []byte(line + "\n")
-	sd := &ExtractedSessionData{Transcript: append([]byte(nil), raw...)}
 	state := &SessionState{SessionID: "s3", AgentType: types.AgentType("Codex")}
 
-	assets := externalizeSessionImages(context.Background(), context.Background(), state, sd)
+	rewritten, assets := externalizeSessionImages(context.Background(), context.Background(), state, raw)
 	if assets != nil {
 		t.Errorf("agent with no image codec should extract nothing, got %d assets", len(assets))
 	}
-	if string(sd.Transcript) != string(raw) || !strings.Contains(string(sd.Transcript), b64) {
+	if string(rewritten) != string(raw) || !strings.Contains(string(rewritten), b64) {
 		t.Error("transcript must pass through unchanged for a no-codec agent")
 	}
 }

@@ -198,6 +198,12 @@ type UpdateOptions struct {
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
 
+	// Assets are the externalized image blobs matching Transcript's placeholders
+	// (see WriteOptions.Assets). Set together with Transcript so the backfill keeps
+	// the stored assets/ folder consistent with the transcript; empty clears any
+	// previously-stored assets when Transcript is replaced.
+	Assets []TranscriptAsset
+
 	// Prompts contains the raw user prompts (replaces existing).
 	// See WriteOptions.Prompts.
 	Prompts []string

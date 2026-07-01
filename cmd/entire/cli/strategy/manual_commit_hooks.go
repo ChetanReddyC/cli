@@ -2845,6 +2845,24 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// Run the 7-layer pipeline over the transcript — OPF runs later in
 	// the pre-push rewrite path, which re-redacts these 7-layer blobs
 	// and produces 8-layer commits before the push goes out.
+	// Externalize inline images BEFORE redaction, mirroring CondenseSession, so the
+	// finalized (authoritative, full-session) transcript keeps its placeholders and
+	// matching assets instead of re-inlining what condensation lifted out. Opt-in;
+	// a no-codec agent or a transcript with no images is a no-op.
+	var finalizeAssets []checkpoint.TranscriptAsset
+	if settings.IsImageExternalizationEnabled(ctx) {
+		rewritten, assets, exErr := extractSessionImages(state.AgentType, fullTranscript)
+		if exErr != nil {
+			logging.Warn(logCtx, "finalize: image externalization failed; leaving transcript inline",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", exErr.Error()),
+			)
+		} else {
+			fullTranscript = rewritten
+			finalizeAssets = assets
+		}
+	}
+
 	_, redactSpan := perf.Start(logCtx, "redact_transcript")
 	redactedTranscript, redactErr := redact.JSONLBytes(fullTranscript)
 	redactSpan.End()
@@ -2886,6 +2904,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			CheckpointID:     cpID,
 			SessionID:        state.SessionID,
 			Transcript:       redactedTranscript,
+			Assets:           finalizeAssets,
 			Prompts:          prompts,
 			Agent:            state.AgentType,
 			SkillEvents:      skillEvents,
