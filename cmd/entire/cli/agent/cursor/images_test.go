@@ -20,6 +20,12 @@ func jpegBytes(payload string) []byte {
 	return append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, []byte(payload)...)
 }
 
+// webpBytes returns a minimal RIFF/WEBP container (RIFF....WEBP) padded past the
+// header so the store query's magic-byte filter matches it.
+func webpBytes(payload string) []byte {
+	return append([]byte("RIFF____WEBP"), []byte(payload)...)
+}
+
 // buildStoreDB writes a Cursor-style store.db at path with a blobs(id, data)
 // table populated from the given blobs. It shells out to sqlite3 (the same
 // binary the code under test uses).
@@ -108,6 +114,53 @@ func TestSidecarImages_MixedImageTypes(t *testing.T) {
 	}
 	if !types["image/png"] || !types["image/jpeg"] {
 		t.Errorf("expected png and jpeg, got %v", types)
+	}
+}
+
+func TestSidecarImages_CapturesWebp(t *testing.T) {
+	requireSqlite3(t)
+
+	img := webpBytes(strings.Repeat("w", 40))
+	transcriptPath := setupChatsDir(t, "sess-webp", map[string][]byte{"w1": img})
+
+	assets, err := (&CursorAgent{}).SidecarImages(context.Background(), transcriptPath)
+	if err != nil {
+		t.Fatalf("SidecarImages: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("expected 1 webp asset (end-to-end through the SQL magic filter), got %d", len(assets))
+	}
+	if assets[0].MediaType != "image/webp" || !strings.HasSuffix(assets[0].Name, ".webp") {
+		t.Errorf("got %q / %q, want image/webp / *.webp", assets[0].MediaType, assets[0].Name)
+	}
+}
+
+// A store whose schema is not the expected blobs(data) shape (a future/older
+// Cursor version) must be a silent no-op, not an error that would log a warning
+// on every checkpoint.
+func TestSidecarImages_UnknownSchemaIsNoOp(t *testing.T) {
+	requireSqlite3(t)
+
+	chats := t.TempDir()
+	dbPath := filepath.Join(chats, "workspace-hash", "sess-schema", "store.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// No `blobs` table at all — a different schema shape.
+	cmd := exec.CommandContext(context.Background(), "sqlite3", dbPath,
+		"CREATE TABLE messages(id TEXT, body TEXT); INSERT INTO messages VALUES('a','hi');")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build store.db: %v: %s", err, out)
+	}
+	t.Setenv(cursorChatsDirEnv, chats)
+	transcriptPath := filepath.Join(t.TempDir(), "sess-schema.jsonl")
+
+	assets, err := (&CursorAgent{}).SidecarImages(context.Background(), transcriptPath)
+	if err != nil {
+		t.Fatalf("unexpected error for unrecognized schema (should be a silent no-op): %v", err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("expected no assets from an unrecognized schema, got %d", len(assets))
 	}
 }
 

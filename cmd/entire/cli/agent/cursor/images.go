@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -23,6 +24,18 @@ var _ agent.SidecarImageProvider = (*CursorAgent)(nil)
 // cursorChatsDirEnv overrides the base directory that holds Cursor's per-session
 // SQLite blob stores. Used by tests and mock environments.
 const cursorChatsDirEnv = "ENTIRE_TEST_CURSOR_CHATS_DIR"
+
+const (
+	// maxStoreDBBytes bounds the work: a store.db larger than this is skipped
+	// (best-effort no-op). sqlite3's hex() output is ~2x the blob size and is
+	// buffered in memory, so this caps peak memory. A normal Cursor store holding
+	// screenshots is well under this.
+	maxStoreDBBytes = 64 << 20 // 64MB
+
+	// sqlite3Timeout bounds the sidecar read so a locked, huge, or malformed
+	// store.db can never hang the git commit / stop hook it runs inside.
+	sqlite3Timeout = 30 * time.Second
+)
 
 // storeDBBlobQuery selects the hex encoding of every blob whose leading bytes
 // match a known image magic number (JPEG, PNG, GIF, or RIFF/WEBP). sqlite3's
@@ -41,7 +54,8 @@ const storeDBBlobQuery = "SELECT hex(data) FROM blobs WHERE " +
 // blobs, and returns them as checkpoint assets.
 //
 // It is best-effort: when the store, the sqlite3 binary, or the expected schema
-// is absent it returns no images and no error. sessionRef is the transcript path.
+// is absent, or the store is too large, it returns no images and no error.
+// sessionRef is the transcript path.
 func (c *CursorAgent) SidecarImages(ctx context.Context, sessionRef string) ([]agent.CompactedTranscriptAsset, error) {
 	logCtx := logging.WithComponent(ctx, "agent.cursor")
 
@@ -50,11 +64,11 @@ func (c *CursorAgent) SidecarImages(ctx context.Context, sessionRef string) ([]a
 		return nil, nil
 	}
 
-	dbPath, err := findStoreDB(sessionID)
+	dbPaths, err := findStoreDBs(sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("locate cursor store.db: %w", err)
 	}
-	if dbPath == "" {
+	if len(dbPaths) == 0 {
 		return nil, nil // no sidecar store for this session
 	}
 
@@ -63,34 +77,40 @@ func (c *CursorAgent) SidecarImages(ctx context.Context, sessionRef string) ([]a
 		return nil, nil
 	}
 
-	hexBlobs, err := readImageBlobs(ctx, dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("read cursor store.db blobs: %w", err)
-	}
-
-	assets := make([]agent.CompactedTranscriptAsset, 0, len(hexBlobs))
-	seen := make(map[string]struct{}, len(hexBlobs))
-	for _, h := range hexBlobs {
-		data, err := hex.DecodeString(h)
+	assets := make([]agent.CompactedTranscriptAsset, 0)
+	seen := make(map[string]struct{})
+	for _, dbPath := range dbPaths {
+		hexBlobs, err := readImageBlobs(logCtx, dbPath)
 		if err != nil {
-			logging.Debug(logCtx, "skipping undecodable cursor blob", slog.String("error", err.Error()))
-			continue
+			return nil, fmt.Errorf("read cursor store.db blobs: %w", err)
 		}
-		mediaType, ext := detectImageType(data)
-		if mediaType == "" {
-			continue // not an image after all
+		for _, h := range hexBlobs {
+			data, err := hex.DecodeString(h)
+			if err != nil {
+				logging.Debug(logCtx, "skipping undecodable cursor blob", slog.String("error", err.Error()))
+				continue
+			}
+			if len(data) > agent.MaxChunkSize {
+				// A blob this large would become an unpushable git object; drop it.
+				logging.Debug(logCtx, "skipping oversized cursor image", slog.Int("bytes", len(data)))
+				continue
+			}
+			mediaType, ext := detectImageType(data)
+			if mediaType == "" {
+				continue // not an image after all
+			}
+			sum := sha256.Sum256(data)
+			name := fmt.Sprintf("img-%s.%s", hex.EncodeToString(sum[:16]), ext)
+			if _, dup := seen[name]; dup {
+				continue // identical image already captured
+			}
+			seen[name] = struct{}{}
+			assets = append(assets, agent.CompactedTranscriptAsset{
+				Name:      name,
+				MediaType: mediaType,
+				Data:      data,
+			})
 		}
-		sum := sha256.Sum256(data)
-		name := fmt.Sprintf("img-%s.%s", hex.EncodeToString(sum[:16]), ext)
-		if _, dup := seen[name]; dup {
-			continue // identical image already captured
-		}
-		seen[name] = struct{}{}
-		assets = append(assets, agent.CompactedTranscriptAsset{
-			Name:      name,
-			MediaType: mediaType,
-			Data:      data,
-		})
 	}
 
 	if len(assets) > 0 {
@@ -103,42 +123,67 @@ func (c *CursorAgent) SidecarImages(ctx context.Context, sessionRef string) ([]a
 // sessionIDFromTranscriptPath extracts the Cursor session id from a transcript
 // path. Both the nested (<id>/<id>.jsonl) and flat (<id>.jsonl) layouts name the
 // file after the session id, so the base name without extension is the id.
+// Returns "" for a path whose base resolves to "." or ".." (never a real id).
 func sessionIDFromTranscriptPath(transcriptPath string) string {
 	if transcriptPath == "" {
 		return ""
 	}
 	base := filepath.Base(transcriptPath)
-	return strings.TrimSuffix(base, filepath.Ext(base))
+	id := strings.TrimSuffix(base, filepath.Ext(base))
+	if id == "." || id == ".." {
+		return ""
+	}
+	return id
 }
 
-// findStoreDB locates the SQLite blob store for a session. Cursor lays these out
-// as <chats>/<workspace-hash>/<session-id>/store.db; the workspace hash is not
-// derivable from the session id, so we glob across workspaces. Returns "" when
-// no store exists (a session with no sidecar images).
-func findStoreDB(sessionID string) (string, error) {
+// findStoreDBs locates every SQLite blob store for a session. Cursor lays these
+// out as <chats>/<workspace-hash>/<session-id>/store.db; the workspace hash is
+// not derivable from the session id, so we enumerate workspaces and check each.
+//
+// Only the workspace level is globbed; the session id is joined as a LITERAL
+// path component (checked with os.Stat), so glob metacharacters in the id can't
+// widen the match to a different session's store. Returns all matches (a session
+// id is a UUID, so normally exactly one) — callers union + dedup the images,
+// which avoids silently dropping images when a session resolves under more than
+// one workspace directory.
+func findStoreDBs(sessionID string) ([]string, error) {
 	base := os.Getenv(cursorChatsDirEnv)
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return "", fmt.Errorf("get home directory: %w", err)
+			return nil, fmt.Errorf("get home directory: %w", err)
 		}
 		base = filepath.Join(home, ".cursor", "chats")
 	}
 
-	matches, err := filepath.Glob(filepath.Join(base, "*", sessionID, "store.db"))
+	workspaces, err := filepath.Glob(filepath.Join(base, "*"))
 	if err != nil {
-		return "", fmt.Errorf("glob store.db: %w", err)
+		return nil, fmt.Errorf("glob cursor workspaces: %w", err)
 	}
-	if len(matches) == 0 {
-		return "", nil
+	var dbs []string
+	for _, ws := range workspaces {
+		p := filepath.Join(ws, sessionID, "store.db")
+		if fileExists(p) {
+			dbs = append(dbs, p)
+		}
 	}
-	return matches[0], nil
+	return dbs, nil
 }
 
 // readImageBlobs copies the store to a temp location (so a live Cursor session
 // cannot lock or mutate it mid-read, and any WAL is applied) and shells out to
 // sqlite3 to select image blobs as hex. Returns one hex string per image blob.
+//
+// Best-effort: a store larger than maxStoreDBBytes, or one whose schema is not
+// the expected blobs(data) shape, returns (nil, nil) — an expected miss, not an
+// error, so it never spams a warning on every checkpoint.
 func readImageBlobs(ctx context.Context, dbPath string) ([]string, error) {
+	if info, err := os.Stat(dbPath); err == nil && info.Size() > maxStoreDBBytes {
+		logging.Debug(ctx, "cursor store.db too large; skipping sidecar capture",
+			slog.Int64("bytes", info.Size()))
+		return nil, nil
+	}
+
 	tmpDir, err := os.MkdirTemp("", "entire-cursor-store-")
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir: %w", err)
@@ -163,12 +208,20 @@ func readImageBlobs(ctx context.Context, dbPath string) ([]string, error) {
 		}
 	}
 
-	cmd := exec.CommandContext(ctx, "sqlite3", tmpDB, storeDBBlobQuery)
+	cctx, cancel := context.WithTimeout(ctx, sqlite3Timeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "sqlite3", tmpDB, storeDBBlobQuery)
 	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("sqlite3 query failed: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+			stderr := strings.TrimSpace(string(exitErr.Stderr))
+			if isSchemaMismatch(stderr) {
+				logging.Debug(ctx, "cursor store.db schema not recognized; skipping",
+					slog.String("detail", stderr))
+				return nil, nil
+			}
+			return nil, fmt.Errorf("sqlite3 query failed: %w: %s", err, stderr)
 		}
 		return nil, fmt.Errorf("sqlite3 query failed: %w", err)
 	}
@@ -180,6 +233,15 @@ func readImageBlobs(ctx context.Context, dbPath string) ([]string, error) {
 		}
 	}
 	return blobs, nil
+}
+
+// isSchemaMismatch reports whether a sqlite3 error is a benign schema-shape
+// mismatch (a store version whose blob table/columns differ from what the query
+// assumes) rather than a genuine failure. Such stores are treated as an expected
+// no-op, not an error.
+func isSchemaMismatch(stderr string) bool {
+	s := strings.ToLower(stderr)
+	return strings.Contains(s, "no such table") || strings.Contains(s, "no such column")
 }
 
 // detectImageType returns the media type and file extension for known image
@@ -205,7 +267,9 @@ func sqlite3Available() bool {
 }
 
 func fileExists(path string) bool {
-	info, err := os.Stat(path)
+	// path is built from a workspace glob result plus a filepath.Base-sanitized
+	// session id (separators stripped, "."/".." rejected), so no traversal.
+	info, err := os.Stat(path) //nolint:gosec // G703 false positive: path is sanitized (see above)
 	return err == nil && !info.IsDir()
 }
 

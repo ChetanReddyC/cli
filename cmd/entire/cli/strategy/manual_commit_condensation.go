@@ -312,14 +312,15 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// is left as the raw transcript (used for the result / growth baseline); only
 	// the redacted, externalized copy is stored.
 	externalizedTranscript, extractedAssets := externalizeSessionImages(ctx, logCtx, state, sessionData.Transcript)
-	if sidecar := sidecarSessionImages(ctx, logCtx, ag, state); len(sidecar) > 0 {
-		extractedAssets = append(extractedAssets, sidecar...)
-	}
 
 	redactedTranscript, redactDuration := redactOrDrop(logCtx, externalizedTranscript, state.SessionID, checkpointID)
 	if skipped := skipIfPostRedactionEmpty(logCtx, redactedTranscript, sessionData, state, checkpointID); skipped != nil {
 		return skipped, nil
 	}
+
+	// Capture agent sidecar images (e.g. Cursor's SQLite store) after the skip
+	// check, so the sqlite3 shell-out is avoided when the checkpoint is discarded.
+	extractedAssets = append(extractedAssets, sidecarSessionImages(ctx, logCtx, ag, state)...)
 
 	store, err := s.getPersistentStore(ctx, repo)
 	if err != nil {
