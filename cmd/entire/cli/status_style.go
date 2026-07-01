@@ -21,14 +21,15 @@ type statusStyles struct {
 	width        int
 
 	// Styles
-	green  lipgloss.Style
-	red    lipgloss.Style
-	gray   lipgloss.Style
-	bold   lipgloss.Style
-	dim    lipgloss.Style
-	agent  lipgloss.Style // amber/orange for agent names
-	cyan   lipgloss.Style
-	yellow lipgloss.Style // yellow for stale warnings
+	green   lipgloss.Style
+	red     lipgloss.Style
+	gray    lipgloss.Style
+	bold    lipgloss.Style
+	dim     lipgloss.Style
+	agent   lipgloss.Style // amber/orange for agent names
+	cyan    lipgloss.Style
+	yellow  lipgloss.Style // yellow for stale warnings
+	magenta lipgloss.Style
 }
 
 // newStatusStyles creates styles appropriate for the output writer.
@@ -50,6 +51,7 @@ func newStatusStyles(w io.Writer) statusStyles {
 		s.agent = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
 		s.cyan = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 		s.yellow = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+		s.magenta = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
 	}
 
 	return s
