@@ -11,6 +11,14 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
+// TranscriptAsset is a binary blob (e.g. an image) lifted out of a transcript
+// and stored raw in the checkpoint, referenced by a placeholder in the log.
+type TranscriptAsset struct {
+	Name      string // stable asset filename / id, also used in the placeholder
+	MediaType string
+	Data      []byte
+}
+
 // WriteOptions contains options for writing a persistent checkpoint.
 type WriteOptions struct {
 	// CheckpointID is the stable 12-hex-char identifier
@@ -35,6 +43,11 @@ type WriteOptions struct {
 	// Transcript is the session transcript content (full.jsonl).
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
+
+	// Assets are binary blobs (e.g. images) lifted out of Transcript and
+	// referenced by path-bearing placeholders. Stored raw under the session's
+	// assets/ folder. Empty for agents/transcripts with no externalized images.
+	Assets []TranscriptAsset
 
 	// Prompts contains the raw user prompts from the session. Run through
 	// redactedJoinedPrompts before persisting — the writer does this
@@ -425,6 +438,9 @@ type SessionFilePaths struct {
 	CompactTranscript string `json:"compact_transcript,omitempty"`
 	ContentHash       string `json:"content_hash,omitempty"`
 	Prompt            string `json:"prompt"`
+	// AssetsManifest points at assets/manifest.json when images were externalized
+	// out of the transcript into the session's assets/ folder. Omitted otherwise.
+	AssetsManifest string `json:"assets_manifest,omitempty"`
 }
 
 // CheckpointSummary is the root-level metadata.json for a checkpoint.
