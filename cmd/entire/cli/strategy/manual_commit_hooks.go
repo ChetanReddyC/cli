@@ -2862,11 +2862,14 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			finalizeAssets = assets
 		}
 	}
-	// Sidecar images (e.g. Cursor's SQLite store) are captured in CondenseSession,
-	// not here: finalize only writes assets when the transcript is rewritten
-	// (rewrote==true), but sidecar images never change the transcript, so this
-	// path would be gated out. Condensation always runs before finalize for the
-	// same turn's checkpoints, so nothing is lost.
+	// Re-capture sidecar images (e.g. Cursor's SQLite store) so a finalize that
+	// rewrites the transcript re-writes them too. When the full transcript differs
+	// from the stored (mid-turn) one, writeAssets clears the whole assets/ folder
+	// and re-writes only these assets — omitting the sidecar images here would drop
+	// what CondenseSession captured. Content-hash names make this idempotent with
+	// condensation's write; when the transcript is unchanged, writeAssets is not
+	// called and condensation's assets are left intact.
+	finalizeAssets = append(finalizeAssets, sidecarSessionImages(ctx, logCtx, ag, state)...)
 
 	_, redactSpan := perf.Start(logCtx, "redact_transcript")
 	redactedTranscript, redactErr := redact.JSONLBytes(fullTranscript)
