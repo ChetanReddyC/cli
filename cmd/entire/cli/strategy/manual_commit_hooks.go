@@ -2862,6 +2862,11 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			finalizeAssets = assets
 		}
 	}
+	// Capture agent sidecar images (e.g. Cursor's SQLite store) that never appear
+	// in the transcript. Preserve/view-only: no placeholder, no reinject.
+	if sidecar := sidecarSessionImages(ctx, logCtx, ag, state); len(sidecar) > 0 {
+		finalizeAssets = append(finalizeAssets, sidecar...)
+	}
 
 	_, redactSpan := perf.Start(logCtx, "redact_transcript")
 	redactedTranscript, redactErr := redact.JSONLBytes(fullTranscript)

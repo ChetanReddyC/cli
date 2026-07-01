@@ -168,6 +168,39 @@ func externalizeSessionImages(ctx, logCtx context.Context, state *SessionState, 
 	return rewritten, assets
 }
 
+// sidecarSessionImages captures images an agent stores OUTSIDE the transcript
+// (e.g. Cursor's per-session SQLite blob store) as checkpoint assets, so they are
+// preserved with the session even though they never appear in full.jsonl. Unlike
+// externalizeSessionImages there is no transcript placeholder and no round trip:
+// these assets are preserve/view-only (the agent reads its own store on restore).
+//
+// Gated on the same opt-in flag. Best-effort: agents without the capability, or
+// any capture error, yield no assets (the checkpoint is written without them).
+func sidecarSessionImages(ctx, logCtx context.Context, ag agent.Agent, state *SessionState) []cpkg.TranscriptAsset {
+	if !settings.IsImageExternalizationEnabled(ctx) {
+		return nil
+	}
+	provider, ok := agent.AsSidecarImageProvider(ag)
+	if !ok {
+		return nil
+	}
+	assets, err := provider.SidecarImages(ctx, state.TranscriptPath)
+	if err != nil {
+		logging.Warn(logCtx, "sidecar image capture failed; checkpoint stored without them",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()))
+		return nil
+	}
+	if len(assets) == 0 {
+		return nil
+	}
+	out := make([]cpkg.TranscriptAsset, len(assets))
+	for i, a := range assets {
+		out[i] = cpkg.TranscriptAsset{Name: a.Name, MediaType: a.MediaType, Data: a.Data}
+	}
+	return out
+}
+
 // checkpointStepCount returns the number of user prompts attributed to the
 // checkpoint being written: the turns counted since the current window's base.
 // The base is re-anchored (deferred) the next time a turn is counted after a
@@ -279,6 +312,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// is left as the raw transcript (used for the result / growth baseline); only
 	// the redacted, externalized copy is stored.
 	externalizedTranscript, extractedAssets := externalizeSessionImages(ctx, logCtx, state, sessionData.Transcript)
+	if sidecar := sidecarSessionImages(ctx, logCtx, ag, state); len(sidecar) > 0 {
+		extractedAssets = append(extractedAssets, sidecar...)
+	}
 
 	redactedTranscript, redactDuration := redactOrDrop(logCtx, externalizedTranscript, state.SessionID, checkpointID)
 	if skipped := skipIfPostRedactionEmpty(logCtx, redactedTranscript, sessionData, state, checkpointID); skipped != nil {

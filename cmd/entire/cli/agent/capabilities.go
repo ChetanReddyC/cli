@@ -79,6 +79,18 @@ func AsTranscriptPreparer(ag Agent) (TranscriptPreparer, bool) {
 	return tp, true
 }
 
+// AsSidecarImageProvider returns the agent as SidecarImageProvider if it
+// implements the interface. This is a best-effort, optional capability (image
+// capture from a store outside the transcript, e.g. Cursor's SQLite blob store),
+// so it resolves by type assertion alone with no DeclaredCaps gate.
+func AsSidecarImageProvider(ag Agent) (SidecarImageProvider, bool) {
+	if ag == nil {
+		return nil, false
+	}
+	p, ok := ag.(SidecarImageProvider)
+	return p, ok
+}
+
 // AsTokenCalculator returns the agent as TokenCalculator if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTokenCalculator(ag Agent) (TokenCalculator, bool) {
