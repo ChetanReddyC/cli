@@ -19,8 +19,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -52,11 +54,35 @@ var placeholderRe = regexp.MustCompile(`entire-asset:assets/(img-[0-9a-f]+\.[a-z
 
 // newAssetID returns a random hex id (16 bytes → 32 hex chars). Hex is ~4
 // bits/char, below the redaction entropy threshold, so placeholders survive
-// redaction. Injectable for deterministic tests.
-var newAssetID = func() string {
+// redaction. The rand error is surfaced (never swallowed) so a broken entropy
+// source can't silently yield an all-zero, collision-prone id. Injectable for
+// deterministic tests.
+var newAssetID = func() (string, error) {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate asset id: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// uniqueImageName returns an asset name not already in used, recording it. It
+// guarantees the "distinct image data -> distinct asset name" invariant the
+// byte-exact round trip relies on: two assets sharing a name would make
+// ReinjectImages restore both placeholders to whichever the lookup returns first.
+// With crypto/rand collisions never happen; the hex-counter suffix guarantees
+// termination even if a caller injects a degenerate id source.
+func uniqueImageName(used map[string]bool, mediaType string) (string, error) {
+	ext := extForMedia(mediaType)
+	id, err := newAssetID()
+	if err != nil {
+		return "", err
+	}
+	name := "img-" + id + "." + ext
+	for suffix := 0; used[name]; suffix++ {
+		name = "img-" + id + strconv.FormatInt(int64(suffix), 16) + "." + ext
+	}
+	used[name] = true
+	return name, nil
 }
 
 // minExternalizedBase64Len is the shortest base64 image value we externalize.
@@ -95,11 +121,15 @@ func (claudeCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
 	// Map each unique base64 image value → its asset (dedupes repeats within the
 	// transcript; git dedupes identical blobs across checkpoints by content).
 	seen := map[string]Asset{}
-	var order []string // unique base64 values, later sorted longest-first
+	var order []string             // unique base64 values, later sorted longest-first
+	usedNames := map[string]bool{} // guards distinct-data -> distinct-name
 
 	for _, line := range bytes.Split(transcript, []byte("\n")) {
 		trimmed := bytes.TrimSpace(line)
-		if len(trimmed) == 0 || trimmed[0] != '{' {
+		// Accept object- and array-rooted JSON lines; collectBase64Images walks
+		// both. Claude Code uses object lines today, but the walker's "any nesting"
+		// contract shouldn't be silently undercut by the line filter.
+		if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
 			continue
 		}
 		var v any
@@ -124,7 +154,10 @@ func (claudeCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
 			if base64.StdEncoding.EncodeToString(raw) != h.data {
 				continue
 			}
-			name := "img-" + newAssetID() + "." + extForMedia(h.mediaType)
+			name, err := uniqueImageName(usedNames, h.mediaType)
+			if err != nil {
+				return transcript, nil, err
+			}
 			seen[h.data] = Asset{Name: name, MediaType: h.mediaType, Data: raw}
 			order = append(order, h.data)
 		}
@@ -134,10 +167,10 @@ func (claudeCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
 		return transcript, nil, nil
 	}
 
-	// Replace longest values first so that if one image's base64 is a substring
-	// of another's, the containing (longer) value is swapped out before the
-	// shorter one, which keeps every asset's placeholder present and the swap
-	// byte-exact. Ties broken by value for determinism.
+	// Replace longest values first so that if one image's base64 is a substring of
+	// another's, the containing (longer) value is swapped out before the shorter
+	// one, keeping every asset's placeholder present. Ties broken by value for
+	// determinism.
 	sort.SliceStable(order, func(i, j int) bool {
 		if len(order[i]) != len(order[j]) {
 			return len(order[i]) > len(order[j])
@@ -149,8 +182,24 @@ func (claudeCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
 	assets := make([]Asset, 0, len(order))
 	for _, data := range order {
 		a := seen[data]
-		rewritten = bytes.ReplaceAll(rewritten, []byte(data), []byte(placeholderPrefix+a.Name))
+		// Swap the base64 value itself, not a "data":"<b64>" wrapper: Claude Code
+		// serializes the image content block both compactly ("data":"<b64>") and
+		// spaced ("data": "<b64>") depending on version, so matching the bare value
+		// is the only format-agnostic anchor. This can also swap a copy of the same
+		// base64 that appears in a text field, but the round trip stays byte-exact
+		// because ReinjectImages restores every occurrence to the identical value.
+		swapped := bytes.ReplaceAll(rewritten, []byte(data), []byte(placeholderPrefix+a.Name))
+		if bytes.Equal(swapped, rewritten) {
+			// Exact bytes weren't present (e.g. JSON-escaped in the raw transcript);
+			// leave the image inline rather than record an asset no placeholder
+			// references.
+			continue
+		}
+		rewritten = swapped
 		assets = append(assets, a)
+	}
+	if len(assets) == 0 {
+		return transcript, nil, nil
 	}
 	return rewritten, assets, nil
 }

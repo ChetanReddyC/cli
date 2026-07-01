@@ -2,6 +2,7 @@ package imageextract
 
 import (
 	"encoding/base64"
+	"errors"
 	"math"
 	"regexp"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
+
+var errTestRand = errors.New("simulated rand failure")
 
 func lookupFrom(assets []Asset) func(string) (Asset, bool) {
 	return func(name string) (Asset, bool) {
@@ -147,6 +150,133 @@ func TestClaudeCodec_SubstringImagesRoundTrip(t *testing.T) {
 	}
 	if string(restored) != orig {
 		t.Fatalf("substring round-trip not byte-exact:\n got: %s\nwant: %s", restored, orig)
+	}
+}
+
+// Even if the id source degenerates to a constant, distinct images must still get
+// distinct names so the round trip stays byte-exact (no asset shadows another).
+func TestClaudeCodec_DistinctNamesUnderCollidingIDSource(t *testing.T) {
+	c := CodecFor(agent.AgentTypeClaudeCode)
+	orig := newAssetID
+	newAssetID = func() (string, error) { return "deadbeefdeadbeefdeadbeefdeadbeef", nil } // constant
+	defer func() { newAssetID = orig }()
+
+	img1 := base64.StdEncoding.EncodeToString([]byte("first-distinct-image-payload-long-enough-to-externalize"))
+	img2 := base64.StdEncoding.EncodeToString([]byte("second-distinct-image-payload-long-enough-to-externalize"))
+	in := claudeLine(img1) + "\n" + claudeLine(img2) + "\n"
+
+	rewritten, assets, err := c.ExtractImages([]byte(in))
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+	if len(assets) != 2 {
+		t.Fatalf("want 2 assets, got %d", len(assets))
+	}
+	if assets[0].Name == assets[1].Name {
+		t.Fatalf("distinct images got the same name %q", assets[0].Name)
+	}
+	restored, err := c.ReinjectImages(rewritten, lookupFrom(assets))
+	if err != nil {
+		t.Fatalf("ReinjectImages: %v", err)
+	}
+	if string(restored) != in {
+		t.Fatalf("round trip broke under colliding id source:\n got: %s\nwant: %s", restored, in)
+	}
+}
+
+// The same base64 appearing in both an image and a text field round-trips
+// byte-exactly: the value swap is value-preserving and reversible, so every
+// occurrence is restored to the identical bytes on reinject.
+func TestClaudeCodec_Base64InTextRoundTrips(t *testing.T) {
+	t.Parallel()
+	c := CodecFor(agent.AgentTypeClaudeCode)
+	b64 := base64.StdEncoding.EncodeToString([]byte("shared-image-and-text-payload-long-enough-to-externalize"))
+	textLine := `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"raw was ` + b64 + `"}]}}`
+	in := textLine + "\n" + claudeLine(b64) + "\n"
+
+	rewritten, assets, err := c.ExtractImages([]byte(in))
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("want 1 asset, got %d", len(assets))
+	}
+	restored, err := c.ReinjectImages(rewritten, lookupFrom(assets))
+	if err != nil {
+		t.Fatalf("ReinjectImages: %v", err)
+	}
+	if string(restored) != in {
+		t.Fatalf("round trip not byte-exact:\n got: %s\nwant: %s", restored, in)
+	}
+}
+
+// Regression: Claude Code serializes image content blocks with a space after the
+// colon ("data": "<b64>") as well as compactly ("data":"<b64>"). Both forms must
+// externalize and round-trip. (A data-field-scoped swap missed the spaced form.)
+func TestClaudeCodec_SpacedAndCompactDataFields(t *testing.T) {
+	t.Parallel()
+	c := CodecFor(agent.AgentTypeClaudeCode)
+	for _, tc := range []struct {
+		name, line string
+	}{
+		{"compact", `{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data":"%s"}}`},
+		{"spaced", `{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "%s"}}`},
+	} {
+		b64 := base64.StdEncoding.EncodeToString([]byte("spaced-vs-compact-payload-long-enough-to-externalize-" + tc.name))
+		in := strings.Replace(tc.line, "%s", b64, 1) + "\n"
+		rewritten, assets, err := c.ExtractImages([]byte(in))
+		if err != nil {
+			t.Fatalf("[%s] ExtractImages: %v", tc.name, err)
+		}
+		if len(assets) != 1 {
+			t.Fatalf("[%s] want 1 asset, got %d", tc.name, len(assets))
+		}
+		if strings.Contains(string(rewritten), b64) {
+			t.Errorf("[%s] base64 not externalized", tc.name)
+		}
+		restored, err := c.ReinjectImages(rewritten, lookupFrom(assets))
+		if err != nil {
+			t.Fatalf("[%s] ReinjectImages: %v", tc.name, err)
+		}
+		if string(restored) != in {
+			t.Fatalf("[%s] round trip not byte-exact", tc.name)
+		}
+	}
+}
+
+// A crypto/rand failure surfaces as an error instead of a silent all-zero id.
+func TestClaudeCodec_IDGenerationErrorSurfaces(t *testing.T) {
+	c := CodecFor(agent.AgentTypeClaudeCode)
+	orig := newAssetID
+	newAssetID = func() (string, error) { return "", errTestRand }
+	defer func() { newAssetID = orig }()
+
+	b64 := base64.StdEncoding.EncodeToString([]byte("payload-long-enough-to-externalize-and-trigger-id-gen"))
+	_, _, err := c.ExtractImages([]byte(claudeLine(b64) + "\n"))
+	if err == nil {
+		t.Fatal("expected an error when id generation fails, got nil")
+	}
+}
+
+// An array-rooted JSONL line carrying an image is walked like an object line.
+func TestClaudeCodec_ArrayRootedLine(t *testing.T) {
+	t.Parallel()
+	c := CodecFor(agent.AgentTypeClaudeCode)
+	b64 := base64.StdEncoding.EncodeToString([]byte("array-rooted-line-image-payload-long-enough-to-externalize"))
+	in := `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + b64 + `"}}]` + "\n"
+	rewritten, assets, err := c.ExtractImages([]byte(in))
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("array-rooted line: want 1 asset, got %d", len(assets))
+	}
+	restored, err := c.ReinjectImages(rewritten, lookupFrom(assets))
+	if err != nil {
+		t.Fatalf("ReinjectImages: %v", err)
+	}
+	if string(restored) != in {
+		t.Fatalf("array-rooted round trip not byte-exact")
 	}
 }
 
