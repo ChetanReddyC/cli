@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	transcriptcompact "github.com/entireio/cli/cmd/entire/cli/transcript/compact"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/imageextract"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
@@ -669,6 +671,13 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		}
 	}
 
+	// Write externalized image assets (raw binary blobs + manifest), when present.
+	manifestPath, err := s.writeAssets(opts, sessionPath, entries)
+	if err != nil {
+		return filePaths, err
+	}
+	filePaths.AssetsManifest = manifestPath
+
 	// Write prompts via the 7-layer pipeline. OPF runs only in the
 	// pre-push rewrite path (manual_commit_opf_rewrite.go).
 	if len(opts.Prompts) > 0 {
@@ -735,6 +744,79 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 	filePaths.Metadata = "/" + sessionPath + paths.MetadataFileName
 
 	return filePaths, nil
+}
+
+type assetManifestEntry struct {
+	Name      string `json:"name"`
+	MediaType string `json:"media_type,omitempty"`
+	Size      int    `json:"size"`
+	SHA256    string `json:"sha256"`
+}
+
+// writeAssets stores each externalized transcript asset as a raw binary blob
+// under the session's assets/ folder, plus an assets/manifest.json index, in the
+// same tree. Returns the manifest path ("" when there are no assets). git
+// content-addresses the blobs, so identical images dedupe across checkpoints.
+func (s *treeWriter) writeAssets(opts WriteOptions, sessionPath string, entries map[string]object.TreeEntry) (string, error) {
+	if len(opts.Assets) == 0 {
+		return "", nil
+	}
+	manifest := struct {
+		Version int                  `json:"version"`
+		Assets  []assetManifestEntry `json:"assets"`
+	}{Version: 1}
+	for _, a := range opts.Assets {
+		blobHash, err := CreateBlobFromContent(s.repo, a.Data)
+		if err != nil {
+			return "", err
+		}
+		p := sessionPath + paths.AssetsDir + a.Name
+		entries[p] = object.TreeEntry{Name: p, Mode: filemode.Regular, Hash: blobHash}
+		sum := sha256.Sum256(a.Data)
+		manifest.Assets = append(manifest.Assets, assetManifestEntry{
+			Name: a.Name, MediaType: a.MediaType, Size: len(a.Data), SHA256: hex.EncodeToString(sum[:]),
+		})
+	}
+	manifestJSON, err := jsonutil.MarshalIndentWithNewline(manifest, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal assets manifest: %w", err)
+	}
+	manifestHash, err := CreateBlobFromContent(s.repo, manifestJSON)
+	if err != nil {
+		return "", err
+	}
+	mp := sessionPath + paths.AssetsManifestFile
+	entries[mp] = object.TreeEntry{Name: mp, Mode: filemode.Regular, Hash: manifestHash}
+	return "/" + mp, nil
+}
+
+// reinjectAssets restores externalized images into a transcript on read, so the
+// returned bytes match what was stored. Best-effort and gated on placeholder
+// presence, not on any config flag: an asset it can't load is left as a
+// placeholder rather than failing the read.
+func reinjectAssets(sessionTree *FetchingTree, agentType types.AgentType, transcript []byte) []byte {
+	if !imageextract.HasPlaceholders(transcript) {
+		return transcript
+	}
+	codec := imageextract.CodecFor(agentType)
+	if codec == nil {
+		return transcript
+	}
+	out, err := codec.ReinjectImages(transcript, func(name string) (agent.CompactedTranscriptAsset, bool) {
+		f, ferr := sessionTree.File(paths.AssetsDir + name)
+		if ferr != nil {
+			return agent.CompactedTranscriptAsset{}, false
+		}
+		content, cerr := f.Contents()
+		if cerr != nil {
+			return agent.CompactedTranscriptAsset{}, false
+		}
+		return agent.CompactedTranscriptAsset{Name: name, Data: []byte(content)}, true
+	})
+	if err != nil {
+		return transcript
+	}
+	return out
 }
 
 // writeCheckpointSummary writes the root-level CheckpointSummary with aggregated statistics.
@@ -1443,7 +1525,7 @@ func (s *GitStore) ReadSessionContent(ctx context.Context, checkpointID id.Check
 
 	// Read transcript (auto-fetches blobs if needed)
 	if transcript, transcriptErr := readTranscriptFromTree(ctx, sessionTree, agentType); transcriptErr == nil && transcript != nil {
-		result.Transcript = transcript
+		result.Transcript = reinjectAssets(sessionTree, agentType, transcript)
 		result.TranscriptBlobHashes = transcriptBlobHashesFromTreeEntries(sessionTree.RawEntries())
 	}
 

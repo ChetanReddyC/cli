@@ -28,6 +28,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/imageextract"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
 
@@ -117,6 +118,49 @@ type condenseOpts struct {
 // re-wired to JSONLBytesWithPrivacyFilter from tests that need OPF.
 var redactSessionJSONLBytes = func(_ context.Context, b []byte) (redact.RedactedBytes, error) {
 	return redact.JSONLBytes(b)
+}
+
+// extractSessionImages lifts inline base64 images out of a transcript into
+// externalized assets via the per-agent image codec, returning the rewritten
+// (placeholder-bearing) transcript. Agents with no codec, or transcripts with no
+// externalizable images, pass through unchanged. Injectable for tests.
+var extractSessionImages = func(agentType types.AgentType, transcript []byte) ([]byte, []cpkg.TranscriptAsset, error) {
+	codec := imageextract.CodecFor(agentType)
+	if codec == nil {
+		return transcript, nil, nil
+	}
+	rewritten, assets, err := codec.ExtractImages(transcript)
+	if err != nil {
+		return transcript, nil, fmt.Errorf("extract images: %w", err)
+	}
+	if len(assets) == 0 {
+		return transcript, nil, nil
+	}
+	out := make([]cpkg.TranscriptAsset, len(assets))
+	for i, a := range assets {
+		out[i] = cpkg.TranscriptAsset{Name: a.Name, MediaType: a.MediaType, Data: a.Data}
+	}
+	return rewritten, out, nil
+}
+
+// externalizeSessionImages runs the opt-in image-externalization step over the
+// session transcript, in place, before redaction. When enabled it rewrites
+// sessionData.Transcript to carry placeholders and returns the extracted assets;
+// when disabled, unsupported for the agent, or on error it leaves the transcript
+// untouched and returns nil (the checkpoint still stores the inline transcript).
+func externalizeSessionImages(ctx, logCtx context.Context, state *SessionState, sessionData *ExtractedSessionData) []cpkg.TranscriptAsset {
+	if !settings.IsImageExternalizationEnabled(ctx) {
+		return nil
+	}
+	rewritten, assets, err := extractSessionImages(state.AgentType, sessionData.Transcript)
+	if err != nil {
+		logging.Warn(logCtx, "image externalization failed; leaving transcript inline",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()))
+		return nil
+	}
+	sessionData.Transcript = rewritten
+	return assets
 }
 
 // checkpointStepCount returns the number of user prompts attributed to the
@@ -224,6 +268,11 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	filterFilesTouched(sessionData, committedFiles, state)
 
+	// Externalize inline images BEFORE redaction: base64 is high-entropy and
+	// redaction would otherwise flag/destroy it. Opt-in; a no-codec agent or a
+	// transcript with no externalizable images is a no-op.
+	extractedAssets := externalizeSessionImages(ctx, logCtx, state, sessionData)
+
 	redactedTranscript, redactDuration := redactOrDrop(logCtx, sessionData.Transcript, state.SessionID, checkpointID)
 	if skipped := skipIfPostRedactionEmpty(logCtx, redactedTranscript, sessionData, state, checkpointID); skipped != nil {
 		return skipped, nil
@@ -276,6 +325,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		CheckpointVersion:           checkpointVersion,
 		Branch:                      branchName,
 		Transcript:                  redactedTranscript,
+		Assets:                      extractedAssets,
 		Prompts:                     sessionData.Prompts,
 		FilesTouched:                sessionData.FilesTouched,
 		CheckpointsCount:            checkpointStepCount(state),
