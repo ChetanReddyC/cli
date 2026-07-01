@@ -1161,6 +1161,13 @@ func mergeRedaction(dst *RedactionSettings, data json.RawMessage) error {
 			return err
 		}
 	}
+	if extRaw, ok := raw["externalize_images"]; ok {
+		var v bool
+		if err := json.Unmarshal(extRaw, &v); err != nil {
+			return fmt.Errorf("parsing redaction.externalize_images: %w", err)
+		}
+		dst.ExternalizeImages = v
+	}
 	return nil
 }
 
