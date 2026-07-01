@@ -1082,6 +1082,9 @@ func (env *TestEnv) gitHookEnv(extra ...string) []string {
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_TEST_OPENCODE_MOCK_EXPORT=1",
 	)
+	// Propagate per-test overrides (e.g. agent project/store dirs) to hook
+	// subprocesses. Empty for tests that don't set ExtraEnv.
+	envVars = append(envVars, env.ExtraEnv...)
 	return append(envVars, extra...)
 }
 
