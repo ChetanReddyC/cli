@@ -204,6 +204,14 @@ type UpdateOptions struct {
 	// previously-stored assets when Transcript is replaced.
 	Assets []TranscriptAsset
 
+	// PreserveAssetsWhenEmpty keeps already-stored assets instead of clearing them
+	// when Assets is empty. Set on the finalize path for agents whose assets come
+	// from a best-effort sidecar capture (e.g. Cursor's sqlite3 store read): a
+	// transient capture miss at finalize must not wipe images a prior condensation
+	// successfully stored. Left false for codec agents, where an empty set means
+	// "the transcript has no images" and stale asset blobs should be cleared.
+	PreserveAssetsWhenEmpty bool
+
 	// Prompts contains the raw user prompts (replaces existing).
 	// See WriteOptions.Prompts.
 	Prompts []string

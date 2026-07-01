@@ -2870,6 +2870,10 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// condensation's write; when the transcript is unchanged, writeAssets is not
 	// called and condensation's assets are left intact.
 	finalizeAssets = append(finalizeAssets, sidecarSessionImages(ctx, logCtx, ag, state)...)
+	// Sidecar capture is best-effort: a transient miss here (sqlite3 locked/timed
+	// out) yields no assets. For a sidecar-capable agent, preserve the assets a
+	// prior condensation stored rather than letting an empty set clear them.
+	_, sidecarCapable := agent.AsSidecarImageProvider(ag)
 
 	_, redactSpan := perf.Start(logCtx, "redact_transcript")
 	redactedTranscript, redactErr := redact.JSONLBytes(fullTranscript)
@@ -2909,14 +2913,15 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		}
 
 		updateOpts := checkpoint.UpdateOptions{
-			CheckpointID:     cpID,
-			SessionID:        state.SessionID,
-			Transcript:       redactedTranscript,
-			Assets:           finalizeAssets,
-			Prompts:          prompts,
-			Agent:            state.AgentType,
-			SkillEvents:      skillEvents,
-			PrecomputedBlobs: precomputed,
+			CheckpointID:            cpID,
+			SessionID:               state.SessionID,
+			Transcript:              redactedTranscript,
+			Assets:                  finalizeAssets,
+			PreserveAssetsWhenEmpty: sidecarCapable,
+			Prompts:                 prompts,
+			Agent:                   state.AgentType,
+			SkillEvents:             skillEvents,
+			PrecomputedBlobs:        precomputed,
 		}
 
 		updateErr := store.Write(ctx, checkpoint.SessionTranscript(updateOpts))

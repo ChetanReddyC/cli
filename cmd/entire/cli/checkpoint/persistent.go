@@ -397,7 +397,7 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 			// transcript: write the new set (clearing any stale ones), so a finalize
 			// that re-externalizes matches its placeholders and one that produces an
 			// inline transcript leaves no orphaned blobs.
-			manifestPath, err := s.writeAssets(opts.Assets, sessionPath, entries)
+			manifestPath, err := s.writeAssetsForBackfill(opts, sessionPath, entries)
 			if err != nil {
 				return plumbing.ZeroHash, fmt.Errorf("failed to write assets: %w", err)
 			}
@@ -774,6 +774,23 @@ type assetManifestEntry struct {
 	MediaType string `json:"media_type,omitempty"`
 	Size      int    `json:"size"`
 	SHA256    string `json:"sha256"`
+}
+
+// writeAssetsForBackfill writes the update's assets, but preserves any
+// already-stored assets when the update carries none AND the update opts into
+// preservation (UpdateOptions.PreserveAssetsWhenEmpty). This guards a best-effort
+// sidecar capture (e.g. Cursor's sqlite3 store read) that transiently yields
+// nothing at finalize from wiping images a prior CondenseSession successfully
+// stored: leaving the existing assets/ subtree untouched is strictly safer than
+// clearing it. Returns the (possibly pre-existing) manifest path.
+func (s *treeWriter) writeAssetsForBackfill(opts UpdateOptions, sessionPath string, entries map[string]object.TreeEntry) (string, error) {
+	if len(opts.Assets) == 0 && opts.PreserveAssetsWhenEmpty {
+		if _, ok := entries[sessionPath+paths.AssetsManifestFile]; ok {
+			return "/" + sessionPath + paths.AssetsManifestFile, nil
+		}
+		return "", nil
+	}
+	return s.writeAssets(opts.Assets, sessionPath, entries)
 }
 
 // writeAssets stores each externalized transcript asset as a raw binary blob

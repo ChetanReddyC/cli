@@ -219,6 +219,93 @@ func TestCursorImageExternalization_SurvivesFinalizeRewrite(t *testing.T) {
 	require.Equal(t, string(img), blob, "asset bytes changed after finalize")
 }
 
+// TestCursorImageExternalization_PreservesImagesOnFinalizeCaptureMiss guards the
+// best-effort edge: condensation captures a Cursor image, but the sidecar
+// re-capture at finalize yields nothing (e.g. sqlite3 locked/timed out, or — as
+// simulated here — the store.db is momentarily gone). A rewriting finalize must
+// then PRESERVE the images condensation stored rather than clearing the assets/
+// folder for the now-empty asset set.
+func TestCursorImageExternalization_PreservesImagesOnFinalizeCaptureMiss(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 not installed; skipping cursor store.db capture test")
+	}
+
+	env := NewFeatureBranchEnv(t)
+	env.InitEntireWithAgent(agent.AgentNameCursor)
+
+	localSettings := filepath.Join(env.RepoDir, ".entire", "settings.local.json")
+	require.NoError(t, os.WriteFile(localSettings, []byte(`{"redaction":{"externalize_images":true}}`), 0o644))
+
+	cursorProjectDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(cursorProjectDir); err == nil {
+		cursorProjectDir = resolved
+	}
+	chatsDir := t.TempDir()
+	env.ExtraEnv = append(env.ExtraEnv,
+		"ENTIRE_TEST_CURSOR_PROJECT_DIR="+cursorProjectDir,
+		"ENTIRE_TEST_CURSOR_CHATS_DIR="+chatsDir,
+	)
+
+	const conversationID = "cursor-finalize-miss"
+	transcriptDir := filepath.Join(cursorProjectDir, conversationID)
+	require.NoError(t, os.MkdirAll(transcriptDir, 0o755))
+	transcriptPath := filepath.Join(transcriptDir, conversationID+".jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath,
+		[]byte(`{"type":"user","text":"look at this screenshot and add a feature"}`+"\n"), 0o600))
+
+	img := append([]byte("\x89PNG\r\n\x1a\n"), []byte(strings.Repeat("cursor-preserve-image-payload-", 8))...)
+	storeDBPath := filepath.Join(chatsDir, "workspace-hash", conversationID, "store.db")
+	require.NoError(t, os.MkdirAll(filepath.Dir(storeDBPath), 0o755))
+	buildCursorStoreDB(t, storeDBPath, map[string][]byte{"img-blob": img})
+
+	runCursorHook(t, env, cursorProjectDir, "session-start", map[string]any{
+		"conversation_id": conversationID, "transcript_path": transcriptPath, "model": "cursor-default",
+	})
+	runCursorHook(t, env, cursorProjectDir, "before-submit-prompt", map[string]any{
+		"conversation_id": conversationID, "transcript_path": transcriptPath,
+		"prompt": "look at this screenshot and add a feature",
+	})
+
+	// Mid-turn commit: condensation captures the image into the checkpoint.
+	env.WriteFile("feature.go", "package main\n// new feature\n")
+	env.GitCommitWithShadowHooksAsAgent("Add feature", "feature.go")
+
+	cpID := env.TryGetLatestCheckpointID()
+	require.NotEmpty(t, cpID, "expected a condensed checkpoint after the mid-turn commit")
+	sessionPath := ShardedCheckpointPath(cpID) + "/0/"
+	_, ok := env.ReadFileFromBranch(paths.MetadataBranchName, sessionPath+paths.AssetsManifestFile)
+	require.True(t, ok, "PRECONDITION: condensation should have captured the sidecar image")
+
+	// Grow the transcript so finalize rewrites (rewrote=true), AND remove the
+	// store.db so the finalize re-capture yields nothing — the transient-miss case.
+	require.NoError(t, os.WriteFile(transcriptPath,
+		[]byte(`{"type":"user","text":"look at this screenshot and add a feature"}`+"\n"+
+			`{"type":"assistant","text":"added the feature"}`+"\n"), 0o600))
+	require.NoError(t, os.Remove(storeDBPath))
+
+	runCursorHook(t, env, cursorProjectDir, "stop", map[string]any{
+		"conversation_id": conversationID, "transcript_path": transcriptPath,
+		"model": "cursor-default", "loop_count": 1,
+	})
+
+	// The image captured at condensation must survive the finalize rewrite even
+	// though the re-capture found nothing.
+	manifest, ok := env.ReadFileFromBranch(paths.MetadataBranchName, sessionPath+paths.AssetsManifestFile)
+	require.True(t, ok, "assets/manifest.json missing after finalize — sidecar image was wiped on a capture miss")
+	var manifestDoc struct {
+		Assets []struct {
+			Name string `json:"name"`
+		} `json:"assets"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(manifest), &manifestDoc))
+	require.Len(t, manifestDoc.Assets, 1, "expected the captured image to survive a finalize capture miss")
+	blob, ok := env.ReadFileFromBranch(paths.MetadataBranchName, sessionPath+paths.AssetsDir+manifestDoc.Assets[0].Name)
+	require.True(t, ok, "asset blob missing after finalize")
+	require.Equal(t, string(img), blob, "asset bytes changed after finalize")
+}
+
 // buildCursorStoreDB writes a Cursor-style store.db with a blobs(id, data) table
 // populated from the given blobs, by shelling out to sqlite3.
 func buildCursorStoreDB(t *testing.T, path string, blobs map[string][]byte) {
