@@ -55,7 +55,7 @@ func TestClaudeCodec_RoundTripByteExact(t *testing.T) {
 	if !strings.Contains(string(rewritten), placeholderPrefix) {
 		t.Error("rewritten transcript should carry a placeholder")
 	}
-	if assets[0].MediaType != "image/png" {
+	if assets[0].MediaType != mediaTypePNG {
 		t.Errorf("asset media type = %q, want image/png", assets[0].MediaType)
 	}
 
@@ -316,7 +316,7 @@ func TestClaudeCodec_LeavesNonBase64Inline(t *testing.T) {
 // Agents that don't inline images have no codec (graceful no-op upstream).
 func TestCodecFor_NonImageAgentsAreNil(t *testing.T) {
 	t.Parallel()
-	for _, at := range []string{"Codex", "Gemini CLI", "OpenCode", "Pi", "Factory AI Droid", "Copilot CLI"} {
+	for _, at := range []string{"Gemini CLI", "OpenCode", "Pi", "Factory AI Droid", "Copilot CLI"} {
 		if CodecFor(types.AgentType(at)) != nil {
 			t.Errorf("agent %q should not have an image codec yet", at)
 		}

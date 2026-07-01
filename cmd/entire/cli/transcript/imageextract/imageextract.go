@@ -3,8 +3,10 @@
 // path-bearing placeholder, and re-injects them byte-exactly on restore.
 //
 // The transform is per-agent because transcript formats differ: only agents that
-// inline base64 images (Claude Code today) register a codec; every other agent
-// resolves to nil and its transcript flows through untouched (a graceful no-op).
+// inline base64 images (Claude Code and Codex today) register a codec; every
+// other agent resolves to nil and its transcript flows through untouched (a
+// graceful no-op). All codecs share one extraction engine and reinjection routine
+// and differ only in how they *find* images (their collector).
 //
 // Correctness contract: for any transcript x from a supported agent,
 // ReinjectImages(ExtractImages(x)) == x, byte-for-byte. This is achieved by only
@@ -95,6 +97,7 @@ const minExternalizedBase64Len = 64
 
 var codecs = map[types.AgentType]ImageCodec{
 	agent.AgentTypeClaudeCode: claudeCodec{},
+	agent.AgentTypeCodex:      codexCodec{},
 }
 
 // CodecFor returns the image codec for an agent type, or nil if the agent's
@@ -107,13 +110,16 @@ func HasPlaceholders(transcript []byte) bool {
 	return bytes.Contains(transcript, []byte(placeholderPrefix))
 }
 
-// claudeCodec handles Claude Code (and, structurally, Cursor) JSONL transcripts,
-// which embed images as {"type":"image","source":{"type":"base64","media_type":…,"data":…}}.
-type claudeCodec struct{}
-
+// imgHit is one image found by a collector: the bare base64 value to swap out and
+// its declared media type (used only to pick the asset filename extension).
 type imgHit struct{ data, mediaType string }
 
-func (claudeCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
+// extractImagesWith is the shared extraction engine. It parses each JSONL line,
+// gathers image hits via the per-agent collector, dedupes, decodes and re-encodes
+// to confirm the base64 is byte-exactly reversible, then swaps each value out for
+// a placeholder — longest value first (so a value that is a substring of another
+// can't orphan it) and only recording assets whose swap actually replaced bytes.
+func extractImagesWith(transcript []byte, collect func(v any, out *[]imgHit)) ([]byte, []Asset, error) {
 	if len(transcript) == 0 {
 		return transcript, nil, nil
 	}
@@ -126,9 +132,7 @@ func (claudeCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
 
 	for _, line := range bytes.Split(transcript, []byte("\n")) {
 		trimmed := bytes.TrimSpace(line)
-		// Accept object- and array-rooted JSON lines; collectBase64Images walks
-		// both. Claude Code uses object lines today, but the walker's "any nesting"
-		// contract shouldn't be silently undercut by the line filter.
+		// Accept object- and array-rooted JSON lines; the collectors walk both.
 		if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
 			continue
 		}
@@ -137,7 +141,7 @@ func (claudeCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
 			continue // non-JSON line; leave untouched
 		}
 		var hits []imgHit
-		collectBase64Images(v, &hits)
+		collect(v, &hits)
 		for _, h := range hits {
 			if len(h.data) < minExternalizedBase64Len {
 				continue // too small to be a real image; also keeps it out of placeholders
@@ -154,11 +158,20 @@ func (claudeCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
 			if base64.StdEncoding.EncodeToString(raw) != h.data {
 				continue
 			}
-			name, err := uniqueImageName(usedNames, h.mediaType)
+			// Prefer the media type detected from the actual bytes over the declared
+			// one: agents mislabel it (real Codex data-URIs declare image/jpeg for
+			// PNG bytes), and the asset filename/manifest should reflect the content.
+			// This is metadata only — the transcript's declared type is untouched, so
+			// the round trip stays byte-exact.
+			mediaType := detectMediaType(raw)
+			if mediaType == "" {
+				mediaType = h.mediaType
+			}
+			name, err := uniqueImageName(usedNames, mediaType)
 			if err != nil {
 				return transcript, nil, err
 			}
-			seen[h.data] = Asset{Name: name, MediaType: h.mediaType, Data: raw}
+			seen[h.data] = Asset{Name: name, MediaType: mediaType, Data: raw}
 			order = append(order, h.data)
 		}
 	}
@@ -182,12 +195,12 @@ func (claudeCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
 	assets := make([]Asset, 0, len(order))
 	for _, data := range order {
 		a := seen[data]
-		// Swap the base64 value itself, not a "data":"<b64>" wrapper: Claude Code
-		// serializes the image content block both compactly ("data":"<b64>") and
-		// spaced ("data": "<b64>") depending on version, so matching the bare value
-		// is the only format-agnostic anchor. This can also swap a copy of the same
-		// base64 that appears in a text field, but the round trip stays byte-exact
-		// because ReinjectImages restores every occurrence to the identical value.
+		// Swap the base64 value itself, not a field wrapper. Agents serialize the
+		// enclosing JSON differently and across versions (compact vs spaced, string
+		// vs object image_url, data-URI vs bare), so the bare value is the only
+		// format-agnostic anchor. This can also swap a copy of the same base64 in a
+		// text field, but the round trip stays byte-exact because ReinjectImages
+		// restores every occurrence to the identical value.
 		swapped := bytes.ReplaceAll(rewritten, []byte(data), []byte(placeholderPrefix+a.Name))
 		if bytes.Equal(swapped, rewritten) {
 			// Exact bytes weren't present (e.g. JSON-escaped in the raw transcript);
@@ -204,7 +217,10 @@ func (claudeCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
 	return rewritten, assets, nil
 }
 
-func (claudeCodec) ReinjectImages(transcript []byte, lookup func(name string) (Asset, bool)) ([]byte, error) {
+// reinjectImages restores every placeholder to its asset's base64. It is shared
+// by all codecs: the placeholder token is agent-independent, so restore only
+// needs the asset lookup.
+func reinjectImages(transcript []byte, lookup func(name string) (Asset, bool)) ([]byte, error) {
 	if !HasPlaceholders(transcript) {
 		return transcript, nil
 	}
@@ -225,10 +241,35 @@ func (claudeCodec) ReinjectImages(transcript []byte, lookup func(name string) (A
 	return result, nil
 }
 
-// collectBase64Images walks any decoded JSON value and gathers every inline
+// claudeCodec handles Claude Code (and, structurally, Cursor) JSONL transcripts,
+// which embed images as {"type":"image","source":{"type":"base64","media_type":…,"data":…}}.
+type claudeCodec struct{}
+
+func (claudeCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
+	return extractImagesWith(transcript, collectClaudeImages)
+}
+
+func (claudeCodec) ReinjectImages(transcript []byte, lookup func(name string) (Asset, bool)) ([]byte, error) {
+	return reinjectImages(transcript, lookup)
+}
+
+// codexCodec handles OpenAI Codex rollout JSONL transcripts, which embed images
+// as base64 data-URIs (data:image/<type>;base64,<data>) — in input_image
+// image_url values, user messages, and function_call_output content alike.
+type codexCodec struct{}
+
+func (codexCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
+	return extractImagesWith(transcript, collectCodexImages)
+}
+
+func (codexCodec) ReinjectImages(transcript []byte, lookup func(name string) (Asset, bool)) ([]byte, error) {
+	return reinjectImages(transcript, lookup)
+}
+
+// collectClaudeImages walks any decoded JSON value and gathers every inline
 // base64 image block, at any nesting depth (top-level content, tool_result
 // content, etc.).
-func collectBase64Images(v any, out *[]imgHit) {
+func collectClaudeImages(v any, out *[]imgHit) {
 	switch t := v.(type) {
 	case map[string]any:
 		if t["type"] == "image" {
@@ -243,24 +284,75 @@ func collectBase64Images(v any, out *[]imgHit) {
 			}
 		}
 		for _, vv := range t {
-			collectBase64Images(vv, out)
+			collectClaudeImages(vv, out)
 		}
 	case []any:
 		for _, vv := range t {
-			collectBase64Images(vv, out)
+			collectClaudeImages(vv, out)
 		}
+	}
+}
+
+// codexDataURIRe matches an image data-URI and captures (media subtype, base64).
+// Codex serializes every inline image this way — input_image image_url values,
+// user-message content, and function_call_output payloads — so keying on the
+// data-URI (rather than a specific field) covers input and generated/tool images
+// uniformly. The captured group is the bare base64, which is what gets swapped.
+var codexDataURIRe = regexp.MustCompile(`data:image/([a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/]+={0,2})`)
+
+// collectCodexImages walks any decoded JSON value and, for each string leaf,
+// gathers every image data-URI it contains (a leaf may be the URI itself, e.g.
+// input_image.image_url, or embed one inside larger tool output).
+func collectCodexImages(v any, out *[]imgHit) {
+	switch t := v.(type) {
+	case map[string]any:
+		for _, vv := range t {
+			collectCodexImages(vv, out)
+		}
+	case []any:
+		for _, vv := range t {
+			collectCodexImages(vv, out)
+		}
+	case string:
+		for _, m := range codexDataURIRe.FindAllStringSubmatch(t, -1) {
+			*out = append(*out, imgHit{data: m[2], mediaType: "image/" + m[1]})
+		}
+	}
+}
+
+const (
+	mediaTypePNG  = "image/png"
+	mediaTypeJPEG = "image/jpeg"
+	mediaTypeGIF  = "image/gif"
+	mediaTypeWEBP = "image/webp"
+)
+
+// detectMediaType returns the image media type implied by the leading magic
+// bytes, or "" if unrecognized (caller falls back to the declared type).
+func detectMediaType(raw []byte) string {
+	switch {
+	case bytes.HasPrefix(raw, []byte("\x89PNG\r\n\x1a\n")):
+		return mediaTypePNG
+	case bytes.HasPrefix(raw, []byte{0xFF, 0xD8, 0xFF}):
+		return mediaTypeJPEG
+	case bytes.HasPrefix(raw, []byte("GIF87a")), bytes.HasPrefix(raw, []byte("GIF89a")):
+		return mediaTypeGIF
+	case len(raw) >= 12 && bytes.HasPrefix(raw, []byte("RIFF")) && bytes.Equal(raw[8:12], []byte("WEBP")):
+		return mediaTypeWEBP
+	default:
+		return ""
 	}
 }
 
 func extForMedia(mediaType string) string {
 	switch mediaType {
-	case "image/png":
+	case mediaTypePNG:
 		return "png"
-	case "image/jpeg":
+	case mediaTypeJPEG:
 		return "jpg"
-	case "image/gif":
+	case mediaTypeGIF:
 		return "gif"
-	case "image/webp":
+	case mediaTypeWEBP:
 		return "webp"
 	default:
 		return "bin"
