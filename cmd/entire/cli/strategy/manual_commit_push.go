@@ -3,10 +3,12 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 
+	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -158,47 +160,78 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 
+	if _, err := flushCheckpointRefsQueue(ctx, repo, ps.pushTarget()); err != nil {
+		// Fail-soft: a checkpoint-ref push failure must never block the user's
+		// git push. The refs stay queued for the next pre-push.
+		logging.Warn(ctx, "git-refs pre-push: checkpoint ref push failed; refs left queued",
+			slog.String("error", err.Error()))
+	}
+
+	cleanupPushedShadowBranches(ctx)
+	return nil
+}
+
+// PushMigratedCheckpointRefs pushes any queued checkpoint refs to the configured
+// checkpoint remote, surfacing errors (unlike the fail-soft pre-push path). It is
+// the opt-in "push now" invoked by the checkpoint migration command. Returns the
+// number of refs pushed. A no-op (0, nil) when pushing is disabled or the queue
+// is empty.
+func PushMigratedCheckpointRefs(ctx context.Context, remote string) (int, error) {
+	ps := resolvePushSettings(ctx, remote)
+	if ps.pushDisabled {
+		return 0, nil
+	}
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("open repository: %w", err)
+	}
+	defer repo.Close()
+	return flushCheckpointRefsQueue(ctx, repo, ps.pushTarget())
+}
+
+// flushCheckpointRefsQueue drains the push-discovery queue and batch-pushes the
+// recorded refs fast-forward-only, recovering a diverged ref by fetch+replay and
+// removing from the queue only the refs that land. It returns the number pushed.
+//
+// Shared by the git-refs pre-push path (which logs and ignores the error to
+// never block the user's push) and the migration command's opt-in push (which
+// surfaces it). Stale entries — refs no longer present locally — are pruned so
+// they don't block the queue forever.
+func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTarget string) (int, error) {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
-		logging.Warn(ctx, "git-refs pre-push: resolve push queue failed; skipping checkpoint push",
-			slog.String("error", err.Error()))
-		return nil
+		return 0, fmt.Errorf("resolve push queue: %w", err)
 	}
 	queued, err := queue.Drain()
 	if err != nil {
-		logging.Warn(ctx, "git-refs pre-push: drain push queue failed; skipping checkpoint push",
-			slog.String("error", err.Error()))
-		return nil
+		return 0, fmt.Errorf("drain push queue: %w", err)
 	}
 	if len(queued) == 0 {
-		return nil
-	}
-
-	// Drop stale entries (refs no longer present locally) so they don't block
-	// the queue forever, then push what remains.
-	existing, stale := partitionLocalRefs(repo, queued)
-	if len(stale) > 0 {
-		if err := queue.Remove(stale); err != nil {
-			logging.Warn(ctx, "git-refs pre-push: prune stale queue entries failed",
-				slog.String("error", err.Error()))
-		}
-	}
-	if len(existing) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	pushCtx, pushSpan := perf.Start(ctx, "push_checkpoint_refs")
 	defer pushSpan.End()
 
+	existing, stale := partitionLocalRefs(repo, queued)
+	if len(stale) > 0 {
+		if err := queue.Remove(stale); err != nil {
+			logging.Warn(ctx, "git-refs push: prune stale queue entries failed",
+				slog.String("error", err.Error()))
+		}
+	}
+	if len(existing) == 0 {
+		return 0, nil
+	}
+
 	// Fast path: push all refs in one round-trip (fast-forward-only). If every
 	// ref was up to date or fast-forwarded, we're done.
-	if err := batchPushRefs(pushCtx, ps.pushTarget(), existing); err == nil {
+	if err := batchPushRefs(pushCtx, pushTarget, existing); err == nil {
 		if removeErr := queue.Remove(existing); removeErr != nil {
-			logging.Warn(ctx, "git-refs pre-push: clear pushed refs from queue failed",
+			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 				slog.String("error", removeErr.Error()))
 		}
-		cleanupPushedShadowBranches(ctx)
-		return nil
+		return len(existing), nil
 	}
 
 	// At least one ref was rejected — typically a non-fast-forward divergence
@@ -207,21 +240,27 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	// (a genuine cherry-pick conflict leaves that ref queued for a later push,
 	// never force-overwriting the remote).
 	pushed := make([]plumbing.ReferenceName, 0, len(existing))
+	var firstErr error
 	for _, ref := range existing {
-		if err := pushCheckpointRefWithRecovery(pushCtx, ps.pushTarget(), ref); err != nil {
-			logging.Warn(ctx, "git-refs pre-push: checkpoint ref push/sync failed; left queued, not overwritten",
+		if err := pushCheckpointRefWithRecovery(pushCtx, pushTarget, ref); err != nil {
+			logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 				slog.String("ref", ref.String()), slog.String("error", err.Error()))
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		pushed = append(pushed, ref)
 	}
 	if err := queue.Remove(pushed); err != nil {
-		logging.Warn(ctx, "git-refs pre-push: clear pushed refs from queue failed",
+		logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 			slog.String("error", err.Error()))
 	}
-
-	cleanupPushedShadowBranches(ctx)
-	return nil
+	if firstErr != nil {
+		return len(pushed), fmt.Errorf("%d of %d checkpoint refs failed to push: %w",
+			len(existing)-len(pushed), len(existing), firstErr)
+	}
+	return len(pushed), nil
 }
 
 // cleanupPushedShadowBranches runs post-push shadow-branch cleanup. Failures are
