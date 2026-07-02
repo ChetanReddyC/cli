@@ -299,6 +299,34 @@ func TestClaudeCodec_LeavesTinyBase64Inline(t *testing.T) {
 	}
 }
 
+// Images whose decoded bytes exceed maxExternalizedImageBytes are left inline: as
+// a single asset blob they could become an unpushable git object, so (like the
+// Cursor sidecar path) they stay in the transcript, which is chunked to stay
+// pushable. Not parallel: it lowers the shared cap to avoid a 50MB fixture.
+func TestClaudeCodec_LeavesOversizedImageInline(t *testing.T) {
+	c := CodecFor(agent.AgentTypeClaudeCode)
+
+	restore := maxExternalizedImageBytes
+	maxExternalizedImageBytes = 8
+	t.Cleanup(func() { maxExternalizedImageBytes = restore })
+
+	// 72 bytes: over the lowered cap, and its base64 clears minExternalizedBase64Len
+	// so only the size guard (not the min-length filter) can keep it inline.
+	raw := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 64)...)
+	b64 := base64.StdEncoding.EncodeToString(raw)
+	if len(b64) < minExternalizedBase64Len {
+		t.Fatalf("fixture too short to exercise the max guard: %d", len(b64))
+	}
+	orig := claudeLine(b64) + "\n"
+	rewritten, assets, err := c.ExtractImages([]byte(orig))
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+	if len(assets) != 0 || string(rewritten) != orig {
+		t.Errorf("oversized image must be left inline; assets=%d changed=%v", len(assets), string(rewritten) != orig)
+	}
+}
+
 // Non-base64 image sources (e.g. url) and non-decodable data are left inline.
 func TestClaudeCodec_LeavesNonBase64Inline(t *testing.T) {
 	t.Parallel()

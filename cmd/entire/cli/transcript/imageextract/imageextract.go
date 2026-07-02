@@ -95,6 +95,14 @@ func uniqueImageName(used map[string]bool, mediaType string) (string, error) {
 // blobs (which are never real images) inline, where they cost nothing.
 const minExternalizedBase64Len = 64
 
+// maxExternalizedImageBytes is the largest decoded image we externalize. Above
+// it the image stays inline: writeAssets stores each asset as a single git blob,
+// so one over agent.MaxChunkSize would become an unpushable object — the same
+// guard the Cursor sidecar path applies. The transcript itself is chunked under
+// MaxChunkSize, so an oversized image left inline still pushes fine. It is a var
+// (not a const) only so tests can lower it without allocating a 50MB fixture.
+var maxExternalizedImageBytes = agent.MaxChunkSize
+
 var codecs = map[types.AgentType]ImageCodec{
 	agent.AgentTypeClaudeCode: claudeCodec{},
 	agent.AgentTypeCodex:      codexCodec{},
@@ -156,6 +164,13 @@ func extractImagesWith(transcript []byte, collect func(v any, out *[]imgHit)) ([
 			// Only externalize if re-encoding reproduces the exact original string;
 			// otherwise the restore round-trip could not be byte-exact.
 			if base64.StdEncoding.EncodeToString(raw) != h.data {
+				continue
+			}
+			// Leave oversized images inline. Each asset is stored as one git blob,
+			// and a blob over MaxChunkSize would be unpushable; the transcript, by
+			// contrast, is chunked under that limit, so keeping the image inline
+			// stays pushable (mirrors the Cursor sidecar guard).
+			if len(raw) > maxExternalizedImageBytes {
 				continue
 			}
 			// Prefer the media type detected from the actual bytes over the declared
