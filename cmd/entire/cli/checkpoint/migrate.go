@@ -74,13 +74,18 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 		}
 
 		// Resolve the existing ref once: it drives both the idempotency check and
-		// the parent of the new commit.
+		// the parent of the new commit. Only a ref that resolves to a real commit
+		// becomes the parent — a ref pointing at an unreadable/non-commit object
+		// is treated as absent (orphan) rather than parenting the new commit on a
+		// bad hash, which would corrupt the commit graph for fetch+replay.
 		parent := plumbing.ZeroHash
 		if existing, err := repo.Reference(refName, true); err == nil {
-			parent = existing.Hash()
-			if commit, cerr := repo.CommitObject(parent); cerr == nil && commit.TreeHash == cpTreeHash {
-				result.Skipped++
-				return nil
+			if commit, cerr := repo.CommitObject(existing.Hash()); cerr == nil {
+				if commit.TreeHash == cpTreeHash {
+					result.Skipped++
+					return nil
+				}
+				parent = existing.Hash()
 			}
 		}
 

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -10,12 +12,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-// migrateCheckpointsPushRemote is the remote the opt-in "push now" targets; the
-// actual push URL is resolved from checkpoint-remote settings when configured.
-const migrateCheckpointsPushRemote = "origin"
-
 func newDoctorMigrateCheckpointsCmd() *cobra.Command {
 	var dryRun bool
+	var remote string
 
 	cmd := &cobra.Command{
 		Use:   "migrate-checkpoints",
@@ -45,6 +44,9 @@ next push once the git-refs store is the configured primary.`,
 
 			result, err := checkpoint.MigrateBranchToRefs(ctx, repo, dryRun)
 			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return NewSilentError(err)
+				}
 				return fmt.Errorf("migrate checkpoints: %w", err)
 			}
 
@@ -79,14 +81,24 @@ next push once the git-refs store is the configured primary.`,
 				return nil
 			}
 
-			pushed, err := strategy.PushMigratedCheckpointRefs(ctx, repo, migrateCheckpointsPushRemote)
+			pushed, err := strategy.PushMigratedCheckpointRefs(ctx, repo, remote)
 			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return NewSilentError(err)
+				}
 				return fmt.Errorf("push migrated refs: %w", err)
+			}
+			if pushed == 0 {
+				// Confirmed, but nothing went to the remote — checkpoint pushing
+				// is disabled in settings. The refs stay queued locally.
+				fmt.Fprintln(out, "Checkpoint pushing is disabled in settings; refs stay queued for the next push.")
+				return nil
 			}
 			fmt.Fprintf(out, "Pushed %d checkpoint ref(s).\n", pushed)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Report what would be migrated without writing refs")
+	cmd.Flags().StringVar(&remote, "remote", "origin", "Remote to push migrated refs to when confirmed")
 	return cmd
 }
