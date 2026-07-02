@@ -330,7 +330,7 @@ func defaultReviewProfileForInstalledAgents(
 		agents[name] = cfg
 	}
 	if len(agents) == 0 {
-		return settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire configure --agent claude-code`, `entire configure --agent codex`, or `entire configure --agent gemini`")
+		return settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire configure --agent claude-code`, `entire configure --agent codex`, `entire configure --agent gemini`, or `entire configure --agent pi`")
 	}
 	profile := settings.ReviewProfileConfig{
 		Task:   profileTask(profileName, settings.ReviewProfileConfig{}),
@@ -352,7 +352,7 @@ func defaultReviewAgentConfig(profileName, agentName string) settings.ReviewConf
 		return settings.ReviewConfig{Skills: []string{"/review"}, Prompt: focus}
 	case string(agent.AgentNameCodex):
 		return settings.ReviewConfig{Skills: []string{"/review"}, Prompt: focus}
-	case string(agent.AgentNameGemini):
+	case string(agent.AgentNameGemini), string(agent.AgentNamePi):
 		prompt := "Review the change according to the profile task."
 		if focus != "" {
 			prompt += " " + focus
@@ -375,11 +375,11 @@ func defaultProfileFocus(profileName string) string {
 }
 
 // defaultJudge auto-selects a consolidating judge from the configured
-// reviewers: it prefers claude-code, then codex, then gemini, and otherwise
-// takes the first reviewer that can write a verdict (text generation). ok is
-// false when no reviewer can.
+// reviewers: it prefers claude-code, then codex, then gemini, then pi, and
+// otherwise takes the first reviewer that can write a verdict (text generation).
+// ok is false when no reviewer can.
 func defaultJudge(ctx context.Context, configured map[string]settings.ReviewConfig) (judgeSpec, bool) {
-	for _, preferred := range []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameCodex), string(agent.AgentNameGemini)} {
+	for _, preferred := range []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameCodex), string(agent.AgentNameGemini), string(agent.AgentNamePi)} {
 		for _, workerName := range sortedMapKeys(configured) {
 			cfg := configured[workerName]
 			if reviewAgentName(workerName, cfg) == preferred && agentSupportsTextGeneration(ctx, preferred) {

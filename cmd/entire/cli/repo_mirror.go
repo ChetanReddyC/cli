@@ -61,9 +61,8 @@ func clusterArg(args []string) string {
 }
 
 // clusterArgAt returns the cluster host from the optional positional at idx,
-// or defaultClusterHost when it was omitted. Commands with an intervening
-// positional (e.g. collaborators add <github-url> <handle> [cluster-host])
-// pass the trailing index.
+// or defaultClusterHost when it was omitted. Commands with leading positionals
+// (e.g. collaborators list <github-url> [cluster-host]) pass the trailing index.
 func clusterArgAt(args []string, idx int) string {
 	if len(args) > idx {
 		return args[idx]
@@ -187,8 +186,10 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 					func(created *coreapi.CreatedMirror) {
 						placing(true)
 						placed = true
-						// Only start a Cloning spinner when there's a clone to await.
-						if !noWait && !created.Empty {
+						// Only start a Cloning spinner when there's a clone to await —
+						// not for an empty upstream, and not for an admin-suspended
+						// placement (which never becomes ready).
+						if !noWait && !created.Empty && !created.Suspended {
 							cloning = startSpinner(errW, fmt.Sprintf("Cloning %s/%s into %s", owner, repo, clusterHost))
 						}
 					}, nil)
@@ -246,6 +247,13 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 		onCreated(created)
 	}
 	outcome := mirrorCreateOutcome{created: created}
+	if created.Suspended {
+		// The placement already existed and an admin has suspended it, so it
+		// will never serve — skip the clone poll. The caller warns after echoing
+		// the placement; a suspended re-create is still a (non-fatal) success,
+		// so return no error.
+		return outcome, nil
+	}
 	if created.Empty {
 		// An empty upstream has nothing to clone, so don't poll for "ready" — it
 		// never would. But an *existing* placement can be suspended even when
@@ -288,6 +296,14 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 		fmt.Fprintf(out, "\nMirror exists (%s)\n", created.MirrorId)
 	}
 	fmt.Fprintf(out, "  %s\n", created.MirrorUrl)
+
+	if created.Suspended {
+		// Echo the placement (above), warn, and exit non-zero: the mirror can't
+		// be used, so a script chaining a clone shouldn't treat this as success.
+		// SilentError keeps main.go from reprinting — the warning is the message.
+		fmt.Fprintln(errW, "\nWARNING: this mirror has been suspended by an admin and won't be usable.")
+		return NewSilentError(errMirrorSuspended)
+	}
 
 	if !outcome.polled {
 		if created.Empty {

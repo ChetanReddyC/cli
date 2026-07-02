@@ -243,7 +243,7 @@ func TestShouldSkipAgentHookForPolicy(t *testing.T) {
 
 	require.False(t, shouldSkipAgentHookForPolicy(checkpointpolicy.DefaultPolicy()))
 	require.True(t, shouldSkipAgentHookForPolicy(checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
+		CheckpointVersion:    "refs-v2",
 		CheckpointMinVersion: "branch-v1",
 	}))
 }
@@ -274,6 +274,29 @@ func TestHookWritesCheckpointData(t *testing.T) {
 			t.Parallel()
 
 			require.Equal(t, tt.want, hookWritesCheckpointData(tt.eventType, tt.claudePostTodoCheckpointHook))
+		})
+	}
+}
+
+func TestAgentWriteHookLabel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                         string
+		eventType                    agent.EventType
+		claudePostTodoCheckpointHook bool
+		want                         string
+	}{
+		{name: "post todo takes priority", claudePostTodoCheckpointHook: true, want: "post-todo"},
+		{name: "subagent end", eventType: agent.SubagentEnd, want: "subagent-end"},
+		{name: "turn end is the default", eventType: agent.TurnEnd, want: "turn-end"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.want, agentWriteHookLabel(tt.eventType, tt.claudePostTodoCheckpointHook))
 		})
 	}
 }

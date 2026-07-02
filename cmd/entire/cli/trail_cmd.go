@@ -38,6 +38,10 @@ const (
 	trailFindMaxPages       = 10
 )
 
+func trailContextBlurb() string {
+	return "A trail ties together the context for a branch. Use `entire trail` to view, create, update, or watch it; use `entire trail finding` to manage agent findings."
+}
+
 func newTrailCmd() *cobra.Command {
 	var insecureHTTPAuth bool
 	var repoOverride string
@@ -54,7 +58,7 @@ func newTrailCmd() *cobra.Command {
 			agentHelpRequiresTrailsAnnotation: agentHelpAnnotationEnabled,
 		},
 		Args: cobra.NoArgs,
-		Long: "A trail ties together the context for a branch. Use `entire trail` to view, create, update, or watch it.",
+		Long: trailContextBlurb(),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},

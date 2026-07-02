@@ -55,6 +55,9 @@ type (
 // CheckpointVersionBranchV1 identifies the branch-backed checkpoint metadata format.
 const CheckpointVersionBranchV1 = apicheckpoint.CheckpointVersionBranchV1
 
+// CheckpointVersionRefsV1 identifies the per-checkpoint-ref checkpoint metadata format.
+const CheckpointVersionRefsV1 = apicheckpoint.CheckpointVersionRefsV1
+
 // Sentinel errors (re-exported so errors.Is keeps working across packages).
 var (
 	ErrCheckpointNotFound = apicheckpoint.ErrCheckpointNotFound

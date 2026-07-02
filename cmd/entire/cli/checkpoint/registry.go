@@ -18,12 +18,21 @@ import (
 // when no backend is configured.
 const BackendTypeGitBranch = "git-branch"
 
+// BackendTypeGitRefs is the built-in git-refs checkpoint backend: it stores the
+// committed record as one git ref per checkpoint (refs/entire/checkpoints/<shard>/
+// <id>) in this repo. Like git-branch it is git-backed, so it may be the primary;
+// the two can run side by side (git-refs primary + git-branch mirror) during the
+// branch->refs rollout, since the one-of-each-type rule permits distinct
+// git-backed backends in the same topology.
+const BackendTypeGitRefs = "git-refs"
+
 // OpenEnv carries the construction context a backend factory may need.
-// Git-backed backends require Repo and use Refs/BlobFetcher; other backends
-// ignore the git-shaped fields and read their own configuration from cfg.
+// Git-backed backends require Repo and use Refs/BlobFetcher/RefFetcher; other
+// backends ignore the git-shaped fields and read their own configuration from cfg.
 type OpenEnv struct {
 	Repo        *git.Repository
 	BlobFetcher BlobFetchFunc
+	RefFetcher  RefFetchFunc
 	Refs        PersistentRefs
 }
 
@@ -55,6 +64,7 @@ var (
 	// RegisterForTesting helpers, so a production binary can never select them.
 	registry = map[string]registeredBackend{
 		BackendTypeGitBranch: {factory: gitBranchBackendFactory, gitBacked: true},
+		BackendTypeGitRefs:   {factory: gitRefsBackendFactory, gitBacked: true},
 	}
 )
 
@@ -116,6 +126,23 @@ func gitBranchBackendFactory(_ context.Context, env OpenEnv, _ json.RawMessage) 
 	store := NewGitStore(env.Repo, env.Refs)
 	if env.BlobFetcher != nil {
 		store.SetBlobFetcher(env.BlobFetcher)
+	}
+	return store, nil
+}
+
+// gitRefsBackendFactory builds the git-refs persistent store from the open
+// environment. It ignores cfg and env.Refs: each checkpoint resolves its own ref
+// (refs/entire/checkpoints/<shard>/<id>) rather than a single configured ref.
+func gitRefsBackendFactory(_ context.Context, env OpenEnv, _ json.RawMessage) (PersistentStore, error) {
+	if env.Repo == nil {
+		return nil, errors.New("git-refs checkpoint backend requires a repository")
+	}
+	store := newGitRefsStore(env.Repo)
+	if env.BlobFetcher != nil {
+		store.SetBlobFetcher(env.BlobFetcher)
+	}
+	if env.RefFetcher != nil {
+		store.SetRefFetcher(env.RefFetcher)
 	}
 	return store, nil
 }

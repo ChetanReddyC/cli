@@ -88,6 +88,34 @@ func KindOf(s string) Kind {
 	}
 }
 
+// Kind classifies this checkpoint ID.
+func (id CheckpointID) Kind() Kind {
+	return KindOf(string(id))
+}
+
+// ShardFor returns the two-character shard for storing this ID under a
+// per-checkpoint git ref (refs/entire/checkpoints/<shard>/<id>): the LAST two
+// characters of the ID, for BOTH supported formats.
+//
+// A single positional rule (independent of the ID's Kind) keeps ref naming
+// robust for legacy and ULID IDs alike and impossible to compute inconsistently
+// between callers. The suffix spreads checkpoints evenly across buckets for
+// either format: a legacy hex ID is random throughout, and a ULID's leading
+// characters encode its timestamp (barely varying between nearby checkpoints)
+// while its trailing characters are random — so sharding on the suffix keeps the
+// distribution even while the ID itself stays lexicographically sortable.
+//
+// This is the git-refs ref namespace only; the entire/checkpoints/v1 branch tree
+// keeps its own independent first-two layout (see Path). For an ID shorter than
+// two characters the whole ID is returned.
+func (id CheckpointID) ShardFor() string {
+	s := string(id)
+	if len(s) < 2 {
+		return s
+	}
+	return s[len(s)-2:]
+}
+
 // NewCheckpointID creates a CheckpointID from a string, validating its format.
 // Returns an error unless the string is a valid checkpoint ID (12-char hex or ULID).
 func NewCheckpointID(s string) (CheckpointID, error) {

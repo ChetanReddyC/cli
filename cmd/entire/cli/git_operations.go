@@ -534,6 +534,26 @@ func resolveCheckpointFetchTarget(ctx context.Context) string {
 	return "origin"
 }
 
+// FetchCheckpointRef fetches a single per-checkpoint ref (refs/entire/checkpoints/
+// <shard>/<id>) from the checkpoint remote into the local ref of the same name,
+// so the git-refs store can resolve a checkpoint written on another machine.
+// Best-effort: the caller treats a fetch failure as "checkpoint not found".
+func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	fetchTarget := resolveCheckpointFetchTarget(ctx)
+	refSpec := "+" + ref.String() + ":" + ref.String()
+	if _, err := remote.Fetch(ctx, remote.FetchOptions{
+		Remote:   fetchTarget,
+		RefSpecs: []string{refSpec},
+		NoTags:   true,
+	}); err != nil {
+		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, fetchTarget, err)
+	}
+	return nil
+}
+
 // FetchBlobsByHash fetches specific blob objects from the remote by their SHA-1 hashes.
 // Uses "git fetch <target> <hash>" which goes through normal credential helpers,
 // unlike fetch-pack which bypasses them. Requires the server to support

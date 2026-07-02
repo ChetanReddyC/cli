@@ -52,8 +52,9 @@ func TestSupportedFormats(t *testing.T) {
 	require.True(t, checkpointpolicy.CanWrite(branchV1))
 	require.Equal(t, checkpoint.CheckpointVersionBranchV1, branchV1.String())
 
-	require.False(t, checkpointpolicy.CanRead(refsV1))
-	require.False(t, checkpointpolicy.CanWrite(refsV1))
+	// refs-v1 is the git-refs store format: read- and write-supported.
+	require.True(t, checkpointpolicy.CanRead(refsV1))
+	require.True(t, checkpointpolicy.CanWrite(refsV1))
 	require.Negative(t, checkpointpolicy.Compare(branchV1, refsV1))
 
 	require.False(t, checkpointpolicy.CanRead(unknownV1))

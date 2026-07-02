@@ -785,7 +785,7 @@ func localReviewManifestDir(ctx context.Context) (string, error) {
 }
 
 func localReviewManifestFilename(manifest LocalReviewManifest) string {
-	name := manifest.CreatedAt.UTC().Format("20060102T150405")
+	name := reviewManifestTimeHandle(manifest.CreatedAt)
 	if len(manifest.Sources) > 0 && manifest.Sources[0].SessionID != "" {
 		name += "-" + safeManifestFilenamePart(manifest.Sources[0].SessionID)
 	}

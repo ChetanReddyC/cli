@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/perf"
@@ -70,23 +71,13 @@ func (g *gitHookContext) skipUnsupportedCheckpointPolicy() bool {
 	// disable Entire checkpoint work, not make Git reject the user's operation.
 	repo, err := gitrepo.OpenCurrent(g.ctx)
 	if err != nil {
-		logging.Warn(g.ctx, "checkpoint policy read failed; skipping git hook",
-			slog.String("error", err.Error()))
-		if interactive.CanPromptInteractively() {
-			fmt.Fprintf(os.Stderr, "[entire] Could not read checkpoint policy; skipping Entire checkpoint work: %v\n", err)
-		}
-		return true
+		return g.skipUnreadableCheckpointPolicy(err)
 	}
 	defer repo.Close()
 
 	state, err := checkpointpolicy.ReadLocal(g.ctx, repo)
 	if err != nil {
-		logging.Warn(g.ctx, "checkpoint policy read failed; skipping git hook",
-			slog.String("error", err.Error()))
-		if interactive.CanPromptInteractively() {
-			fmt.Fprintf(os.Stderr, "[entire] Could not read checkpoint policy; skipping Entire checkpoint work: %v\n", err)
-		}
-		return true
+		return g.skipUnreadableCheckpointPolicy(err)
 	}
 
 	policy := state.Policy
@@ -103,6 +94,32 @@ func (g *gitHookContext) skipUnsupportedCheckpointPolicy() bool {
 			versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version),
 		))
 	}
+	emitCheckpointPolicyBlocked(g.ctx, telemetry.CheckpointPolicyBlockedEvent{
+		Hook:                 g.hookName,
+		HookType:             telemetry.PolicyBlockedHookTypeGit,
+		Reason:               telemetry.PolicyBlockedReasonUnsupported,
+		Outcome:              telemetry.PolicyBlockedOutcomeSkipped,
+		CheckpointVersion:    policy.CheckpointVersion,
+		CheckpointMinVersion: policy.CheckpointMinVersion,
+	})
+	return true
+}
+
+// skipUnreadableCheckpointPolicy warns, notifies the user, and reports the
+// policy-blocked telemetry event for a hook whose checkpoint policy could not be
+// read. It always returns true so callers skip Entire checkpoint work.
+func (g *gitHookContext) skipUnreadableCheckpointPolicy(err error) bool {
+	logging.Warn(g.ctx, "checkpoint policy read failed; skipping git hook",
+		slog.String("error", err.Error()))
+	if interactive.CanPromptInteractively() {
+		fmt.Fprintf(os.Stderr, "[entire] Could not read checkpoint policy; skipping Entire checkpoint work: %v\n", err)
+	}
+	emitCheckpointPolicyBlocked(g.ctx, telemetry.CheckpointPolicyBlockedEvent{
+		Hook:     g.hookName,
+		HookType: telemetry.PolicyBlockedHookTypeGit,
+		Reason:   telemetry.PolicyBlockedReasonUnreadable,
+		Outcome:  telemetry.PolicyBlockedOutcomeSkipped,
+	})
 	return true
 }
 

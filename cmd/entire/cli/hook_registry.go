@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/perf"
@@ -179,7 +180,7 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	}
 
 	if eventType == agent.SessionStart {
-		skipSessionStart, err := shouldSkipSessionStartForPolicy(ctx, cmd.ErrOrStderr(), ag, worktreeRoot)
+		skipSessionStart, err := shouldSkipSessionStartForPolicy(ctx, cmd.ErrOrStderr(), agentName, ag, worktreeRoot)
 		if err != nil {
 			span.RecordError(err)
 			return err
@@ -188,7 +189,8 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 			return nil
 		}
 	} else if hookWritesCheckpointData(eventType, claudePostTodoCheckpointHook) {
-		if err := rejectUnsupportedCheckpointWritePolicy(ctx, cmd.ErrOrStderr(), worktreeRoot); err != nil {
+		writeHook := agentWriteHookLabel(eventType, claudePostTodoCheckpointHook)
+		if err := rejectUnsupportedCheckpointWritePolicy(ctx, cmd.ErrOrStderr(), agentName, writeHook, worktreeRoot); err != nil {
 			span.RecordError(err)
 			return err
 		}
@@ -221,16 +223,32 @@ func shouldSkipAgentHookForPolicy(policy checkpointpolicy.Policy) bool {
 	return !checkpointpolicy.CanSatisfyPolicy(policy)
 }
 
-func shouldSkipSessionStartForPolicy(ctx context.Context, errW io.Writer, ag agent.Agent, worktreeRoot string) (bool, error) {
+func shouldSkipSessionStartForPolicy(ctx context.Context, errW io.Writer, agentName types.AgentName, ag agent.Agent, worktreeRoot string) (bool, error) {
 	policy, err := agentHookPolicy(ctx, worktreeRoot)
 	if err != nil {
 		logging.Warn(ctx, "checkpoint policy read failed for agent hook",
 			slog.String("error", err.Error()))
+		emitCheckpointPolicyBlocked(ctx, telemetry.CheckpointPolicyBlockedEvent{
+			Hook:     "session-start",
+			HookType: telemetry.PolicyBlockedHookTypeAgent,
+			Reason:   telemetry.PolicyBlockedReasonUnreadable,
+			Outcome:  telemetry.PolicyBlockedOutcomeSkipped,
+			Agent:    string(agentName),
+		})
 		// Let the agent start; the warning explains that checkpoint capture is
 		// disabled until the policy can be read.
 		return true, writeUnsupportedPolicySessionStartWarning(errW, ag, sessionStartPolicyReadErrorWarning(err))
 	}
 	if shouldSkipAgentHookForPolicy(policy) {
+		emitCheckpointPolicyBlocked(ctx, telemetry.CheckpointPolicyBlockedEvent{
+			Hook:                 "session-start",
+			HookType:             telemetry.PolicyBlockedHookTypeAgent,
+			Reason:               telemetry.PolicyBlockedReasonUnsupported,
+			Outcome:              telemetry.PolicyBlockedOutcomeSkipped,
+			Agent:                string(agentName),
+			CheckpointVersion:    policy.CheckpointVersion,
+			CheckpointMinVersion: policy.CheckpointMinVersion,
+		})
 		// Let the agent start; the warning explains that checkpoint capture is
 		// disabled until the CLI is upgraded.
 		return true, writeUnsupportedPolicySessionStartWarning(errW, ag, sessionStartPolicyWarning(policy))
@@ -238,15 +256,31 @@ func shouldSkipSessionStartForPolicy(ctx context.Context, errW io.Writer, ag age
 	return false, nil
 }
 
-func rejectUnsupportedCheckpointWritePolicy(ctx context.Context, errW io.Writer, worktreeRoot string) error {
+func rejectUnsupportedCheckpointWritePolicy(ctx context.Context, errW io.Writer, agentName types.AgentName, hook string, worktreeRoot string) error {
 	policy, err := agentHookPolicy(ctx, worktreeRoot)
 	if err != nil {
 		logging.Warn(ctx, "checkpoint policy read failed for agent hook",
 			slog.String("error", err.Error()))
+		emitCheckpointPolicyBlocked(ctx, telemetry.CheckpointPolicyBlockedEvent{
+			Hook:     hook,
+			HookType: telemetry.PolicyBlockedHookTypeAgent,
+			Reason:   telemetry.PolicyBlockedReasonUnreadable,
+			Outcome:  telemetry.PolicyBlockedOutcomeBlocked,
+			Agent:    string(agentName),
+		})
 		fmt.Fprint(errW, agentCheckpointCaptureDisabledReadErrorMessage(err))
 		return NewSilentError(err)
 	}
 	if shouldSkipAgentHookForPolicy(policy) {
+		emitCheckpointPolicyBlocked(ctx, telemetry.CheckpointPolicyBlockedEvent{
+			Hook:                 hook,
+			HookType:             telemetry.PolicyBlockedHookTypeAgent,
+			Reason:               telemetry.PolicyBlockedReasonUnsupported,
+			Outcome:              telemetry.PolicyBlockedOutcomeBlocked,
+			Agent:                string(agentName),
+			CheckpointVersion:    policy.CheckpointVersion,
+			CheckpointMinVersion: policy.CheckpointMinVersion,
+		})
 		fmt.Fprint(errW, agentCheckpointCaptureDisabledMessage(policy))
 		return NewSilentError(errUnsupportedCheckpointPolicy)
 	}
@@ -258,6 +292,17 @@ func hookWritesCheckpointData(eventType agent.EventType, claudePostTodoCheckpoin
 		return true
 	}
 	return eventType == agent.TurnEnd || eventType == agent.SubagentEnd
+}
+
+func agentWriteHookLabel(eventType agent.EventType, claudePostTodoCheckpointHook bool) string {
+	switch {
+	case claudePostTodoCheckpointHook:
+		return "post-todo"
+	case eventType == agent.SubagentEnd:
+		return "subagent-end"
+	default:
+		return "turn-end"
+	}
 }
 
 func sessionStartPolicyWarning(policy checkpointpolicy.Policy) string {

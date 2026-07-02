@@ -170,7 +170,7 @@ func TestPrePushWarnsAndSkipsCheckpointPushWhenPolicyUnsupported(t *testing.T) {
 		_ = repo.Close()
 	})
 	_, err = checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
+		CheckpointVersion:    "refs-v2",
 		CheckpointMinVersion: "branch-v1",
 	})
 	require.NoError(t, err)
@@ -210,7 +210,7 @@ func TestPrePushWarnsAndPushesWhenPolicyDiverged(t *testing.T) {
 	localHash, err := checkpointpolicy.WriteLocal(t.Context(), repo, baseHash, checkpointpolicy.DefaultPolicy())
 	require.NoError(t, err)
 	_, err = checkpointpolicy.WriteLocal(t.Context(), repo, baseHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
+		CheckpointVersion:    "refs-v2",
 		CheckpointMinVersion: "branch-v1",
 	})
 	require.NoError(t, err)
@@ -251,7 +251,7 @@ func TestSyncCheckpointPolicyForPrePushUsesPushTarget(t *testing.T) {
 	})
 
 	_, err = checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
+		CheckpointVersion:    "refs-v2",
 		CheckpointMinVersion: "branch-v1",
 	})
 	require.NoError(t, err)
@@ -277,7 +277,7 @@ func TestSyncCheckpointPolicyForPrePushUsesPushTarget(t *testing.T) {
 func writeUnsupportedCheckpointPolicy(t *testing.T, repo *git.Repository) {
 	t.Helper()
 	_, err := checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
+		CheckpointVersion:    "refs-v2",
 		CheckpointMinVersion: "branch-v1",
 	})
 	require.NoError(t, err)

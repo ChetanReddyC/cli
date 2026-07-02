@@ -26,13 +26,16 @@ type expertsAPIClient interface {
 	Post(ctx context.Context, path string, body any) (*http.Response, error)
 }
 
-var newExpertsAPIClient = func(ctx context.Context, insecureHTTP bool) (expertsAPIClient, error) {
-	return NewAuthenticatedAPIClient(ctx, insecureHTTP)
+// newExpertsAPIClient builds the entire-api cell client. fullName (owner/repo)
+// and/or ulid identify the repo so the client can route to the cell that hosts
+// it (see NewAuthenticatedEntireAPICellClient).
+var newExpertsAPIClient = func(ctx context.Context, insecureHTTP bool, fullName, ulid string) (expertsAPIClient, error) {
+	return NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, ulid)
 }
 
 func setExpertsClientFactoryForTest(
 	t interface{ Helper() },
-	fn func(context.Context, bool) (expertsAPIClient, error),
+	fn func(context.Context, bool, string, string) (expertsAPIClient, error),
 ) func() {
 	t.Helper()
 	prev := newExpertsAPIClient
@@ -267,7 +270,16 @@ func runExperts(ctx context.Context, out, errOut io.Writer, args []string, f *ex
 		}
 	}
 
-	client, err := newExpertsAPIClient(ctx, f.insecureHTTP)
+	// Identify the repo for cell routing: a ULID goes on the ulid arg, an
+	// owner/repo on the fullName arg. The client uses whichever is set to reach
+	// the cell that hosts the repo (falling back to home-jurisdiction routing).
+	cellFullName, cellULID := "", ""
+	if repoIsULID {
+		cellULID = repoOverride
+	} else {
+		cellFullName = repoFullName
+	}
+	client, err := newExpertsAPIClient(ctx, f.insecureHTTP, cellFullName, cellULID)
 	if err != nil {
 		return fmt.Errorf("create experts API client: %w", err)
 	}
@@ -288,12 +300,24 @@ func runExperts(ctx context.Context, out, errOut io.Writer, args []string, f *ex
 
 	if err := api.CheckResponse(resp); err != nil {
 		var httpErr *api.HTTPError
-		if errors.As(err, &httpErr) &&
-			httpErr.StatusCode == http.StatusServiceUnavailable &&
-			req.Query != nil &&
-			strings.Contains(strings.ToLower(httpErr.Message), "code search") {
-			fmt.Fprintln(errOut, "Code search is not configured for natural-language experts queries.")
-			return NewSilentError(err)
+		if errors.As(err, &httpErr) {
+			// A natural-language query needs code search on the cell. When it
+			// isn't available the cell returns 503 — sometimes with only a bare
+			// "Service Unavailable" body — so treat any 503 on a query as the
+			// code-search-unavailable case. Path scopes don't need code search
+			// and fall through to the generic error below.
+			if httpErr.StatusCode == http.StatusServiceUnavailable && req.Query != nil {
+				fmt.Fprintln(errOut, "Code search is not available for natural-language experts queries on this backend.")
+				return NewSilentError(err)
+			}
+			// entire-api returns 404 "repo not in this region" when the repo is
+			// homed in a different cell than the one reached. Surface that as an
+			// actionable region hint instead of the raw service-to-service text.
+			if httpErr.StatusCode == http.StatusNotFound &&
+				strings.Contains(strings.ToLower(httpErr.Message), "region") {
+				fmt.Fprintln(errOut, "This repo appears to be homed in a different Entire region than the cell this command reached; cross-region experts routing may be incomplete.")
+				return NewSilentError(err)
+			}
 		}
 		return fmt.Errorf("fetch experts: %w", err)
 	}
@@ -371,7 +395,7 @@ func resolveExpertsRepoID(ctx context.Context, client expertsAPIClient, fullName
 			return r.ID, nil
 		}
 	}
-	return "", fmt.Errorf("repo %q is not among your accessible repos on this API (is it onboarded to Entire, and do you have access?)", fullName)
+	return "", fmt.Errorf("repo %q was not found on the entire-api cell this command reached. It may be homed in another Entire region (cross-region experts routing may be incomplete), not onboarded to Entire, or outside your access", fullName)
 }
 
 type expertsRepoListItem struct {

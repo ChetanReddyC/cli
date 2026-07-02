@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -144,6 +145,27 @@ func (s *treeWriter) subtreeObjAt(rootTreeHash plumbing.Hash, path string) (*obj
 	return subtree, nil
 }
 
+// checkpointSubtreePath joins a checkpoint-relative git tree path from a base and
+// trailing segments using path.Join. Git tree paths are always "/"-separated, so
+// this uses the stdlib path package (never path/filepath, which would emit "\" on
+// Windows and corrupt tree keys). path.Join cleans separators, so base may be ""
+// (per-checkpoint-ref root), a clean dir ("a3/b2.../0"), or a trailing-slash dir
+// ("a3/b2.../"): checkpointSubtreePath("", "0", "metadata.json") == "0/metadata.json"
+// and checkpointSubtreePath("a3/b2.../", "0", "metadata.json") == "a3/b2.../0/metadata.json".
+// Callers therefore need not maintain the trailing-slash invariant by hand.
+func checkpointSubtreePath(base string, segs ...string) string {
+	if len(segs) == 0 {
+		// path.Join with no segments would clean a "" base to "." — an invalid
+		// git tree key. At the ref root the correct key is ""; for a non-empty
+		// base, clean it to keep the trailing-slash-stripping behavior.
+		if base == "" {
+			return ""
+		}
+		return path.Clean(base)
+	}
+	return path.Join(append([]string{base}, segs...)...)
+}
+
 // flattenExisting flattens a checkpoint's current subtree into a path->entry map
 // keyed under basePath, so the per-checkpoint write helpers (which build paths as
 // basePath+"<n>/<file>") see the existing files. basePath is "" for the
@@ -232,7 +254,7 @@ func (s *treeWriter) applyAttributionBackfill(ctx context.Context, existing *obj
 		return plumbing.ZeroHash, err
 	}
 
-	rootMetadataPath := basePath + paths.MetadataFileName
+	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	entry, exists := entries[rootMetadataPath]
 	if !exists {
 		return plumbing.ZeroHash, ErrCheckpointNotFound
@@ -271,7 +293,7 @@ func (s *treeWriter) applySummaryBackfill(ctx context.Context, existing *object.
 		return plumbing.ZeroHash, "", err
 	}
 
-	rootMetadataPath := basePath + paths.MetadataFileName
+	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	entry, exists := entries[rootMetadataPath]
 	if !exists {
 		return plumbing.ZeroHash, "", ErrCheckpointNotFound
@@ -284,7 +306,7 @@ func (s *treeWriter) applySummaryBackfill(ctx context.Context, existing *object.
 
 	// Find the latest session's metadata path (0-based indexing)
 	latestIndex := len(checkpointSummary.Sessions) - 1
-	sessionMetadataPath := fmt.Sprintf("%s%d/%s", basePath, latestIndex, paths.MetadataFileName)
+	sessionMetadataPath := checkpointSubtreePath(basePath, strconv.Itoa(latestIndex), paths.MetadataFileName)
 	sessionEntry, exists := entries[sessionMetadataPath]
 	if !exists {
 		return plumbing.ZeroHash, "", fmt.Errorf("session metadata not found at %s", sessionMetadataPath)
@@ -327,7 +349,7 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 		return plumbing.ZeroHash, err
 	}
 
-	rootMetadataPath := basePath + paths.MetadataFileName
+	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	entry, exists := entries[rootMetadataPath]
 	if !exists {
 		return plumbing.ZeroHash, ErrCheckpointNotFound
@@ -345,7 +367,7 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 	sessionIndex := -1
 	var sessionMeta *Metadata
 	for i := range len(checkpointSummary.Sessions) {
-		metaPath := fmt.Sprintf("%s%d/%s", basePath, i, paths.MetadataFileName)
+		metaPath := checkpointSubtreePath(basePath, strconv.Itoa(i), paths.MetadataFileName)
 		if metaEntry, metaExists := entries[metaPath]; metaExists {
 			meta, metaErr := s.readMetadataFromBlob(metaEntry.Hash)
 			if metaErr == nil && meta.SessionID == opts.SessionID {
@@ -363,13 +385,13 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 			slog.String("checkpoint_id", string(opts.CheckpointID)),
 			slog.Int("fallback_index", sessionIndex),
 		)
-		metaPath := fmt.Sprintf("%s%d/%s", basePath, sessionIndex, paths.MetadataFileName)
+		metaPath := checkpointSubtreePath(basePath, strconv.Itoa(sessionIndex), paths.MetadataFileName)
 		if metaEntry, metaExists := entries[metaPath]; metaExists {
 			sessionMeta, _ = s.readMetadataFromBlob(metaEntry.Hash) //nolint:errcheck // best-effort; nil meta means start 0
 		}
 	}
 
-	sessionPath := fmt.Sprintf("%s%d/", basePath, sessionIndex)
+	sessionDir := checkpointSubtreePath(basePath, strconv.Itoa(sessionIndex))
 
 	// Replace transcript (full replace, not append).
 	// Transcript is pre-redacted by the caller (enforced by RedactedBytes type).
@@ -382,7 +404,7 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 				agentType = sessionMeta.Agent
 			}
 		}
-		rewrote, err := s.replaceTranscript(ctx, opts.Transcript, agentType, startLine, opts.PrecomputedBlobs, sessionPath, entries)
+		rewrote, err := s.replaceTranscript(ctx, opts.Transcript, agentType, startLine, opts.PrecomputedBlobs, sessionDir, entries)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to replace transcript: %w", err)
 		}
@@ -397,7 +419,7 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 			// transcript: write the new set (clearing any stale ones), so a finalize
 			// that re-externalizes matches its placeholders and one that produces an
 			// inline transcript leaves no orphaned blobs.
-			manifestPath, err := s.writeAssetsForBackfill(opts, sessionPath, entries)
+			manifestPath, err := s.writeAssetsForBackfill(opts, sessionDir, entries)
 			if err != nil {
 				return plumbing.ZeroHash, fmt.Errorf("failed to write assets: %w", err)
 			}
@@ -408,8 +430,8 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 			// was skipped then and succeeds now), so re-derive both pointers from the
 			// tree and rewrite the root summary once when either changed.
 			compactPath := ""
-			if _, ok := entries[sessionPath+paths.CompactTranscriptFileName]; ok {
-				compactPath = "/" + sessionPath + paths.CompactTranscriptFileName
+			if _, ok := entries[checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)]; ok {
+				compactPath = "/" + checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)
 			}
 			sess := &checkpointSummary.Sessions[sessionIndex]
 			if sess.CompactTranscript != compactPath || sess.AssetsManifest != manifestPath {
@@ -439,15 +461,16 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to create prompt blob: %w", err)
 		}
-		entries[sessionPath+paths.PromptFileName] = object.TreeEntry{
-			Name: sessionPath + paths.PromptFileName,
+		promptPath := checkpointSubtreePath(sessionDir, paths.PromptFileName)
+		entries[promptPath] = object.TreeEntry{
+			Name: promptPath,
 			Mode: filemode.Regular,
 			Hash: blobHash,
 		}
 	}
 
 	if len(opts.SkillEvents) > 0 {
-		if err := s.replaceSkillEvents(opts.SkillEvents, sessionPath, entries); err != nil {
+		if err := s.replaceSkillEvents(opts.SkillEvents, sessionDir, entries); err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to replace skill events: %w", err)
 		}
 	}
@@ -457,16 +480,16 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 
 // writeTaskCheckpointEntries writes task-specific checkpoint entries and returns the task metadata path.
 func (s *treeWriter) writeTaskCheckpointEntries(ctx context.Context, opts WriteOptions, basePath string, entries map[string]object.TreeEntry) (string, error) {
-	taskPath := basePath + "tasks/" + opts.ToolUseID + "/"
+	taskDir := checkpointSubtreePath(basePath, "tasks", opts.ToolUseID)
 
 	if opts.IsIncremental {
-		return s.writeIncrementalTaskCheckpoint(opts, taskPath, entries)
+		return s.writeIncrementalTaskCheckpoint(opts, taskDir, entries)
 	}
-	return s.writeFinalTaskCheckpoint(ctx, opts, taskPath, entries)
+	return s.writeFinalTaskCheckpoint(ctx, opts, taskDir, entries)
 }
 
 // writeIncrementalTaskCheckpoint writes an incremental checkpoint file during task execution.
-func (s *treeWriter) writeIncrementalTaskCheckpoint(opts WriteOptions, taskPath string, entries map[string]object.TreeEntry) (string, error) {
+func (s *treeWriter) writeIncrementalTaskCheckpoint(opts WriteOptions, taskDir string, entries map[string]object.TreeEntry) (string, error) {
 	incData, err := redact.JSONLBytes(opts.IncrementalData)
 	if err != nil {
 		return "", fmt.Errorf("failed to redact incremental checkpoint: %w", err)
@@ -487,7 +510,7 @@ func (s *treeWriter) writeIncrementalTaskCheckpoint(opts WriteOptions, taskPath 
 	}
 
 	cpFilename := fmt.Sprintf("%03d-%s.json", opts.IncrementalSequence, opts.ToolUseID)
-	cpPath := taskPath + "checkpoints/" + cpFilename
+	cpPath := checkpointSubtreePath(taskDir, "checkpoints", cpFilename)
 	entries[cpPath] = object.TreeEntry{
 		Name: cpPath,
 		Mode: filemode.Regular,
@@ -497,7 +520,7 @@ func (s *treeWriter) writeIncrementalTaskCheckpoint(opts WriteOptions, taskPath 
 }
 
 // writeFinalTaskCheckpoint writes the final checkpoint.json and subagent transcript.
-func (s *treeWriter) writeFinalTaskCheckpoint(ctx context.Context, opts WriteOptions, taskPath string, entries map[string]object.TreeEntry) (string, error) {
+func (s *treeWriter) writeFinalTaskCheckpoint(ctx context.Context, opts WriteOptions, taskDir string, entries map[string]object.TreeEntry) (string, error) {
 	checkpoint := taskCheckpointData{
 		SessionID:      opts.SessionID,
 		ToolUseID:      opts.ToolUseID,
@@ -513,7 +536,7 @@ func (s *treeWriter) writeFinalTaskCheckpoint(ctx context.Context, opts WriteOpt
 		return "", fmt.Errorf("failed to create task checkpoint blob: %w", err)
 	}
 
-	checkpointFile := taskPath + "checkpoint.json"
+	checkpointFile := checkpointSubtreePath(taskDir, "checkpoint.json")
 	entries[checkpointFile] = object.TreeEntry{
 		Name: checkpointFile,
 		Mode: filemode.Regular,
@@ -539,7 +562,7 @@ func (s *treeWriter) writeFinalTaskCheckpoint(ctx context.Context, opts WriteOpt
 
 			agentBlobHash, agentBlobErr := CreateBlobFromContent(s.repo, agentContent)
 			if agentBlobErr == nil {
-				agentPath := taskPath + "agent-" + opts.AgentID + ".jsonl"
+				agentPath := checkpointSubtreePath(taskDir, "agent-"+opts.AgentID+".jsonl")
 				entries[agentPath] = object.TreeEntry{
 					Name: agentPath,
 					Mode: filemode.Regular,
@@ -549,8 +572,8 @@ func (s *treeWriter) writeFinalTaskCheckpoint(ctx context.Context, opts WriteOpt
 		}
 	}
 
-	// Return task path without trailing slash
-	return taskPath[:len(taskPath)-1], nil
+	// taskDir is already a clean path (no trailing slash).
+	return taskDir, nil
 }
 
 // writeStandardCheckpointEntries writes session files to numbered subdirectories and
@@ -571,7 +594,7 @@ func (s *treeWriter) writeFinalTaskCheckpoint(ctx context.Context, opts WriteOpt
 func (s *treeWriter) writeStandardCheckpointEntries(ctx context.Context, opts WriteOptions, basePath string, entries map[string]object.TreeEntry, checkpointVersion string) error {
 	// Read existing summary to get current session count
 	var existingSummary *CheckpointSummary
-	metadataPath := basePath + paths.MetadataFileName
+	metadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	if entry, exists := entries[metadataPath]; exists {
 		existing, err := s.readSummaryFromBlob(entry.Hash)
 		if err == nil {
@@ -596,7 +619,7 @@ func (s *treeWriter) writeStandardCheckpointEntries(ctx context.Context, opts Wr
 	// We read and capture BEFORE writeSessionToSubdirectory clears the subtree,
 	// otherwise we'd only ever see our own write.
 	if sessionIndex == 0 {
-		if entry, exists := entries[fmt.Sprintf("%s0/%s", basePath, paths.MetadataFileName)]; exists {
+		if entry, exists := entries[checkpointSubtreePath(basePath, "0", paths.MetadataFileName)]; exists {
 			if existingMeta, readErr := s.readMetadataFromBlob(entry.Hash); readErr == nil && existingMeta.SessionID != opts.SessionID {
 				logging.Error(ctx, "refusing checkpoint write: session 0 holds a different sessionID",
 					slog.String("checkpoint_id", opts.CheckpointID.String()),
@@ -612,15 +635,15 @@ func (s *treeWriter) writeStandardCheckpointEntries(ctx context.Context, opts Wr
 	}
 
 	// Write session files to numbered subdirectory
-	sessionPath := fmt.Sprintf("%s%d/", basePath, sessionIndex)
-	sessionFilePaths, err := s.writeSessionToSubdirectory(ctx, opts, sessionPath, entries)
+	sessionDir := checkpointSubtreePath(basePath, strconv.Itoa(sessionIndex))
+	sessionFilePaths, err := s.writeSessionToSubdirectory(ctx, opts, sessionDir, entries)
 	if err != nil {
 		return err
 	}
 
 	// Copy additional metadata files from directory if specified (to session subdirectory)
 	if opts.MetadataDir != "" {
-		if err := s.copyMetadataDir(ctx, opts.MetadataDir, sessionPath, entries); err != nil {
+		if err := s.copyMetadataDir(ctx, opts.MetadataDir, sessionDir, entries); err != nil {
 			return fmt.Errorf("failed to copy metadata directory: %w", err)
 		}
 	}
@@ -644,7 +667,7 @@ func (s *treeWriter) writeStandardCheckpointEntries(ctx context.Context, opts Wr
 	// metadata with a DIFFERENT sessionID, that's the exact bug shape.
 	// Loud WARN so we get a log trace instead of only the symptom.
 	if sessionIndex == 0 {
-		path := fmt.Sprintf("%s0/%s", basePath, paths.MetadataFileName)
+		path := checkpointSubtreePath(basePath, "0", paths.MetadataFileName)
 		if entry, exists := entries[path]; exists {
 			if existingMeta, readErr := s.readMetadataFromBlob(entry.Hash); readErr == nil && existingMeta.SessionID != opts.SessionID {
 				logging.Warn(ctx, "checkpoint write overwrites session 0 with a different sessionID — potential overwrite regression",
@@ -662,13 +685,14 @@ func (s *treeWriter) writeStandardCheckpointEntries(ctx context.Context, opts Wr
 
 // writeSessionToSubdirectory writes a single session's files to a numbered subdirectory.
 // Returns the absolute file paths from the git tree root for the sessions map.
-func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteOptions, sessionPath string, entries map[string]object.TreeEntry) (SessionFilePaths, error) {
+func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteOptions, sessionDir string, entries map[string]object.TreeEntry) (SessionFilePaths, error) {
 	filePaths := SessionFilePaths{}
 
-	// Clear any existing entries at this path so stale files from a previous
-	// write (e.g. prompt.txt) don't persist on overwrite.
+	// Clear any existing entries under this session dir so stale files from a
+	// previous write (e.g. prompt.txt) don't persist on overwrite. Match on the
+	// dir plus "/" so a sibling session (e.g. "10") isn't caught by "1".
 	for key := range entries {
-		if strings.HasPrefix(key, sessionPath) {
+		if strings.HasPrefix(key, sessionDir+"/") {
 			delete(entries, key)
 		}
 	}
@@ -676,22 +700,22 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 	// Write transcript. Transcript points at full.jsonl (CLI
 	// rewind/resume/explain read it by filename); the compact transcript.jsonl,
 	// when written, is also pushed and pointed at by CompactTranscript.
-	wroteTranscript, compactTranscriptStart, err := s.writeTranscript(ctx, opts, sessionPath, entries)
+	wroteTranscript, compactTranscriptStart, err := s.writeTranscript(ctx, opts, sessionDir, entries)
 	if err != nil {
 		return filePaths, err
 	}
 	if wroteTranscript {
-		filePaths.Transcript = "/" + sessionPath + paths.TranscriptFileName
-		filePaths.ContentHash = "/" + sessionPath + paths.ContentHashFileName
+		filePaths.Transcript = "/" + checkpointSubtreePath(sessionDir, paths.TranscriptFileName)
+		filePaths.ContentHash = "/" + checkpointSubtreePath(sessionDir, paths.ContentHashFileName)
 		// Point at the compact transcript only when it was actually written
 		// (best-effort), deriving from the tree entry so the path can't dangle.
-		if _, ok := entries[sessionPath+paths.CompactTranscriptFileName]; ok {
-			filePaths.CompactTranscript = "/" + sessionPath + paths.CompactTranscriptFileName
+		if _, ok := entries[checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)]; ok {
+			filePaths.CompactTranscript = "/" + checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)
 		}
 	}
 
 	// Write externalized image assets (raw binary blobs + manifest), when present.
-	manifestPath, err := s.writeAssets(opts.Assets, sessionPath, entries)
+	manifestPath, err := s.writeAssets(opts.Assets, sessionDir, entries)
 	if err != nil {
 		return filePaths, err
 	}
@@ -705,12 +729,13 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		if err != nil {
 			return filePaths, err
 		}
-		entries[sessionPath+paths.PromptFileName] = object.TreeEntry{
-			Name: sessionPath + paths.PromptFileName,
+		promptPath := checkpointSubtreePath(sessionDir, paths.PromptFileName)
+		entries[promptPath] = object.TreeEntry{
+			Name: promptPath,
 			Mode: filemode.Regular,
 			Hash: blobHash,
 		}
-		filePaths.Prompt = "/" + sessionPath + paths.PromptFileName
+		filePaths.Prompt = "/" + promptPath
 	}
 
 	// Write session-level metadata.json (Metadata with all fields including initial_attribution)
@@ -755,123 +780,15 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 	if err != nil {
 		return filePaths, err
 	}
-	entries[sessionPath+paths.MetadataFileName] = object.TreeEntry{
-		Name: sessionPath + paths.MetadataFileName,
+	sessionMetadataPath := checkpointSubtreePath(sessionDir, paths.MetadataFileName)
+	entries[sessionMetadataPath] = object.TreeEntry{
+		Name: sessionMetadataPath,
 		Mode: filemode.Regular,
 		Hash: metadataHash,
 	}
-	filePaths.Metadata = "/" + sessionPath + paths.MetadataFileName
+	filePaths.Metadata = "/" + sessionMetadataPath
 
 	return filePaths, nil
-}
-
-// assetManifestEntry describes one externalized asset in assets/manifest.json.
-// Size and SHA256 are descriptive metadata for external tooling and audits; they
-// are not used on reinject (git content-addresses the blobs, which already
-// guarantees their integrity on read).
-type assetManifestEntry struct {
-	Name      string `json:"name"`
-	MediaType string `json:"media_type,omitempty"`
-	Size      int    `json:"size"`
-	SHA256    string `json:"sha256"`
-}
-
-// writeAssetsForBackfill writes the update's assets, but preserves any
-// already-stored assets when the update carries none AND the update opts into
-// preservation (UpdateOptions.PreserveAssetsWhenEmpty). This guards a best-effort
-// sidecar capture (e.g. Cursor's sqlite3 store read) that transiently yields
-// nothing at finalize from wiping images a prior CondenseSession successfully
-// stored: leaving the existing assets/ subtree untouched is strictly safer than
-// clearing it. Returns the (possibly pre-existing) manifest path.
-func (s *treeWriter) writeAssetsForBackfill(opts UpdateOptions, sessionPath string, entries map[string]object.TreeEntry) (string, error) {
-	if len(opts.Assets) == 0 && opts.PreserveAssetsWhenEmpty {
-		if _, ok := entries[sessionPath+paths.AssetsManifestFile]; ok {
-			return "/" + sessionPath + paths.AssetsManifestFile, nil
-		}
-		return "", nil
-	}
-	return s.writeAssets(opts.Assets, sessionPath, entries)
-}
-
-// writeAssets stores each externalized transcript asset as a raw binary blob
-// under the session's assets/ folder, plus an assets/manifest.json index, in the
-// same tree. Returns the manifest path ("" when there are no assets). git
-// content-addresses the blobs, so identical images dedupe across checkpoints.
-//
-// It first clears any assets already present under the session's assets/ folder,
-// so a re-write (backfill/finalize) replaces rather than accumulates, and an
-// empty asset set leaves no orphaned blobs behind a now-inline transcript.
-func (s *treeWriter) writeAssets(assets []TranscriptAsset, sessionPath string, entries map[string]object.TreeEntry) (string, error) {
-	assetsPrefix := sessionPath + paths.AssetsDir
-	for key := range entries {
-		if strings.HasPrefix(key, assetsPrefix) {
-			delete(entries, key)
-		}
-	}
-	if len(assets) == 0 {
-		return "", nil
-	}
-	manifest := struct {
-		Version int                  `json:"version"`
-		Assets  []assetManifestEntry `json:"assets"`
-	}{Version: 1}
-	for _, a := range assets {
-		blobHash, err := CreateBlobFromContent(s.repo, a.Data)
-		if err != nil {
-			return "", err
-		}
-		p := sessionPath + paths.AssetsDir + a.Name
-		entries[p] = object.TreeEntry{Name: p, Mode: filemode.Regular, Hash: blobHash}
-		sum := sha256.Sum256(a.Data)
-		manifest.Assets = append(manifest.Assets, assetManifestEntry{
-			Name: a.Name, MediaType: a.MediaType, Size: len(a.Data), SHA256: hex.EncodeToString(sum[:]),
-		})
-	}
-	manifestJSON, err := jsonutil.MarshalIndentWithNewline(manifest, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("marshal assets manifest: %w", err)
-	}
-	manifestHash, err := CreateBlobFromContent(s.repo, manifestJSON)
-	if err != nil {
-		return "", err
-	}
-	mp := sessionPath + paths.AssetsManifestFile
-	entries[mp] = object.TreeEntry{Name: mp, Mode: filemode.Regular, Hash: manifestHash}
-	return "/" + mp, nil
-}
-
-// reinjectAssets restores externalized images into a transcript on read, so the
-// returned bytes match what was stored. Best-effort and gated on placeholder
-// presence, not on any config flag: an asset it can't load is left as a
-// placeholder rather than failing the read.
-func reinjectAssets(sessionTree *FetchingTree, agentType types.AgentType, transcript []byte) []byte {
-	if !imageextract.HasPlaceholders(transcript) {
-		return transcript
-	}
-	codec := imageextract.CodecFor(agentType)
-	if codec == nil {
-		return transcript
-	}
-	// No blob-integrity check is needed here: git content-addresses every asset
-	// blob, so a corrupt/truncated fetch fails object verification and Contents()
-	// errors out (leaving the placeholder). The manifest's sha256 is external
-	// metadata, not a second integrity gate — and since writeAssets derives both
-	// the blob and the sha256 from the same bytes, they can never disagree.
-	out, err := codec.ReinjectImages(transcript, func(name string) (agent.CompactedTranscriptAsset, bool) {
-		f, ferr := sessionTree.File(paths.AssetsDir + name)
-		if ferr != nil {
-			return agent.CompactedTranscriptAsset{}, false
-		}
-		content, cerr := f.Contents()
-		if cerr != nil {
-			return agent.CompactedTranscriptAsset{}, false
-		}
-		return agent.CompactedTranscriptAsset{Name: name, Data: []byte(content)}, true
-	})
-	if err != nil {
-		return transcript
-	}
-	return out
 }
 
 // writeCheckpointSummary writes the root-level CheckpointSummary with aggregated statistics.
@@ -889,7 +806,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	// was imported (Kind == "imported"). Compared as a literal because the
 	// session package imports checkpoint, so we can't reference its constant.
 	imported := opts.Kind == "imported"
-	rootMetadataPath := basePath + paths.MetadataFileName
+	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
 		if readErr == nil {
@@ -933,8 +850,8 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	if err != nil {
 		return err
 	}
-	entries[basePath+paths.MetadataFileName] = object.TreeEntry{
-		Name: basePath + paths.MetadataFileName,
+	entries[rootMetadataPath] = object.TreeEntry{
+		Name: rootMetadataPath,
 		Mode: filemode.Regular,
 		Hash: metadataHash,
 	}
@@ -988,7 +905,7 @@ func (s *treeWriter) findSessionIndex(ctx context.Context, basePath string, exis
 		return 0
 	}
 	for i := range len(existingSummary.Sessions) {
-		path := fmt.Sprintf("%s%d/%s", basePath, i, paths.MetadataFileName)
+		path := checkpointSubtreePath(basePath, strconv.Itoa(i), paths.MetadataFileName)
 		entry, exists := entries[path]
 		if !exists {
 			continue
@@ -1017,7 +934,7 @@ func (s *treeWriter) reaggregateFromEntries(basePath string, sessionCount int, e
 	var totalTokens *agent.TokenUsage
 
 	for i := range sessionCount {
-		path := fmt.Sprintf("%s%d/%s", basePath, i, paths.MetadataFileName)
+		path := checkpointSubtreePath(basePath, strconv.Itoa(i), paths.MetadataFileName)
 		entry, exists := entries[path]
 		if !exists {
 			return 0, nil, nil, fmt.Errorf("session %d metadata not found at %s", i, path)
@@ -1109,7 +1026,7 @@ func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 // empty, nothing written); compactStart is the line offset of this checkpoint's
 // slice within the compact transcript, to record as CompactTranscriptStart, or
 // nil when no compact transcript was produced.
-func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, basePath string, entries map[string]object.TreeEntry) (bool, *int, error) {
+func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, sessionDir string, entries map[string]object.TreeEntry) (bool, *int, error) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	transcriptBytes := opts.Transcript.Bytes()
 
@@ -1154,7 +1071,7 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, bas
 	blobStart := time.Now()
 	blobCtx, writeTranscriptBlobsSpan := perf.Start(chunkCtx, "write_transcript_blobs")
 	for i, chunk := range chunks {
-		chunkPath := basePath + agent.ChunkFileName(paths.TranscriptFileName, i)
+		chunkPath := checkpointSubtreePath(sessionDir, agent.ChunkFileName(paths.TranscriptFileName, i))
 		blobHash, err := CreateBlobFromContent(s.repo, chunk)
 		if err != nil {
 			writeTranscriptBlobsSpan.RecordError(err)
@@ -1180,8 +1097,9 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, bas
 		contentHashSpan.End()
 		return false, nil, err
 	}
-	entries[basePath+paths.ContentHashFileName] = object.TreeEntry{
-		Name: basePath + paths.ContentHashFileName,
+	contentHashPath := checkpointSubtreePath(sessionDir, paths.ContentHashFileName)
+	entries[contentHashPath] = object.TreeEntry{
+		Name: contentHashPath,
 		Mode: filemode.Regular,
 		Hash: hashBlob,
 	}
@@ -1192,7 +1110,7 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, bas
 	// full.jsonl, which the CLI read paths resolve by filename. compactStart is
 	// the line offset of this checkpoint's slice within the full compact output,
 	// recorded into session metadata so downstream readers can segment it.
-	compactStart := s.writeCompactTranscript(logCtx, opts.Agent, opts.CheckpointTranscriptStart, transcriptBytes, basePath, entries)
+	compactStart := s.writeCompactTranscript(logCtx, opts.Agent, opts.CheckpointTranscriptStart, transcriptBytes, sessionDir, entries)
 
 	logging.Debug(logCtx, "write transcript timings",
 		slog.String("session_id", opts.SessionID),
@@ -1218,7 +1136,7 @@ func compactAgentName(agentType types.AgentType) string {
 }
 
 // writeCompactTranscript converts the pre-redacted full transcript into the
-// compact transcript.jsonl format and records it at sessionPath in the tree.
+// compact transcript.jsonl format and records it under sessionDir in the tree.
 // The whole session is compacted (so each checkpoint is self-contained); the
 // returned offset is the line in the compact output at which this checkpoint's
 // data begins (derived from startLine), to be stored as
@@ -1230,7 +1148,7 @@ func compactAgentName(agentType types.AgentType) string {
 // already be sanitized for the agent (e.g. Codex portable-transcript
 // sanitization); callers sanitize before calling so the expensive pass runs
 // exactly once.
-func (s *treeWriter) writeCompactTranscript(ctx context.Context, agentType types.AgentType, startLine int, transcriptBytes []byte, sessionPath string, entries map[string]object.TreeEntry) *int {
+func (s *treeWriter) writeCompactTranscript(ctx context.Context, agentType types.AgentType, startLine int, transcriptBytes []byte, sessionDir string, entries map[string]object.TreeEntry) *int {
 	compactCtx, compactSpan := perf.Start(ctx, "write_compact_transcript")
 	defer compactSpan.End()
 
@@ -1269,7 +1187,7 @@ func (s *treeWriter) writeCompactTranscript(ctx context.Context, agentType types
 		)
 		return nil
 	}
-	compactPath := sessionPath + paths.CompactTranscriptFileName
+	compactPath := checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName)
 	entries[compactPath] = object.TreeEntry{
 		Name: compactPath,
 		Mode: filemode.Regular,
@@ -1436,6 +1354,16 @@ func (s *GitStore) Read(ctx context.Context, checkpointID id.CheckpointID) (*Che
 		return nil, nil //nolint:nilnil,nilerr // Checkpoint directory not found
 	}
 
+	return readSummaryFromCheckpointTree(checkpointTree)
+}
+
+// readSummaryFromCheckpointTree reads the root CheckpointSummary from a checkpoint
+// tree (the tree holding metadata.json plus the numbered session dirs). It is
+// shared by the git-branch store (which descends to <shard>/<id>) and the
+// git-refs store (whose ref tree is the checkpoint tree directly). It returns
+// (nil, nil) when metadata.json is absent so callers normalize a missing
+// checkpoint to ErrCheckpointNotFound via the contract.
+func readSummaryFromCheckpointTree(checkpointTree *FetchingTree) (*CheckpointSummary, error) {
 	// Read root metadata.json as CheckpointSummary (auto-fetches blob if needed)
 	metadataFile, err := checkpointTree.File(paths.MetadataFileName)
 	if err != nil {
@@ -1488,7 +1416,12 @@ func (s *GitStore) ReadSessionMetadata(ctx context.Context, checkpointID id.Chec
 	if err != nil {
 		return nil, err
 	}
+	return readSessionMetadataFromTree(sessionTree, sessionIndex)
+}
 
+// readSessionMetadataFromTree parses metadata.json from a session tree. Shared by
+// both persistent backends, which differ only in how they navigate to the tree.
+func readSessionMetadataFromTree(sessionTree *FetchingTree, sessionIndex int) (*Metadata, error) {
 	metadataFile, err := sessionTree.File(paths.MetadataFileName)
 	if err != nil {
 		return nil, fmt.Errorf("metadata.json not found for session %d: %w", sessionIndex, err)
@@ -1514,18 +1447,13 @@ func (s *GitStore) ReadSessionMetadataAndPrompts(ctx context.Context, checkpoint
 	if err != nil {
 		return nil, "", err
 	}
+	return readSessionMetadataAndPromptsFromTree(sessionTree, sessionIndex)
+}
 
-	metadataFile, err := sessionTree.File(paths.MetadataFileName)
+func readSessionMetadataAndPromptsFromTree(sessionTree *FetchingTree, sessionIndex int) (*Metadata, string, error) {
+	metadata, err := readSessionMetadataFromTree(sessionTree, sessionIndex)
 	if err != nil {
-		return nil, "", fmt.Errorf("metadata.json not found for session %d: %w", sessionIndex, err)
-	}
-	metadataContent, err := metadataFile.Contents()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to read session metadata: %w", err)
-	}
-	var metadata Metadata
-	if err := json.Unmarshal([]byte(metadataContent), &metadata); err != nil {
-		return nil, "", fmt.Errorf("failed to parse session metadata: %w", err)
+		return nil, "", err
 	}
 
 	var prompts string
@@ -1535,7 +1463,7 @@ func (s *GitStore) ReadSessionMetadataAndPrompts(ctx context.Context, checkpoint
 		}
 	}
 
-	return &metadata, prompts, nil
+	return metadata, prompts, nil
 }
 
 func (s *GitStore) ReadSessionPrompts(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (string, error) {
@@ -1543,7 +1471,10 @@ func (s *GitStore) ReadSessionPrompts(ctx context.Context, checkpointID id.Check
 	if err != nil {
 		return "", err
 	}
+	return readSessionPromptsFromTree(sessionTree)
+}
 
+func readSessionPromptsFromTree(sessionTree *FetchingTree) (string, error) {
 	file, err := sessionTree.File(paths.PromptFileName)
 	if err != nil {
 		return "", nil //nolint:nilerr // Missing prompt.txt means no recorded prompts.
@@ -1565,7 +1496,10 @@ func (s *GitStore) ReadSessionContent(ctx context.Context, checkpointID id.Check
 	if err != nil {
 		return nil, err
 	}
+	return readSessionContentFromTree(ctx, sessionTree)
+}
 
+func readSessionContentFromTree(ctx context.Context, sessionTree *FetchingTree) (*SessionContent, error) {
 	result := &SessionContent{}
 
 	// Read session-specific metadata (auto-fetches blob if needed)
@@ -1882,8 +1816,8 @@ func (s *GitStore) backfillTranscript(ctx context.Context, opts UpdateOptions) e
 // mutate, and rewrites the blob. Reading from the blob (rather than an in-memory
 // copy) keeps it correct when several finalize-path steps mutate the same
 // metadata in sequence — each sees the prior step's changes.
-func (s *treeWriter) updateSessionMetadata(sessionPath string, entries map[string]object.TreeEntry, mutate func(*Metadata)) error {
-	metadataPath := sessionPath + paths.MetadataFileName
+func (s *treeWriter) updateSessionMetadata(sessionDir string, entries map[string]object.TreeEntry, mutate func(*Metadata)) error {
+	metadataPath := checkpointSubtreePath(sessionDir, paths.MetadataFileName)
 	entry, exists := entries[metadataPath]
 	if !exists {
 		return fmt.Errorf("session metadata not found at %s", metadataPath)
@@ -1940,12 +1874,122 @@ func (s *treeWriter) setCompactTranscriptStart(sessionPath string, start *int, e
 // reuse precomputed blobs: each checkpoint in a turn shares the full
 // transcript but has its own start offset, so the compact content differs per
 // checkpoint.
+// assetManifestEntry describes one externalized asset in assets/manifest.json.
+// Size and SHA256 are descriptive metadata for external tooling and audits; they
+// are not used on reinject (git content-addresses the blobs, which already
+// guarantees their integrity on read).
+type assetManifestEntry struct {
+	Name      string `json:"name"`
+	MediaType string `json:"media_type,omitempty"`
+	Size      int    `json:"size"`
+	SHA256    string `json:"sha256"`
+}
+
+// writeAssetsForBackfill writes the update's assets, but preserves any
+// already-stored assets when the update carries none AND the update opts into
+// preservation (UpdateOptions.PreserveAssetsWhenEmpty). This guards a best-effort
+// sidecar capture (e.g. Cursor's sqlite3 store read) that transiently yields
+// nothing at finalize from wiping images a prior CondenseSession successfully
+// stored: leaving the existing assets/ subtree untouched is strictly safer than
+// clearing it. Returns the (possibly pre-existing) manifest path.
+func (s *treeWriter) writeAssetsForBackfill(opts UpdateOptions, sessionDir string, entries map[string]object.TreeEntry) (string, error) {
+	if len(opts.Assets) == 0 && opts.PreserveAssetsWhenEmpty {
+		manifestKey := checkpointSubtreePath(sessionDir, paths.AssetsManifestFile)
+		if _, ok := entries[manifestKey]; ok {
+			return "/" + manifestKey, nil
+		}
+		return "", nil
+	}
+	return s.writeAssets(opts.Assets, sessionDir, entries)
+}
+
+// writeAssets stores each externalized transcript asset as a raw binary blob
+// under the session's assets/ folder, plus an assets/manifest.json index, in the
+// same tree. Returns the manifest path ("" when there are no assets). git
+// content-addresses the blobs, so identical images dedupe across checkpoints.
+//
+// It first clears any assets already present under the session's assets/ folder,
+// so a re-write (backfill/finalize) replaces rather than accumulates, and an
+// empty asset set leaves no orphaned blobs behind a now-inline transcript.
+func (s *treeWriter) writeAssets(assets []TranscriptAsset, sessionDir string, entries map[string]object.TreeEntry) (string, error) {
+	assetsPrefix := checkpointSubtreePath(sessionDir, paths.AssetsDirName) + "/"
+	for key := range entries {
+		if strings.HasPrefix(key, assetsPrefix) {
+			delete(entries, key)
+		}
+	}
+	if len(assets) == 0 {
+		return "", nil
+	}
+	manifest := struct {
+		Version int                  `json:"version"`
+		Assets  []assetManifestEntry `json:"assets"`
+	}{Version: 1}
+	for _, a := range assets {
+		blobHash, err := CreateBlobFromContent(s.repo, a.Data)
+		if err != nil {
+			return "", err
+		}
+		p := checkpointSubtreePath(sessionDir, paths.AssetsDirName, a.Name)
+		entries[p] = object.TreeEntry{Name: p, Mode: filemode.Regular, Hash: blobHash}
+		sum := sha256.Sum256(a.Data)
+		manifest.Assets = append(manifest.Assets, assetManifestEntry{
+			Name: a.Name, MediaType: a.MediaType, Size: len(a.Data), SHA256: hex.EncodeToString(sum[:]),
+		})
+	}
+	manifestJSON, err := jsonutil.MarshalIndentWithNewline(manifest, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal assets manifest: %w", err)
+	}
+	manifestHash, err := CreateBlobFromContent(s.repo, manifestJSON)
+	if err != nil {
+		return "", err
+	}
+	mp := checkpointSubtreePath(sessionDir, paths.AssetsManifestFile)
+	entries[mp] = object.TreeEntry{Name: mp, Mode: filemode.Regular, Hash: manifestHash}
+	return "/" + mp, nil
+}
+
+// reinjectAssets restores externalized images into a transcript on read, so the
+// returned bytes match what was stored. Best-effort and gated on placeholder
+// presence, not on any config flag: an asset it can't load is left as a
+// placeholder rather than failing the read.
+func reinjectAssets(sessionTree *FetchingTree, agentType types.AgentType, transcript []byte) []byte {
+	if !imageextract.HasPlaceholders(transcript) {
+		return transcript
+	}
+	codec := imageextract.CodecFor(agentType)
+	if codec == nil {
+		return transcript
+	}
+	// No blob-integrity check is needed here: git content-addresses every asset
+	// blob, so a corrupt/truncated fetch fails object verification and Contents()
+	// errors out (leaving the placeholder). The manifest's sha256 is external
+	// metadata, not a second integrity gate — and since writeAssets derives both
+	// the blob and the sha256 from the same bytes, they can never disagree.
+	out, err := codec.ReinjectImages(transcript, func(name string) (agent.CompactedTranscriptAsset, bool) {
+		f, ferr := sessionTree.File(paths.AssetsDir + name)
+		if ferr != nil {
+			return agent.CompactedTranscriptAsset{}, false
+		}
+		content, cerr := f.Contents()
+		if cerr != nil {
+			return agent.CompactedTranscriptAsset{}, false
+		}
+		return agent.CompactedTranscriptAsset{Name: name, Data: []byte(content)}, true
+	})
+	if err != nil {
+		return transcript
+	}
+	return out
+}
+
 // replaceTranscript rewrites the session transcript (full.jsonl chunks +
 // content_hash + compact) in entries. It reports whether it actually rewrote:
 // false means the content-hash matched and everything was left as-is (the
 // caller must then leave coupled artifacts like assets untouched too, so they
 // stay consistent with the unchanged transcript).
-func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.RedactedBytes, agentType types.AgentType, startLine int, precomputed *PrecomputedTranscriptBlobs, sessionPath string, entries map[string]object.TreeEntry) (bool, error) {
+func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.RedactedBytes, agentType types.AgentType, startLine int, precomputed *PrecomputedTranscriptBlobs, sessionDir string, entries map[string]object.TreeEntry) (bool, error) {
 	// Ignore precompute if invariants are violated — fall back to fresh chunking.
 	if precomputed != nil && !precomputed.IsUsable() {
 		precomputed = nil
@@ -1962,7 +2006,7 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	// Short-circuit: if the existing content_hash.txt already matches, the
 	// chunk entries currently in `entries` represent the same content. Leave
 	// everything as-is and skip chunking + zlib.
-	hashPath := sessionPath + paths.ContentHashFileName
+	hashPath := checkpointSubtreePath(sessionDir, paths.ContentHashFileName)
 	if existing, ok := entries[hashPath]; ok {
 		if blob, err := s.repo.BlobObject(existing.Hash); err == nil {
 			if rdr, rerr := blob.Reader(); rerr == nil {
@@ -1976,7 +2020,7 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	}
 
 	// Remove existing transcript files (base + any chunks)
-	transcriptBase := sessionPath + paths.TranscriptFileName
+	transcriptBase := checkpointSubtreePath(sessionDir, paths.TranscriptFileName)
 	for key := range entries {
 		if key == transcriptBase || strings.HasPrefix(key, transcriptBase+".") {
 			delete(entries, key)
@@ -2004,7 +2048,7 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 
 	// Record chunk files in the tree at v1 (full.jsonl) naming.
 	for i, blobHash := range chunkHashes {
-		chunkPath := sessionPath + agent.ChunkFileName(paths.TranscriptFileName, i)
+		chunkPath := checkpointSubtreePath(sessionDir, agent.ChunkFileName(paths.TranscriptFileName, i))
 		entries[chunkPath] = object.TreeEntry{
 			Name: chunkPath,
 			Mode: filemode.Regular,
@@ -2037,7 +2081,7 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	if agentType == agent.AgentTypeCodex {
 		compactBytes = codex.SanitizePortableTranscript(compactBytes)
 	}
-	compactStart := s.writeCompactTranscript(ctx, agentType, startLine, compactBytes, sessionPath, entries)
+	compactStart := s.writeCompactTranscript(ctx, agentType, startLine, compactBytes, sessionDir, entries)
 
 	// If regeneration produced no compact transcript (failure, empty, or
 	// oversized), drop any stale transcript.jsonl carried over from the prior
@@ -2047,13 +2091,13 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	// re-redacted full transcript. The caller re-derives the root summary's
 	// compact_transcript pointer from the (now absent) tree entry.
 	if compactStart == nil {
-		delete(entries, sessionPath+paths.CompactTranscriptFileName)
+		delete(entries, checkpointSubtreePath(sessionDir, paths.CompactTranscriptFileName))
 	}
 
 	// Keep the session metadata's marker consistent with the regenerated
 	// transcript.jsonl: record the new boundary when one was produced, or clear
 	// it (nil) when the compact transcript was dropped above.
-	if err := s.setCompactTranscriptStart(sessionPath, compactStart, entries); err != nil {
+	if err := s.setCompactTranscriptStart(sessionDir, compactStart, entries); err != nil {
 		return false, fmt.Errorf("failed to update compact transcript start: %w", err)
 	}
 
@@ -2204,7 +2248,7 @@ func CreateBlobFromContent(repo *git.Repository, content []byte) (plumbing.Hash,
 
 // copyMetadataDir copies all files from a directory to the checkpoint path.
 // Used to include additional metadata files like task checkpoints, subagent transcripts, etc.
-func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, basePath string, entries map[string]object.TreeEntry) error {
+func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, sessionDir string, entries map[string]object.TreeEntry) error {
 	err := filepath.Walk(metadataDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -2255,7 +2299,7 @@ func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, basePath 
 		}
 
 		// Store at checkpoint path (use forward slashes for git tree compatibility on Windows)
-		fullPath := basePath + filepath.ToSlash(relPath)
+		fullPath := checkpointSubtreePath(sessionDir, filepath.ToSlash(relPath))
 		entries[fullPath] = object.TreeEntry{
 			Name: fullPath,
 			Mode: mode,

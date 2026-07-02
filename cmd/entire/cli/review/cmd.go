@@ -2,7 +2,7 @@
 //
 // cmd.go provides NewCommand(), the cobra entry point for `entire review`.
 // It routes through the new AgentReviewer / Sink / Run architecture for
-// agents with review-runner adapters (claude-code, codex, gemini) and falls
+// agents with review-runner adapters (claude-code, codex, gemini, pi) and falls
 // back to RunMarkerFallback for agents that are not yet wired into that review
 // runner contract.
 package review
@@ -126,7 +126,7 @@ Flags:
   --set-slot     with --configure: a reviewer slot as agent[=model] (repeatable;
                  the same agent/model may repeat to run it multiple times)
   --edit         re-open the advanced profile skill picker
-  --findings     browse local findings
+  --findings     browse local findings; pass a handle to print one saved run
   --agent NAME   run only one reviewer from the selected profile
   --list         list configured review profiles (their reviewers and judge)
   --agents       list the reviewer agents you can pass to --agent for the profile
@@ -150,7 +150,7 @@ To tag an already-finished session as a review, use
 			if len(args) > 1 {
 				return fmt.Errorf("accepts at most one argument, received %d", len(args))
 			}
-			if len(args) == 1 && profileOverride != "" {
+			if len(args) == 1 && profileOverride != "" && !findings {
 				return errors.New("pass profile either positionally or with --profile, not both")
 			}
 			return nil
@@ -188,9 +188,13 @@ To tag an already-finished session as a review, use
 			if modelOverride != "" && agentOverride == "" {
 				return errors.New("--model requires --agent (the model applies to a single reviewer)")
 			}
-			profileName := profileOverride
+			positionalArg := ""
 			if len(args) == 1 {
-				profileName = args[0]
+				positionalArg = args[0]
+			}
+			profileName := profileOverride
+			if positionalArg != "" && !findings {
+				profileName = positionalArg
 			}
 			if configure {
 				return runReviewConfigure(ctx, cmd, profileName, reviewConfigureOptions{
@@ -204,10 +208,20 @@ To tag an already-finished session as a review, use
 				}, deps)
 			}
 			if edit {
+				if !interactive.IsTerminalWriter(cmd.OutOrStdout()) || !interactive.CanPromptInteractively() {
+					err := errors.New("--edit requires an interactive terminal")
+					cmd.SilenceUsage = true
+					fmt.Fprintln(cmd.ErrOrStderr(), "--edit requires an interactive terminal.")
+					fmt.Fprintln(cmd.ErrOrStderr(), "Inspect current profiles with:")
+					fmt.Fprintln(cmd.ErrOrStderr(), "  entire review --list")
+					fmt.Fprintln(cmd.ErrOrStderr(), "For non-interactive changes, use:")
+					fmt.Fprintln(cmd.ErrOrStderr(), "  entire review --configure --set-agents <agent>[,<agent>] [--set-judge <agent>]")
+					return wrapReviewSilentError(deps.NewSilentError, err)
+				}
 				return RunReviewProfileConfigPicker(ctx, cmd.OutOrStdout(), deps.GetAgentsWithHooksInstalled, profileName)
 			}
 			if findings {
-				return runReviewFindings(ctx, cmd, deps.NewSilentError)
+				return runReviewFindings(ctx, cmd, positionalArg, deps.NewSilentError)
 			}
 			// Map the flag to the RunConfig timeout convention: a non-positive
 			// value (the user passed --timeout 0) means "disable", encoded as the
@@ -227,7 +241,7 @@ To tag an already-finished session as a review, use
 	cmd.Flags().StringArrayVar(&setModels, "set-model", nil, "with --configure: per-reviewer model as agent=model (repeatable)")
 	cmd.Flags().StringArrayVar(&setSlots, "set-slot", nil, "with --configure: a reviewer slot as agent[=model] (repeatable; same agent/model may repeat)")
 	cmd.Flags().BoolVar(&edit, "edit", false, "re-open the advanced review profile skill picker")
-	cmd.Flags().BoolVar(&findings, "findings", false, "browse local review findings")
+	cmd.Flags().BoolVar(&findings, "findings", false, "browse local review findings; pass a handle to print one saved run")
 	cmd.Flags().BoolVar(&listAgents, "agents", false, "list the reviewer agents you can pass to --agent for the selected profile")
 	cmd.Flags().BoolVar(&listModels, "models", false, "list the models each review agent advertises (optionally filtered by --agent)")
 	cmd.Flags().BoolVar(&listProfiles, "list", false, "list configured review profiles (reviewers and judge)")

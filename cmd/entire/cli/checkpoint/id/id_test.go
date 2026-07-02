@@ -145,6 +145,38 @@ func TestKindOf(t *testing.T) {
 			if got := KindOf(tt.input); got != tt.want {
 				t.Errorf("KindOf(%q) = %v, want %v", tt.input, got, tt.want)
 			}
+			if got := CheckpointID(tt.input).Kind(); got != tt.want {
+				t.Errorf("CheckpointID(%q).Kind() = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckpointID_ShardFor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		// Every format shards on the LAST two chars (single positional rule).
+		{"legacy", "a1b2c3d4e5f6", "f6"},
+		{"legacy other", "abcdef123456", "56"},
+		{"ulid", sampleULID, "ZN"},
+		{"ulid trailing", "0123456789ABCDEFGHJKMNPQRS", "RS"},
+		{"unknown", "XYZ", "YZ"},
+		// Short-string fallbacks.
+		{"empty", "", ""},
+		{"one char", "a", "a"},
+		{"two chars", "ab", "ab"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := CheckpointID(tt.input).ShardFor(); got != tt.want {
+				t.Errorf("CheckpointID(%q).ShardFor() = %q, want %q", tt.input, got, tt.want)
+			}
 		})
 	}
 }

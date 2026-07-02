@@ -147,8 +147,12 @@ func TestReviewCmd_ListModels(t *testing.T) {
 			t.Errorf("--models output missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "gpt-5-codex") {
-		t.Errorf("--models should not invent example codex models:\n%s", out)
+	// codex has no enumeration command, so its own section must show the
+	// no-advertised-models note rather than invented examples. (A substring
+	// check would false-positive on Pi's live list, which legitimately
+	// includes openai/gpt-5-codex.)
+	if !strings.Contains(out, "codex:\n  (no advertised models") {
+		t.Errorf("codex section should show no advertised models:\n%s", out)
 	}
 }
 
@@ -395,6 +399,26 @@ func TestRunReview_BareNonInteractiveRequiresProfile(t *testing.T) {
 	_, exists, markerErr := review.ReadPendingReviewMarker(context.Background())
 	if markerErr == nil && exists {
 		t.Error("bare non-interactive review should not have started a review")
+	}
+}
+
+func TestReviewEditNonInteractiveRefusesWithScriptedAlternatives(t *testing.T) {
+	setupCmdTestRepo(t)
+
+	rootCmd := cli.NewRootCmd()
+	errBuf := &bytes.Buffer{}
+	rootCmd.SetErr(errBuf)
+	rootCmd.SetArgs([]string{"review", "--edit"})
+
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected non-interactive --edit to fail")
+	}
+	got := errBuf.String()
+	for _, want := range []string{"--edit requires an interactive terminal", "entire review --configure --set-agents", "entire review --list"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("--edit error missing %q:\n%s", want, got)
+		}
 	}
 }
 

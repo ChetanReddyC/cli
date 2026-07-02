@@ -29,7 +29,7 @@ func writeMalformedCheckpointPolicyForCLITest(t *testing.T, repo *git.Repository
 func writeUnsupportedCheckpointPolicyForCLITest(t *testing.T, repo *git.Repository) {
 	t.Helper()
 	_, err := checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
+		CheckpointVersion:    "refs-v2",
 		CheckpointMinVersion: "branch-v1",
 	})
 	require.NoError(t, err)

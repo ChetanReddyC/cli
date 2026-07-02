@@ -134,7 +134,7 @@ func TestExpertsCommandIsHiddenAndListedInLabs(t *testing.T) {
 
 func TestExpertsCommandSendsQueryAndPrintsJSON(t *testing.T) {
 	fake := &fakeExpertsClient{body: expertsSuccessBody()}
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return fake, nil
 	})
 	defer restore()
@@ -179,7 +179,7 @@ func TestExpertsCommandSendsQueryAndPrintsJSON(t *testing.T) {
 
 func TestExpertsCommandPrintsAgentCenteredEvidence(t *testing.T) {
 	fake := &fakeExpertsClient{body: expertsSuccessBody()}
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return fake, nil
 	})
 	defer restore()
@@ -256,7 +256,7 @@ func TestExpertsCommandUsesStagedFilesAsScopes(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
 	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["billing/webhooks/sender.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return fake, nil
 	})
 	defer restore()
@@ -298,7 +298,7 @@ func TestExpertsCommandUsesStagedDeletionsAsScopes(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
 	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["billing/webhooks/sender.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return fake, nil
 	})
 	defer restore()
@@ -338,7 +338,7 @@ func TestExpertsCommandResolvesRepoRootPathFromSubdirectory(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
 	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["cmd/entire/cli/experts.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return fake, nil
 	})
 	defer restore()
@@ -380,7 +380,7 @@ func TestExpertsCommandResolvesCWDRelativePathFromSubdirectory(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
 	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["cmd/entire/cli/experts.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return fake, nil
 	})
 	defer restore()
@@ -405,7 +405,7 @@ func TestExpertsCommandResolvesCWDRelativePathFromSubdirectory(t *testing.T) {
 
 func TestExpertsCommandTreatsPathLikeRepoOverrideArgAsScope(t *testing.T) {
 	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["api/deleted.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return fake, nil
 	})
 	defer restore()
@@ -438,7 +438,7 @@ func TestExpertsCommandRelativizesAbsoluteDeletedPathScope(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
 	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["api/deleted.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return fake, nil
 	})
 	defer restore()
@@ -484,7 +484,7 @@ func TestExpertsCommandRelativizesDeletedPathScopeFromSubdirectory(t *testing.T)
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
 	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["cmd/entire/cli/deleted.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return fake, nil
 	})
 	defer restore()
@@ -523,7 +523,7 @@ func TestExpertsCommandAcceptsCaseInsensitiveRepoOverrideForLocalScope(t *testin
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
 	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["cmd/"],"query":null,"branch":"main","source":"db","profiles":[]}`}
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return fake, nil
 	})
 	defer restore()
@@ -563,7 +563,7 @@ func TestExpertsCommandRejectsMismatchedRepoOverrideForLocalScope(t *testing.T) 
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return &fakeExpertsClient{}, nil
 	})
 	defer restore()
@@ -582,7 +582,7 @@ func TestExpertsCommandRejectsMismatchedRepoOverrideForLocalScope(t *testing.T) 
 
 func TestExpertsCommandDoesNotRewritePathScope503AsCodeSearch(t *testing.T) {
 	fake := &fakeExpertsClient{status: http.StatusServiceUnavailable, body: `{"error":"Database unavailable"}`}
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return fake, nil
 	})
 	defer restore()
@@ -597,8 +597,34 @@ func TestExpertsCommandDoesNotRewritePathScope503AsCodeSearch(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "Database unavailable") {
 		t.Fatalf("error = %v", err)
 	}
-	if strings.Contains(out.String(), "Code search is not configured") {
-		t.Fatalf("path-scope 503 should not be rewritten as code search setup:\n%s", out.String())
+	if strings.Contains(out.String(), "Code search is not available") {
+		t.Fatalf("path-scope 503 should not be rewritten as code search unavailable:\n%s", out.String())
+	}
+}
+
+// TestExpertsCommandQuery503ShowsCodeSearchMessage covers the real backend
+// behaviour observed live: a natural-language query hits a cell without code
+// search and gets a bare 503, which must surface as a clean code-search message
+// (not the raw "fetch experts: API error" wrap).
+func TestExpertsCommandQuery503ShowsCodeSearchMessage(t *testing.T) {
+	fake := &fakeExpertsClient{status: http.StatusServiceUnavailable, body: `{"error":"Service Unavailable"}`}
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
+		return fake, nil
+	})
+	defer restore()
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "some natural language topic", "--repo", "acme/widget"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected a non-nil (silent) error for a 503 query")
+	}
+	if !strings.Contains(out.String(), "Code search is not available") {
+		t.Fatalf("query 503 should show the code-search message:\n%s", out.String())
 	}
 }
 
@@ -634,7 +660,7 @@ func TestResolveExpertsRepoIDPaginatesAccessibleRepoList(t *testing.T) {
 		},
 		body: `{"repo_full_name":"acme/widget","scopes":["api/x.go"],"query":null,"branch":"main","source":"db","profiles":[]}`,
 	}
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return fake, nil
 	})
 	defer restore()
@@ -664,7 +690,7 @@ func TestResolveExpertsRepoIDPaginatesAccessibleRepoList(t *testing.T) {
 
 func TestExpertsCommandAcceptsRepoULIDWithoutResolution(t *testing.T) {
 	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["api/x.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
-	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool) (expertsAPIClient, error) {
+	restore := setExpertsClientFactoryForTest(t, func(context.Context, bool, string, string) (expertsAPIClient, error) {
 		return fake, nil
 	})
 	defer restore()

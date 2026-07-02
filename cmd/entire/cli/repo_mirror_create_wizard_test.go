@@ -12,6 +12,34 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
+// TestCreateOneMirror_Suspended pins the wizard's per-mirror handling of an
+// admin-suspended existing placement: it surfaces the "suspended" status and
+// sets an error so the batch exits non-zero (matching the one-shot), rather
+// than being reported as a plain "registered" success.
+func TestCreateOneMirror_Suspended(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	suspended := &coreapi.CreatedMirror{MirrorId: "m1", MirrorUrl: "entire://c/gh/o/r", Suspended: true}
+	c, paths := serveMirrorCreate(t, suspended, false)
+
+	var final string
+	var finalOK bool
+	target := mirrorTarget{owner: "o", repo: "r", region: regionChoice{host: "c"}}
+	res := createOneMirror(ctx, target, c, nil, false, time.Second,
+		func(status string, isFinal, ok bool) {
+			if isFinal {
+				final, finalOK = status, ok
+			}
+		})
+
+	require.Equal(t, mirrorStatusSuspended, res.status)
+	require.Error(t, res.err, "a suspended placement must fail the batch (non-zero exit)")
+	require.Equal(t, mirrorStatusSuspended, final)
+	require.False(t, finalOK)
+	require.Equal(t, []string{mirrorsAPIPath}, *paths, "suspended must not poll GetMirror")
+}
+
 func TestRunMirrorCreateWizard_RequiresTTY(t *testing.T) {
 	t.Parallel()
 	// In-process tests are non-interactive, so the wizard must refuse before

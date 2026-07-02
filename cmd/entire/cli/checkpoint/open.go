@@ -19,9 +19,22 @@ type OpenOptions struct {
 	// fetching off.
 	BlobFetcher BlobFetchFunc
 
+	// RefFetcher is the CLI-level on-demand checkpoint-ref fetcher, used by the
+	// git-refs backend to resolve a checkpoint ref missing locally. nil leaves
+	// reads local-only; ignored by the git-branch backend.
+	RefFetcher RefFetchFunc
+
 	// Refs overrides the default committed-ref topology. A non-nil value wins,
 	// e.g. attach pins reads to Primary via PrimaryAsRead().
 	Refs *PersistentRefs
+}
+
+// PrimaryIsRefs reports whether the configured primary backend is the git-refs
+// per-checkpoint store. It centralizes the topology check so push/pre-push code
+// does not compare backend-type strings itself. A nil config (default) is the
+// git-branch backend, so this returns false.
+func PrimaryIsRefs(cfg *settings.CheckpointsConfig) bool {
+	return cfg != nil && cfg.Primary.Type == BackendTypeGitRefs
 }
 
 // Stores is the facade returned by Open: the persistent store plus the git-only
@@ -49,7 +62,7 @@ type Stores struct {
 // default git-branch backend with no mirrors, preserving default behavior.
 func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores, error) {
 	refs := resolveOpenRefs(ctx, opts)
-	env := OpenEnv{Repo: repo, BlobFetcher: opts.BlobFetcher, Refs: refs}
+	env := OpenEnv{Repo: repo, BlobFetcher: opts.BlobFetcher, RefFetcher: opts.RefFetcher, Refs: refs}
 
 	cfg, err := settings.LoadCheckpointsConfig(ctx)
 	if err != nil {

@@ -88,8 +88,8 @@ func TestReadLocalPolicyAllowsUnsupportedPolicy(t *testing.T) {
 	t.Parallel()
 	repo := initPolicyRepo(t)
 	policy := checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "refs-v1",
+		CheckpointVersion:    "refs-v2",
+		CheckpointMinVersion: "refs-v2",
 	}
 	data, err := json.Marshal(policy)
 	require.NoError(t, err)

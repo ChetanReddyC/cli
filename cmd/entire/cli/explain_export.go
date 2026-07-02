@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
@@ -197,6 +198,34 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 	matches := matchCheckpointPrefix(lookup, prefix)
 	if len(matches) > 0 {
 		return matches, lookup
+	}
+
+	// git-refs primary: there is no single metadata branch to fetch — each
+	// checkpoint is its own ref. When the prefix is a full checkpoint ID (the
+	// Entire-Checkpoint commit trailer always is), fetch that one ref directly,
+	// then re-list. Falls through to the v1-branch fetch below otherwise.
+	if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: bad config surfaces via Open elsewhere
+		if cid, err := id.NewCheckpointID(prefix); err == nil {
+			// cid is already validated by NewCheckpointID above, so RefName can't
+			// error here; the guard is defensive — fall back to the v1-branch path
+			// rather than fetch a malformed ref.
+			refName, refErr := checkpoint.RefName(cid)
+			if refErr != nil {
+				return nil, lookup
+			}
+			stop := startSpinner(errW, "Fetching checkpoint from remote")
+			fetchErr := FetchCheckpointRef(ctx, refName)
+			stop(false)
+			if fetchErr == nil {
+				if fresh, freshErr := newExplainCheckpointLookup(ctx); freshErr == nil {
+					if m := matchCheckpointPrefix(fresh, prefix); len(m) > 0 {
+						return m, fresh
+					}
+					_ = fresh.Close()
+				}
+			}
+		}
+		return nil, lookup
 	}
 
 	stop := startSpinner(errW, "Fetching checkpoint metadata from remote")
