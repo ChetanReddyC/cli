@@ -173,19 +173,14 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 
 // PushMigratedCheckpointRefs pushes any queued checkpoint refs to the configured
 // checkpoint remote, surfacing errors (unlike the fail-soft pre-push path). It is
-// the opt-in "push now" invoked by the checkpoint migration command. Returns the
-// number of refs pushed. A no-op (0, nil) when pushing is disabled or the queue
-// is empty.
-func PushMigratedCheckpointRefs(ctx context.Context, remote string) (int, error) {
+// the opt-in "push now" invoked by the checkpoint migration command; the caller
+// owns the repo. Returns the number of refs pushed — a no-op (0, nil) when
+// pushing is disabled or the queue is empty.
+func PushMigratedCheckpointRefs(ctx context.Context, repo *git.Repository, remote string) (int, error) {
 	ps := resolvePushSettings(ctx, remote)
 	if ps.pushDisabled {
 		return 0, nil
 	}
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("open repository: %w", err)
-	}
-	defer repo.Close()
 	return flushCheckpointRefsQueue(ctx, repo, ps.pushTarget())
 }
 

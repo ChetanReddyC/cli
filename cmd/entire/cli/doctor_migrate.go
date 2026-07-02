@@ -1,11 +1,8 @@
 package cli
 
 import (
-	"context"
-	"errors"
 	"fmt"
 
-	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -72,16 +69,17 @@ next push once the git-refs store is the configured primary.`,
 				return nil
 			}
 
-			confirmed, err := confirmPushMigratedRefs(ctx, len(result.Migrated))
+			title := fmt.Sprintf("Push %d migrated checkpoint ref(s) now?", len(result.Migrated))
+			confirmed, err := confirmDoctorFix(ctx, out, title)
 			if err != nil {
 				return err
 			}
 			if !confirmed {
-				fmt.Fprintln(out, "Left queued for the next push.")
+				fmt.Fprintln(out, "Refs stay queued for the next push.")
 				return nil
 			}
 
-			pushed, err := strategy.PushMigratedCheckpointRefs(ctx, migrateCheckpointsPushRemote)
+			pushed, err := strategy.PushMigratedCheckpointRefs(ctx, repo, migrateCheckpointsPushRemote)
 			if err != nil {
 				return fmt.Errorf("push migrated refs: %w", err)
 			}
@@ -91,24 +89,4 @@ next push once the git-refs store is the configured primary.`,
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Report what would be migrated without writing refs")
 	return cmd
-}
-
-// confirmPushMigratedRefs prompts whether to push the migrated refs now. A user
-// abort (or cancelled context) is treated as "no", not an error.
-func confirmPushMigratedRefs(ctx context.Context, count int) (bool, error) {
-	var confirmed bool
-	form := NewAccessibleForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title(fmt.Sprintf("Push %d migrated checkpoint ref(s) now?", count)).
-				Value(&confirmed),
-		),
-	)
-	if err := form.RunWithContext(ctx); err != nil {
-		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
-			return false, nil
-		}
-		return false, fmt.Errorf("prompt failed: %w", err)
-	}
-	return confirmed, nil
 }
