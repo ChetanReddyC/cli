@@ -2850,6 +2850,14 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// matching assets instead of re-inlining what condensation lifted out. Opt-in;
 	// a no-codec agent or a transcript with no images is a no-op.
 	var finalizeAssets []checkpoint.TranscriptAsset
+	// Whether externalization actually RAN at finalize. When it did not (flag
+	// off here even though it may have been on at condensation — e.g. an
+	// ENTIRE_EXTERNALIZE_IMAGES env override not inherited by the hook
+	// process, or settings toggled mid-session), an empty finalizeAssets means
+	// "extraction didn't run", NOT "the transcript has no images" — clearing
+	// the previously-stored assets would permanently lose them (the re-inlined
+	// base64 is destroyed by redaction below).
+	externalizationRan := false
 	if settings.IsImageExternalizationEnabled(ctx) {
 		rewritten, assets, exErr := extractSessionImages(state.AgentType, fullTranscript)
 		if exErr != nil {
@@ -2860,6 +2868,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		} else {
 			fullTranscript = rewritten
 			finalizeAssets = assets
+			externalizationRan = true
 		}
 	}
 	// Re-capture sidecar images (e.g. Cursor's SQLite store) so a finalize that
@@ -2917,7 +2926,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			SessionID:               state.SessionID,
 			Transcript:              redactedTranscript,
 			Assets:                  finalizeAssets,
-			PreserveAssetsWhenEmpty: sidecarCapable,
+			PreserveAssetsWhenEmpty: sidecarCapable || !externalizationRan,
 			Prompts:                 prompts,
 			Agent:                   state.AgentType,
 			SkillEvents:             skillEvents,
