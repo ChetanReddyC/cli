@@ -224,21 +224,33 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 		return 0, nil
 	}
 
+	// Progress: pushing many refs over the network can take tens of seconds, so
+	// surface it (matching the v1 path's "[entire] Pushing ..." line) instead of
+	// leaving the user's git push apparently hung. Written to stderr, which git
+	// shows during the pre-push hook.
+	displayTarget := displayPushTarget(pushTarget)
+	fmt.Fprintf(os.Stderr, "[entire] Pushing %d checkpoint ref(s) to %s...", len(existing), displayTarget)
+	stop := startProgressDots(os.Stderr)
+
 	// Fast path: push all refs in one round-trip (fast-forward-only). If every
 	// ref was up to date or fast-forwarded, we're done.
 	if err := batchPushRefs(pushCtx, pushTarget, existing); err == nil {
+		stop(" done")
 		if removeErr := queue.Remove(existing); removeErr != nil {
 			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 				slog.String("error", removeErr.Error()))
 		}
 		return len(existing), nil
 	}
+	stop("")
 
 	// At least one ref was rejected — typically a non-fast-forward divergence
 	// (the same checkpoint re-written on another machine). Retry per ref with
 	// fetch+replay recovery, and remove from the queue only the refs that land
 	// (a genuine cherry-pick conflict leaves that ref queued for a later push,
 	// never force-overwriting the remote).
+	fmt.Fprintf(os.Stderr, "[entire] Some checkpoint refs diverged; syncing %d ref(s) individually...", len(existing))
+	stop = startProgressDots(os.Stderr)
 	pushed := make([]plumbing.ReferenceName, 0, len(existing))
 	var firstErr error
 	for _, ref := range existing {
@@ -252,6 +264,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 		}
 		pushed = append(pushed, ref)
 	}
+	stop(fmt.Sprintf(" pushed %d of %d", len(pushed), len(existing)))
 	if err := queue.Remove(pushed); err != nil {
 		logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 			slog.String("error", err.Error()))

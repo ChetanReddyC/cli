@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,6 +99,20 @@ func TestExchangeCore(t *testing.T) {
 			t.Fatal("expected error for plaintext advertised core")
 		}
 	})
+
+	t.Run("env path pins the token's core", func(t *testing.T) {
+		t.Parallel()
+		// sa-session JWTs carry no home_jurisdiction claim; the pinned core
+		// must win without ever parsing the subject token for routing.
+		s := newEnvJurisdictionTokenSource("https://core.us.entire.io/", "https://us.entire.io", "env-jwt", "", nil)
+		core, err := s.exchangeCore("not-even-a-jwt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if core != "https://core.us.entire.io" {
+			t.Fatalf("core = %q, want pinned trimmed core", core)
+		}
+	})
 }
 
 func TestJurisdictionToken_MintsPersistsAndReuses(t *testing.T) {
@@ -123,7 +138,7 @@ func TestJurisdictionToken_MintsPersistsAndReuses(t *testing.T) {
 	login := staticLogin(fakeLoginJWT(t, "eu"))
 	s := newJurisdictionTokenSource(core.URL, "https://eu.example.io", "", "toothbrush", login, core.Client())
 
-	token, err := s.Token(context.Background(), "/et/x/y", "pull")
+	token, err := s.Token(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +150,7 @@ func TestJurisdictionToken_MintsPersistsAndReuses(t *testing.T) {
 	}
 
 	// Same source: memoized, no second exchange.
-	if _, err := s.Token(context.Background(), "/et/x/y", "push"); err != nil {
+	if _, err := s.Token(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if mints != 1 {
@@ -144,7 +159,7 @@ func TestJurisdictionToken_MintsPersistsAndReuses(t *testing.T) {
 
 	// Fresh source (new process): served from the persisted keychain entry.
 	s2 := newJurisdictionTokenSource(core.URL, "https://eu.example.io", "", "toothbrush", login, core.Client())
-	token2, err := s2.Token(context.Background(), "/et/x/y", "pull")
+	token2, err := s2.Token(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +172,7 @@ func TestJurisdictionToken_MintsPersistsAndReuses(t *testing.T) {
 
 	// A different handle must not share the token.
 	s3 := newJurisdictionTokenSource(core.URL, "https://eu.example.io", "", "other-account", login, core.Client())
-	if _, err := s3.Token(context.Background(), "/et/x/y", "pull"); err != nil {
+	if _, err := s3.Token(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if mints != 2 {
@@ -179,7 +194,7 @@ func TestJurisdictionToken_InvalidateDropsMemoAndKeychain(t *testing.T) {
 
 	login := staticLogin(fakeLoginJWT(t, "eu"))
 	s := newJurisdictionTokenSource(core.URL, "https://eu.example.io", "", "toothbrush", login, core.Client())
-	if _, err := s.Token(context.Background(), "/et/x/y", "pull"); err != nil {
+	if _, err := s.Token(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if mints != 1 {
@@ -189,7 +204,7 @@ func TestJurisdictionToken_InvalidateDropsMemoAndKeychain(t *testing.T) {
 	s.Invalidate()
 
 	// Memo gone: this source re-mints.
-	if _, err := s.Token(context.Background(), "/et/x/y", "pull"); err != nil {
+	if _, err := s.Token(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if mints != 2 {
@@ -201,7 +216,7 @@ func TestJurisdictionToken_InvalidateDropsMemoAndKeychain(t *testing.T) {
 	// a new entry, so invalidate again to observe the delete.)
 	s.Invalidate()
 	s2 := newJurisdictionTokenSource(core.URL, "https://eu.example.io", "", "toothbrush", login, core.Client())
-	if _, err := s2.Token(context.Background(), "/et/x/y", "pull"); err != nil {
+	if _, err := s2.Token(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if mints != 3 {
@@ -231,7 +246,7 @@ func TestJurisdictionToken_EmptyPersistedTokenRemints(t *testing.T) {
 	defer core.Close()
 
 	s := newJurisdictionTokenSource(core.URL, "https://eu.example.io", "", "toothbrush", staticLogin(fakeLoginJWT(t, "eu")), core.Client())
-	token, err := s.Token(context.Background(), "/et/x/y", "pull")
+	token, err := s.Token(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,11 +276,99 @@ func TestJurisdictionToken_ExpiredPersistedTokenRemints(t *testing.T) {
 	defer core.Close()
 
 	s := newJurisdictionTokenSource(core.URL, "https://eu.example.io", "", "toothbrush", staticLogin(fakeLoginJWT(t, "eu")), core.Client())
-	token, err := s.Token(context.Background(), "/et/x/y", "pull")
+	token, err := s.Token(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if token != "fresh-jwt" || mints != 1 {
 		t.Fatalf("token = %q mints = %d, want fresh mint", token, mints)
+	}
+}
+
+func TestEnvJurisdictionToken_MintsInMemoryOnly(t *testing.T) {
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	defer restore()
+
+	const audience = "https://eu.example.io"
+	const envToken = "env-sa-session-jwt"
+	mints := 0
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mints++
+		if got := r.FormValue("subject_token"); got != envToken {
+			t.Errorf("subject_token = %q, want the ENTIRE_TOKEN verbatim", got)
+		}
+		if got := r.FormValue("audience"); got != audience {
+			t.Errorf("audience = %q, want %q", got, audience)
+		}
+		if got := r.FormValue("scope"); got != "openid" {
+			t.Errorf("scope = %q, want openid", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"env-juri-jwt","token_type":"Bearer","expires_in":7200}`)) //nolint:errcheck // test
+	}))
+	defer core.Close()
+
+	s := newEnvJurisdictionTokenSource(core.URL, audience, envToken, "", core.Client())
+	token, err := s.Token(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "env-juri-jwt" || mints != 1 {
+		t.Fatalf("token = %q mints = %d, want one mint", token, mints)
+	}
+
+	// Same source: memoized, no second exchange.
+	if _, err := s.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if mints != 1 {
+		t.Fatalf("mints after memo hit = %d, want 1", mints)
+	}
+
+	// Invalidate (data-plane 401) drops the memo without touching the token
+	// store — the next acquisition in this process re-mints.
+	s.Invalidate()
+	if _, err := s.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if mints != 2 {
+		t.Fatalf("mints after invalidate = %d, want 2", mints)
+	}
+
+	// Nothing may be persisted: a fresh source (new helper process) re-mints,
+	// and the token store has no entry under the jurisdiction service.
+	s2 := newEnvJurisdictionTokenSource(core.URL, audience, envToken, "", core.Client())
+	if _, err := s2.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if mints != 3 {
+		t.Fatalf("mints for fresh env source = %d, want 3 (no persistence)", mints)
+	}
+	if _, err := tokenstore.Get(jurisdictionKeyringService(audience), ""); err == nil {
+		t.Fatal("env path must not write the jurisdiction token to the token store")
+	}
+}
+
+func TestEnvJurisdictionToken_ExchangeHintDecoratesFailure(t *testing.T) {
+	t.Parallel()
+
+	// A cross-jurisdiction ENTIRE_TOKEN reaches the wrong core, which
+	// refuses the audience with an opaque invalid_target. The pre-computed
+	// hint must ride the error so the CI operator learns the actual fix.
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_target"}`)) //nolint:errcheck // test
+	}))
+	defer core.Close()
+
+	const hint = "\nENTIRE_TOKEN was minted at X, but cluster Y's jurisdiction core is Z — point your CI auth url at Z"
+	s := newEnvJurisdictionTokenSource(core.URL, "https://au.example.io", "env-jwt", hint, core.Client())
+	_, err := s.Token(context.Background())
+	if err == nil {
+		t.Fatal("expected the exchange to fail")
+	}
+	if !strings.HasSuffix(err.Error(), hint) {
+		t.Fatalf("error must end with the cross-jurisdiction hint, got: %v", err)
 	}
 }

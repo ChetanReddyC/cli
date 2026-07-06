@@ -278,14 +278,6 @@ func ParseURL(rawURL string) (*Info, error) {
 	return info, nil
 }
 
-func DeriveCheckpointURL(pushRemoteURL string, config *settings.CheckpointRemoteConfig) (string, error) {
-	info, err := gitremote.ParseURL(pushRemoteURL)
-	if err != nil {
-		return "", fmt.Errorf("cannot parse push remote URL: %w", err)
-	}
-	return deriveCheckpointURLFromInfo(info, config)
-}
-
 // isDerivableProtocol reports whether deriveCheckpointURLFromInfo can map the
 // protocol to a checkpoint URL (i.e. it's a real git transport, not a remote
 // helper scheme like entire:// or a local file://).

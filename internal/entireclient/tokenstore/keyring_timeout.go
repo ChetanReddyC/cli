@@ -2,11 +2,14 @@ package tokenstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"runtime"
 	"time"
+
+	"github.com/entireio/cli/internal/procsignal"
 )
 
 // defaultKeyringTimeout caps how long every OS keyring call may take.
@@ -57,7 +60,21 @@ func callKeyringWithTimeout(op string, fn func() (string, error)) (string, error
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
 	defer signal.Stop(sigCh)
-	return callKeyringWithInterrupt(op, keyringTimeout(), fn, sigCh)
+	return recordInterruptSignal(callKeyringWithInterrupt(op, keyringTimeout(), fn, sigCh))
+}
+
+// recordInterruptSignal records the shared "we were signalled" marker when the
+// keyring call was aborted by a Ctrl-C (a wrapped context.Canceled from the
+// interrupt branch below). It runs on the goroutine that unwinds to the CLI's
+// top-level signal-abort gate, so the store is ordered before that gate reads
+// procsignal — closing the race against the asynchronous signal handler that
+// also received the SIGINT. A timeout wraps context.DeadlineExceeded, not
+// Canceled, so it is left untouched.
+func recordInterruptSignal(val string, err error) (string, error) {
+	if errors.Is(err, context.Canceled) {
+		procsignal.Store(os.Interrupt)
+	}
+	return val, err
 }
 
 // callKeyringWithInterrupt is the testable core of callKeyringWithTimeout:

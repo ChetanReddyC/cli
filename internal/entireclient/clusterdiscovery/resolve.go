@@ -110,22 +110,21 @@ func resolveClusterAuth(ctx context.Context, configDir, cacheDir, clusterHost st
 	}, nil
 }
 
-// ResolveClusterCores returns the trusted control-plane core URLs that
-// front clusterHost, using the same cache-then-/.well-known discovery as
-// ResolveContextForCluster (see resolveClusterCores). Exported for callers
-// that need the cluster's trusted-core set without account selection — e.g.
+// ResolveClusterCores returns the cluster's discovery entry — the trusted
+// control-plane core URLs that front clusterHost plus its advertised
+// jurisdiction audience/core — using the same cache-then-/.well-known
+// discovery as ResolveContextForCluster (see resolveClusterCores). Exported
+// for callers that need the cluster facts without account selection — e.g.
 // the ENTIRE_TOKEN path validates that the env token's audience is one of
-// these before exchanging it, so an unverified JWT can't redirect the
-// token exchange to an attacker-chosen host.
-func ResolveClusterCores(ctx context.Context, cacheDir, clusterHost string, httpClient *http.Client, debugf DebugFunc) ([]string, error) {
+// the advertised cores before exchanging it, so an unverified JWT can't
+// redirect the token exchange to an attacker-chosen host. Its sole caller
+// mints jurisdiction tokens, so the audience-requiring cache semantics
+// apply (see resolveCachedCores).
+func ResolveClusterCores(ctx context.Context, cacheDir, clusterHost string, httpClient *http.Client, debugf DebugFunc) (*discovery.CoresEntry, error) {
 	if debugf == nil {
 		debugf = func(string, ...any) {}
 	}
-	entry, err := resolveClusterCores(ctx, cacheDir, normalizeClusterHost(clusterHost), false, httpClient, debugf)
-	if err != nil {
-		return nil, err
-	}
-	return entry.CoreURLs, nil
+	return resolveClusterCores(ctx, cacheDir, normalizeClusterHost(clusterHost), true, httpClient, debugf)
 }
 
 // normalizeClusterHost folds a cluster host to its canonical form for use as a
@@ -146,7 +145,7 @@ func normalizeClusterHost(clusterHost string) string {
 // label names the resource in debug output ("cluster" / "api host").
 //
 // requireAudience marks callers that cannot proceed without the entry's
-// jurisdiction audience (the interactive git path). For them, an entry
+// jurisdiction audience (both git auth paths). For them, an entry
 // cached before the cluster advertised an audience is treated as stale so
 // the upgrade is picked up immediately instead of after the 24h TTL — and
 // an audience-less entry is NOT used as the discovery-failure fallback:

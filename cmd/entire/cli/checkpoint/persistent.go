@@ -21,7 +21,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -1565,10 +1564,7 @@ func (s *GitStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		return nil
 	})
 
-	// Sort by time (most recent first)
-	sort.Slice(checkpoints, func(i, j int) bool {
-		return checkpoints[i].CreatedAt.After(checkpoints[j].CreatedAt)
-	})
+	sortCheckpointInfosByRecency(checkpoints) // most recent first
 
 	return checkpoints, nil
 }
@@ -1659,24 +1655,6 @@ func (s *GitStore) GetSessionLog(ctx context.Context, cpID id.CheckpointID) ([]b
 		return nil, "", err
 	}
 	return content.Transcript, content.Metadata.SessionID, nil
-}
-
-// LookupSessionLog is a convenience function that opens the repository and retrieves
-// a session log by checkpoint ID. This is the primary entry point for callers that
-// do not already have a committed store instance.
-// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
-// Returns ErrNoTranscript if the checkpoint exists but has no transcript.
-func LookupSessionLog(ctx context.Context, cpID id.CheckpointID) ([]byte, string, error) {
-	repo, err := gitrepo.OpenCurrent(ctx)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-	stores, err := Open(ctx, repo, OpenOptions{})
-	if err != nil {
-		return nil, "", fmt.Errorf("open checkpoint store: %w", err)
-	}
-	return ReadRawSessionLogForCheckpoint(ctx, stores.Persistent, cpID)
 }
 
 // backfillSummary updates the summary field in the latest session's metadata.

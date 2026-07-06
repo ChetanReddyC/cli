@@ -224,17 +224,7 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 		return handleLogsOnlyRewindInteractive(ctx, w, errW, start, *selectedPoint, shortID)
 	}
 
-	// Preview rewind to show warnings about files that will be deleted
-	preview, previewErr := start.PreviewRewind(ctx, *selectedPoint)
-	if previewErr != nil {
-		fmt.Fprintf(errW, "Warning: could not preview rewind effects: %v\n", previewErr)
-	} else if preview != nil && len(preview.FilesToDelete) > 0 {
-		fmt.Fprintf(errW, "\nWarning: The following untracked files will be DELETED:\n")
-		for _, f := range preview.FilesToDelete {
-			fmt.Fprintf(errW, "  - %s\n", f)
-		}
-		fmt.Fprintf(errW, "\n")
-	}
+	printRewindPreviewWarnings(ctx, errW, start, *selectedPoint)
 
 	// Confirm rewind
 	var confirm bool
@@ -493,17 +483,7 @@ func runRewindToInternal(ctx context.Context, w, errW io.Writer, commitID string
 		return handleLogsOnlyRewindNonInteractive(ctx, w, errW, start, *selectedPoint)
 	}
 
-	// Preview rewind to show warnings about files that will be deleted
-	preview, previewErr := start.PreviewRewind(ctx, *selectedPoint)
-	if previewErr != nil {
-		fmt.Fprintf(errW, "Warning: could not preview rewind effects: %v\n", previewErr)
-	} else if preview != nil && len(preview.FilesToDelete) > 0 {
-		fmt.Fprintf(errW, "\nWarning: The following untracked files will be DELETED:\n")
-		for _, f := range preview.FilesToDelete {
-			fmt.Fprintf(errW, "  - %s\n", f)
-		}
-		fmt.Fprintf(errW, "\n")
-	}
+	printRewindPreviewWarnings(ctx, errW, start, *selectedPoint)
 
 	// Resolve agent once for use throughout
 	agent, err := getAgent(selectedPoint.Agent)
@@ -726,6 +706,22 @@ func legacyFallbackTranscriptPath(metadataDir string) string {
 		return ""
 	}
 	return filepath.Join(cleaned, paths.TranscriptFileNameLegacy)
+}
+
+// printRewindPreviewWarnings previews the rewind and warns about untracked
+// files it would delete. Preview failures are non-fatal — the rewind itself
+// still runs, so the warning degrades to a notice.
+func printRewindPreviewWarnings(ctx context.Context, errW io.Writer, start *strategy.ManualCommitStrategy, point strategy.RewindPoint) {
+	preview, previewErr := start.PreviewRewind(ctx, point)
+	if previewErr != nil {
+		fmt.Fprintf(errW, "Warning: could not preview rewind effects: %v\n", previewErr)
+	} else if preview != nil && len(preview.FilesToDelete) > 0 {
+		fmt.Fprintf(errW, "\nWarning: The following untracked files will be DELETED:\n")
+		for _, f := range preview.FilesToDelete {
+			fmt.Fprintf(errW, "  - %s\n", f)
+		}
+		fmt.Fprintf(errW, "\n")
+	}
 }
 
 func restoreSessionTranscript(ctx context.Context, w io.Writer, transcriptFile, sessionID string, agent agentpkg.Agent) error {

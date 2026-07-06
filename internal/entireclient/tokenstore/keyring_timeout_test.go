@@ -3,11 +3,18 @@ package tokenstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/internal/procsignal"
 )
+
+// notReturnedSentinel is the value fn returns when the test expects the
+// interrupt/timeout branch to win the select, so this value must never surface.
+const notReturnedSentinel = "should not be returned"
 
 func TestCallKeyringWithTimeout_ReturnsValueWhenFast(t *testing.T) {
 	t.Parallel()
@@ -55,7 +62,7 @@ func TestCallKeyringWithTimeout_DeadlineExceeded(t *testing.T) {
 	start := time.Now()
 	_, err := callKeyringWithTimeout("get", func() (string, error) {
 		time.Sleep(5 * time.Second)
-		return "should not be returned", nil
+		return notReturnedSentinel, nil
 	})
 	elapsed := time.Since(start)
 
@@ -94,7 +101,7 @@ func TestCallKeyringWithInterrupt_AbortsOnSignal(t *testing.T) {
 	_, err := callKeyringWithInterrupt("get", 10*time.Second, func() (string, error) {
 		close(started)
 		time.Sleep(10 * time.Second) // never completes within the test
-		return "should not be returned", nil
+		return notReturnedSentinel, nil
 	}, interrupt)
 	elapsed := time.Since(start)
 
@@ -107,6 +114,66 @@ func TestCallKeyringWithInterrupt_AbortsOnSignal(t *testing.T) {
 	if !strings.Contains(err.Error(), "interrupted") {
 		t.Errorf("error %q should mention it was interrupted", err.Error())
 	}
+}
+
+// recordInterruptSignal must record a shared SIGINT marker for a Ctrl-C abort
+// (wrapped context.Canceled) so the CLI's signal-abort gate recognizes it
+// without racing the async top-level handler — but must leave the marker
+// untouched for a timeout or any non-abort error. This test mutates the
+// process-global procsignal state, so it can't run in parallel.
+func TestRecordInterruptSignal(t *testing.T) {
+	t.Run("records SIGINT on interrupt abort", func(t *testing.T) {
+		procsignal.Reset()
+		t.Cleanup(procsignal.Reset)
+
+		val, err := recordInterruptSignal(callKeyringWithInterruptResult())
+		if val != "" || !errors.Is(err, context.Canceled) {
+			t.Fatalf("passthrough changed value/err: val=%q err=%v", val, err)
+		}
+		if got := procsignal.Load(); got != os.Interrupt {
+			t.Fatalf("procsignal.Load() = %v, want SIGINT", got)
+		}
+	})
+
+	t.Run("leaves marker unset on timeout", func(t *testing.T) {
+		procsignal.Reset()
+		t.Cleanup(procsignal.Reset)
+
+		timeoutErr := fmt.Errorf("get timed out: %w", context.DeadlineExceeded)
+		if _, err := recordInterruptSignal("", timeoutErr); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("passthrough changed err: %v", err)
+		}
+		if got := procsignal.Load(); got != nil {
+			t.Fatalf("procsignal.Load() = %v, want nil (timeout is not a signal abort)", got)
+		}
+	})
+
+	t.Run("leaves marker unset on success", func(t *testing.T) {
+		procsignal.Reset()
+		t.Cleanup(procsignal.Reset)
+
+		if _, err := recordInterruptSignal("token", nil); err != nil {
+			t.Fatalf("passthrough changed err: %v", err)
+		}
+		if got := procsignal.Load(); got != nil {
+			t.Fatalf("procsignal.Load() = %v, want nil", got)
+		}
+	})
+}
+
+// callKeyringWithInterruptResult produces the exact (val, err) shape the
+// interrupt branch returns, so the test exercises recordInterruptSignal against
+// the real wrapped error rather than a hand-rolled one.
+func callKeyringWithInterruptResult() (string, error) {
+	interrupt := make(chan os.Signal, 1)
+	interrupt <- os.Interrupt
+	return callKeyringWithInterrupt("get", time.Second, func() (string, error) {
+		// The pre-loaded interrupt wins the select immediately; this brief
+		// sleep just keeps fn from racing it, then the goroutine exits into
+		// the buffered result channel (no leak).
+		time.Sleep(50 * time.Millisecond)
+		return notReturnedSentinel, nil
+	}, interrupt)
 }
 
 func TestKeyringTimeout_DefaultWhenUnset(t *testing.T) {

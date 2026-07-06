@@ -145,18 +145,10 @@ func Discover(ctx context.Context, clusterHost string, c *http.Client, debugf De
 	return &body, nil
 }
 
-// RenderLoginHint formats a fatal-ready "no auth context for cluster X"
-// message telling the operator to run `entire login`. coreURLs (the cluster's
-// advertised login servers) is accepted but intentionally not yet surfaced —
-// see renderLoginHint.
-func RenderLoginHint(clusterHost string, coreURLs []string) string {
-	return renderLoginHint("cluster "+clusterHost, coreURLs)
-}
-
-// renderLoginHint is the subject-agnostic form behind RenderLoginHint:
-// subject is a noun phrase like "cluster nyc.entire.io" or "API host
-// partial.to" so the same hint serves both the git-cluster and data-API
-// resolvers.
+// renderLoginHint formats a fatal-ready "no auth context for <subject>"
+// message telling the operator to run `entire login`. subject is a noun
+// phrase like "cluster nyc.entire.io" or "API host partial.to" so the same
+// hint serves both the git-cluster and data-API resolvers.
 //
 // We'll display coreURLs (2nd param) to the user as a hint at a later stage.
 func renderLoginHint(subject string, _ []string) string {

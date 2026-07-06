@@ -8,13 +8,13 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/procsignal"
 	"github.com/spf13/cobra"
 )
 
@@ -45,7 +45,7 @@ func main() {
 		// re-raises that same signal — a SIGTERM (from a supervisor /
 		// container stop) must exit 143, not masquerade as a SIGINT 130.
 		sig := <-sigChan
-		caughtSignal.Store(sig)
+		procsignal.Store(sig)
 		if sig == os.Interrupt {
 			fmt.Fprintln(os.Stderr, "\nInterrupting… press Ctrl-C again to force quit.")
 		} else {
@@ -89,20 +89,25 @@ func main() {
 		var silent *cli.SilentError
 
 		switch {
-		case errors.Is(err, context.Canceled) && caughtSignal.Load() != nil:
-			// A signal cancelled the root context (our handler fired). Don't
-			// dump the raw transport/keyring cancellation string ("...:
-			// context canceled", "read access token: signal: interrupt") as
-			// if it were a failure — die quietly by re-raising the signal
-			// that triggered it (see dieFromSignal) so an enclosing
-			// `while ...; do entire; done` loop actually breaks on a single
-			// Ctrl-C, and a SIGTERM shutdown still exits 143.
+		case errors.Is(err, context.Canceled) && procsignal.Load() != nil:
+			// A signal cancelled the root context (our handler fired) or a
+			// keyring read was aborted by Ctrl-C. Don't dump the raw
+			// transport/keyring cancellation string ("...: context canceled",
+			// "read access token: signal: interrupt") as if it were a failure
+			// — die quietly by re-raising the signal that triggered it (see
+			// dieFromSignal) so an enclosing `while ...; do entire; done` loop
+			// actually breaks on a single Ctrl-C, and a SIGTERM shutdown still
+			// exits 143.
 			//
-			// We gate on the handler having fired rather than on the error
-			// type alone: a context.Canceled that arose without a signal
+			// We gate on a signal having been recorded rather than on the
+			// error type alone: a context.Canceled that arose without a signal
 			// (e.g. an internally-cancelled sub-context) is a genuine error
 			// and must fall through to normal reporting, not masquerade as a
 			// user abort (which would also wrongly break an enclosing loop).
+			// procsignal is the shared source of truth written both by the
+			// handler above and by the keyring interrupt path; the latter
+			// records the signal on this same goroutine before returning, so
+			// this Load never races that write.
 			cancel()
 			dieFromSignal(terminatingSignal())
 		case errors.As(err, &silent):
@@ -130,19 +135,14 @@ func main() {
 	cancel() // Cleanup on successful exit
 }
 
-// caughtSignal records the terminating signal (SIGINT or SIGTERM) the handler
-// observed, so a later cancellation-driven exit can re-raise the *same* signal
-// rather than always SIGINT. Read via terminatingSignal.
-var caughtSignal atomic.Value // stores os.Signal
-
 // terminatingSignal returns the signal that cancelled the root context,
-// defaulting to SIGINT when the cancellation came from something other than
-// our signal handler (so a stray context.Canceled still exits 130).
+// defaulting to SIGINT when the cancellation came from something other than a
+// recorded terminating signal (so a stray context.Canceled still exits 130).
+// The recorded signal lives in the shared procsignal package, written by the
+// handler goroutine (SIGINT/SIGTERM) and by the keyring interrupt path (SIGINT).
 func terminatingSignal() os.Signal {
-	if v := caughtSignal.Load(); v != nil {
-		if s, ok := v.(os.Signal); ok {
-			return s
-		}
+	if s := procsignal.Load(); s != nil {
+		return s
 	}
 	return os.Interrupt
 }
