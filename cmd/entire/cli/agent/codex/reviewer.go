@@ -32,9 +32,24 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 
 // buildCodexReviewCmd builds the exec.Cmd for a codex review run.
 // Exposed at package level for test inspection of argv, stdin, and env.
+// buildCodexReviewCmd builds the exec.Cmd for a codex review run.
+//
+// Configured skills are passed through in codex's native $name form — NOT
+// paraphrased. Codex's skill system injects a catalog of installed skills
+// into every exec session and loads the matching SKILL.md when the prompt
+// names one, so the agent runs the real configured workflow. A previous
+// version silently REPLACED /review with a generic 28-word instruction: the
+// configured skill never ran (the codex sibling of the claude -p
+// slash-expansion bug, where the built-in /review hijacked the prompt).
+//
+// Native `codex exec review` is intentionally NOT used: it rejects an extra
+// prompt when a scope flag is set, and codex hooks don't fire during it —
+// leaving no channel for Entire's scope enumeration, per-run prompt, and
+// checkpoint context. Plain `codex exec -` with the composed prompt on stdin
+// runs the same skill while carrying our arguments.
 func buildCodexReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	promptCfg := cfg
-	promptCfg.Skills = expandCodexBuiltinReview(cfg.Skills)
+	promptCfg.Skills = codexNativeSkillInvocations(cfg.Skills)
 	args := []string{codexExecCommand, "--skip-git-repo-check", "--json"}
 	args = review.AppendModelFlag(args, cfg.Model)
 	args = append(args, "-")
@@ -45,19 +60,16 @@ func buildCodexReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.C
 	return cmd
 }
 
-// Codex's native `exec review --base <branch>` rejects an additional prompt,
-// so expand `/review` into text and run normal `codex exec -`. That preserves
-// Entire's scoped base clause, per-run instructions, and checkpoint context.
-const codexBuiltinReviewPrompt = "Review the current branch changes and report actionable findings. " +
-	"Prioritize correctness, regressions, security, and missing test coverage. Do not make code changes."
-
 const codexExecCommand = "exec"
 
-func expandCodexBuiltinReview(skills []string) []string {
+// codexNativeSkillInvocations rewrites slash-form skill invocations (the
+// agent-portable form profiles are configured with) into codex's native
+// $name form. Non-slash entries (plain instruction text) pass verbatim.
+func codexNativeSkillInvocations(skills []string) []string {
 	out := make([]string, 0, len(skills))
 	for _, skill := range skills {
-		if skill == "/review" {
-			out = append(out, codexBuiltinReviewPrompt)
+		if rest, ok := strings.CutPrefix(skill, "/"); ok && rest != "" {
+			out = append(out, "$"+rest)
 			continue
 		}
 		out = append(out, skill)

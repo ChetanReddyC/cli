@@ -122,10 +122,10 @@ func TestCodexReviewer_BuiltinReviewExpandsToScopedExecPrompt(t *testing.T) {
 
 	prompt := readCodexCmdStdin(t, cmd)
 	if strings.Contains(prompt, "/review") {
-		t.Fatalf("builtin review prompt should not include raw /review:\n%s", prompt)
+		t.Fatalf("slash-form skill must be rewritten to codex's $ form:\n%s", prompt)
 	}
 	for _, wantText := range []string{
-		"Review the current branch changes and report actionable findings.",
+		"$review",
 		"Focus on auth regressions.",
 		"Scope: review the commits unique to this branch vs main, plus any uncommitted changes in the working tree. Ignore code outside this scope.",
 		"Commits in scope (newest first):",
@@ -462,4 +462,50 @@ func envToMap(env []string) map[string]string {
 		m[e[:idx]] = e[idx+1:]
 	}
 	return m
+}
+
+// TestBuildCodexReviewCmd_SkillsPassNativelyNotParaphrased locks the fix for
+// codex skill invocation: configured skills reach codex in its native $name
+// form so codex's skill system loads the real SKILL.md, instead of /review
+// being silently REPLACED with a generic 28-word paraphrase (which meant the
+// configured skill never ran — the codex sibling of the claude -p
+// slash-expansion bug).
+func TestBuildCodexReviewCmd_SkillsPassNativelyNotParaphrased(t *testing.T) {
+	t.Parallel()
+	cmd := buildCodexReviewCmd(context.Background(), reviewtypes.RunConfig{
+		Skills: []string{"/review", "/pr-review-toolkit:review-pr", "plain instruction line"},
+	})
+	stdin, err := io.ReadAll(cmd.Stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := string(stdin)
+	for _, want := range []string{"$review", "$pr-review-toolkit:review-pr", "plain instruction line"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing native skill invocation %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "Review the current branch changes and report actionable findings") {
+		t.Errorf("prompt still contains the generic paraphrase:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "/review\n") || strings.HasSuffix(prompt, "/review") {
+		t.Errorf("slash-form skill leaked through untransformed:\n%s", prompt)
+	}
+}
+
+// TestBuildCodexReviewCmd_PromptOverrideVerbatim ensures the $-form transform
+// never touches a verbatim prompt override.
+func TestBuildCodexReviewCmd_PromptOverrideVerbatim(t *testing.T) {
+	t.Parallel()
+	cmd := buildCodexReviewCmd(context.Background(), reviewtypes.RunConfig{
+		Skills:         []string{"/review"},
+		PromptOverride: "/review exactly as written",
+	})
+	stdin, err := io.ReadAll(cmd.Stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(stdin); got != "/review exactly as written" {
+		t.Errorf("PromptOverride modified: %q", got)
+	}
 }
