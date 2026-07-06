@@ -423,7 +423,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m.searchCfg = cfg
 		m = m.refreshBrowseContent()
 		cmds := []tea.Cmd{performSearch(cfg)}
-		if codeSearchEnabled() && m.codeSearchOpts.repoFilters != nil {
+		if codeSearchEnabled() {
 			// Code search uses extractInlineRepoFilters (not ParseSearchInput)
 			// so author:/date:/branch: tokens are preserved as literal search
 			// text, matching the --code CLI path.

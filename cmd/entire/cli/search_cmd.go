@@ -229,7 +229,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			if query == "" && !searchCfg.HasFilters() {
 				searchCfg.Limit = search.DefaultLimit
 				styles := newStatusStyles(w)
-				model := newSearchModel(nil, "", 0, searchCfg, styles, buildCodeSearchOpts(ctx, owner, repoName, insecureHTTPAuth))
+				model := newSearchModel(nil, "", 0, searchCfg, styles, buildCodeSearchOpts(owner, repoName, nil, false, insecureHTTPAuth))
 				model.mode = modeSearch
 				model.input.Focus()
 				model.codeLoading = false // don't fetch until a query is entered
@@ -271,7 +271,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			}
 
 			// Interactive TUI
-			codeOpts := buildCodeSearchOpts(ctx, owner, repoName, insecureHTTPAuth)
+			codeOpts := buildCodeSearchOpts(owner, repoName, repos, allRepos, insecureHTTPAuth)
 			if codeOpts != nil {
 				codeOpts.query = query // empty query → no initial code search (gated in newSearchModel)
 			}
@@ -383,15 +383,25 @@ func extractInlineRepoFilters(query string) (remaining string, repos []string) {
 	return strings.Join(kept, " "), repos
 }
 
-// buildCodeSearchOpts returns a *codeSearchOpts pre-populated with the current
-// repo slug when ENTIRE_CODE_SEARCH=1 is set, or nil when the feature is off.
-func buildCodeSearchOpts(_ context.Context, owner, repoName string, insecureHTTP bool) *codeSearchOpts {
+// buildCodeSearchOpts returns a *codeSearchOpts pre-populated with repo filters
+// when ENTIRE_CODE_SEARCH=1 is set, or nil when the feature is off. It honors
+// --repo, --all-repos, and inline repo: filters from the command line; when none
+// are specified, it falls back to the current git origin slug.
+func buildCodeSearchOpts(owner, repoName string, repos []string, allRepos, insecureHTTP bool) *codeSearchOpts {
 	if !codeSearchEnabled() {
 		return nil
 	}
-	slug := owner + "/" + repoName
+	var repoFilters []string
+	switch {
+	case allRepos:
+		// nil repoFilters → searchAllCells searches all repos
+	case len(repos) > 0:
+		repoFilters = repos
+	default:
+		repoFilters = []string{owner + "/" + repoName}
+	}
 	return &codeSearchOpts{
-		repoFilters:  []string{slug},
+		repoFilters:  repoFilters,
 		limit:        search.DefaultLimit,
 		insecureHTTP: insecureHTTP,
 	}
@@ -529,7 +539,7 @@ func resolveRepoFilters(filters []string, repos []coreapi.RepoIndexEntry) (repoI
 	byName := make(map[string]coreapi.RepoIndexEntry, len(repos))
 	byID := make(map[string]coreapi.RepoIndexEntry, len(repos))
 	for _, r := range repos {
-		byName[r.FullName] = r
+		byName[strings.ToLower(r.FullName)] = r
 		byID[r.ID] = r
 	}
 	seen := make(map[string]bool) // dedup by ID
@@ -541,11 +551,14 @@ func resolveRepoFilters(filters []string, repos []coreapi.RepoIndexEntry) (repoI
 		}
 
 		// Match order mirrors the BFF: id === filter || full_name === slug || full_name === filter
+		// FullName comparison is case-insensitive so casing differences between
+		// the git remote (e.g. entireio/CLI) and the repo index (entireio/cli)
+		// don't cause a "no matching repositories found" failure.
 		var r coreapi.RepoIndexEntry
 		var ok bool
 		if r, ok = byID[f]; !ok {
-			if r, ok = byName[slug]; !ok {
-				r, ok = byName[f]
+			if r, ok = byName[strings.ToLower(slug)]; !ok {
+				r, ok = byName[strings.ToLower(f)]
 			}
 		}
 		if ok && !seen[r.ID] {
