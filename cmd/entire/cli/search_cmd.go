@@ -273,7 +273,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			// Interactive TUI
 			codeOpts := buildCodeSearchOpts(ctx, owner, repoName, insecureHTTPAuth)
 			if codeOpts != nil {
-				codeOpts.query = query
+				codeOpts.query = query // empty query → no initial code search (gated in newSearchModel)
 			}
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles, codeOpts)
 			p := tea.NewProgram(model)
@@ -392,6 +392,7 @@ func buildCodeSearchOpts(_ context.Context, owner, repoName string, insecureHTTP
 	slug := owner + "/" + repoName
 	return &codeSearchOpts{
 		repoFilters:  []string{slug},
+		limit:        search.DefaultLimit,
 		insecureHTTP: insecureHTTP,
 	}
 }

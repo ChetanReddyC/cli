@@ -291,7 +291,7 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	}
 	if codeOpts != nil {
 		m.codeSearchOpts = *codeOpts
-		m.codeLoading = true
+		m.codeLoading = codeOpts.query != ""
 	}
 	m = m.refreshBrowseContent()
 	return m
@@ -424,11 +424,21 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m = m.refreshBrowseContent()
 		cmds := []tea.Cmd{performSearch(cfg)}
 		if codeSearchEnabled() && m.codeSearchOpts.repoFilters != nil {
-			m.codeSearchOpts.query = parsed.Query
-			m.codeLoading = true
-			m.codeResults = nil
-			m.codeSearchErr = ""
-			cmds = append(cmds, performCodeSearch(m.codeSearchOpts))
+			// Code search uses extractInlineRepoFilters (not ParseSearchInput)
+			// so author:/date:/branch: tokens are preserved as literal search
+			// text, matching the --code CLI path.
+			codeQuery, inlineRepos := extractInlineRepoFilters(raw)
+			if codeQuery != "" {
+				opts := m.codeSearchOpts
+				opts.query = codeQuery
+				if len(inlineRepos) > 0 {
+					opts.repoFilters = inlineRepos
+				}
+				m.codeLoading = true
+				m.codeResults = nil
+				m.codeSearchErr = ""
+				cmds = append(cmds, performCodeSearch(opts))
+			}
 		}
 		return m, tea.Batch(cmds...)
 	}
