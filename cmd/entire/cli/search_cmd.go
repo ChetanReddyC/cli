@@ -380,8 +380,12 @@ func extractInlineRepoFilters(query string) (remaining string, repos []string) {
 	var kept []string
 	for _, part := range strings.Fields(query) {
 		if strings.HasPrefix(part, "repo:") {
-			if v := part[5:]; v != "" {
-				repos = append(repos, v)
+			// Split comma-separated values (repo:a,b → [a, b]), matching
+			// checkpoint search's parseListFilter behavior.
+			for _, v := range strings.Split(part[5:], ",") {
+				if v != "" {
+					repos = append(repos, v)
+				}
 			}
 		} else {
 			kept = append(kept, part)
@@ -504,6 +508,13 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 	resolveCellBaseURLs(ctx, coreClient, cells)
 
 	// Step 4: Fan out via the shared fanOutCells helper.
+	// When fanning out to multiple cells, request the full limit from each cell
+	// so the global merge/sort sees the best hits from every region. The final
+	// cap is applied by mergeSearchResults after global ranking.
+	perCellLimit := opts.limit
+	if len(cells) > 1 && perCellLimit > 0 {
+		perCellLimit = 0 // let peregrine decide per-cell; global cap applied after merge
+	}
 	results, err := fanOutCells(ctx, opts.insecureHTTP, codeSearchCellTimeout, cells, func(ctx context.Context, group cellGroup, client *api.Client) (*codesearch.SearchResponse, error) {
 		var repoIDs []string
 		if len(opts.resolvedRepoIDs) > 0 {
@@ -514,8 +525,8 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 			Repos:         repoIDs,
 			CaseSensitive: opts.caseSensitive,
 		}
-		if opts.limit > 0 {
-			req.MaxResults = opts.limit
+		if perCellLimit > 0 {
+			req.MaxResults = perCellLimit
 		}
 		return codesearch.Search(ctx, client, req)
 	})

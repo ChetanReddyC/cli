@@ -51,6 +51,7 @@ type searchMoreResultsMsg struct {
 type codeSearchResultsMsg struct {
 	resp *codesearch.SearchResponse
 	err  error
+	gen  uint64 // generation counter; stale results are discarded
 }
 
 // searchStyles holds lipgloss styles specific to the search TUI.
@@ -154,6 +155,7 @@ type searchModel struct {
 	codeLoading    bool                // true while async code search runs
 	codeSearchErr  string              // error from code search
 	codeSearchOpts codeSearchOpts      // opts for code search (set by caller)
+	codeSearchGen  uint64              // generation counter; incremented on each new code search
 }
 
 // filteredResults returns results matching the active type filter.
@@ -291,7 +293,10 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	}
 	if codeOpts != nil {
 		m.codeSearchOpts = *codeOpts
-		m.codeLoading = codeOpts.query != ""
+		if codeOpts.query != "" {
+			m.codeLoading = true
+			m.codeSearchGen = 1
+		}
 	}
 	m = m.refreshBrowseContent()
 	return m
@@ -303,7 +308,7 @@ func (m searchModel) Init() tea.Cmd {
 		cmds = append(cmds, textinput.Blink)
 	}
 	if m.codeLoading {
-		cmds = append(cmds, performCodeSearch(m.codeSearchOpts))
+		cmds = append(cmds, performCodeSearch(m.codeSearchOpts, m.codeSearchGen))
 	}
 	return tea.Batch(cmds...)
 }
@@ -360,6 +365,9 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		return m, nil
 
 	case codeSearchResultsMsg:
+		if msg.gen != m.codeSearchGen {
+			return m, nil // stale result from a superseded search
+		}
 		m.codeLoading = false
 		if msg.err != nil {
 			m.codeSearchErr = msg.err.Error()
@@ -460,10 +468,11 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 						opts.repoFilters = filtered
 					}
 				}
+				m.codeSearchGen++
 				m.codeLoading = true
 				m.codeResults = nil
 				m.codeSearchErr = ""
-				cmds = append(cmds, performCodeSearch(opts))
+				cmds = append(cmds, performCodeSearch(opts, m.codeSearchGen))
 			}
 		}
 
@@ -636,10 +645,10 @@ func performSearch(cfg search.Config) tea.Cmd {
 	}
 }
 
-func performCodeSearch(opts codeSearchOpts) tea.Cmd {
+func performCodeSearch(opts codeSearchOpts, gen uint64) tea.Cmd {
 	return func() tea.Msg {
 		resp, err := searchAllCells(context.Background(), opts)
-		return codeSearchResultsMsg{resp: resp, err: err}
+		return codeSearchResultsMsg{resp: resp, err: err, gen: gen}
 	}
 }
 
