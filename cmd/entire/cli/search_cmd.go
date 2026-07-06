@@ -8,7 +8,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -230,9 +229,10 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			if query == "" && !searchCfg.HasFilters() {
 				searchCfg.Limit = search.DefaultLimit
 				styles := newStatusStyles(w)
-				model := newSearchModel(nil, "", 0, searchCfg, styles)
+				model := newSearchModel(nil, "", 0, searchCfg, styles, buildCodeSearchOpts(ctx, owner, repoName, insecureHTTPAuth))
 				model.mode = modeSearch
 				model.input.Focus()
+				model.codeLoading = false // don't fetch until a query is entered
 				p := tea.NewProgram(model)
 				if _, err := p.Run(); err != nil {
 					return fmt.Errorf("TUI error: %w", err)
@@ -271,7 +271,11 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			}
 
 			// Interactive TUI
-			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles)
+			codeOpts := buildCodeSearchOpts(ctx, owner, repoName, insecureHTTPAuth)
+			if codeOpts != nil {
+				codeOpts.query = query
+			}
+			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles, codeOpts)
 			p := tea.NewProgram(model)
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("TUI error: %w", err)
@@ -358,20 +362,7 @@ type codeSearchOpts struct {
 	caseSensitive   bool
 	jsonOutput      bool
 	insecureHTTP    bool
-
-	// Test seams — nil in production.
-	searchCellFn func(ctx context.Context, opts codeSearchOpts, cg cellGroup) (*codesearch.SearchResponse, error)
 }
-
-// codeSearchCoreClient is the control-plane surface searchAllCells needs.
-// An interface so the fan-out is unit-testable against a fake control plane.
-type codeSearchCoreClient interface {
-	ListRepos(ctx context.Context) (*coreapi.ListReposOutputBody, error)
-	ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error)
-}
-
-// newCodeSearchCoreClient builds the control-plane client. Swapped in tests.
-var newCodeSearchCoreClient = func() (codeSearchCoreClient, error) { return coreapi.New() }
 
 // extractInlineRepoFilters extracts only repo: prefixed filters from a query
 // string, returning the remaining query text and the list of repo values.
@@ -390,6 +381,19 @@ func extractInlineRepoFilters(query string) (remaining string, repos []string) {
 		}
 	}
 	return strings.Join(kept, " "), repos
+}
+
+// buildCodeSearchOpts returns a *codeSearchOpts pre-populated with the current
+// repo slug when ENTIRE_CODE_SEARCH=1 is set, or nil when the feature is off.
+func buildCodeSearchOpts(_ context.Context, owner, repoName string, insecureHTTP bool) *codeSearchOpts {
+	if !codeSearchEnabled() {
+		return nil
+	}
+	slug := owner + "/" + repoName
+	return &codeSearchOpts{
+		repoFilters:  []string{slug},
+		insecureHTTP: insecureHTTP,
+	}
 }
 
 // codeSearchCellTimeout bounds each per-cell search call (token exchange + API).
@@ -428,26 +432,18 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 	return nil
 }
 
-// cellGroup groups repos by cell for fan-out, matching the BFF's per-cell
-// search pattern. Each cell has its own peregrine instance, so we search
-// each cell independently. The jurisdiction is kept for token minting.
-type cellGroup struct {
-	cell         string   // cell identifier from RepoIndexEntry.Cell (grouping key, matches BFF)
-	jurisdiction string   // used for jurisdictional token exchange
-	baseURL      string   // cell's apiUrl from the cluster catalog (empty → home-cell fallback)
-	repoIDs      []string // repo ULIDs that belong to this cell (set when filtering)
-}
-
 // searchAllCells fans out code search across all cells that host the user's
-// repos, mirroring the BFF's per-cell search pattern:
+// repos, using the shared cell-routing foundation (cell_fanout.go):
 //  1. List repos from the control plane (entire-core) to discover cells
-//  2. Group by cell (one search per cell, matching the BFF)
-//  3. Resolve each cell's apiUrl from the cluster catalog
-//  4. Search each cell in parallel with per-cell timeouts
+//  2. Resolve repo slug filters to ULIDs
+//  3. Group by cell and resolve baseURLs via the shared helpers
+//  4. Fan out via fanOutCells with per-cell codesearch.Search calls
 //  5. Merge results (sorted by score, capped to limit)
 func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.SearchResponse, error) {
 	// Step 1: Get repos index from the control plane.
-	coreClient, err := newCodeSearchCoreClient()
+	// coreapi.Client satisfies cellCoreClient (for resolveCellBaseURLs)
+	// and also provides ListRepos (which cellCoreClient doesn't expose).
+	coreClient, err := coreapi.New()
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
 			return nil, errors.New("not authenticated. Run 'entire login' to authenticate")
@@ -482,80 +478,37 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 		indexRepos = filtered
 	}
 
-	// Step 3: Group repos by cell (one search per cell, matching the BFF).
+	// Step 3: Group repos by cell and resolve baseURLs via shared helpers.
 	cells := groupReposByCell(indexRepos)
 	if len(cells) == 0 {
 		return &codesearch.SearchResponse{}, nil
 	}
+	resolveCellBaseURLs(ctx, coreClient, cells)
 
-	// Step 3b: Resolve each cell's apiUrl from the cluster catalog so we
-	// can route directly to the cell rather than relying on jurisdiction
-	// fallback. Best-effort: if the listing fails, cells without a baseURL
-	// will fall back to jurisdiction-based routing in searchCell.
-	clusterCtx, clusterCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer clusterCancel()
-	clusters, clusterErr := coreClient.ListClusters(clusterCtx)
-	if clusterErr != nil {
-		logging.Warn(ctx, "could not list clusters for cell URL resolution; falling back to jurisdiction routing",
-			"error", clusterErr.Error())
-	} else {
-		slugToCluster := make(map[string]coreapi.Cluster, len(clusters.Clusters))
-		for _, cl := range clusters.Clusters {
-			slugToCluster[strings.ToLower(cl.Slug)] = cl
+	// Step 4: Fan out via the shared fanOutCells helper.
+	results, err := fanOutCells(ctx, opts.insecureHTTP, codeSearchCellTimeout, cells, func(ctx context.Context, group cellGroup, client *api.Client) (*codesearch.SearchResponse, error) {
+		var repoIDs []string
+		if len(opts.resolvedRepoIDs) > 0 {
+			repoIDs = group.repoIDs
 		}
-		for i := range cells {
-			if cl, ok := slugToCluster[cells[i].cell]; ok {
-				cells[i].baseURL = strings.TrimRight(strings.TrimSpace(cl.ApiUrl.Or("")), "/")
-			}
+		req := codesearch.SearchRequest{
+			Query:         opts.query,
+			Repos:         repoIDs,
+			CaseSensitive: opts.caseSensitive,
 		}
+		if opts.limit > 0 {
+			req.MaxResults = opts.limit
+		}
+		return codesearch.Search(ctx, client, req)
+	})
+	if err != nil {
+		if errors.Is(err, auth.ErrNotLoggedIn) {
+			return nil, errors.New("not authenticated. Run 'entire login' to authenticate")
+		}
+		return nil, fmt.Errorf("code search: %w", err)
 	}
 
-	// Step 4: Search each cell in parallel (or serially for a single cell).
-	// Every path goes through mergeSearchResults for uniform sort/dedup/truncate.
-	doSearch := searchCell
-	if opts.searchCellFn != nil {
-		doSearch = opts.searchCellFn
-	}
-	results := make([]codeSearchCellResult, len(cells))
-	if len(cells) == 1 {
-		resp, err := doSearch(ctx, opts, cells[0])
-		results[0] = codeSearchCellResult{resp: resp, err: err}
-	} else {
-		var wg sync.WaitGroup
-		for i, cg := range cells {
-			wg.Add(1)
-			go func(idx int, cg cellGroup) {
-				defer wg.Done()
-				resp, err := doSearch(ctx, opts, cg)
-				results[idx] = codeSearchCellResult{resp: resp, err: err}
-			}(i, cg)
-		}
-		wg.Wait()
-	}
-
-	return mergeSearchResults(ctx, opts.limit, cells, results)
-}
-
-// groupReposByCell groups repos by cell, returning one entry per distinct cell.
-// This matches the BFF pattern where peregrine runs per-cell.
-func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
-	idx := make(map[string]int) // cell → index in groups
-	var groups []cellGroup
-	for _, r := range repos {
-		cell := strings.ToLower(strings.TrimSpace(r.Cell))
-		if i, ok := idx[cell]; ok {
-			groups[i].repoIDs = append(groups[i].repoIDs, r.ID)
-			continue
-		}
-		idx[cell] = len(groups)
-		j := strings.ToLower(strings.TrimSpace(r.Jurisdiction))
-		groups = append(groups, cellGroup{
-			cell:         cell,
-			jurisdiction: j,
-			repoIDs:      []string{r.ID},
-		})
-	}
-	return groups
+	return mergeSearchResults(ctx, opts.limit, results)
 }
 
 // resolveRepoFilters matches user-provided filters against the repo index,
@@ -603,66 +556,11 @@ func resolveRepoFilters(filters []string, repos []coreapi.RepoIndexEntry) (repoI
 	return repoIDs, matched
 }
 
-// searchCell searches a single cell, using auth.NewEntireAPICellClient with
-// an explicit CellTarget. When baseURL is available (resolved from the cluster
-// catalog), it routes directly to the cell; otherwise falls back to
-// jurisdiction-based routing.
-func searchCell(ctx context.Context, opts codeSearchOpts, cg cellGroup) (*codesearch.SearchResponse, error) {
-	cellCtx, cancel := context.WithTimeout(ctx, codeSearchCellTimeout)
-	defer cancel()
-
-	var target *auth.CellTarget
-	label := cg.cell
-	if label == "" {
-		label = cg.jurisdiction
-	}
-	if label == "" {
-		label = "home"
-	}
-	switch {
-	case cg.baseURL != "":
-		target = &auth.CellTarget{BaseURL: cg.baseURL, Jurisdiction: cg.jurisdiction}
-	case cg.jurisdiction != "":
-		target = &auth.CellTarget{Jurisdiction: cg.jurisdiction}
-	}
-	client, err := auth.NewEntireAPICellClient(cellCtx, opts.insecureHTTP, target)
-	if err != nil {
-		return nil, fmt.Errorf("resolving cell client for %s: %w", label, err)
-	}
-
-	// Use per-cell repo IDs when filtering, so each cell only searches
-	// repos that belong to it.
-	var repoIDs []string
-	if len(opts.resolvedRepoIDs) > 0 {
-		repoIDs = cg.repoIDs
-	}
-	req := codesearch.SearchRequest{
-		Query:         opts.query,
-		Repos:         repoIDs,
-		CaseSensitive: opts.caseSensitive,
-	}
-	if opts.limit > 0 {
-		req.MaxResults = opts.limit
-	}
-
-	resp, err := codesearch.Search(cellCtx, client, req)
-	if err != nil {
-		return nil, fmt.Errorf("code search on %s: %w", label, err)
-	}
-	return resp, nil
-}
-
-// codeSearchCellResult holds the outcome of a single-cell search.
-type codeSearchCellResult struct {
-	resp *codesearch.SearchResponse
-	err  error
-}
-
 // mergeSearchResults merges responses from multiple cells into one, combining
 // results, stats, and repo_stats. Results are sorted by Score (descending) for
 // global relevance ranking and truncated to limit. Individual cell errors are
 // logged and skipped, but if ALL cells fail the error is surfaced.
-func mergeSearchResults(ctx context.Context, limit int, cells []cellGroup, results []codeSearchCellResult) (*codesearch.SearchResponse, error) {
+func mergeSearchResults(ctx context.Context, limit int, results []cellCallResult[*codesearch.SearchResponse]) (*codesearch.SearchResponse, error) {
 	merged := &codesearch.SearchResponse{}
 	var lastErr error
 	successCount := 0
@@ -671,20 +569,20 @@ func mergeSearchResults(ctx context.Context, limit int, cells []cellGroup, resul
 			lastErr = r.err
 			continue
 		}
-		if r.resp == nil {
+		if r.value == nil {
 			continue
 		}
 		successCount++
-		merged.Results = append(merged.Results, r.resp.Results...)
-		merged.RepoStats = append(merged.RepoStats, r.resp.RepoStats...)
-		merged.Stats.TotalMatches += r.resp.Stats.TotalMatches
-		merged.Stats.TotalFiles += r.resp.Stats.TotalFiles
-		merged.Stats.ReposSearched += r.resp.Stats.ReposSearched
-		if r.resp.Stats.DurationMs > merged.Stats.DurationMs {
-			merged.Stats.DurationMs = r.resp.Stats.DurationMs // wall-clock = slowest cell
+		merged.Results = append(merged.Results, r.value.Results...)
+		merged.RepoStats = append(merged.RepoStats, r.value.RepoStats...)
+		merged.Stats.TotalMatches += r.value.Stats.TotalMatches
+		merged.Stats.TotalFiles += r.value.Stats.TotalFiles
+		merged.Stats.ReposSearched += r.value.Stats.ReposSearched
+		if r.value.Stats.DurationMs > merged.Stats.DurationMs {
+			merged.Stats.DurationMs = r.value.Stats.DurationMs // wall-clock = slowest cell
 		}
 		if merged.Query == "" {
-			merged.Query = r.resp.Query
+			merged.Query = r.value.Query
 		}
 	}
 
@@ -693,26 +591,17 @@ func mergeSearchResults(ctx context.Context, limit int, cells []cellGroup, resul
 	}
 
 	// Track partial failures so consumers (especially --json) can see them.
-	// Use cell name for labeling when available, fall back to jurisdiction.
 	var failedJurisdictions []string
-	for i, r := range results {
+	for _, r := range results {
 		if r.err == nil {
 			continue
 		}
-		label := "home"
-		if i < len(cells) {
-			if cells[i].cell != "" {
-				label = cells[i].cell
-			} else if cells[i].jurisdiction != "" {
-				label = cells[i].jurisdiction
-			}
-		}
-		failedJurisdictions = append(failedJurisdictions, label)
+		failedJurisdictions = append(failedJurisdictions, r.group.label())
 	}
 	if len(failedJurisdictions) > 0 {
 		logging.Warn(ctx, "code search partial failure; results may be incomplete",
 			"succeeded", successCount,
-			"total", len(cells),
+			"total", len(results),
 			"failed_cells", failedJurisdictions)
 	}
 
