@@ -278,9 +278,17 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			if codeOpts != nil {
 				// Use extractInlineRepoFilters on the raw query so author:/date:/branch:
 				// tokens are preserved as literal code-search text, matching --code and
-				// the TUI submit path.
-				codeQuery, _ := extractInlineRepoFilters(rawQuery)
+				// the TUI submit path. Inline repo: filters override the flag-based
+				// scope, consistent with TUI re-search behavior.
+				codeQuery, inlineRepos := extractInlineRepoFilters(rawQuery)
 				codeOpts.query = codeQuery // empty → no initial code search (gated in newSearchModel)
+				if len(inlineRepos) > 0 {
+					if hasAllReposFilter(inlineRepos) {
+						codeOpts.repoFilters = nil
+					} else {
+						codeOpts.repoFilters = inlineRepos
+					}
+				}
 			}
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles, codeOpts)
 			p := tea.NewProgram(model)
@@ -392,6 +400,27 @@ func extractInlineRepoFilters(query string) (remaining string, repos []string) {
 		}
 	}
 	return strings.Join(kept, " "), repos
+}
+
+// hasAllReposFilter returns true if repos contains the wildcard "*" filter.
+func hasAllReposFilter(repos []string) bool {
+	for _, r := range repos {
+		if r == search.AllReposFilter {
+			return true
+		}
+	}
+	return false
+}
+
+// filterRepoWildcards returns repos with AllReposFilter entries removed.
+func filterRepoWildcards(repos []string) []string {
+	var out []string
+	for _, r := range repos {
+		if r != search.AllReposFilter {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // buildCodeSearchOpts returns a *codeSearchOpts pre-populated with repo filters
@@ -508,8 +537,13 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 	resolveCellBaseURLs(ctx, coreClient, cells)
 
 	// Step 4: Fan out via the shared fanOutCells helper.
-	// Each cell gets the full limit so the merge sees the best hits from every
-	// region. mergeSearchResults applies the global cap after ranking.
+	// Each cell gets the full limit for single-cell, or 2x for multi-cell so
+	// the merge sees enough candidates from every region for proper global
+	// ranking. mergeSearchResults applies the final cap.
+	perCellLimit := opts.limit
+	if len(cells) > 1 && perCellLimit > 0 {
+		perCellLimit *= 2
+	}
 	results, err := fanOutCells(ctx, opts.insecureHTTP, codeSearchCellTimeout, cells, func(ctx context.Context, group cellGroup, client *api.Client) (*codesearch.SearchResponse, error) {
 		var repoIDs []string
 		if len(opts.resolvedRepoIDs) > 0 {
@@ -520,8 +554,8 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 			Repos:         repoIDs,
 			CaseSensitive: opts.caseSensitive,
 		}
-		if opts.limit > 0 {
-			req.MaxResults = opts.limit
+		if perCellLimit > 0 {
+			req.MaxResults = perCellLimit
 		}
 		return codesearch.Search(ctx, client, req)
 	})

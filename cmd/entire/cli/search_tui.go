@@ -452,20 +452,10 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 				// previous query leaking into the next one.
 				opts.repoFilters = m.codeSearchOpts.repoFilters
 				if len(inlineRepos) > 0 {
-					// Handle repo:* → nil (all repos), matching --code --all-repos.
-					hasAll := false
-					var filtered []string
-					for _, r := range inlineRepos {
-						if r == search.AllReposFilter {
-							hasAll = true
-						} else {
-							filtered = append(filtered, r)
-						}
-					}
-					if hasAll {
+					if hasAllReposFilter(inlineRepos) {
 						opts.repoFilters = nil
 					} else {
-						opts.repoFilters = filtered
+						opts.repoFilters = filterRepoWildcards(inlineRepos)
 					}
 				}
 				m.codeSearchGen++
