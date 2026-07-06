@@ -591,9 +591,13 @@ func resolveRepoFilters(filters []string, repos []coreapi.RepoIndexEntry) (repoI
 	}
 	seen := make(map[string]bool) // dedup by ID
 	for _, f := range filters {
-		// BFF only strips gh/ prefix; other prefixes are left as-is.
+		// Strip known forge prefixes so "gh/owner/repo" and "et/owner/repo"
+		// match the index's full_name (which is just "owner/repo").
 		slug := f
-		if strings.HasPrefix(f, "gh/") {
+		switch {
+		case strings.HasPrefix(f, "gh/"):
+			slug = f[3:]
+		case strings.HasPrefix(f, "et/"):
 			slug = f[3:]
 		}
 
@@ -745,7 +749,7 @@ func writeCodeSearchJSON(w io.Writer, resp *codesearch.SearchResponse) error {
 	}{
 		Query:               resp.Query,
 		Results:             resp.Results,
-		Total:               resp.Stats.TotalMatches,
+		Total:               len(resp.Results),
 		Stats:               resp.Stats,
 		RepoStats:           resp.RepoStats,
 		FailedJurisdictions: resp.FailedJurisdictions,
@@ -785,8 +789,14 @@ func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse) {
 		}
 		fmt.Fprintf(w, "%s:%s:%d: %s\n", r.Repo, r.Path, r.Line, line)
 	}
-	fmt.Fprintf(w, "\n%d matches across %d files in %d repos (%.0fms)\n",
-		resp.Stats.TotalMatches, resp.Stats.TotalFiles, resp.Stats.ReposSearched, resp.Stats.DurationMs)
+	shown := len(resp.Results)
+	if resp.Stats.TotalMatches > shown {
+		fmt.Fprintf(w, "\nShowing %d of %d matches across %d files in %d repos (%.0fms)\n",
+			shown, resp.Stats.TotalMatches, resp.Stats.TotalFiles, resp.Stats.ReposSearched, resp.Stats.DurationMs)
+	} else {
+		fmt.Fprintf(w, "\n%d matches across %d files in %d repos (%.0fms)\n",
+			resp.Stats.TotalMatches, resp.Stats.TotalFiles, resp.Stats.ReposSearched, resp.Stats.DurationMs)
+	}
 	if len(resp.FailedJurisdictions) > 0 {
 		fmt.Fprintf(w, "Warning: results may be incomplete (failed jurisdictions: %s)\n",
 			strings.Join(resp.FailedJurisdictions, ", "))
