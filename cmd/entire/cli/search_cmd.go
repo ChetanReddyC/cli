@@ -112,8 +112,9 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 					codeRepos = filtered
 
 					// No explicit repo filter → derive from git origin remote.
+					// Use forge-prefixed slug so et/ forge repos match the index.
 					if len(codeRepos) == 0 {
-						slug := currentRepoSlug(ctx)
+						slug := currentRepoSlugWithForge(ctx)
 						if slug == "" {
 							return errors.New("could not determine current repository for code search (use --repo or --all-repos)")
 						}
@@ -232,7 +233,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			if query == "" && !searchCfg.HasFilters() {
 				searchCfg.Limit = search.DefaultLimit
 				styles := newStatusStyles(w)
-				model := newSearchModel(nil, "", 0, searchCfg, styles, buildCodeSearchOpts(owner, repoName, nil, false, insecureHTTPAuth))
+				model := newSearchModel(nil, "", 0, searchCfg, styles, buildCodeSearchOpts(ctx, owner, repoName, nil, false, insecureHTTPAuth))
 				model.mode = modeSearch
 				model.input.Focus()
 				model.codeLoading = false // don't fetch until a query is entered
@@ -274,7 +275,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			}
 
 			// Interactive TUI
-			codeOpts := buildCodeSearchOpts(owner, repoName, repos, allRepos, insecureHTTPAuth)
+			codeOpts := buildCodeSearchOpts(ctx, owner, repoName, repos, allRepos, insecureHTTPAuth)
 			if codeOpts != nil {
 				// Use extractInlineRepoFilters on the raw query so author:/date:/branch:
 				// tokens are preserved as literal code-search text, matching --code and
@@ -427,7 +428,7 @@ func filterRepoWildcards(repos []string) []string {
 // when ENTIRE_CODE_SEARCH=1 is set, or nil when the feature is off. It honors
 // --repo, --all-repos, and inline repo: filters from the command line; when none
 // are specified, it falls back to the current git origin slug.
-func buildCodeSearchOpts(owner, repoName string, repos []string, allRepos, insecureHTTP bool) *codeSearchOpts {
+func buildCodeSearchOpts(ctx context.Context, owner, repoName string, repos []string, allRepos, insecureHTTP bool) *codeSearchOpts {
 	if !codeSearchEnabled() {
 		return nil
 	}
@@ -438,7 +439,14 @@ func buildCodeSearchOpts(owner, repoName string, repos []string, allRepos, insec
 	case len(repos) > 0:
 		repoFilters = repos
 	default:
-		repoFilters = []string{owner + "/" + repoName}
+		// Use forge-prefixed slug (e.g. "et/proj/repo") so Entire forge
+		// repos match the index FullName. Falls back to owner/repo for
+		// GitHub repos (gh/ prefix is stripped by resolveRepoFilters).
+		if slug := currentRepoSlugWithForge(ctx); slug != "" {
+			repoFilters = []string{slug}
+		} else {
+			repoFilters = []string{owner + "/" + repoName}
+		}
 	}
 	return &codeSearchOpts{
 		repoFilters:  repoFilters,
@@ -591,13 +599,9 @@ func resolveRepoFilters(filters []string, repos []coreapi.RepoIndexEntry) (repoI
 	}
 	seen := make(map[string]bool) // dedup by ID
 	for _, f := range filters {
-		// Strip known forge prefixes so "gh/owner/repo" and "et/owner/repo"
-		// match the index's full_name (which is just "owner/repo").
+		// BFF only strips gh/ prefix; other prefixes are left as-is.
 		slug := f
-		switch {
-		case strings.HasPrefix(f, "gh/"):
-			slug = f[3:]
-		case strings.HasPrefix(f, "et/"):
+		if strings.HasPrefix(f, "gh/") {
 			slug = f[3:]
 		}
 
