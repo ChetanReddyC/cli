@@ -24,9 +24,11 @@ per-checkpoint refs under refs/entire/checkpoints/<shard>/<id>, the layout the
 git-refs checkpoint store uses.
 
 Each checkpoint's current tree is wrapped in a fresh commit and its ref is
-pointed at it — existing branch commits are not remapped. The command is
-idempotent: checkpoints already converted (their ref carries the same tree) are
-skipped, so it is safe to re-run after more branch activity.
+pointed at it — existing branch commits are not remapped. The checkpoint's
+metadata is normalized for the new layout: the legacy checkpoint_version field
+is dropped and session file paths are rewritten relative to the ref. The
+command is idempotent: checkpoints already converted are skipped, so it is safe
+to re-run after more branch activity.
 
 New refs are queued for push. Run interactively, it asks whether to push them
 now; non-interactively it never pushes — the refs stay queued and flush on the

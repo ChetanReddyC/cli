@@ -2,15 +2,21 @@ package checkpoint
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // MigrateResult summarizes a git-branch → git-refs checkpoint migration.
@@ -27,21 +33,17 @@ type MigrateResult struct {
 // branch (entire/checkpoints/v1) into a per-checkpoint ref under
 // refs/entire/checkpoints/<shard>/<id> — the layout the git-refs store uses.
 //
-// For each checkpoint it takes the checkpoint's CURRENT subtree object from the
-// v1 branch tip and wraps it in a fresh commit, then points the ref at that
-// commit. Existing branch commits are not remapped — only the latest tree is
-// carried over. Because the git-refs ref tree is byte-for-byte the branch's
-// <shard>/<id> subtree, a migrated checkpoint reads identically under either
-// backend.
+// Each checkpoint's current subtree from the v1 branch tip is wrapped in a
+// fresh commit, byte-identical except for the root metadata.json, which is
+// normalized for the refs layout (see normalizeMigratedMetadata). Existing
+// branch commits are not remapped.
 //
-// It is idempotent: a checkpoint whose ref already points at a commit carrying
-// the same tree is skipped, so re-running after more branch activity converts
-// only what changed — the new commit parents on the existing ref (a
-// fast-forward) rather than orphaning, so no prior state is lost from history.
+// It is idempotent: a ref already carrying the normalized tree is skipped, and
+// a re-run after more branch activity fast-forwards the ref (parenting on the
+// existing commit).
 //
-// New and advanced refs are enqueued for push like any git-refs write; this
-// function does not push. When dryRun is true it reports what would change
-// (populating Migrated) without writing any refs.
+// New and advanced refs are enqueued for push; this function does not push.
+// When dryRun is true it reports what would change without writing refs.
 func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool) (MigrateResult, error) {
 	var result MigrateResult
 
@@ -73,6 +75,11 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 			return nil
 		}
 
+		migratedTree, err := migratedCheckpointTree(ctx, repo, cid, cpTreeHash)
+		if err != nil {
+			return fmt.Errorf("normalize checkpoint %s: %w", cid, err)
+		}
+
 		// Resolve the existing ref once: it drives both the idempotency check and
 		// the parent of the new commit. Only a ref that resolves to a real commit
 		// becomes the parent — a ref pointing at an unreadable/non-commit object
@@ -81,7 +88,7 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 		parent := plumbing.ZeroHash
 		if existing, err := repo.Reference(refName, true); err == nil {
 			if commit, cerr := repo.CommitObject(existing.Hash()); cerr == nil {
-				if commit.TreeHash == cpTreeHash {
+				if commit.TreeHash == migratedTree {
 					result.Skipped++
 					return nil
 				}
@@ -94,11 +101,8 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 			return nil
 		}
 
-		// Wrap the checkpoint's current subtree in a fresh commit — parenting on
-		// the existing ref when present (re-migration fast-forwards) or as an
-		// orphan for a brand-new ref — then point the ref at it and enqueue it.
 		msg := fmt.Sprintf("Import checkpoint %s (migrated from git-branch)", cid)
-		commitHash, err := CreateCommit(ctx, repo, cpTreeHash, parent, msg, authorName, authorEmail)
+		commitHash, err := CreateCommit(ctx, repo, migratedTree, parent, msg, authorName, authorEmail)
 		if err != nil {
 			return fmt.Errorf("commit checkpoint %s: %w", cid, err)
 		}
@@ -112,4 +116,93 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 		return result, fmt.Errorf("walk v1 checkpoints: %w", walkErr)
 	}
 	return result, nil
+}
+
+// migratedCheckpointTree returns the branch subtree with its root metadata.json
+// normalized for the refs layout — unchanged when already normalized or absent.
+func migratedCheckpointTree(ctx context.Context, repo *git.Repository, cid id.CheckpointID, cpTreeHash plumbing.Hash) (plumbing.Hash, error) {
+	subtree, err := repo.TreeObject(cpTreeHash)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("read checkpoint tree: %w", err)
+	}
+	metadataFile, err := subtree.File(paths.MetadataFileName)
+	if err != nil {
+		if errors.Is(err, object.ErrFileNotFound) {
+			return cpTreeHash, nil
+		}
+		return plumbing.ZeroHash, fmt.Errorf("read metadata.json: %w", err)
+	}
+	raw, err := metadataFile.Contents()
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("read metadata.json: %w", err)
+	}
+
+	normalized, changed, err := normalizeMigratedMetadata([]byte(raw), cid)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	if !changed {
+		return cpTreeHash, nil
+	}
+
+	blobHash, err := CreateBlobFromContent(repo, normalized)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("write normalized metadata.json: %w", err)
+	}
+	newTree, err := ApplyTreeChanges(ctx, repo, cpTreeHash, []TreeChange{{
+		Path:  paths.MetadataFileName,
+		Entry: &object.TreeEntry{Name: paths.MetadataFileName, Mode: filemode.Regular, Hash: blobHash},
+	}})
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("build normalized checkpoint tree: %w", err)
+	}
+	return newTree, nil
+}
+
+// normalizeMigratedMetadata rewrites a checkpoint's root metadata.json for the
+// refs layout: it drops the legacy checkpoint_version field and strips the
+// "/<shard>/<id>" prefix from sessions[] paths. Any session string value under
+// the prefix is rebased, so path fields added by other CLI versions are covered
+// without naming them. The raw JSON is edited in place so fields this CLI
+// doesn't model are preserved. changed is false when the metadata already
+// matches the refs layout.
+func normalizeMigratedMetadata(raw []byte, cid id.CheckpointID) (normalized []byte, changed bool, err error) {
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, false, fmt.Errorf("parse metadata.json: %w", err)
+	}
+
+	if _, ok := doc["checkpoint_version"]; ok {
+		delete(doc, "checkpoint_version")
+		changed = true
+	}
+
+	branchPrefix := "/" + cid.Path()
+	if sessions, ok := doc["sessions"].([]any); ok {
+		for _, entry := range sessions {
+			session, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			for field, raw := range session {
+				value, ok := raw.(string)
+				if !ok {
+					continue
+				}
+				if rest, found := strings.CutPrefix(value, branchPrefix); found && strings.HasPrefix(rest, "/") {
+					session[field] = rest
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return nil, false, nil
+	}
+
+	normalized, err = jsonutil.MarshalIndentWithNewline(doc, "", "  ")
+	if err != nil {
+		return nil, false, fmt.Errorf("encode metadata.json: %w", err)
+	}
+	return normalized, true, nil
 }
