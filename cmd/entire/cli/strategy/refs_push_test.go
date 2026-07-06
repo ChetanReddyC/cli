@@ -214,7 +214,7 @@ func enqueueRefs(t *testing.T, repo *git.Repository, refs []plumbing.ReferenceNa
 	return queue
 }
 
-func TestPushMigratedCheckpointRefs(t *testing.T) {
+func TestPushQueuedCheckpointRefs(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
@@ -223,7 +223,7 @@ func TestPushMigratedCheckpointRefs(t *testing.T) {
 	require.NoError(t, err)
 	queue := enqueueRefs(t, repo, refs)
 
-	pushed, err := PushMigratedCheckpointRefs(context.Background(), repo, bareDir)
+	pushed, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
 	require.NoError(t, err)
 	assert.Equal(t, len(refs), pushed)
 
@@ -235,7 +235,7 @@ func TestPushMigratedCheckpointRefs(t *testing.T) {
 	assert.Empty(t, remaining, "pushed refs are removed from the queue")
 }
 
-func TestPushMigratedCheckpointRefs_PolicyBlocked(t *testing.T) {
+func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
@@ -245,7 +245,7 @@ func TestPushMigratedCheckpointRefs_PolicyBlocked(t *testing.T) {
 	writeUnsupportedCheckpointPolicy(t, repo)
 	queue := enqueueRefs(t, repo, refs)
 
-	pushed, err := PushMigratedCheckpointRefs(context.Background(), repo, bareDir)
+	pushed, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
 	require.ErrorContains(t, err, "checkpoint policy")
 	assert.Equal(t, 0, pushed)
 
@@ -262,7 +262,7 @@ func TestPushMigratedCheckpointRefs_PolicyBlocked(t *testing.T) {
 	}
 }
 
-func TestPushMigratedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
+func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
 	workDir, _, refs := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
@@ -272,7 +272,7 @@ func TestPushMigratedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
 	queue := enqueueRefs(t, repo, refs)
 
 	badTarget := filepath.Join(t.TempDir(), "missing.git")
-	pushed, err := PushMigratedCheckpointRefs(context.Background(), repo, badTarget)
+	pushed, err := PushQueuedCheckpointRefs(context.Background(), repo, badTarget)
 	require.ErrorContains(t, err, "failed to push")
 	assert.Equal(t, 0, pushed)
 

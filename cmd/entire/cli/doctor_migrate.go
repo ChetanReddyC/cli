@@ -83,7 +83,7 @@ next push once the git-refs store is the configured primary.`,
 				return nil
 			}
 
-			pushed, err := strategy.PushMigratedCheckpointRefs(ctx, repo, remote)
+			pushed, err := strategy.PushQueuedCheckpointRefs(ctx, repo, remote)
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
 					return NewSilentError(err)

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	git "github.com/go-git/go-git/v6"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -66,34 +64,23 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 		}
 		result.Total++
 
-		refName, err := RefName(cid)
-		if err != nil {
-			// A malformed id on the branch can't map to a ref; skip it rather
-			// than aborting the whole migration.
-			logging.Warn(ctx, "migrate: skipping checkpoint with unmappable id",
-				slog.String("id", cid.String()), slog.String("error", err.Error()))
-			return nil
-		}
-
 		migratedTree, err := migratedCheckpointTree(ctx, repo, cid, cpTreeHash)
 		if err != nil {
 			return fmt.Errorf("normalize checkpoint %s: %w", cid, err)
 		}
 
-		// Resolve the existing ref once: it drives both the idempotency check and
-		// the parent of the new commit. Only a ref that resolves to a real commit
-		// becomes the parent — a ref pointing at an unreadable/non-commit object
-		// is treated as absent (orphan) rather than parenting the new commit on a
-		// bad hash, which would corrupt the commit graph for fetch+replay.
-		parent := plumbing.ZeroHash
-		if existing, err := repo.Reference(refName, true); err == nil {
-			if commit, cerr := repo.CommitObject(existing.Hash()); cerr == nil {
-				if commit.TreeHash == migratedTree {
-					result.Skipped++
-					return nil
-				}
-				parent = existing.Hash()
-			}
+		// The existing ref drives the idempotency check and the new commit's
+		// parent. Only a ref that resolves to a real commit becomes the parent —
+		// unreadable ref state is treated as absent (orphan) rather than
+		// parenting the new commit on a bad hash, which would corrupt the commit
+		// graph for fetch+replay.
+		parent, existingTree, err := refsStore.refBase(cid)
+		if err != nil {
+			parent, existingTree = plumbing.ZeroHash, nil
+		}
+		if existingTree != nil && existingTree.Hash == migratedTree {
+			result.Skipped++
+			return nil
 		}
 
 		if dryRun {

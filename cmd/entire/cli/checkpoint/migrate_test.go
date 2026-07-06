@@ -242,6 +242,30 @@ func TestMigrateBranchToRefs_DryRunWritesNothing(t *testing.T) {
 	assert.Empty(t, queued, "dry-run must not enqueue refs for push")
 }
 
+func TestMigrateBranchToRefs_UnreadableRefIsReplacedWithOrphan(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	seedBranchCheckpoint(t, branch, cid, "s1")
+
+	// A ref at a nonexistent commit: the lookup succeeds but the commit read
+	// fails. The migration treats it as absent rather than parenting on the
+	// bad hash.
+	refName, err := RefName(cid)
+	require.NoError(t, err)
+	bogus := plumbing.NewHash("0123456789abcdef0123456789abcdef01234567")
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, bogus)))
+
+	result, err := MigrateBranchToRefs(context.Background(), repo, false)
+	require.NoError(t, err)
+	assert.Len(t, result.Migrated, 1)
+
+	commit, err := repo.CommitObject(refHash(t, repo, cid))
+	require.NoError(t, err)
+	assert.Empty(t, commit.ParentHashes, "unreadable ref must not become the parent")
+}
+
 func TestMigrateBranchToRefs_NoBranchIsNoop(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupBranchTestRepo(t) // initial commit only; no v1 checkpoint branch yet
