@@ -401,38 +401,64 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		if raw == "" {
 			return m, nil
 		}
+		// Checkpoint search: ParseSearchInput extracts author:/date:/branch:/repo:.
+		// ValidateRepoFilters only applies to checkpoint search (single repo limit);
+		// code search handles multiple repos via fan-out.
 		parsed := search.ParseSearchInput(raw)
-		if err := search.ValidateRepoFilters(parsed.Repos); err != nil {
-			m.searchErr = err.Error()
-			m = m.refreshBrowseContent()
-			return m, nil
-		}
+		checkpointRepoErr := search.ValidateRepoFilters(parsed.Repos)
+
 		m.mode = modeBrowse
 		m.input.Blur()
-		m.loading = true
 		m.searchErr = ""
-		cfg := m.searchCfg
-		cfg.Query = parsed.Query
-		if cfg.Query == "" {
-			cfg.Query = search.WildcardQuery
+
+		var cmds []tea.Cmd
+
+		// Checkpoint search (only if repo filters are valid for the checkpoint API).
+		if checkpointRepoErr != nil {
+			m.searchErr = checkpointRepoErr.Error()
+		} else {
+			m.loading = true
+			cfg := m.searchCfg
+			cfg.Query = parsed.Query
+			if cfg.Query == "" {
+				cfg.Query = search.WildcardQuery
+			}
+			cfg.Author = parsed.Author
+			cfg.Date = parsed.Date
+			cfg.Branch = parsed.Branch
+			cfg.Repos = parsed.Repos
+			m.searchCfg = cfg
+			cmds = append(cmds, performSearch(cfg))
 		}
-		cfg.Author = parsed.Author
-		cfg.Date = parsed.Date
-		cfg.Branch = parsed.Branch
-		cfg.Repos = parsed.Repos
-		m.searchCfg = cfg
-		m = m.refreshBrowseContent()
-		cmds := []tea.Cmd{performSearch(cfg)}
+
+		// Code search uses extractInlineRepoFilters (not ParseSearchInput)
+		// so author:/date:/branch: tokens are preserved as literal search
+		// text, matching the --code CLI path.
 		if codeSearchEnabled() {
-			// Code search uses extractInlineRepoFilters (not ParseSearchInput)
-			// so author:/date:/branch: tokens are preserved as literal search
-			// text, matching the --code CLI path.
 			codeQuery, inlineRepos := extractInlineRepoFilters(raw)
 			if codeQuery != "" {
 				opts := m.codeSearchOpts
 				opts.query = codeQuery
+				// Always reset to the model's default repo scope, then apply
+				// inline overrides. This prevents a stale repo list from a
+				// previous query leaking into the next one.
+				opts.repoFilters = m.codeSearchOpts.repoFilters
 				if len(inlineRepos) > 0 {
-					opts.repoFilters = inlineRepos
+					// Handle repo:* → nil (all repos), matching --code --all-repos.
+					hasAll := false
+					var filtered []string
+					for _, r := range inlineRepos {
+						if r == search.AllReposFilter {
+							hasAll = true
+						} else {
+							filtered = append(filtered, r)
+						}
+					}
+					if hasAll {
+						opts.repoFilters = nil
+					} else {
+						opts.repoFilters = filtered
+					}
 				}
 				m.codeLoading = true
 				m.codeResults = nil
@@ -440,6 +466,8 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 				cmds = append(cmds, performCodeSearch(opts))
 			}
 		}
+
+		m = m.refreshBrowseContent()
 		return m, tea.Batch(cmds...)
 	}
 
