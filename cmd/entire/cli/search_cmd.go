@@ -508,13 +508,8 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 	resolveCellBaseURLs(ctx, coreClient, cells)
 
 	// Step 4: Fan out via the shared fanOutCells helper.
-	// When fanning out to multiple cells, request the full limit from each cell
-	// so the global merge/sort sees the best hits from every region. The final
-	// cap is applied by mergeSearchResults after global ranking.
-	perCellLimit := opts.limit
-	if len(cells) > 1 && perCellLimit > 0 {
-		perCellLimit = 0 // let peregrine decide per-cell; global cap applied after merge
-	}
+	// Each cell gets the full limit so the merge sees the best hits from every
+	// region. mergeSearchResults applies the global cap after ranking.
 	results, err := fanOutCells(ctx, opts.insecureHTTP, codeSearchCellTimeout, cells, func(ctx context.Context, group cellGroup, client *api.Client) (*codesearch.SearchResponse, error) {
 		var repoIDs []string
 		if len(opts.resolvedRepoIDs) > 0 {
@@ -525,8 +520,8 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 			Repos:         repoIDs,
 			CaseSensitive: opts.caseSensitive,
 		}
-		if perCellLimit > 0 {
-			req.MaxResults = perCellLimit
+		if opts.limit > 0 {
+			req.MaxResults = opts.limit
 		}
 		return codesearch.Search(ctx, client, req)
 	})
