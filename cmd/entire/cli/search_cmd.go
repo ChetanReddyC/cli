@@ -130,7 +130,10 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				})
 			}
 
-			// Extract inline filters (author:, date:, branch:, repo:) from query args
+			// Extract inline filters (author:, date:, branch:, repo:) from query args.
+			// Keep the raw query for code search (which preserves author:/date:/branch:
+			// as literal text via extractInlineRepoFilters).
+			rawQuery := query
 			parsed := search.ParseSearchInput(query)
 			query = parsed.Query
 			if authorFlag == "" {
@@ -273,7 +276,11 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			// Interactive TUI
 			codeOpts := buildCodeSearchOpts(owner, repoName, repos, allRepos, insecureHTTPAuth)
 			if codeOpts != nil {
-				codeOpts.query = query // empty query → no initial code search (gated in newSearchModel)
+				// Use extractInlineRepoFilters on the raw query so author:/date:/branch:
+				// tokens are preserved as literal code-search text, matching --code and
+				// the TUI submit path.
+				codeQuery, _ := extractInlineRepoFilters(rawQuery)
+				codeOpts.query = codeQuery // empty → no initial code search (gated in newSearchModel)
 			}
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles, codeOpts)
 			p := tea.NewProgram(model)
