@@ -1429,10 +1429,10 @@ func TestSearchModel_NewSearchRejectsMultipleExplicitRepos(t *testing.T) {
 		t.Fatalf("Update returned %T, want searchModel", updated)
 	}
 
-	// Multi-repo filters are invalid for checkpoint search; the error is shown
-	// but the TUI transitions to browse mode (code search may still fire).
-	if m.mode != modeBrowse {
-		t.Errorf("mode = %d, want modeBrowse", m.mode)
+	// Multi-repo filters are invalid for checkpoint search and code search is
+	// off (nil codeOpts) — stay in search mode so the user can correct input.
+	if m.mode != modeSearch {
+		t.Errorf("mode = %d, want modeSearch", m.mode)
 	}
 	if m.searchErr != "only one explicit repo filter is currently supported" {
 		t.Errorf("searchErr = %q", m.searchErr)

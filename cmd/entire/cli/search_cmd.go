@@ -390,8 +390,10 @@ func extractInlineRepoFilters(query string) (remaining string, repos []string) {
 	for _, part := range strings.Fields(query) {
 		if strings.HasPrefix(part, "repo:") {
 			// Split comma-separated values (repo:a,b → [a, b]), matching
-			// checkpoint search's parseListFilter behavior.
+			// checkpoint search's parseListFilter behavior. Trim quotes so
+			// repo:"gh/owner/repo" works like the unquoted form.
 			for _, v := range strings.Split(part[5:], ",") {
+				v = strings.Trim(v, `"'`)
 				if v != "" {
 					repos = append(repos, v)
 				}

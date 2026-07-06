@@ -415,29 +415,10 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		parsed := search.ParseSearchInput(raw)
 		checkpointRepoErr := search.ValidateRepoFilters(parsed.Repos)
 
-		m.mode = modeBrowse
-		m.input.Blur()
 		m.searchErr = ""
 
 		var cmds []tea.Cmd
-
-		// Checkpoint search (only if repo filters are valid for the checkpoint API).
-		if checkpointRepoErr != nil {
-			m.searchErr = checkpointRepoErr.Error()
-		} else {
-			m.loading = true
-			cfg := m.searchCfg
-			cfg.Query = parsed.Query
-			if cfg.Query == "" {
-				cfg.Query = search.WildcardQuery
-			}
-			cfg.Author = parsed.Author
-			cfg.Date = parsed.Date
-			cfg.Branch = parsed.Branch
-			cfg.Repos = parsed.Repos
-			m.searchCfg = cfg
-			cmds = append(cmds, performSearch(cfg))
-		}
+		willFireCodeSearch := false
 
 		// Code search uses extractInlineRepoFilters (not ParseSearchInput)
 		// so author:/date:/branch: tokens are preserved as literal search
@@ -445,6 +426,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		if codeSearchEnabled() {
 			codeQuery, inlineRepos := extractInlineRepoFilters(raw)
 			if codeQuery != "" {
+				willFireCodeSearch = true
 				opts := m.codeSearchOpts
 				opts.query = codeQuery
 				// Always reset to the model's default repo scope, then apply
@@ -463,9 +445,40 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 				m.codeResults = nil
 				m.codeSearchErr = ""
 				cmds = append(cmds, performCodeSearch(opts, m.codeSearchGen))
+			} else {
+				// No code query (e.g. repo-only input) — clear stale code
+				// results so the Code tab doesn't show previous matches.
+				m.codeResults = nil
+				m.codeSearchErr = ""
 			}
 		}
 
+		// Checkpoint search (only if repo filters are valid for the checkpoint API).
+		if checkpointRepoErr != nil {
+			m.searchErr = checkpointRepoErr.Error()
+			if !willFireCodeSearch {
+				// Neither search will fire — stay in search mode so the
+				// user can correct the input without pressing / again.
+				m = m.refreshBrowseContent()
+				return m, nil
+			}
+		} else {
+			m.loading = true
+			cfg := m.searchCfg
+			cfg.Query = parsed.Query
+			if cfg.Query == "" {
+				cfg.Query = search.WildcardQuery
+			}
+			cfg.Author = parsed.Author
+			cfg.Date = parsed.Date
+			cfg.Branch = parsed.Branch
+			cfg.Repos = parsed.Repos
+			m.searchCfg = cfg
+			cmds = append(cmds, performSearch(cfg))
+		}
+
+		m.mode = modeBrowse
+		m.input.Blur()
 		m = m.refreshBrowseContent()
 		return m, tea.Batch(cmds...)
 	}
