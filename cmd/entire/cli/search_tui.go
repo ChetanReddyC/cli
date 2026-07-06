@@ -447,7 +447,10 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 				cmds = append(cmds, performCodeSearch(opts, m.codeSearchGen))
 			} else {
 				// No code query (e.g. repo-only input) — clear stale code
-				// results so the Code tab doesn't show previous matches.
+				// results and bump the generation so any in-flight search
+				// from a prior query is discarded when it completes.
+				m.codeSearchGen++
+				m.codeLoading = false
 				m.codeResults = nil
 				m.codeSearchErr = ""
 			}
