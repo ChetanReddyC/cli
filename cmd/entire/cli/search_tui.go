@@ -796,23 +796,40 @@ func (m searchModel) viewBrowseHeader() (string, bool) {
 	b.WriteString(pad + m.styles.render(m.styles.sectionTitle, "›") + " " + m.styles.render(m.styles.bold, query))
 	b.WriteString("\n\n")
 
-	// Loading / error / empty states
-	if m.loading {
-		b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
-		return b.String(), false
-	}
-	if m.searchErr != "" {
-		b.WriteString(pad + m.styles.render(m.styles.red, "Error: "+m.searchErr))
-		return b.String(), false
-	}
-	if len(m.results) == 0 {
-		b.WriteString(pad + m.styles.render(m.styles.dim, "No results found."))
+	// When code search is available, always show type tabs so the user can
+	// switch to the Code tab even when checkpoint search is loading/errored/empty.
+	hasCodeTab := codeSearchEnabled()
+	checkpointBlocked := m.loading || m.searchErr != "" || len(m.results) == 0
+
+	if checkpointBlocked && !hasCodeTab {
+		// No code tab — show the checkpoint-only loading/error/empty state.
+		switch {
+		case m.loading:
+			b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
+		case m.searchErr != "":
+			b.WriteString(pad + m.styles.render(m.styles.red, "Error: "+m.searchErr))
+		default:
+			b.WriteString(pad + m.styles.render(m.styles.dim, "No results found."))
+		}
 		return b.String(), false
 	}
 
 	// Type tabs
 	b.WriteString(pad + m.viewTypeTabs())
 	b.WriteString("\n\n")
+
+	// Checkpoint-specific loading/error/empty when on a checkpoint tab.
+	if checkpointBlocked && m.filterType != typeFilterCode {
+		switch {
+		case m.loading:
+			b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
+		case m.searchErr != "":
+			b.WriteString(pad + m.styles.render(m.styles.red, "Error: "+m.searchErr))
+		default:
+			b.WriteString(pad + m.styles.render(m.styles.dim, "No results found."))
+		}
+		return b.String(), false
+	}
 
 	// Section: RESULTS
 	b.WriteString(pad + m.styles.render(m.styles.sectionTitle, "RESULTS"))
