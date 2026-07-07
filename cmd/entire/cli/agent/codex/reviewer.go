@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/review"
@@ -117,15 +118,21 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 	go func() {
 		defer close(out)
 		// The rollout token tailer (started on thread.started) runs concurrently
-		// and also sends on out. Stop it and wait for it to exit BEFORE close(out)
-		// so its send can never hit a closed channel. defer is LIFO, so this runs
-		// before the close(out) registered above.
+		// and also sends on out. It must be stopped and awaited BEFORE the
+		// terminal Tokens/RunError/Finished emissions — Finished is contractually
+		// the last event, and a lagging tailer tick would otherwise overwrite the
+		// final recorded totals after completion. stopTailer is called explicitly
+		// on every exit path ahead of the terminal sends; the deferred call is a
+		// safety net (sync.Once) that also guarantees no send can hit the closed
+		// channel.
 		stop := make(chan struct{})
 		var tailWG sync.WaitGroup
-		defer func() {
+		var tailerEmitted atomic.Bool
+		stopTailer := sync.OnceFunc(func() {
 			close(stop)
 			tailWG.Wait()
-		}()
+		})
+		defer stopTailer()
 		out <- reviewtypes.Started{}
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, min(1024*1024, maxBuf)), maxBuf)
@@ -164,7 +171,7 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 					tailWG.Add(1)
 					go func(id string) {
 						defer tailWG.Done()
-						tailRolloutTokens(id, out, stop)
+						tailRolloutTokens(id, out, stop, &tailerEmitted)
 					}(env.ThreadID)
 				}
 			case "turn.started":
@@ -184,16 +191,19 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 				seenTurnComplete = true
 				turnUsage = env.Usage
 				// Emit Tokens at every turn boundary so multi-turn reviews
-				// show iterative updates. The post-loop emission is kept as
-				// a backstop for streams that ended without a usage-carrying
-				// turn.completed (defensive — shouldn't happen in practice).
+				// show iterative updates — but only while the rollout tailer
+				// hasn't produced values: turn.completed usage is per-turn
+				// scale, the tailer's token_count totals are session-
+				// cumulative, and mixing the two in one overwrite-not-sum
+				// slot makes the counter flap between scales. Once the
+				// tailer has emitted, it is the single authoritative source.
 				//
 				// codex reports cached_input_tokens as a subset of
 				// input_tokens and reasoning_output_tokens as a subset of
 				// output_tokens (matching OpenAI's chat-completions usage
 				// shape), so do NOT sum the subset fields — that would
 				// double-count.
-				if env.Usage.InputTokens > 0 || env.Usage.OutputTokens > 0 {
+				if !tailerEmitted.Load() && (env.Usage.InputTokens > 0 || env.Usage.OutputTokens > 0) {
 					out <- reviewtypes.Tokens{
 						In:  env.Usage.InputTokens,
 						Out: env.Usage.OutputTokens,
@@ -205,6 +215,10 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 					slog.String("type", env.Type))
 			}
 		}
+		// Stream over — stop the tailer BEFORE any terminal emission so
+		// Finished stays the last event and no lagging tailer tick can
+		// overwrite the final recorded totals.
+		stopTailer()
 		if err := scanner.Err(); err != nil {
 			out <- reviewtypes.RunError{Err: fmt.Errorf("read stdout: %w", err)}
 			out <- reviewtypes.Finished{Success: false}
@@ -214,13 +228,14 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			out <- reviewtypes.RunError{Err: fmt.Errorf("codex: %s", failureMsg)}
 		}
 		if seenTurnComplete {
-			// Defensive backstop: the per-turn emission inside the
-			// `case "turn.completed"` arm above is the primary path and
-			// already emitted Tokens for every turn with non-zero usage.
-			// This fires only if no per-turn emission happened (e.g., a
-			// terminal turn.completed envelope arrived without a usage
-			// block — defensive against codex output drift).
-			if !emittedTokens {
+			// Defensive backstop for a stream whose turn.completed carried
+			// usage that never got emitted (can't happen today — the
+			// per-turn arm emits whenever usage is non-zero and no tailer
+			// value exists). Gated on non-zero usage: emitting {0,0} here
+			// would only ever ERASE the tailer's genuine totals under the
+			// consumers' overwrite-not-sum semantics.
+			if !emittedTokens && !tailerEmitted.Load() &&
+				(turnUsage.InputTokens > 0 || turnUsage.OutputTokens > 0) {
 				out <- reviewtypes.Tokens{
 					In:  turnUsage.InputTokens,
 					Out: turnUsage.OutputTokens,

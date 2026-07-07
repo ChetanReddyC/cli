@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -28,22 +32,27 @@ const (
 // until the run ends. The rollout file is the same source codex's
 // interactive UI reads for its live token counter.
 //
-// token_count.total_token_usage is a running total, so each emission is an
-// absolute count — matching consumers' overwrite-not-sum semantics.
-// Duplicate totals are suppressed so we only emit on real movement.
+// token_count.total_token_usage is a running SESSION total (not per-turn
+// scale like turn.completed usage), so each emission is an absolute count —
+// matching consumers' overwrite-not-sum semantics. Duplicate totals are
+// suppressed so we only emit on real movement. emitted is set after the
+// first successful send; the parser uses it to suppress its per-turn-scale
+// stdout emissions so a single source stays authoritative.
 //
-// Returns when stop is closed (the stdout stream ended) or the rollout file
-// never appears. The caller must wait for this to return before closing the
-// event channel (see parseCodexOutputBuf), so a send here can never race a
-// channel close.
-func tailRolloutTokens(threadID string, out chan<- reviewtypes.Event, stop <-chan struct{}) {
+// Returns when stop is closed (the stdout stream ended) — after one final
+// catch-up drain of the file, so the last token_count codex wrote is not
+// lost to tick timing — or when the rollout file never appears. The caller
+// must wait for this to return before closing the event channel (see
+// parseCodexOutputBuf), and the run contract guarantees the consumer drains
+// events until close, so sends here can neither race a close nor deadlock.
+func tailRolloutTokens(threadID string, out chan<- reviewtypes.Event, stop <-chan struct{}, emitted *atomic.Bool) {
 	ctx := context.Background()
 	sessionDir, err := (&CodexAgent{}).GetSessionDir("")
 	if err != nil {
 		logging.Debug(ctx, "codex token tail: session dir unresolved", slog.String("error", err.Error()))
 		return
 	}
-	path := waitForRollout(sessionDir, threadID, stop)
+	path := waitForRollout(ctx, sessionDir, threadID, stop)
 	if path == "" {
 		return
 	}
@@ -56,50 +65,80 @@ func tailRolloutTokens(threadID string, out chan<- reviewtypes.Event, stop <-cha
 
 	// Tail via os.File.Read rather than bufio.Reader: bufio is sticky on EOF
 	// and would never observe lines codex appends after we first catch up.
-	var pending []byte
-	chunk := make([]byte, rolloutReadChunk)
-	lastIn, lastOut := -1, -1
+	tail := rolloutTail{f: f, out: out, emitted: emitted, lastIn: -1, lastOut: -1}
 	ticker := time.NewTicker(rolloutTailInterval)
 	defer ticker.Stop()
 	for {
-		for {
-			n, readErr := f.Read(chunk)
-			if n > 0 {
-				pending = append(pending, chunk[:n]...)
-				for {
-					idx := bytes.IndexByte(pending, '\n')
-					if idx < 0 {
-						break
-					}
-					line := pending[:idx]
-					pending = pending[idx+1:]
-					in, outTok, ok := parseRolloutTokenCount(line)
-					if !ok || (in == lastIn && outTok == lastOut) {
-						continue
-					}
-					lastIn, lastOut = in, outTok
-					select {
-					case out <- reviewtypes.Tokens{In: in, Out: outTok}:
-					case <-stop:
-						return
-					}
-				}
-			}
-			if readErr != nil {
-				break // EOF or error — wait for the file to grow, then retry
-			}
+		if err := tail.drain(); err != nil {
+			logging.Debug(ctx, "codex token tail: read rollout failed", slog.String("error", err.Error()))
+			return
 		}
 		select {
 		case <-stop:
+			// Final catch-up: codex may have flushed the terminal
+			// token_count between our last drain and stream end.
+			if err := tail.drain(); err != nil {
+				logging.Debug(ctx, "codex token tail: final drain failed", slog.String("error", err.Error()))
+			}
 			return
 		case <-ticker.C:
 		}
 	}
 }
 
+// rolloutTail holds the incremental read state for one rollout file.
+type rolloutTail struct {
+	f       *os.File
+	out     chan<- reviewtypes.Event
+	emitted *atomic.Bool
+	pending []byte
+	lastIn  int
+	lastOut int
+}
+
+// drain reads the file to EOF, emitting Tokens for every complete
+// token_count line with new totals. Returns a non-nil error only for
+// non-EOF read failures (deleted file, I/O error) — persistent failures
+// must stop the tailer instead of silently re-polling forever.
+func (t *rolloutTail) drain() error {
+	chunk := make([]byte, rolloutReadChunk)
+	for {
+		n, readErr := t.f.Read(chunk)
+		if n > 0 {
+			t.pending = append(t.pending, chunk[:n]...)
+			for {
+				idx := bytes.IndexByte(t.pending, '\n')
+				if idx < 0 {
+					break
+				}
+				line := t.pending[:idx]
+				t.pending = t.pending[idx+1:]
+				in, outTok, ok := parseRolloutTokenCount(line)
+				if !ok || (in == t.lastIn && outTok == t.lastOut) {
+					continue
+				}
+				t.lastIn, t.lastOut = in, outTok
+				// Unconditional send is safe: the parser waits for the
+				// tailer before closing the channel, and the run contract
+				// guarantees the consumer drains until close.
+				t.out <- reviewtypes.Tokens{In: in, Out: outTok}
+				t.emitted.Store(true)
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil // caught up — wait for the file to grow
+			}
+			return fmt.Errorf("read rollout: %w", readErr)
+		}
+	}
+}
+
 // waitForRollout polls for the rollout file matching threadID, returning its
-// path or "" if stop fires or the attempts are exhausted.
-func waitForRollout(sessionDir, threadID string, stop <-chan struct{}) string {
+// path or "" if stop fires or the attempts are exhausted. Exhaustion is
+// debug-logged: it is the likely failure mode if a codex release changes the
+// rollout layout, and it would otherwise silently disable live tokens.
+func waitForRollout(ctx context.Context, sessionDir, threadID string, stop <-chan struct{}) string {
 	for range rolloutPollAttempts {
 		if path := findRolloutBySessionID(sessionDir, threadID); path != "" {
 			return path
@@ -110,6 +149,8 @@ func waitForRollout(sessionDir, threadID string, stop <-chan struct{}) string {
 		case <-time.After(rolloutPollInterval):
 		}
 	}
+	logging.Debug(ctx, "codex token tail: rollout file never appeared",
+		slog.String("session_dir", sessionDir), slog.String("thread_id", threadID))
 	return ""
 }
 

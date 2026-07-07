@@ -390,19 +390,24 @@ func TestParseClaudeOutput_GarbledLineEmitsRunErrorAndContinues(t *testing.T) {
 	}
 }
 
-// TestParseClaudeOutput_EmitsInputOnlyDuringRun captures the live-token
-// contract for Claude: the assistant envelopes' usage block carries a
-// per-turn-start snapshot where output_tokens is essentially zero (1–8
-// tokens of initial decision), so we surface input only on those envelopes
-// and let the terminal `result` envelope carry the true {In, Out} total.
+// TestParseClaudeOutput_EmitsCumulativeInputDuringRun captures the live-token
+// contract for Claude. The `Tokens` type is documented as cumulative running
+// totals (each emission replaces the previous), so mid-run emissions must be
+// running sums, not per-call snapshots. Claude's assistant envelopes carry a
+// usage block per API call (repeated verbatim on every content-block envelope
+// of the same message id), where output_tokens is a 1–8 token "initial
+// decision" stub — so the parser accumulates input across unique message ids,
+// emits `Tokens{In: <running sum>, Out: 0}`, and lets the terminal `result`
+// envelope deliver the true {In, Out} aggregate.
 //
 // Fixture is derived from real `claude -p --output-format stream-json
 // --verbose` output captured against claude-haiku-4-5: six assistant
-// envelopes across three turns, each with output_tokens 1–6, then a final
-// result with output_tokens 2511. If a future Claude build starts streaming
-// real output token counts on assistant envelopes, this test fails and
-// signals that the parser can emit live {In, Out} pairs.
-func TestParseClaudeOutput_EmitsInputOnlyDuringRun(t *testing.T) {
+// envelopes across three API calls (message ids msg_turn1..3, with turn 1
+// repeated on three envelopes), then a final result. The per-call input sums
+// are 56277, 56626, and 56734 — running totals 56277, 112903, 169637 — and
+// the result aggregate is exactly {In: 169637, Out: 2511}, which pins that
+// accumulation converges to the final figure.
+func TestParseClaudeOutput_EmitsCumulativeInputDuringRun(t *testing.T) {
 	t.Parallel()
 	f, err := os.Open("testdata/stream_with_deltas.jsonl")
 	if err != nil {
@@ -428,31 +433,22 @@ func TestParseClaudeOutput_EmitsInputOnlyDuringRun(t *testing.T) {
 			sawFinished = true
 		}
 	}
-	if len(tokens) < 2 {
-		t.Fatalf("expected >=2 Tokens events (assistant snapshots + final), got %d", len(tokens))
-	}
 
-	// All Tokens BEFORE the final one are assistant-envelope snapshots:
-	// input is populated; Out must be exactly 0 to avoid showing the
-	// misleading per-turn-start initial-decision count in the TUI.
-	for i := range len(tokens) - 1 {
-		tk := tokens[i]
-		if tk.Out != 0 {
-			t.Errorf("tokens[%d].Out = %d, want 0 (assistant envelope snapshot — output not yet known)", i, tk.Out)
-		}
-		if tk.In == 0 {
-			t.Errorf("tokens[%d].In = 0, want >0 (assistant envelope carries input)", i)
-		}
+	// One emission per unique message id (duplicate envelopes of the same
+	// API call must not re-emit) plus the terminal result emission.
+	want := []reviewtypes.Tokens{
+		{In: 56277, Out: 0},
+		{In: 112903, Out: 0},
+		{In: 169637, Out: 0},
+		{In: 169637, Out: 2511},
 	}
-
-	// The terminal Tokens event is from `result` and carries the true
-	// aggregate output count (2511 in the fixture).
-	last := tokens[len(tokens)-1]
-	if last.Out == 0 {
-		t.Error("final Tokens.Out = 0, want non-zero (result envelope final tally)")
+	if len(tokens) != len(want) {
+		t.Fatalf("Tokens events = %d, want %d (one per unique message id + result): %+v", len(tokens), len(want), tokens)
 	}
-	if last.In == 0 {
-		t.Error("final Tokens.In = 0, want non-zero")
+	for i, w := range want {
+		if tokens[i] != w {
+			t.Errorf("tokens[%d] = %+v, want %+v", i, tokens[i], w)
+		}
 	}
 }
 

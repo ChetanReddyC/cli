@@ -56,16 +56,21 @@ func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 // On a scanner error (torn stream), emits RunError then Finished{Success:false}.
 //
 // Live-token semantics: Claude's assistant envelopes carry a usage snapshot
-// taken at the START of each turn — input_tokens/cache_* are populated but
-// output_tokens is essentially zero (a 1–8 token "initial decision" count
-// that does not update as text streams). The true per-turn output is only
-// surfaced on `result` (aggregate across all turns in the run) or on the
+// taken at the START of each API call — input_tokens/cache_* are populated
+// but output_tokens is essentially zero (a 1–8 token "initial decision"
+// count that does not update as text streams). The true output is only
+// surfaced on `result` (aggregate across all calls in the run) or on the
 // late `message_delta` event of --include-partial-messages mode.
 //
-// We emit `Tokens{In: <sum>, Out: 0}` on each assistant envelope so consumers
-// can show context size growing across multi-turn runs, and `Tokens{In, Out}`
-// on `result` with the final aggregate. Sending the misleading early
-// "Out: 1" snapshot was removed after capturing real claude stream-json.
+// The Tokens contract (types/reviewer.go) is cumulative running totals, so
+// the parser accumulates the input sum across unique message ids (the same
+// usage block repeats verbatim on every content-block envelope of one API
+// call — summing per envelope would multi-count) and emits
+// `Tokens{In: <running sum>, Out: 0}` once per new message id. The running
+// sum converges to the `result` aggregate, which is emitted last with the
+// true {In, Out}. Out stays 0 mid-run because consumers render every Tokens
+// event the same way — surfacing the 1–8 token stub would display a
+// misleading real-looking output count.
 //
 // Package-private; called directly from this package's tests so they can
 // drive raw stdout fixtures through the parser without going through the
@@ -94,6 +99,8 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 		var sawResult bool
 		var resultErr bool
 		var resultUsage messageUsage
+		seenMsgIDs := map[string]struct{}{}
+		var cumInputTokens int
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			if len(line) == 0 {
@@ -120,19 +127,21 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 						out <- reviewtypes.ToolCall{Name: block.Name, Args: string(block.Input)}
 					}
 				}
-				// The usage snapshot here is captured at the start of the
-				// turn, so output_tokens is essentially zero (1–8 tokens of
-				// initial decision, not the true output count). Surface input
-				// only — consumers render input-only Tokens differently from
-				// finalized {In, Out} pairs. The final tally comes from the
-				// `result` envelope below.
-				if env.Message.Usage.InputTokens > 0 ||
-					env.Message.Usage.CacheReadInputTokens > 0 ||
-					env.Message.Usage.CacheCreationInputTokens > 0 {
-					in := env.Message.Usage.InputTokens +
-						env.Message.Usage.CacheReadInputTokens +
-						env.Message.Usage.CacheCreationInputTokens
-					out <- reviewtypes.Tokens{In: in, Out: 0}
+				// Accumulate input once per unique message id: every
+				// content-block envelope of one API call repeats the same
+				// usage snapshot, and its output_tokens is a 1–8 token stub
+				// (see the parser doc). Emitting the running sum keeps
+				// mid-run values on the cumulative Tokens contract; the
+				// true {In, Out} tally comes from `result` below.
+				in := env.Message.Usage.InputTokens +
+					env.Message.Usage.CacheReadInputTokens +
+					env.Message.Usage.CacheCreationInputTokens
+				if in > 0 && env.Message.ID != "" {
+					if _, seen := seenMsgIDs[env.Message.ID]; !seen {
+						seenMsgIDs[env.Message.ID] = struct{}{}
+						cumInputTokens += in
+						out <- reviewtypes.Tokens{In: cumInputTokens, Out: 0}
+					}
 				}
 			case "result":
 				sawResult = true
@@ -168,8 +177,12 @@ type claudeEnvelope struct {
 }
 
 type claudeMessage struct {
+	// ID is the API message id — identical across the multiple
+	// content-block envelopes of one API call; the parser dedupes usage
+	// accumulation on it.
+	ID      string        `json:"id"`
 	Content []claudeBlock `json:"content"`
-	// Usage on assistant envelopes is the per-turn-START snapshot — input
+	// Usage on assistant envelopes is the per-call-START snapshot — input
 	// counts are populated but output_tokens reflects only the model's
 	// initial decision, not the streamed text. Final aggregate usage
 	// arrives on the `result` envelope. Reuses messageUsage (declared in
