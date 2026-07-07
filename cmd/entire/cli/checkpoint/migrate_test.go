@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"testing"
 
 	git "github.com/go-git/go-git/v6"
@@ -298,6 +299,25 @@ func TestMigrateBranchToRefs_UnreadableRefIsReplacedWithOrphan(t *testing.T) {
 	commit, err := repo.CommitObject(refHash(t, repo, cid))
 	require.NoError(t, err)
 	assert.Empty(t, commit.ParentHashes, "unreadable ref must not become the parent")
+}
+
+func TestMigrateBranchToRefs_EnqueueFailureIsError(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	ctx := context.Background()
+	branch := NewGitStore(repo, DefaultV1Refs())
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	seedBranchCheckpoint(t, branch, cid, "s1")
+
+	// Occupy the queue file path with a directory so appending fails: the
+	// queued-for-push contract must surface this, not leave the migrated ref
+	// silently unpushed.
+	queue, err := PushQueueForRepo(ctx, repo)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(queue.queuePath(), 0o755))
+
+	_, err = MigrateBranchToRefs(ctx, repo, false)
+	require.Error(t, err, "a failed enqueue must fail the migration")
 }
 
 func TestMigrateBranchToRefs_NoBranchIsNoop(t *testing.T) {

@@ -41,8 +41,9 @@ type MigrateResult struct {
 // a re-run after more branch activity fast-forwards the ref (parenting on the
 // existing commit).
 //
-// New and advanced refs are enqueued for push; this function does not push.
-// When dryRun is true it reports what would change without writing refs.
+// New and advanced refs are enqueued for push — a failed enqueue is an error,
+// not best-effort. This function does not push. When dryRun is true it reports
+// what would change without writing refs.
 func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool) (MigrateResult, error) {
 	var result MigrateResult
 
@@ -58,6 +59,10 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 
 	refsStore := newGitRefsStore(repo)
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
+	queue, err := PushQueueForRepo(ctx, repo)
+	if err != nil {
+		return result, fmt.Errorf("resolve push queue: %w", err)
+	}
 
 	walkErr := WalkCheckpointShards(ctx, repo, tree, func(cid id.CheckpointID, cpTreeHash plumbing.Hash) error {
 		if err := ctx.Err(); err != nil {
@@ -100,6 +105,16 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 		}
 		if err := refsStore.setRef(ctx, cid, commitHash); err != nil {
 			return fmt.Errorf("set ref for checkpoint %s: %w", cid, err)
+		}
+		// setRef's own enqueue is best-effort (a condensation write must not
+		// fail on it); the migration's queued-for-push contract needs a
+		// guaranteed one. Duplicates collapse on Drain.
+		refName, err := RefName(cid)
+		if err != nil {
+			return fmt.Errorf("ref name for checkpoint %s: %w", cid, err)
+		}
+		if err := queue.Enqueue(refName); err != nil {
+			return fmt.Errorf("enqueue checkpoint %s for push: %w", cid, err)
 		}
 		result.Migrated = append(result.Migrated, cid)
 		return nil

@@ -186,7 +186,12 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	if !checkpointPolicyAllowsGitHook(ctx, repo) {
 		return 0, errors.New("checkpoint policy does not allow pushing checkpoint refs; refs stay queued")
 	}
-	return flushCheckpointRefsQueue(ctx, repo, ps.pushTarget())
+	pushed, err := flushCheckpointRefsQueue(ctx, repo, ps.pushTarget())
+	if err != nil {
+		return pushed, err
+	}
+	cleanupPushedShadowBranches(ctx)
+	return pushed, nil
 }
 
 // flushCheckpointRefsQueue drains the push-discovery queue and batch-pushes the
