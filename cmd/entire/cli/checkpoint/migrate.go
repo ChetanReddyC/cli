@@ -41,9 +41,10 @@ type MigrateResult struct {
 // a re-run after more branch activity fast-forwards the ref (parenting on the
 // existing commit).
 //
-// New and advanced refs are enqueued for push — a failed enqueue is an error,
-// not best-effort. This function does not push. When dryRun is true it reports
-// what would change without writing refs.
+// Refs are enqueued for push — a failed enqueue is an error, not best-effort —
+// including already-imported refs, so a ref left unqueued by a partial earlier
+// run still gets pushed. This function does not push. When dryRun is true it
+// reports what would change without writing or enqueuing anything.
 func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool) (MigrateResult, error) {
 	var result MigrateResult
 
@@ -75,6 +76,11 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 			return fmt.Errorf("normalize checkpoint %s: %w", cid, err)
 		}
 
+		refName, err := RefName(cid)
+		if err != nil {
+			return fmt.Errorf("ref name for checkpoint %s: %w", cid, err)
+		}
+
 		// The existing ref drives the idempotency check and the new commit's
 		// parent. refBase separates three cases we must not conflate:
 		//   - no ref yet (nil error, zero hash): a brand-new orphan.
@@ -93,17 +99,36 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 		default:
 			return fmt.Errorf("resolve existing ref for checkpoint %s: %w", cid, err)
 		}
-		// Skip when this snapshot was already imported anywhere on the ref's
-		// first-parent chain: the ref may have advanced past it through
-		// refs-store writes, and re-wrapping the old snapshot would regress
-		// the tip.
-		if treeInRefHistory(repo, parent, migratedTree) {
-			result.Skipped++
+		// This snapshot is already imported when it appears anywhere on the
+		// ref's first-parent chain: the ref may have advanced past it through
+		// refs-store writes, and re-wrapping the old snapshot would regress the
+		// tip.
+		alreadyImported := treeInRefHistory(repo, parent, migratedTree)
+
+		if dryRun {
+			// Report only what a real run would newly write; an already-imported
+			// checkpoint is a skip, not a would-migrate. No refs or objects are
+			// enqueued or written on this path.
+			if alreadyImported {
+				result.Skipped++
+			} else {
+				result.Migrated = append(result.Migrated, cid)
+			}
 			return nil
 		}
 
-		if dryRun {
-			result.Migrated = append(result.Migrated, cid)
+		if alreadyImported {
+			// The snapshot is on the ref, but a prior run may have written the
+			// ref and then failed before enqueuing it (an Enqueue error, or a
+			// crash between setRef and Enqueue), leaving it queued for a push
+			// that never comes — and every later run would skip it here. Enqueue
+			// unconditionally so the "queued for push" contract survives a
+			// partial earlier run; duplicates collapse on Drain and an
+			// already-pushed ref is a no-op on the next push.
+			if err := queue.Enqueue(refName); err != nil {
+				return fmt.Errorf("enqueue checkpoint %s for push: %w", cid, err)
+			}
+			result.Skipped++
 			return nil
 		}
 
@@ -118,10 +143,6 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 		// setRef's own enqueue is best-effort (a condensation write must not
 		// fail on it); the migration's queued-for-push contract needs a
 		// guaranteed one. Duplicates collapse on Drain.
-		refName, err := RefName(cid)
-		if err != nil {
-			return fmt.Errorf("ref name for checkpoint %s: %w", cid, err)
-		}
 		if err := queue.Enqueue(refName); err != nil {
 			return fmt.Errorf("enqueue checkpoint %s for push: %w", cid, err)
 		}
