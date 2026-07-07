@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -762,13 +764,28 @@ func TestDispatchFork_MultiAgentFailsWhenAllReviewersFail(t *testing.T) {
 func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 	setupCmdTestRepo(t)
 
+	// Codex has no curated built-ins — its skills are discovered on disk in
+	// $name form, so spawn-time validation needs a real SKILL.md under a
+	// controlled HOME. (Cannot t.Parallel — t.Setenv; setupCmdTestRepo
+	// already precludes parallelism via t.Chdir.)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	skillDir := filepath.Join(home, ".codex", "skills", "code-review")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillMD := "---\nname: code-review\ndescription: Review code changes.\n---\n\nbody\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		"claude-code": {
 			Skills: []string{"/review"},
 			Prompt: "Claude saved prompt.",
 		},
 		testCodexAgent: {
-			Skills: []string{"/review"},
+			Skills: []string{"$code-review"},
 			Prompt: "Codex saved prompt.",
 		},
 	}); err != nil {
@@ -809,16 +826,17 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		reviewer   *captureRunConfigReviewer
+		wantSkill  string
 		wantPrompt string
 	}{
-		{name: "claude-code", reviewer: claudeReviewer, wantPrompt: "Claude saved prompt."},
-		{name: "codex", reviewer: codexReviewer, wantPrompt: "Codex saved prompt."},
+		{name: "claude-code", reviewer: claudeReviewer, wantSkill: "/review", wantPrompt: "Claude saved prompt."},
+		{name: "codex", reviewer: codexReviewer, wantSkill: "$code-review", wantPrompt: "Codex saved prompt."},
 	} {
 		if !tc.reviewer.called {
 			t.Fatalf("%s reviewer was not started", tc.name)
 		}
-		if got := tc.reviewer.got.Skills; len(got) != 1 || got[0] != "/review" {
-			t.Fatalf("%s Skills = %v, want [/review]", tc.name, got)
+		if got := tc.reviewer.got.Skills; len(got) != 1 || got[0] != tc.wantSkill {
+			t.Fatalf("%s Skills = %v, want [%s]", tc.name, got, tc.wantSkill)
 		}
 		if tc.reviewer.got.AlwaysPrompt != tc.wantPrompt {
 			t.Fatalf("%s AlwaysPrompt = %q, want %q", tc.name, tc.reviewer.got.AlwaysPrompt, tc.wantPrompt)
