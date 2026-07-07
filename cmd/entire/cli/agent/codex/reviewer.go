@@ -192,11 +192,21 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 				turnUsage = env.Usage
 				// Emit Tokens at every turn boundary so multi-turn reviews
 				// show iterative updates — but only while the rollout tailer
-				// hasn't produced values: turn.completed usage is per-turn
-				// scale, the tailer's token_count totals are session-
-				// cumulative, and mixing the two in one overwrite-not-sum
-				// slot makes the counter flap between scales. Once the
-				// tailer has emitted, it is the single authoritative source.
+				// hasn't produced values: turn.completed usage is treated as
+				// per-turn scale, the tailer's token_count totals are
+				// session-cumulative, and mixing the two in one
+				// overwrite-not-sum slot makes the counter flap between
+				// scales. Once the tailer has emitted, it is the single
+				// authoritative source.
+				//
+				// Scale caveat: whether turn.completed usage is per-turn or
+				// session-cumulative is unverified against real MULTI-turn
+				// codex output — exec-mode reviews are single-turn, where
+				// the two are identical and this code is exact. In the rare
+				// multi-turn no-rollout fallback, the recorded total is the
+				// last turn's usage (an under-count if per-turn); when the
+				// rollout tailer runs — the normal case — its cumulative
+				// totals win regardless.
 				//
 				// codex reports cached_input_tokens as a subset of
 				// input_tokens and reasoning_output_tokens as a subset of

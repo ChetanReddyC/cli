@@ -80,6 +80,14 @@ func tailRolloutTokens(threadID string, out chan<- reviewtypes.Event, stop <-cha
 			if err := tail.drain(); err != nil {
 				logging.Debug(ctx, "codex token tail: final drain failed", slog.String("error", err.Error()))
 			}
+			// Re-emit the last totals unconditionally (bypassing dedup):
+			// a per-turn stdout emission can race past the parser's
+			// tailerEmitted check in the instant before this tailer's
+			// first send is observed, and this re-send guarantees the
+			// session-cumulative value is the final Tokens regardless.
+			if tail.lastIn >= 0 {
+				out <- reviewtypes.Tokens{In: tail.lastIn, Out: tail.lastOut}
+			}
 			return
 		case <-ticker.C:
 		}

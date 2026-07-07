@@ -346,7 +346,10 @@ func TestParseCodexOutput_StreamsEventsBeforeEOF(t *testing.T) {
 }
 
 func TestParseCodexOutput_NoTurnCompletedMeansFailed(t *testing.T) {
-	t.Parallel()
+	// Cannot t.Parallel — uses t.Setenv. The thread.started envelope
+	// launches the rollout tailer; without the session-dir override it
+	// would glob the real ~/.codex/sessions.
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", t.TempDir())
 	// A truncated session: thread starts and an item completes, but no
 	// `turn.completed` envelope ever arrives. The parser must surface
 	// this as Finished{Success: false}.
@@ -435,11 +438,19 @@ func TestParseCodexOutput_NestedErrorMessage(t *testing.T) {
 // running real codex-cli 0.130.0 — no item.* envelope ever carried a
 // usage field, so emission stays anchored to turn.completed.
 func TestParseCodexOutput_EmitsTokensAtEveryTurnCompleted(t *testing.T) {
-	t.Parallel()
-	// Real codex --json output (lightly trimmed) simulating a multi-turn
-	// review: model call → tool exec → model call → tool exec, with a
-	// turn.completed envelope at every turn boundary carrying running
-	// usage. The parser should emit Tokens for each turn in order.
+	// Cannot t.Parallel — uses t.Setenv. The thread.started envelope
+	// launches the rollout tailer; without the session-dir override it
+	// would glob the real ~/.codex/sessions, and a matching rollout could
+	// inject Tokens into the exact-count assertions below.
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", t.TempDir())
+	// Synthetic multi-turn stream (real envelope shapes, invented usage
+	// numbers) with a turn.completed at every turn boundary and NO rollout
+	// file — the no-tailer fallback path. The parser emits each turn's
+	// usage as it arrives. NOTE: turn.completed usage is treated as
+	// per-turn scale (see the parser doc); exec-mode reviews are single
+	// turn in practice, where per-turn and cumulative are identical, so
+	// multi-turn fallback totals are a documented approximation (the last
+	// turn's usage), not a verified cumulative sum.
 	input := strings.Join([]string{
 		`{"type":"thread.started","thread_id":"tid-1"}`,
 		`{"type":"turn.started"}`,

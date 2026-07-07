@@ -452,6 +452,36 @@ func TestParseClaudeOutput_EmitsCumulativeInputDuringRun(t *testing.T) {
 	}
 }
 
+// TestParseClaudeOutput_UsagelessResultDoesNotClobberCumulative pins the
+// terminal emission guard: a result envelope with no/zero usage must not
+// emit Tokens{0,0} — under the consumers' overwrite-not-sum semantics that
+// would erase the mid-run cumulative input total.
+func TestParseClaudeOutput_UsagelessResultDoesNotClobberCumulative(t *testing.T) {
+	t.Parallel()
+	input := strings.Join([]string{
+		`{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":10,"cache_read_input_tokens":90,"cache_creation_input_tokens":0,"output_tokens":2}}}`,
+		`{"type":"result","subtype":"success","is_error":false}`,
+		"",
+	}, "\n")
+
+	var tokens []reviewtypes.Tokens
+	for ev := range parseClaudeOutput(strings.NewReader(input)) {
+		if tk, ok := ev.(reviewtypes.Tokens); ok {
+			tokens = append(tokens, tk)
+		}
+	}
+	if len(tokens) == 0 {
+		t.Fatal("expected the mid-run cumulative Tokens emission")
+	}
+	last := tokens[len(tokens)-1]
+	if last.In == 0 && last.Out == 0 {
+		t.Fatalf("final tokens = %+v — usage-less result clobbered the cumulative total", last)
+	}
+	if last.In != 100 {
+		t.Errorf("final tokens = %+v, want the cumulative {100, 0} to stand", last)
+	}
+}
+
 // collectEvents drains an event channel into a slice.
 func collectEvents(ch <-chan reviewtypes.Event) []reviewtypes.Event {
 	var events []reviewtypes.Event

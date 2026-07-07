@@ -329,6 +329,47 @@ func TestTailRolloutTokens_PartialLineAppend(t *testing.T) {
 	}
 }
 
+// TestTailRolloutTokens_ReemitsLastTotalsOnStop pins the TOCTOU hardening:
+// on stop, after the final catch-up drain, the tailer re-emits its last
+// known totals. This guarantees the tailer's session-cumulative value is the
+// final Tokens even if a per-turn stdout emission raced past the parser's
+// tailerEmitted check in the instant before the tailer's first Store(true).
+func TestTailRolloutTokens_ReemitsLastTotalsOnStop(t *testing.T) {
+	// Cannot t.Parallel — uses t.Setenv.
+	dir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", dir)
+	rollout := filepath.Join(dir, "rollout-2026-06-03T08-57-39-"+tailTestThreadID+".jsonl")
+	if err := os.WriteFile(rollout, []byte(tokenLine(7000, 300)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := make(chan reviewtypes.Event, 16)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		tailRolloutTokens(tailTestThreadID, out, stop, new(atomic.Bool))
+		close(done)
+	}()
+
+	first := awaitTokens(t, out)
+	if first.In != 7000 || first.Out != 300 {
+		t.Fatalf("first tokens = %+v, want {7000, 300}", first)
+	}
+
+	close(stop)
+	<-done
+	// The stop path must have re-emitted the last totals (dedup bypassed).
+	select {
+	case ev := <-out:
+		tk, ok := ev.(reviewtypes.Tokens)
+		if !ok || tk.In != 7000 || tk.Out != 300 {
+			t.Fatalf("post-stop event = %#v, want re-emitted Tokens{7000, 300}", ev)
+		}
+	default:
+		t.Fatal("no re-emitted Tokens after stop — TOCTOU window unguarded")
+	}
+}
+
 func TestTailRolloutTokens_ReturnsOnStopWhenNoRollout(t *testing.T) {
 	// Cannot t.Parallel — uses t.Setenv.
 	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", t.TempDir())

@@ -155,8 +155,14 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			return
 		}
 		if sawResult {
+			// Gate on non-zero usage: a result envelope without a usage
+			// block would emit Tokens{0,0}, which only ever ERASES the
+			// mid-run cumulative total under the consumers'
+			// overwrite-not-sum semantics (mirrors the codex guard).
 			in := resultUsage.InputTokens + resultUsage.CacheReadInputTokens + resultUsage.CacheCreationInputTokens
-			out <- reviewtypes.Tokens{In: in, Out: resultUsage.OutputTokens}
+			if in > 0 || resultUsage.OutputTokens > 0 {
+				out <- reviewtypes.Tokens{In: in, Out: resultUsage.OutputTokens}
+			}
 			out <- reviewtypes.Finished{Success: !resultErr}
 			return
 		}
