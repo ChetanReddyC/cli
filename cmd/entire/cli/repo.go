@@ -40,7 +40,7 @@ func newRepoCmd() *cobra.Command {
 var repoColumns = []string{"ID", "NAME", "PROJECT", "CLUSTER", "STATE"}
 
 func repoRow(r coreapi.Repo) []string {
-	return []string{r.ID, r.Name, r.OwningProjectId, r.ClusterHost.Or("-"), r.State.Or("")}
+	return []string{r.ID, r.Name, r.OwningProjectId, r.ClusterHost.Or("-"), r.State.Or("-")}
 }
 
 // repoDetailColumns / repoDetailRow extend the shared repo view with the
