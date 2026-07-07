@@ -1016,3 +1016,67 @@ func TestRemoveMirror(t *testing.T) {
 		require.Empty(t, out.String())
 	})
 }
+
+// sortRowsRow is the TestSortRows fixture: two columns, REPO and PRIVATE,
+// mapped by sortRowsRowFn — exercises sortRows over a real multi-column row.
+type sortRowsRow struct {
+	repo    string
+	private string
+}
+
+var sortRowsHeaders = []string{"REPO", "PRIVATE"}
+
+func sortRowsRowFn(r sortRowsRow) []string { return []string{r.repo, r.private} }
+
+func sortRowsRepos(items []sortRowsRow) []string {
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = it.repo
+	}
+	return out
+}
+
+func TestSortRows(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty spec sorts by first column ascending", func(t *testing.T) {
+		t.Parallel()
+		items := []sortRowsRow{{repo: "b/y"}, {repo: "a/x"}, {repo: "c/z"}}
+		require.NoError(t, sortRows(items, sortRowsHeaders, sortRowsRowFn, ""))
+		require.Equal(t, []string{"a/x", "b/y", "c/z"}, sortRowsRepos(items))
+	})
+
+	t.Run("leading dash sorts descending", func(t *testing.T) {
+		t.Parallel()
+		items := []sortRowsRow{{repo: "b/y"}, {repo: "a/x"}, {repo: "c/z"}}
+		require.NoError(t, sortRows(items, sortRowsHeaders, sortRowsRowFn, "-repo"))
+		require.Equal(t, []string{"c/z", "b/y", "a/x"}, sortRowsRepos(items))
+	})
+
+	t.Run("sorts by named column", func(t *testing.T) {
+		t.Parallel()
+		items := []sortRowsRow{{repo: "a", private: "yes"}, {repo: "b", private: "no"}}
+		require.NoError(t, sortRows(items, sortRowsHeaders, sortRowsRowFn, "private"))
+		// "no" < "yes", so the second row comes first.
+		require.Equal(t, []string{"b", "a"}, sortRowsRepos(items))
+	})
+
+	t.Run("stable for equal keys", func(t *testing.T) {
+		t.Parallel()
+		items := []sortRowsRow{
+			{repo: "same", private: "1"},
+			{repo: "same", private: "2"},
+			{repo: "same", private: "3"},
+		}
+		require.NoError(t, sortRows(items, sortRowsHeaders, sortRowsRowFn, "repo"))
+		require.Equal(t, []string{"1", "2", "3"}, []string{items[0].private, items[1].private, items[2].private})
+	})
+
+	t.Run("unknown column errors naming valid columns", func(t *testing.T) {
+		t.Parallel()
+		err := sortRows([]sortRowsRow{{repo: "a"}}, sortRowsHeaders, sortRowsRowFn, "nope")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unknown sort column")
+		require.Contains(t, err.Error(), "repo")
+	})
+}

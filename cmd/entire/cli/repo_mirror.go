@@ -53,6 +53,38 @@ func sortMirrorsDefault(mirrors []coreapi.Mirror) {
 	})
 }
 
+// sortRows orders items in place by one column's rendered value, ascending
+// case-insensitive string order. spec is a header name; a leading '-' sorts
+// descending. An empty spec sorts by the first column. An unknown column name
+// is an error naming the valid columns. Stable, so rows equal on the sort
+// column keep their input order. row must return one cell per header, which the
+// mirror/available row funcs do.
+func sortRows[T any](items []T, headers []string, row func(T) []string, spec string) error {
+	desc := strings.HasPrefix(spec, "-")
+	name := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(spec, "-")))
+	idx := 0
+	if name != "" {
+		idx = -1
+		for i, h := range headers {
+			if strings.EqualFold(h, name) {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return fmt.Errorf("unknown sort column %q; valid columns: %s", name, strings.ToLower(strings.Join(headers, ", ")))
+		}
+	}
+	sort.SliceStable(items, func(a, b int) bool {
+		ka, kb := strings.ToLower(row(items[a])[idx]), strings.ToLower(row(items[b])[idx])
+		if desc {
+			return ka > kb
+		}
+		return ka < kb
+	})
+	return nil
+}
+
 // filterByRepo keeps items whose repo name contains substr (case-insensitive).
 // The control plane already filters by owner/provider/cluster server-side but
 // not by repo name, so `repo mirror list --repo` narrows that last dimension
