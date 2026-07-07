@@ -187,11 +187,12 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 		return 0, errors.New("checkpoint policy does not allow pushing checkpoint refs; refs stay queued")
 	}
 	pushed, err := flushCheckpointRefsQueue(ctx, repo, ps.pushTarget())
-	if err != nil {
-		return pushed, err
-	}
+	// Clean up even on a partial/failed flush: a diverged batch can push some
+	// refs and still return an error, and the shadow branches for the refs that
+	// *did* land must still be cleaned up — parity with the pre-push path, which
+	// always runs cleanup after flush regardless of its error.
 	cleanupPushedShadowBranches(ctx)
-	return pushed, nil
+	return pushed, err
 }
 
 // flushCheckpointRefsQueue drains the push-discovery queue and batch-pushes the
