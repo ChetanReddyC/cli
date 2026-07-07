@@ -1,0 +1,213 @@
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"regexp"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
+
+	"github.com/spf13/cobra"
+)
+
+// checkpointPrefixShape matches strings that could be a checkpoint ID or a
+// prefix of one (legacy 12-hex or 26-char Crockford ULID). Targets that can't
+// be checkpoint IDs (e.g. "feature/foo") skip the store lookup and its
+// remote-fetch fallback entirely.
+var checkpointPrefixShape = regexp.MustCompile(`^(?:[0-9a-f]{1,12}|[0-9ABCDEFGHJKMNPQRSTVWXYZ]{1,26})$`)
+
+var errNoResumeCommit = errors.New("no commit found")
+
+func newCheckpointResumeCmd() *cobra.Command {
+	var checkpointFlag string
+	var commitFlag string
+	var branchFlag string
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "resume [checkpoint-id | commit-sha | branch]",
+		Short: "Resume the agent session(s) recorded in a checkpoint",
+		Long: `Resume agent sessions from a committed checkpoint.
+
+The target can be a checkpoint ID (or prefix), a commit SHA (or ref) whose
+message carries an Entire-Checkpoint trailer, or a branch name. Auto-detection
+tries checkpoint ID first, then branch, then commit; use the flags to force
+one interpretation.
+
+For a checkpoint or commit target, the branch containing the checkpoint's
+commit is checked out at its current tip before the session logs are
+restored. If no local branch contains it, the session logs are restored
+without switching branches. A branch target behaves like
+'entire session resume <branch>'.
+
+With no target, shows recent checkpoints: an interactive picker on a
+terminal, a plain-text list otherwise.
+
+Existing local session logs are never overwritten unless --force is given.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if checkDisabledGuard(cmd.Context(), cmd.OutOrStdout()) {
+				return nil
+			}
+			var positional string
+			if len(args) > 0 {
+				positional = args[0]
+				if checkpointFlag != "" || commitFlag != "" || branchFlag != "" {
+					return errors.New("cannot combine positional argument with --checkpoint, --commit, or --branch")
+				}
+			}
+			if _, err := paths.WorktreeRoot(cmd.Context()); err == nil {
+				logging.SetLogLevelGetter(GetLogLevel)
+				if err := logging.Init(cmd.Context(), ""); err == nil {
+					defer logging.Close()
+				}
+			}
+			external.DiscoverAndRegister(cmd.Context())
+			return runCheckpointResume(cmd.Context(), cmd, positional, checkpointFlag, commitFlag, branchFlag, force)
+		},
+	}
+
+	cmd.Flags().StringVarP(&checkpointFlag, "checkpoint", "c", "", "Resume a specific checkpoint (ID or prefix)")
+	cmd.Flags().StringVar(&commitFlag, "commit", "", "Resume the checkpoint referenced by a commit (SHA or ref)")
+	cmd.Flags().StringVar(&branchFlag, "branch", "", "Resume the latest checkpoint on a branch")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmations and overwrite existing local session logs")
+	cmd.MarkFlagsMutuallyExclusive("checkpoint", "commit", "branch")
+
+	return cmd
+}
+
+func runCheckpointResume(ctx context.Context, cmd *cobra.Command, target, checkpointFlag, commitFlag, branchFlag string, force bool) error {
+	if branchFlag != "" {
+		return runResume(ctx, cmd, branchFlag, force)
+	}
+
+	lookup, err := newExplainCheckpointLookup(ctx)
+	if err != nil {
+		return err
+	}
+	initialLookup := lookup
+	defer func() {
+		if lookup != nil && lookup != initialLookup {
+			_ = lookup.Close()
+		}
+		_ = initialLookup.Close()
+	}()
+
+	switch {
+	case checkpointFlag != "":
+		var matches []id.CheckpointID
+		matches, lookup = matchCheckpointPrefixWithRemoteFallback(ctx, cmd.ErrOrStderr(), lookup, checkpointFlag)
+		return resumeMatchedCheckpoints(ctx, cmd, lookup, checkpointFlag, matches, force)
+	case commitFlag != "":
+		return resumeCommitTarget(ctx, cmd, lookup, commitFlag, force)
+	case target != "":
+		var resumeErr error
+		lookup, resumeErr = resumeAutoTarget(ctx, cmd, lookup, target, force)
+		return resumeErr
+	default:
+		return runCheckpointResumePicker(ctx, cmd, lookup, force)
+	}
+}
+
+// resumeAutoTarget resolves a positional target: checkpoint-ID prefix first,
+// then branch (local or origin-tracking, no network), then commit revision.
+// Returns the possibly-swapped lookup so the caller's deferred close stays
+// correct.
+func resumeAutoTarget(ctx context.Context, cmd *cobra.Command, lookup *explainCheckpointLookup, target string, force bool) (*explainCheckpointLookup, error) {
+	if checkpointPrefixShape.MatchString(target) {
+		var matches []id.CheckpointID
+		matches, lookup = matchCheckpointPrefixWithRemoteFallback(ctx, cmd.ErrOrStderr(), lookup, target)
+		if len(matches) > 0 {
+			return lookup, resumeMatchedCheckpoints(ctx, cmd, lookup, target, matches, force)
+		}
+	}
+
+	if _, err := branchCommit(lookup.repo, target); err == nil {
+		return lookup, runResume(ctx, cmd, target, force)
+	}
+
+	err := resumeCommitTarget(ctx, cmd, lookup, target, force)
+	if errors.Is(err, errNoResumeCommit) {
+		return lookup, fmt.Errorf("nothing matched %q as a checkpoint ID, branch, or commit\nHint: run 'entire checkpoint list' to see available checkpoints", target)
+	}
+	return lookup, err
+}
+
+func resumeMatchedCheckpoints(ctx context.Context, cmd *cobra.Command, lookup *explainCheckpointLookup, prefix string, matches []id.CheckpointID, force bool) error {
+	switch len(matches) {
+	case 0:
+		return fmt.Errorf("no committed checkpoint matched %q\nHint: run 'entire checkpoint list' to see available checkpoints", prefix)
+	case 1:
+		return resumeResolvedCheckpoint(ctx, cmd, lookup, matches[0], force)
+	default:
+		renderAmbiguousPrefixFailure(cmd.ErrOrStderr(), prefix, "committed checkpoints", buildAmbiguousCheckpointMatches(matches, lookup.committed))
+		return NewSilentError(fmt.Errorf("%w: %s matches %d checkpoints", errAmbiguousCommitPrefix, prefix, len(matches)))
+	}
+}
+
+// resumeCommitTarget resolves ref to a commit and resumes the checkpoint its
+// Entire-Checkpoint trailer references. Multiple trailers (squash merge)
+// resolve to the newest checkpoint by CreatedAt.
+func resumeCommitTarget(ctx context.Context, cmd *cobra.Command, lookup *explainCheckpointLookup, ref string, force bool) error {
+	w := cmd.OutOrStdout()
+	errW := cmd.ErrOrStderr()
+
+	hash, ambiguousMatches, err := resolveCommitUnambiguous(lookup.repo, ref)
+	if err != nil {
+		if errors.Is(err, errAmbiguousCommitPrefix) {
+			renderAmbiguousPrefixFailure(errW, ref, "commits", buildAmbiguousCommitMatches(lookup.repo, ambiguousMatches))
+			return NewSilentError(err)
+		}
+		return fmt.Errorf("%w matching %q", errNoResumeCommit, ref)
+	}
+	commit, err := lookup.repo.CommitObject(hash)
+	if err != nil {
+		return fmt.Errorf("failed to get commit %s: %w", abbreviateCommitHash(lookup.repo, hash), err)
+	}
+
+	cpIDs := trailers.ParseAllCheckpoints(commit.Message)
+	if len(cpIDs) == 0 {
+		printNoTrailerMessage(w, lookup.repo, hash)
+		return NewSilentError(fmt.Errorf("commit %s has no Entire-Checkpoint trailer", abbreviateCommitHash(lookup.repo, hash)))
+	}
+
+	cpID := cpIDs[0]
+	if len(cpIDs) > 1 {
+		latest, found, latestErr := resolveLatestCheckpoint(ctx, lookup.store, cpIDs)
+		if latestErr != nil {
+			return latestErr
+		}
+		if found {
+			cpID = latest.CheckpointID
+		}
+	}
+	return resumeResolvedCheckpoint(ctx, cmd, lookup, cpID, force)
+}
+
+// resumeResolvedCheckpoint resumes one committed checkpoint: checks out the
+// branch containing it (at the branch's current tip) when one exists, points
+// at the owning worktree when that branch is checked out elsewhere, and falls
+// back to restoring session logs in place when no local branch contains it.
+func resumeResolvedCheckpoint(ctx context.Context, cmd *cobra.Command, lookup *explainCheckpointLookup, cpID id.CheckpointID, force bool) error {
+	w := cmd.OutOrStdout()
+
+	branch := buildCheckpointBranchIndex(lookup.repo)[cpID.String()]
+	if branch == "" {
+		fmt.Fprintf(w, "Checkpoint %s is not on any local branch; restoring session logs without switching branches.\n", cpID)
+		return resumeByCheckpointID(ctx, w, cmd.ErrOrStderr(), cpID, force)
+	}
+	if otherPath, ok := branchCheckedOutElsewhere(ctx, branch); ok {
+		fmt.Fprint(w, worktreeClashMessage(branch, otherPath, ""))
+		return nil
+	}
+	return resumeSessionOnBranch(ctx, cmd, branch, cpID, force)
+}
+
+func runCheckpointResumePicker(_ context.Context, _ *cobra.Command, _ *explainCheckpointLookup, _ bool) error {
+	return errors.New("pass a checkpoint ID, commit SHA, or branch (picker lands in the next commit)")
+}
