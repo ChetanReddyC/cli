@@ -567,6 +567,34 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		)
 	})
 
+	t.Run("explicit --sort repo keeps the cluster tiebreak (matches default)", func(t *testing.T) {
+		// A repo on two clusters plus a lexically-earlier repo. Explicit
+		// `--sort repo` must order like the default: owner/repo ascending, and
+		// within the duplicate tie, cluster ascending (aws before eu). Guards
+		// against `--sort repo` regressing to a plain single-key sort that would
+		// drop the tiebreak.
+		dupes := []coreapi.Mirror{
+			{Owner: "acme", Repo: "web", ClusterHost: "eu-west-1.entire.io"},
+			{Owner: "acme", Repo: "web", ClusterHost: "aws-us-east-2.entire.io"},
+			{Owner: "acme", Repo: "api", ClusterHost: "aws-us-east-2.entire.io"},
+		}
+		serveMirrorList(t, dupes, nil)
+		stdout, _ := runMirrorList(t, "--sort", "repo")
+		api := strings.Index(stdout, "entire://aws-us-east-2.entire.io/gh/acme/api")
+		awsWeb := strings.Index(stdout, "entire://aws-us-east-2.entire.io/gh/acme/web")
+		euWeb := strings.Index(stdout, "entire://eu-west-1.entire.io/gh/acme/web")
+		require.Less(t, api, awsWeb, "acme/api sorts before acme/web")
+		require.Less(t, awsWeb, euWeb, "within the acme/web tie, aws cluster sorts before eu")
+
+		// -repo reverses the whole ordering, tiebreak included.
+		serveMirrorList(t, dupes, nil)
+		stdout, _ = runMirrorList(t, "--sort", "-repo")
+		require.Less(t,
+			strings.Index(stdout, "entire://eu-west-1.entire.io/gh/acme/web"),
+			strings.Index(stdout, "entire://aws-us-east-2.entire.io/gh/acme/web"),
+		)
+	})
+
 	t.Run("--repo/--sort apply under --show-available", func(t *testing.T) {
 		serveMirrorList(t, nil, []coreapi.AvailableMirror{
 			{Owner: "acme", Repo: "web", Access: "write", Status: "available"},
