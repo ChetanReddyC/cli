@@ -3,7 +3,10 @@ package checkpoint
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"testing"
 
 	git "github.com/go-git/go-git/v6"
@@ -18,10 +21,11 @@ import (
 	"github.com/entireio/cli/redact"
 )
 
-// seedBranchCheckpoint writes one checkpoint to the git-branch v1 store.
-func seedBranchCheckpoint(t *testing.T, store *GitStore, cid id.CheckpointID, sessionID string) {
-	t.Helper()
-	require.NoError(t, store.Write(context.Background(), Session{
+// sampleSession builds a checkpoint write request with deterministic content,
+// shared so a checkpoint written to the git-branch and git-refs stores has
+// byte-identical session contents.
+func sampleSession(cid id.CheckpointID, sessionID string) Session {
+	return Session{
 		CheckpointID: cid,
 		SessionID:    sessionID,
 		Strategy:     "manual-commit",
@@ -29,7 +33,13 @@ func seedBranchCheckpoint(t *testing.T, store *GitStore, cid id.CheckpointID, se
 		Prompts:      []string{"do the thing"},
 		AuthorName:   "Test",
 		AuthorEmail:  "test@test.com",
-	}))
+	}
+}
+
+// seedBranchCheckpoint writes one checkpoint to the git-branch v1 store.
+func seedBranchCheckpoint(t *testing.T, store *GitStore, cid id.CheckpointID, sessionID string) {
+	t.Helper()
+	require.NoError(t, store.Write(context.Background(), sampleSession(cid, sessionID)))
 }
 
 // mutateBranchCheckpointMetadata rewrites a checkpoint's root metadata.json on
@@ -185,6 +195,63 @@ func TestMigrateBranchToRefs(t *testing.T) {
 	assert.Equal(t, 2, result2.Skipped)
 	assert.Equal(t, before[cid1.String()], refHash(t, repo, cid1), "idempotent re-run must not move refs")
 	assert.Equal(t, before[cid2.String()], refHash(t, repo, cid2))
+}
+
+// TestMigrateBranchToRefs_MetadataMatchesNativeRefsLayout pins the migration's
+// metadata rebasing to the git-refs writer it must mirror. The migration rebases
+// session paths by string surgery rather than round-tripping the metadata model,
+// so if the native layout ever drifts (a renamed session dir, a new path field,
+// a non-prefix-relative field) this fails loudly instead of silently shipping
+// checkpoints whose paths a native reader can't resolve.
+func TestMigrateBranchToRefs_MetadataMatchesNativeRefsLayout(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	ctx := context.Background()
+
+	// The same checkpoint content written two ways: natively by the git-refs
+	// store, and migrated from the git-branch store.
+	nativeCID := id.MustCheckpointID("aaaaaaaaaaaa")
+	migratedCID := id.MustCheckpointID("bbbbbbbbbbbb")
+
+	refsStore := newGitRefsStore(repo)
+	require.NoError(t, refsStore.Write(ctx, sampleSession(nativeCID, "s1")))
+
+	branch := NewGitStore(repo, DefaultV1Refs())
+	seedBranchCheckpoint(t, branch, migratedCID, "s1")
+	_, err := MigrateBranchToRefs(ctx, repo, false)
+	require.NoError(t, err)
+
+	nativeCommit, err := repo.CommitObject(refHash(t, repo, nativeCID))
+	require.NoError(t, err)
+	migratedCommit, err := repo.CommitObject(refHash(t, repo, migratedCID))
+	require.NoError(t, err)
+
+	native := sessionPathFields(t, migratedMetadataDoc(t, repo, nativeCommit.TreeHash))
+	migrated := sessionPathFields(t, migratedMetadataDoc(t, repo, migratedCommit.TreeHash))
+	require.NotEmpty(t, migrated, "sanity: migrated metadata carries session paths")
+	assert.Equal(t, native, migrated,
+		"migrated session paths must match the native git-refs layout")
+}
+
+// sessionPathFields returns the sorted "field=value" pairs of every path-shaped
+// (leading "/") string value under sessions[] — the layout the migration must
+// keep in lockstep with the writer.
+func sessionPathFields(t *testing.T, doc map[string]any) []string {
+	t.Helper()
+	sessions, ok := doc["sessions"].([]any)
+	require.True(t, ok, "sessions must be an array")
+	var out []string
+	for i, entry := range sessions {
+		session, ok := entry.(map[string]any)
+		require.True(t, ok)
+		for field, v := range session {
+			if s, ok := v.(string); ok && strings.HasPrefix(s, "/") {
+				out = append(out, fmt.Sprintf("%d.%s=%s", i, field, s))
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func TestMigrateBranchToRefs_AdvancesOnBranchChange(t *testing.T) {
