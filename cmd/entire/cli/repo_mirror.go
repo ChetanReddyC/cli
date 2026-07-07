@@ -487,9 +487,16 @@ func newRepoMirrorListCmd() *cobra.Command {
 					return nil, err
 				}
 				mirrors = filterByRepo(mirrors, func(m coreapi.Mirror) string { return m.Repo }, repo)
-				if sortSpec == "" {
+				normalizedSort := strings.TrimSpace(sortSpec)
+				repoSort := strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(normalizedSort, "-")), "repo")
+				if normalizedSort == "" || repoSort {
 					sortMirrorsDefault(mirrors)
-				} else if err := sortRows(mirrors, mirrorColumns, mirrorRow, sortSpec); err != nil {
+					if strings.HasPrefix(normalizedSort, "-") {
+						for i, j := 0, len(mirrors)-1; i < j; i, j = i+1, j-1 {
+							mirrors[i], mirrors[j] = mirrors[j], mirrors[i]
+						}
+					}
+				} else if err := sortRows(mirrors, mirrorColumns, mirrorRow, normalizedSort); err != nil {
 					return nil, err
 				}
 				return mirrors, nil
