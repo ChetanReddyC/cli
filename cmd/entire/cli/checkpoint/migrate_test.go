@@ -242,6 +242,40 @@ func TestMigrateBranchToRefs_DryRunWritesNothing(t *testing.T) {
 	assert.Empty(t, queued, "dry-run must not enqueue refs for push")
 }
 
+func TestMigrateBranchToRefs_SkipsRefAdvancedPastBranchSnapshot(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	ctx := context.Background()
+	branch := NewGitStore(repo, DefaultV1Refs())
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	seedBranchCheckpoint(t, branch, cid, "s1")
+
+	_, err := MigrateBranchToRefs(ctx, repo, false)
+	require.NoError(t, err)
+	imported := refHash(t, repo, cid)
+
+	// The ref advances past the migration snapshot, as a refs-store write
+	// (e.g. a summary backfill) would: a new commit with a different tree,
+	// parented on the imported commit.
+	head, err := repo.Head()
+	require.NoError(t, err)
+	headCommit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+	advanced, err := CreateCommit(ctx, repo, headCommit.TreeHash, imported, "refs-store write", "Test", "test@test.com")
+	require.NoError(t, err)
+	refName, err := RefName(cid)
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, advanced)))
+
+	// A re-run must recognize the already-imported snapshot in the ref's
+	// history and skip — not regress the tip to the old branch tree.
+	result, err := MigrateBranchToRefs(ctx, repo, false)
+	require.NoError(t, err)
+	assert.Empty(t, result.Migrated, "already-imported checkpoint must not be re-migrated")
+	assert.Equal(t, 1, result.Skipped)
+	assert.Equal(t, advanced, refHash(t, repo, cid), "ref tip must keep the newer refs-store write")
+}
+
 func TestMigrateBranchToRefs_UnreadableRefIsReplacedWithOrphan(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupBranchTestRepo(t)

@@ -36,7 +36,8 @@ type MigrateResult struct {
 // normalized for the refs layout (see normalizeMigratedMetadata). Existing
 // branch commits are not remapped.
 //
-// It is idempotent: a ref already carrying the normalized tree is skipped, and
+// It is idempotent: a ref whose history already contains the normalized tree
+// is skipped (even when refs-store writes have advanced the tip past it), and
 // a re-run after more branch activity fast-forwards the ref (parenting on the
 // existing commit).
 //
@@ -74,11 +75,15 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 		// unreadable ref state is treated as absent (orphan) rather than
 		// parenting the new commit on a bad hash, which would corrupt the commit
 		// graph for fetch+replay.
-		parent, existingTree, err := refsStore.refBase(cid)
+		parent, _, err := refsStore.refBase(cid)
 		if err != nil {
-			parent, existingTree = plumbing.ZeroHash, nil
+			parent = plumbing.ZeroHash
 		}
-		if existingTree != nil && existingTree.Hash == migratedTree {
+		// Skip when this snapshot was already imported anywhere on the ref's
+		// first-parent chain: the ref may have advanced past it through
+		// refs-store writes, and re-wrapping the old snapshot would regress
+		// the tip.
+		if treeInRefHistory(repo, parent, migratedTree) {
 			result.Skipped++
 			return nil
 		}
@@ -103,6 +108,25 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 		return result, fmt.Errorf("walk v1 checkpoints: %w", walkErr)
 	}
 	return result, nil
+}
+
+// treeInRefHistory reports whether any commit on the first-parent chain
+// starting at tip carries the given tree.
+func treeInRefHistory(repo *git.Repository, tip, tree plumbing.Hash) bool {
+	for h := tip; h != plumbing.ZeroHash; {
+		commit, err := repo.CommitObject(h)
+		if err != nil {
+			return false
+		}
+		if commit.TreeHash == tree {
+			return true
+		}
+		if len(commit.ParentHashes) == 0 {
+			return false
+		}
+		h = commit.ParentHashes[0]
+	}
+	return false
 }
 
 // migratedCheckpointTree returns the branch subtree with its root metadata.json

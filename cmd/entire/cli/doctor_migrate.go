@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -37,6 +38,14 @@ next push once the git-refs store is the configured primary.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
+
+			// Once git-refs is the primary store the refs are authoritative and
+			// the v1 branch may lag behind them; re-importing its snapshots
+			// could only regress refs, so refuse.
+			if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: a bad checkpoints block already surfaces via Open; default to allowing migration
+				fmt.Fprintln(out, "The git-refs store is already the primary checkpoint store — nothing to migrate.")
+				return nil
+			}
 
 			repo, err := strategy.OpenRepository(ctx)
 			if err != nil {
