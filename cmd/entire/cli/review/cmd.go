@@ -250,7 +250,7 @@ To tag an already-finished session as a review, use
 	cmd.Flags().StringVar(&profileOverride, "profile", "", "review profile to run (default: review_default_profile or general)")
 	cmd.Flags().StringVar(&perRunPrompt, "prompt", "", "one-off instructions appended to this review run")
 	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
-	cmd.Flags().DurationVar(&reviewTimeout, "timeout", defaultReviewerTimeout, "max time each reviewer may run before it is cancelled and marked failed; also bounds the consolidating judge, whose timeout or error fails the review (0 disables both)")
+	cmd.Flags().DurationVar(&reviewTimeout, "timeout", 0, "optional hard cap per reviewer (default: none — reviewers run until they finish, like a skill invoked directly in a session). When set, it also bounds the consolidating judge; unset, the judge keeps its own 5m default")
 	// The listing modes and the action modes each select a distinct command
 	// behavior; combining them silently runs one and drops the rest, so reject
 	// the combination up front with a clear cobra error.
@@ -722,6 +722,19 @@ func resolveReviewerTimeoutArg(flagValue time.Duration) time.Duration {
 		return -1
 	}
 	return flagValue
+}
+
+// judgeTimeoutArg maps the resolved reviewer timeout to the judge's
+// ProviderTimeout three-state. The judge is a single text-generation call
+// with no event stream, so unlike reviewers it always keeps a bound: an
+// explicit --timeout governs it, otherwise the synthesis default (5m)
+// applies. The reviewer no-cap sentinel (negative) must not leak through —
+// it would disable the judge bound entirely.
+func judgeTimeoutArg(reviewerArg time.Duration) time.Duration {
+	if reviewerArg > 0 {
+		return reviewerArg
+	}
+	return 0
 }
 
 // runReview executes the main review flow.
@@ -1231,7 +1244,7 @@ func runMultiAgentPath(
 		profileName:       profileName,
 		task:              profile.Task,
 		masterName:        masterLabel,
-		judgeTimeout:      timeout,
+		judgeTimeout:      judgeTimeoutArg(timeout),
 		onSynthesisResult: func(result string) {
 			aggregateOutput = result
 		},

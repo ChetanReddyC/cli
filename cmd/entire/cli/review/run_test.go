@@ -996,8 +996,8 @@ func TestRun_NaturalCompletionPastDeadlineIsNotTimeout(t *testing.T) {
 
 func TestReviewerTimeout(t *testing.T) {
 	t.Parallel()
-	if got := reviewerTimeout(reviewtypes.RunConfig{}); got != defaultReviewerTimeout {
-		t.Errorf("unset = %v, want default %v", got, defaultReviewerTimeout)
+	if got := reviewerTimeout(reviewtypes.RunConfig{}); got != 0 {
+		t.Errorf("unset = %v, want 0 (no default cap)", got)
 	}
 	if got := reviewerTimeout(reviewtypes.RunConfig{ReviewerTimeout: 5 * time.Minute}); got != 5*time.Minute {
 		t.Errorf("explicit = %v, want 5m", got)
@@ -1029,13 +1029,34 @@ func TestResolveReviewerTimeoutArg(t *testing.T) {
 	}
 }
 
-// TestDefaultReviewerTimeoutValue pins the literal default so an accidental edit
-// to the constant is caught (the other timeout tests compare against the
-// constant itself and would silently follow a change).
-func TestDefaultReviewerTimeoutValue(t *testing.T) {
+// TestReviewerTimeout_NoDefaultCap pins the deliberate absence of a default
+// wall cap: an unset RunConfig.ReviewerTimeout means the reviewer runs until
+// it finishes, like a skill invoked directly in a session. Every wall-clock
+// default we shipped killed legitimate work at some diff size (reviewers
+// spend 10+ minute stretches inside subagents with zero parent output).
+func TestReviewerTimeout_NoDefaultCap(t *testing.T) {
 	t.Parallel()
-	if defaultReviewerTimeout != 20*time.Minute {
-		t.Errorf("defaultReviewerTimeout = %v, want 20m", defaultReviewerTimeout)
+	if got := reviewerTimeout(reviewtypes.RunConfig{}); got != 0 {
+		t.Errorf("reviewerTimeout(unset) = %v, want 0 (no cap)", got)
+	}
+	if got := reviewerTimeout(reviewtypes.RunConfig{ReviewerTimeout: -1}); got != 0 {
+		t.Errorf("reviewerTimeout(negative) = %v, want 0 (no cap)", got)
+	}
+	if got := reviewerTimeout(reviewtypes.RunConfig{ReviewerTimeout: 30 * time.Minute}); got != 30*time.Minute {
+		t.Errorf("reviewerTimeout(30m) = %v, want the explicit cap", got)
+	}
+}
+
+// TestJudgeTimeoutArg pins the judge mapping: the judge is one bounded API
+// call and always keeps a limit — an explicit --timeout governs it, and the
+// reviewer's no-cap sentinel must not leak through as "judge unbounded".
+func TestJudgeTimeoutArg(t *testing.T) {
+	t.Parallel()
+	if got := judgeTimeoutArg(-1); got != 0 {
+		t.Errorf("judgeTimeoutArg(no-cap sentinel) = %v, want 0 (judge default applies)", got)
+	}
+	if got := judgeTimeoutArg(30 * time.Minute); got != 30*time.Minute {
+		t.Errorf("judgeTimeoutArg(30m) = %v, want 30m", got)
 	}
 }
 
@@ -1058,15 +1079,16 @@ func TestTimeoutFlag_ResolvesThroughCommand(t *testing.T) {
 		return d
 	}
 
-	// Default (no flag) is the nonzero default and resolves to a positive bound.
-	if d := parseTimeout(nil); d != defaultReviewerTimeout {
-		t.Errorf("default --timeout = %v, want %v", d, defaultReviewerTimeout)
-	} else if got := resolveReviewerTimeoutArg(d); got != defaultReviewerTimeout {
-		t.Errorf("default resolves to %v, want %v", got, defaultReviewerTimeout)
+	// Default (no flag) is zero and resolves to the no-cap sentinel: reviewers
+	// run until they finish unless the user explicitly caps them.
+	if d := parseTimeout(nil); d != 0 {
+		t.Errorf("default --timeout = %v, want 0 (no cap)", d)
+	} else if got := resolveReviewerTimeoutArg(d); got != -1 {
+		t.Errorf("default resolves to %v, want -1 (no cap)", got)
 	}
-	// --timeout 0 resolves to the negative disable sentinel (reviewers + judge).
+	// Explicit --timeout 0 behaves the same as the default.
 	if got := resolveReviewerTimeoutArg(parseTimeout([]string{"--timeout", "0"})); got != -1 {
-		t.Errorf("--timeout 0 resolves to %v, want -1 (disabled)", got)
+		t.Errorf("--timeout 0 resolves to %v, want -1 (no cap)", got)
 	}
 	// A positive override passes through unchanged.
 	if got := resolveReviewerTimeoutArg(parseTimeout([]string{"--timeout", "30m"})); got != 30*time.Minute {
