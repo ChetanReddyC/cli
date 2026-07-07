@@ -428,6 +428,52 @@ func TestParseCodexOutput_NestedErrorMessage(t *testing.T) {
 	}
 }
 
+// TestParseCodexOutput_EmitsTokensAtEveryTurnCompleted locks the live-token
+// contract for codex: its --json output carries `usage` on every
+// `turn.completed` envelope, and the parser emits Tokens at each turn
+// boundary so multi-turn reviews show iterative updates. Captured by
+// running real codex-cli 0.130.0 — no item.* envelope ever carried a
+// usage field, so emission stays anchored to turn.completed.
+func TestParseCodexOutput_EmitsTokensAtEveryTurnCompleted(t *testing.T) {
+	t.Parallel()
+	// Real codex --json output (lightly trimmed) simulating a multi-turn
+	// review: model call → tool exec → model call → tool exec, with a
+	// turn.completed envelope at every turn boundary carrying running
+	// usage. The parser should emit Tokens for each turn in order.
+	input := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"tid-1"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}`,
+		`{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"ls","aggregated_output":"a\nb\nc","exit_code":0,"status":"completed"}}`,
+		`{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Found three files."}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":34317,"cached_input_tokens":19712,"output_tokens":240,"reasoning_output_tokens":114}}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"cat a","aggregated_output":"","exit_code":null,"status":"in_progress"}}`,
+		`{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"cat a","aggregated_output":"hello","exit_code":0,"status":"completed"}}`,
+		`{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Done."}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":35820,"cached_input_tokens":20114,"output_tokens":401,"reasoning_output_tokens":160}}`,
+		"",
+	}, "\n")
+
+	var tokens []reviewtypes.Tokens
+	for ev := range parseCodexOutput(strings.NewReader(input)) {
+		if tk, ok := ev.(reviewtypes.Tokens); ok {
+			tokens = append(tokens, tk)
+		}
+	}
+
+	if len(tokens) != 2 {
+		t.Fatalf("Tokens count = %d, want exactly 2 (one per turn.completed); got events: %+v",
+			len(tokens), tokens)
+	}
+	if tokens[0].In != 34317 || tokens[0].Out != 240 {
+		t.Errorf("tokens[0] = %+v, want {In:34317, Out:240}", tokens[0])
+	}
+	if tokens[1].In != 35820 || tokens[1].Out != 401 {
+		t.Errorf("tokens[1] = %+v, want {In:35820, Out:401}", tokens[1])
+	}
+}
+
 func collectCodexEvents(ch <-chan reviewtypes.Event) []reviewtypes.Event {
 	var events []reviewtypes.Event
 	for ev := range ch {

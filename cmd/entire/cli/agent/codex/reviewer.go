@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/review"
@@ -81,8 +82,17 @@ func expandCodexBuiltinReview(skills []string) []string {
 // On a scanner error or a missing turn.completed envelope, emits RunError
 // (scanner) or Finished{Success: false} (missing turn) accordingly.
 //
-// Tokens are emitted only at the terminal `turn.completed` envelope, not
-// incrementally — codex's usage fields land once at end-of-turn.
+// Live-token semantics: codex's `--json` output carries `usage` ONLY on
+// `turn.completed` envelopes. Verified against codex-cli 0.130.0 stdout
+// for both short and long prompts — no intermediate envelope
+// (item.started, item.completed, etc.) carries a usage block. Codex's
+// on-disk session log (the `event_msg{type:"token_count"}` shape the
+// transcript parser consumes) is a separate format, not surfaced
+// through `exec --json` — the rollout tailer (review_tokens.go) reads
+// it for live counts between turn boundaries.
+//
+// Tokens are emitted at every `turn.completed` envelope so multi-turn
+// runs show iterative updates.
 //
 // Package-private; called directly from this package's tests so they can
 // drive raw stdout fixtures through the parser without going through the
@@ -106,10 +116,20 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 	out := make(chan reviewtypes.Event, 32)
 	go func() {
 		defer close(out)
+		// The rollout token tailer (started on thread.started) runs concurrently
+		// and also sends on out. Stop it and wait for it to exit BEFORE close(out)
+		// so its send can never hit a closed channel. defer is LIFO, so this runs
+		// before the close(out) registered above.
+		stop := make(chan struct{})
+		var tailWG sync.WaitGroup
+		defer func() {
+			close(stop)
+			tailWG.Wait()
+		}()
 		out <- reviewtypes.Started{}
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, min(1024*1024, maxBuf)), maxBuf)
-		var seenTurnComplete bool
+		var seenTurnComplete, emittedTokens, tailerStarted bool
 		var turnUsage codexUsage
 		var failureMsg string
 		for scanner.Scan() {
@@ -134,8 +154,21 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			// default arm logs unknown types at Debug so drift can be
 			// triaged via ENTIRE_LOG_LEVEL=debug.
 			switch env.Type {
-			case "thread.started", "turn.started":
-				// Session/turn markers — no event emitted.
+			case "thread.started":
+				// Launch the rollout token tailer once. codex's exec --json stdout
+				// only carries usage on turn.completed, so we tail the rollout
+				// file (located by thread_id) for live per-turn token totals —
+				// the same source codex's interactive UI reads.
+				if !tailerStarted && env.ThreadID != "" {
+					tailerStarted = true
+					tailWG.Add(1)
+					go func(id string) {
+						defer tailWG.Done()
+						tailRolloutTokens(id, out, stop)
+					}(env.ThreadID)
+				}
+			case "turn.started":
+				// Turn marker — no event emitted.
 			case "item.started":
 				if env.Item.Type == "command_execution" {
 					out <- reviewtypes.ToolCall{Name: "exec", Args: env.Item.Command}
@@ -150,6 +183,23 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			case "turn.completed":
 				seenTurnComplete = true
 				turnUsage = env.Usage
+				// Emit Tokens at every turn boundary so multi-turn reviews
+				// show iterative updates. The post-loop emission is kept as
+				// a backstop for streams that ended without a usage-carrying
+				// turn.completed (defensive — shouldn't happen in practice).
+				//
+				// codex reports cached_input_tokens as a subset of
+				// input_tokens and reasoning_output_tokens as a subset of
+				// output_tokens (matching OpenAI's chat-completions usage
+				// shape), so do NOT sum the subset fields — that would
+				// double-count.
+				if env.Usage.InputTokens > 0 || env.Usage.OutputTokens > 0 {
+					out <- reviewtypes.Tokens{
+						In:  env.Usage.InputTokens,
+						Out: env.Usage.OutputTokens,
+					}
+					emittedTokens = true
+				}
 			default:
 				logging.Debug(context.Background(), "codex parser: unknown envelope type",
 					slog.String("type", env.Type))
@@ -164,13 +214,17 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			out <- reviewtypes.RunError{Err: fmt.Errorf("codex: %s", failureMsg)}
 		}
 		if seenTurnComplete {
-			// codex reports cached_input_tokens as a subset of input_tokens
-			// and reasoning_output_tokens as a subset of output_tokens
-			// (matching OpenAI's chat-completions usage shape), so do NOT
-			// sum the subset fields — that would double-count.
-			out <- reviewtypes.Tokens{
-				In:  turnUsage.InputTokens,
-				Out: turnUsage.OutputTokens,
+			// Defensive backstop: the per-turn emission inside the
+			// `case "turn.completed"` arm above is the primary path and
+			// already emitted Tokens for every turn with non-zero usage.
+			// This fires only if no per-turn emission happened (e.g., a
+			// terminal turn.completed envelope arrived without a usage
+			// block — defensive against codex output drift).
+			if !emittedTokens {
+				out <- reviewtypes.Tokens{
+					In:  turnUsage.InputTokens,
+					Out: turnUsage.OutputTokens,
+				}
 			}
 			// Success is hard-coded true here because codex's `turn.completed`
 			// envelope has no turn-level error field in 0.130.0. If a future
@@ -187,11 +241,12 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 }
 
 type codexEnvelope struct {
-	Type    string          `json:"type"`
-	Item    codexItem       `json:"item"`
-	Usage   codexUsage      `json:"usage"`
-	Message string          `json:"message"`
-	Error   codexErrorField `json:"error"`
+	Type     string          `json:"type"`
+	ThreadID string          `json:"thread_id"` // present on thread.started; locates the rollout file
+	Item     codexItem       `json:"item"`
+	Usage    codexUsage      `json:"usage"`
+	Message  string          `json:"message"`
+	Error    codexErrorField `json:"error"`
 }
 
 // codexErrorField captures the nested error message shape some codex envelopes
