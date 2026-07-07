@@ -76,13 +76,22 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 		}
 
 		// The existing ref drives the idempotency check and the new commit's
-		// parent. Only a ref that resolves to a real commit becomes the parent —
-		// unreadable ref state is treated as absent (orphan) rather than
-		// parenting the new commit on a bad hash, which would corrupt the commit
-		// graph for fetch+replay.
+		// parent. refBase separates three cases we must not conflate:
+		//   - no ref yet (nil error, zero hash): a brand-new orphan.
+		//   - ref present but its commit object is missing (corrupt or pruned):
+		//     treat as absent and re-import as an orphan rather than parenting on
+		//     a bad hash, which would corrupt the commit graph for fetch+replay.
+		//   - a genuine read failure (transient IO, a concurrent repack): do NOT
+		//     clobber a possibly-valid ref with an orphan; abort this checkpoint
+		//     so an idempotent re-run can retry once the repo is readable again.
 		parent, _, err := refsStore.refBase(cid)
-		if err != nil {
+		switch {
+		case err == nil:
+			// parent is the ref tip, or zero when the ref is absent.
+		case errors.Is(err, plumbing.ErrObjectNotFound):
 			parent = plumbing.ZeroHash
+		default:
+			return fmt.Errorf("resolve existing ref for checkpoint %s: %w", cid, err)
 		}
 		// Skip when this snapshot was already imported anywhere on the ref's
 		// first-parent chain: the ref may have advanced past it through
