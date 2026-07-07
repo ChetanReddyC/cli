@@ -21,6 +21,10 @@ import (
 	"github.com/entireio/cli/redact"
 )
 
+// legacyCheckpointVersion is the checkpoint_version stamp older git-branch
+// checkpoints carry; the migration drops it for the refs layout.
+const legacyCheckpointVersion = "branch-v1"
+
 // sampleSession builds a checkpoint write request with deterministic content,
 // shared so a checkpoint written to the git-branch and git-refs stores has
 // byte-identical session contents.
@@ -115,7 +119,7 @@ func TestMigrateBranchToRefs(t *testing.T) {
 
 	// cid1 carries legacy metadata: a checkpoint_version stamp plus an unmodeled field.
 	mutateBranchCheckpointMetadata(t, repo, cid1, func(doc map[string]any) {
-		doc["checkpoint_version"] = "branch-v1"
+		doc["checkpoint_version"] = legacyCheckpointVersion
 		doc["future_field"] = "keep-me"
 	})
 
@@ -295,7 +299,7 @@ func TestMigrateBranchToRefs_DryRunWritesNothing(t *testing.T) {
 	// Legacy metadata so normalization rewrites the tree — the case that used to
 	// persist a blob + tree even under dry-run.
 	mutateBranchCheckpointMetadata(t, repo, cid, func(doc map[string]any) {
-		doc["checkpoint_version"] = "branch-v1"
+		doc["checkpoint_version"] = legacyCheckpointVersion
 	})
 
 	before := countObjects(t, repo)
@@ -339,7 +343,7 @@ func TestMigrateBranchToRefs_DryRunRecognizesAlreadyMigrated(t *testing.T) {
 	cid := id.MustCheckpointID("a1b2c3d4e5f6")
 	seedBranchCheckpoint(t, branch, cid, "s1")
 	mutateBranchCheckpointMetadata(t, repo, cid, func(doc map[string]any) {
-		doc["checkpoint_version"] = "branch-v1"
+		doc["checkpoint_version"] = legacyCheckpointVersion
 	})
 
 	// Real migration persists the normalized tree.
