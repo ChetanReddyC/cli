@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,11 +18,13 @@ import (
 )
 
 // mirrorColumns is the human table/field view of a mirror: the scannable
-// repo name, the clone URL you'd copy, and whether the upstream is
-// private. The cluster is omitted — it's already embedded in the clone
-// URL — and the wire model's internal ids are dropped entirely. The clone
-// URL is synthesised from the mirror's coords (the form `git clone`
-// accepts), since the list API doesn't return it.
+// owner/repo name, the clone URL you'd copy, and whether the upstream is
+// private. Owner, provider, and cluster aren't columns of their own — they're
+// inferable from the owner/repo pair and the clone URL
+// (entire://<cluster>/gh/<owner>/<repo>), where `--repo` and a bare cluster/
+// provider substring still match — and the wire model's internal ids are
+// dropped. The clone URL is synthesised from the mirror's coords (the form
+// `git clone` accepts), since the list API doesn't return it.
 var mirrorColumns = []string{"REPO", "CLONE URL", "PRIVATE"}
 
 func mirrorRow(m coreapi.Mirror) []string {
@@ -32,6 +35,42 @@ func mirrorRow(m coreapi.Mirror) []string {
 		private = "yes"
 	}
 	return []string{repo, cloneURL, private}
+}
+
+// sortMirrorsDefault orders mirrors by the owner/repo name ascending (matching
+// the REPO column and an explicit `--sort repo`), breaking ties by cluster host
+// ascending. It's the default (no --sort) ordering: a repo mirrored on several
+// clusters would otherwise sit in arbitrary server order. Case-insensitive,
+// matching sortRows.
+func sortMirrorsDefault(mirrors []coreapi.Mirror) {
+	sort.SliceStable(mirrors, func(i, j int) bool {
+		ri := strings.ToLower(mirrors[i].Owner + "/" + mirrors[i].Repo)
+		rj := strings.ToLower(mirrors[j].Owner + "/" + mirrors[j].Repo)
+		if ri != rj {
+			return ri < rj
+		}
+		return strings.ToLower(mirrors[i].ClusterHost) < strings.ToLower(mirrors[j].ClusterHost)
+	})
+}
+
+// filterByRepo keeps items whose repo name contains substr (case-insensitive).
+// The control plane already filters by owner/provider/cluster server-side but
+// not by repo name, so `repo mirror list --repo` narrows that last dimension
+// client-side. repoOf extracts the repo field from each item (mirrors and
+// available mirrors both carry one). An empty substr returns items unchanged;
+// the result is non-nil even when empty so --json encodes [] rather than null.
+func filterByRepo[T any](items []T, repoOf func(T) string, substr string) []T {
+	if substr == "" {
+		return items
+	}
+	substr = strings.ToLower(substr)
+	out := items[:0:0]
+	for _, it := range items {
+		if strings.Contains(strings.ToLower(repoOf(it)), substr) {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 // availableMirrorColumns is the view of a repo you *could* mirror: the
@@ -343,7 +382,8 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 }
 
 func newRepoMirrorListCmd() *cobra.Command {
-	var cluster, provider, owner string
+	var cluster, provider, owner, repo string
+	var sortSpec string
 	var showAvailable bool
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -367,7 +407,11 @@ func newRepoMirrorListCmd() *cobra.Command {
 					if err != nil {
 						return nil, err
 					}
-					return out.Available, nil
+					avail := filterByRepo(out.Available, func(m coreapi.AvailableMirror) string { return m.Repo }, repo)
+					if err := sortRows(avail, availableMirrorColumns, availableMirrorRow, sortSpec); err != nil {
+						return nil, err
+					}
+					return avail, nil
 				})
 			}
 			return runCoreList(cmd, "No mirrors found.", mirrorColumns, mirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Mirror, error) {
@@ -384,7 +428,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 				if !jsonRequested(cmd) {
 					fmt.Fprintf(cmd.ErrOrStderr(), "Listing mirrors on %s\n", c.CoreOrigin())
 				}
-				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Mirror, string, error) {
+				mirrors, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Mirror, string, error) {
 					params := coreapi.ListMirrorsParams{}
 					if cluster != "" {
 						params.Cluster = coreapi.NewOptString(cluster)
@@ -404,12 +448,24 @@ func newRepoMirrorListCmd() *cobra.Command {
 					}
 					return out.Mirrors, out.NextPageToken.Or(""), nil
 				})
+				if err != nil {
+					return nil, err
+				}
+				mirrors = filterByRepo(mirrors, func(m coreapi.Mirror) string { return m.Repo }, repo)
+				if sortSpec == "" {
+					sortMirrorsDefault(mirrors)
+				} else if err := sortRows(mirrors, mirrorColumns, mirrorRow, sortSpec); err != nil {
+					return nil, err
+				}
+				return mirrors, nil
 			})
 		},
 	}
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Filter by cluster public host")
 	cmd.Flags().StringVar(&provider, "provider", "", "Filter by upstream provider (e.g. github)")
 	cmd.Flags().StringVar(&owner, "owner", "", "Filter by upstream owner login")
+	cmd.Flags().StringVar(&repo, "repo", "", "Filter by repo name (case-insensitive substring; applied client-side)")
+	cmd.Flags().StringVar(&sortSpec, "sort", "", "Sort by column (header name; prefix '-' for descending). Default: repo name ascending")
 	cmd.Flags().BoolVar(&showAvailable, "show-available", false, "Instead of existing mirrors, list GitHub repos you could onboard as mirrors (ignores --cluster/--provider)")
 	return cmd
 }

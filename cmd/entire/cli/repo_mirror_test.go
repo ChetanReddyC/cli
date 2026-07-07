@@ -378,17 +378,29 @@ func serveMirrorList(t *testing.T, mirrors []coreapi.Mirror, available []coreapi
 	return recCh
 }
 
+// execMirrorList runs `list` under a parent that carries the control-plane
+// persistent flags (--json lives there, not on the list command itself), so
+// tests can exercise --json and the client-side --filter/--sort together.
+func execMirrorList(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	parent := &cobra.Command{Use: "mirror"}
+	addControlPlaneFlags(parent)
+	parent.AddCommand(newRepoMirrorListCmd())
+	var out, errOut bytes.Buffer
+	parent.SetOut(&out)
+	parent.SetErr(&errOut)
+	parent.SetArgs(append([]string{"list"}, args...))
+	err = parent.ExecuteContext(t.Context())
+	return out.String(), errOut.String(), err
+}
+
 // runMirrorList executes `repo mirror list` with args against the fake server,
 // returning stdout (the table/JSON) and stderr (the routing banner).
 func runMirrorList(t *testing.T, args ...string) (stdout, stderr string) {
 	t.Helper()
-	cmd := newRepoMirrorListCmd()
-	var out, errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	cmd.SetArgs(args)
-	require.NoError(t, cmd.ExecuteContext(t.Context()))
-	return out.String(), errOut.String()
+	stdout, stderr, err := execMirrorList(t, args...)
+	require.NoError(t, err)
+	return stdout, stderr
 }
 
 // TestRepoMirrorList_ShowAvailableRouting locks in the flag-driven branch of
@@ -474,6 +486,95 @@ func TestRepoMirrorList_ShowAvailableRouting(t *testing.T) {
 		require.Equal(t, "/api/v1/mirrors/available", rec.path)
 		require.Empty(t, rec.query.Get("cluster"), "show-available is cluster-agnostic; must not send --cluster")
 		require.Empty(t, rec.query.Get("provider"), "show-available is GitHub-only; must not send --provider")
+	})
+}
+
+// runMirrorListErr is runMirrorList for the error paths (bad --sort column): it
+// returns the command error instead of asserting success.
+func runMirrorListErr(t *testing.T, args ...string) error {
+	t.Helper()
+	_, _, err := execMirrorList(t, args...)
+	return err
+}
+
+// TestRepoMirrorList_FilterSort pins the client-side --repo filter and --sort
+// applied to `repo mirror list` before rendering (server handles
+// owner/provider/cluster), so they shape both the table and --json output and
+// work under --show-available.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoMirrorList_FilterSort(t *testing.T) {
+	mirrors := []coreapi.Mirror{
+		{Owner: "acme", Repo: "web", ClusterHost: "aws-us-east-2.entire.io"},
+		{Owner: "acme", Repo: "cli", ClusterHost: "aws-us-east-2.entire.io"},
+		{Owner: "other", Repo: "api", ClusterHost: "eu-west-1.entire.io"},
+	}
+
+	t.Run("--repo narrows the table by repo-name substring", func(t *testing.T) {
+		serveMirrorList(t, mirrors, nil)
+		stdout, _ := runMirrorList(t, "--repo", "cli")
+		require.Contains(t, stdout, "acme/cli")
+		require.NotContains(t, stdout, "acme/web")
+		require.NotContains(t, stdout, "other/api")
+	})
+
+	t.Run("default output is owner/repo sorted", func(t *testing.T) {
+		serveMirrorList(t, mirrors, nil)
+		stdout, _ := runMirrorList(t)
+		// acme/cli < acme/web < other/api by owner/repo
+		require.Less(t, strings.Index(stdout, "acme/cli"), strings.Index(stdout, "acme/web"))
+		require.Less(t, strings.Index(stdout, "acme/web"), strings.Index(stdout, "other/api"))
+	})
+
+	t.Run("--sort -repo reverses the order", func(t *testing.T) {
+		serveMirrorList(t, mirrors, nil)
+		stdout, _ := runMirrorList(t, "--sort", "-repo")
+		require.Less(t, strings.Index(stdout, "other/api"), strings.Index(stdout, "acme/web"))
+		require.Less(t, strings.Index(stdout, "acme/web"), strings.Index(stdout, "acme/cli"))
+	})
+
+	t.Run("--repo applies to --json and keeps [] not null", func(t *testing.T) {
+		serveMirrorList(t, mirrors, nil)
+		stdout, _ := runMirrorList(t, "--repo", "cli", "--json")
+		require.Contains(t, stdout, `"repo": "cli"`)
+		require.NotContains(t, stdout, `"repo": "web"`)
+
+		serveMirrorList(t, mirrors, nil)
+		stdout, _ = runMirrorList(t, "--repo", "zzz", "--json")
+		require.Contains(t, stdout, "[]")
+		require.NotContains(t, stdout, "null")
+	})
+
+	t.Run("unknown --sort column errors naming valid columns", func(t *testing.T) {
+		serveMirrorList(t, mirrors, nil)
+		err := runMirrorListErr(t, "--sort", "nope")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unknown sort column")
+	})
+
+	t.Run("default order breaks duplicate-repo ties by cluster ascending", func(t *testing.T) {
+		// Same repo on two clusters, delivered eu-first; the default sort must
+		// deterministically place aws before eu.
+		dupes := []coreapi.Mirror{
+			{Owner: "acme", Repo: "web", ClusterHost: "eu-west-1.entire.io"},
+			{Owner: "acme", Repo: "web", ClusterHost: "aws-us-east-2.entire.io"},
+		}
+		serveMirrorList(t, dupes, nil)
+		stdout, _ := runMirrorList(t)
+		require.Less(t,
+			strings.Index(stdout, "entire://aws-us-east-2.entire.io/gh/acme/web"),
+			strings.Index(stdout, "entire://eu-west-1.entire.io/gh/acme/web"),
+		)
+	})
+
+	t.Run("--repo/--sort apply under --show-available", func(t *testing.T) {
+		serveMirrorList(t, nil, []coreapi.AvailableMirror{
+			{Owner: "acme", Repo: "web", Access: "write", Status: "available"},
+			{Owner: "acme", Repo: "cli", Access: "read", Status: "available"},
+		})
+		stdout, _ := runMirrorList(t, "--show-available", "--repo", "cli", "--sort", "access")
+		require.Contains(t, stdout, "acme/cli")
+		require.NotContains(t, stdout, "acme/web")
 	})
 }
 

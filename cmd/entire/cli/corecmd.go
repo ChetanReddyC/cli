@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"charm.land/huh/v2"
@@ -459,6 +460,63 @@ func renderCoreError(err error) error {
 		return errors.New(msg)
 	}
 	return err
+}
+
+// sortRows orders items in place by one column's rendered value, ascending
+// case-insensitive string order. spec is a header name; a leading '-' sorts
+// descending. An empty spec sorts by the first column (the primary identifier),
+// so a list is always deterministically ordered. An unknown column name is an
+// error naming the valid columns. Stable, so rows equal on the sort column keep
+// their input order. The sort key for each item is computed once (not per
+// comparison): keys are precomputed and a stable permutation of indices is
+// sorted against them, then items are reordered to match.
+func sortRows[T any](items []T, headers []string, row func(T) []string, spec string) error {
+	desc := strings.HasPrefix(spec, "-")
+	name := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(spec, "-")))
+	idx := 0
+	if name != "" {
+		if idx = headerIndex(headers, name); idx < 0 {
+			return fmt.Errorf("unknown sort column %q; valid columns: %s", name, strings.ToLower(strings.Join(headers, ", ")))
+		}
+	}
+	keys := make([]string, len(items))
+	perm := make([]int, len(items))
+	for i, it := range items {
+		keys[i] = strings.ToLower(cellAt(row(it), idx))
+		perm[i] = i
+	}
+	sort.SliceStable(perm, func(a, b int) bool {
+		if desc {
+			return keys[perm[a]] > keys[perm[b]]
+		}
+		return keys[perm[a]] < keys[perm[b]]
+	})
+	sorted := make([]T, len(items))
+	for i, p := range perm {
+		sorted[i] = items[p]
+	}
+	copy(items, sorted)
+	return nil
+}
+
+// headerIndex returns the index of the column named name (case-insensitive), or
+// -1 if no header matches.
+func headerIndex(headers []string, name string) int {
+	for i, h := range headers {
+		if strings.EqualFold(h, name) {
+			return i
+		}
+	}
+	return -1
+}
+
+// cellAt returns cells[i], or "" when i is out of range — so a row with fewer
+// cells than headers sorts/filters as empty rather than panicking.
+func cellAt(cells []string, i int) string {
+	if i >= 0 && i < len(cells) {
+		return cells[i]
+	}
+	return ""
 }
 
 // printJSON writes v as indented JSON to w — the --json view for list/get
