@@ -89,14 +89,17 @@ func sortRows[T any](items []T, headers []string, row func(T) []string, spec str
 // The control plane already filters by owner/provider/cluster server-side but
 // not by repo name, so `repo mirror list --repo` narrows that last dimension
 // client-side. repoOf extracts the repo field from each item (mirrors and
-// available mirrors both carry one). An empty substr returns items unchanged;
-// the result is non-nil even when empty so --json encodes [] rather than null.
+// available mirrors both carry one). An empty substr returns items unchanged.
 func filterByRepo[T any](items []T, repoOf func(T) string, substr string) []T {
+	substr = strings.TrimSpace(substr)
 	if substr == "" {
+		if items == nil {
+			return []T{}
+		}
 		return items
 	}
 	substr = strings.ToLower(substr)
-	out := items[:0:0]
+	out := make([]T, 0, len(items))
 	for _, it := range items {
 		if strings.Contains(strings.ToLower(repoOf(it)), substr) {
 			out = append(out, it)
