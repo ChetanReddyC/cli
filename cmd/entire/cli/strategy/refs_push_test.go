@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -223,8 +224,9 @@ func TestPushQueuedCheckpointRefs(t *testing.T) {
 	require.NoError(t, err)
 	queue := enqueueRefs(t, repo, refs)
 
-	pushed, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
 	require.NoError(t, err)
+	assert.False(t, pushDisabled)
 	assert.Equal(t, len(refs), pushed)
 
 	for _, ref := range refs {
@@ -233,6 +235,34 @@ func TestPushQueuedCheckpointRefs(t *testing.T) {
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
 	assert.Empty(t, remaining, "pushed refs are removed from the queue")
+}
+
+func TestPushQueuedCheckpointRefs_PushDisabled(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	// push_sessions disabled: the push is a no-op, and the caller must be able
+	// to tell that apart from an empty queue (pushed==0 with pushing enabled).
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(workDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"push_sessions": false}}`),
+		0o600,
+	))
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	assert.True(t, pushDisabled, "push_sessions=false must be reported as disabled")
+	assert.Equal(t, 0, pushed)
+
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "disabled push leaves refs queued")
 }
 
 func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
@@ -245,7 +275,7 @@ func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
 	writeUnsupportedCheckpointPolicy(t, repo)
 	queue := enqueueRefs(t, repo, refs)
 
-	pushed, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
 	require.ErrorContains(t, err, "checkpoint policy")
 	assert.Equal(t, 0, pushed)
 
@@ -272,7 +302,7 @@ func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
 	queue := enqueueRefs(t, repo, refs)
 
 	badTarget := filepath.Join(t.TempDir(), "missing.git")
-	pushed, err := PushQueuedCheckpointRefs(context.Background(), repo, badTarget)
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, badTarget)
 	require.ErrorContains(t, err, "failed to push")
 	assert.Equal(t, 0, pushed)
 

@@ -92,20 +92,25 @@ next push once the git-refs store is the configured primary.`,
 				return nil
 			}
 
-			pushed, err := strategy.PushQueuedCheckpointRefs(ctx, repo, remote)
+			pushed, pushDisabled, err := strategy.PushQueuedCheckpointRefs(ctx, repo, remote)
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
 					return NewSilentError(err)
 				}
 				return fmt.Errorf("push migrated refs: %w", err)
 			}
-			if pushed == 0 {
-				// Confirmed, but nothing went to the remote — checkpoint pushing
-				// is disabled in settings. The refs stay queued locally.
+			switch {
+			case pushDisabled:
+				// Confirmed, but checkpoint pushing is disabled in settings, so
+				// nothing went to the remote. The refs stay queued locally.
 				fmt.Fprintln(out, "Checkpoint pushing is disabled in settings; refs stay queued for the next push.")
-				return nil
+			case pushed == 0:
+				// Enabled, but the queue was already empty — e.g. a concurrent
+				// git push flushed the just-migrated refs while we prompted.
+				fmt.Fprintln(out, "No queued refs to push (they may have already been pushed).")
+			default:
+				fmt.Fprintf(out, "Pushed %d checkpoint ref(s).\n", pushed)
 			}
-			fmt.Fprintf(out, "Pushed %d checkpoint ref(s).\n", pushed)
 			return nil
 		},
 	}

@@ -173,26 +173,28 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 
 // PushQueuedCheckpointRefs pushes any queued checkpoint refs to the configured
 // checkpoint remote, surfacing errors (unlike the fail-soft pre-push path); the
-// caller owns the repo. Returns the number of refs pushed — a no-op (0, nil)
-// when pushing is disabled or the queue is empty. Like the pre-push paths, a
-// checkpoint policy that blocks pushing errors with the refs left queued.
-// Currently used by the checkpoint migration command's opt-in "push now".
-func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote string) (int, error) {
+// caller owns the repo. It returns the number of refs pushed and whether
+// pushing is disabled in settings — a distinct signal from pushed==0 with
+// pushing enabled (an empty queue), so callers can report the two accurately.
+// Like the pre-push paths, a checkpoint policy that blocks pushing errors with
+// the refs left queued. Currently used by the checkpoint migration command's
+// opt-in "push now".
+func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote string) (pushed int, pushDisabled bool, err error) {
 	ps := resolvePushSettings(ctx, remote)
 	if ps.pushDisabled {
-		return 0, nil
+		return 0, true, nil
 	}
 	syncCheckpointPolicyForPrePush(ctx, repo, ps)
 	if !checkpointPolicyAllowsGitHook(ctx, repo) {
-		return 0, errors.New("checkpoint policy does not allow pushing checkpoint refs; refs stay queued")
+		return 0, false, errors.New("checkpoint policy does not allow pushing checkpoint refs; refs stay queued")
 	}
-	pushed, err := flushCheckpointRefsQueue(ctx, repo, ps.pushTarget())
+	pushed, err = flushCheckpointRefsQueue(ctx, repo, ps.pushTarget())
 	// Clean up even on a partial/failed flush: a diverged batch can push some
 	// refs and still return an error, and the shadow branches for the refs that
 	// *did* land must still be cleaned up — parity with the pre-push path, which
 	// always runs cleanup after flush regardless of its error.
 	cleanupPushedShadowBranches(ctx)
-	return pushed, err
+	return pushed, false, err
 }
 
 // flushCheckpointRefsQueue drains the push-discovery queue and batch-pushes the
