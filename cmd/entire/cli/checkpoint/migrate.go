@@ -71,7 +71,7 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 		}
 		result.Total++
 
-		migratedTree, err := migratedCheckpointTree(ctx, repo, cid, cpTreeHash)
+		migratedTree, err := migratedCheckpointTree(ctx, repo, cid, cpTreeHash, !dryRun)
 		if err != nil {
 			return fmt.Errorf("normalize checkpoint %s: %w", cid, err)
 		}
@@ -176,7 +176,13 @@ func treeInRefHistory(repo *git.Repository, tip, tree plumbing.Hash) bool {
 
 // migratedCheckpointTree returns the branch subtree with its root metadata.json
 // normalized for the refs layout — unchanged when already normalized or absent.
-func migratedCheckpointTree(ctx context.Context, repo *git.Repository, cid id.CheckpointID, cpTreeHash plumbing.Hash) (plumbing.Hash, error) {
+//
+// When persist is false (dry-run) it computes the resulting tree hash WITHOUT
+// writing the normalized blob or tree into the object store. git object hashes
+// are content-addressed, so the hash returned is byte-identical to the one the
+// persisting path produces — idempotency reporting stays exact while a dry-run
+// leaves no loose objects behind.
+func migratedCheckpointTree(ctx context.Context, repo *git.Repository, cid id.CheckpointID, cpTreeHash plumbing.Hash, persist bool) (plumbing.Hash, error) {
 	subtree, err := repo.TreeObject(cpTreeHash)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("read checkpoint tree: %w", err)
@@ -201,6 +207,14 @@ func migratedCheckpointTree(ctx context.Context, repo *git.Repository, cid id.Ch
 		return cpTreeHash, nil
 	}
 
+	if !persist {
+		blobHash, err := hashBlob(repo, normalized)
+		if err != nil {
+			return plumbing.ZeroHash, fmt.Errorf("hash normalized metadata.json: %w", err)
+		}
+		return hashRootFileSwap(repo, subtree, paths.MetadataFileName, blobHash)
+	}
+
 	blobHash, err := CreateBlobFromContent(repo, normalized)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("write normalized metadata.json: %w", err)
@@ -213,6 +227,53 @@ func migratedCheckpointTree(ctx context.Context, repo *git.Repository, cid id.Ch
 		return plumbing.ZeroHash, fmt.Errorf("build normalized checkpoint tree: %w", err)
 	}
 	return newTree, nil
+}
+
+// hashBlob encodes content as a git blob and returns its hash without storing
+// it — mirroring CreateBlobFromContent's encoding so the two hash identically.
+func hashBlob(repo *git.Repository, content []byte) (plumbing.Hash, error) {
+	obj := repo.Storer.NewEncodedObject()
+	obj.SetType(plumbing.BlobObject)
+	obj.SetSize(int64(len(content)))
+	w, err := obj.Writer()
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("open blob writer: %w", err)
+	}
+	if _, err := w.Write(content); err != nil {
+		_ = w.Close()
+		return plumbing.ZeroHash, fmt.Errorf("write blob: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("close blob writer: %w", err)
+	}
+	return obj.Hash(), nil
+}
+
+// hashRootFileSwap returns the hash of subtree with one root-level file entry
+// replaced by blobHash, without storing the new tree. It mirrors ApplyTreeChanges
+// + storeTree for a single root-level file (force Regular mode, then
+// sortTreeEntries before encoding) so the hash matches the persisting path.
+func hashRootFileSwap(repo *git.Repository, subtree *object.Tree, name string, blobHash plumbing.Hash) (plumbing.Hash, error) {
+	entries := make([]object.TreeEntry, len(subtree.Entries))
+	copy(entries, subtree.Entries)
+	swapped := false
+	for i := range entries {
+		if entries[i].Name == name {
+			entries[i] = object.TreeEntry{Name: name, Mode: filemode.Regular, Hash: blobHash}
+			swapped = true
+			break
+		}
+	}
+	if !swapped {
+		// The caller only reaches here after reading name from this same tree.
+		return plumbing.ZeroHash, fmt.Errorf("%s not found in checkpoint tree", name)
+	}
+	sortTreeEntries(entries)
+	obj := repo.Storer.NewEncodedObject()
+	if err := (&object.Tree{Entries: entries}).Encode(obj); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("encode dry-run tree: %w", err)
+	}
+	return obj.Hash(), nil
 }
 
 // normalizeMigratedMetadata rewrites a checkpoint's root metadata.json for the
