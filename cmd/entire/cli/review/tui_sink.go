@@ -152,7 +152,10 @@ func (s *TUISink) Start() {
 
 	// Pump: the only goroutine allowed to block on Program.Send. When the
 	// program exits (done closes), a blocked Send unblocks via the program's
-	// context and the pump drains out.
+	// context and the pump drains out. A Send that races program exit (done
+	// closes while a queued msg is in hand) is equally safe: Bubble Tea's
+	// Send is a context-guarded select and the msgs channel is never closed,
+	// so a post-exit Send is an immediate no-op — not a panic, not a block.
 	go func() {
 		defer close(s.pumpDone)
 		for {
