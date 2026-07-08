@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -154,9 +155,18 @@ func resolveCellBaseURLs(ctx context.Context, c cellCoreClient, cells []cellGrou
 	}
 	for i := range cells {
 		cl, ok := bySlug[cells[i].clusterSlug]
+		if !ok && cells[i].cell != "" {
+			// Try matching the group's cell name against catalog apiUrl
+			// hosts (e.g. cell "aws-eu-central-1" matches
+			// "https://aws-eu-central-1.api.entire.io"). This is more
+			// precise than jurisdiction when a jurisdiction has multiple
+			// cells — mirroring matchClusterByHost in cell_target.go.
+			cl, ok = matchClusterByCellInURL(clusters.Clusters, cells[i].cell)
+		}
 		if !ok && cells[i].jurisdiction != "" {
-			// Placement-derived groups lack a cluster slug; fall back to
-			// jurisdiction so mirror placements still resolve a baseURL.
+			// Last resort: jurisdiction-level fallback using the default
+			// cluster. Less precise, but still routes to the right
+			// jurisdiction when the cell name doesn't appear in any URL.
 			cl, ok = byJurisdiction[cells[i].jurisdiction]
 		}
 		if !ok {
@@ -180,6 +190,31 @@ func resolveCellBaseURLs(ctx context.Context, c cellCoreClient, cells []cellGrou
 		cells[i].jurisdiction = jurisdiction
 		cells[i].baseURL = strings.TrimRight(strings.TrimSpace(cl.ApiUrl.Or("")), "/")
 	}
+}
+
+// matchClusterByCellInURL finds a catalog cluster whose ApiUrl or PublicUrl
+// host contains the cell name as a prefix (e.g. cell "aws-eu-central-1"
+// matches "https://aws-eu-central-1.api.entire.io"). This is more precise
+// than a jurisdiction-level fallback when multiple clusters share a
+// jurisdiction — each cluster serves a different cell.
+func matchClusterByCellInURL(clusters []coreapi.Cluster, cell string) (coreapi.Cluster, bool) {
+	prefix := strings.ToLower(strings.TrimSpace(cell)) + "."
+	for _, cl := range clusters {
+		for _, rawURL := range []string{cl.ApiUrl.Or(""), cl.PublicUrl} {
+			rawURL = strings.TrimSpace(rawURL)
+			if rawURL == "" {
+				continue
+			}
+			u, err := url.Parse(rawURL)
+			if err != nil {
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(u.Hostname()), prefix) {
+				return cl, true
+			}
+		}
+	}
+	return coreapi.Cluster{}, false
 }
 
 // cellTarget converts the group's routing coordinates into the auth layer's
