@@ -141,11 +141,13 @@ func resolveCellBaseURLs(ctx context.Context, c cellCoreClient, cells []cellGrou
 	byJurisdiction := make(map[string]coreapi.Cluster, len(clusters.Clusters))
 	for _, cl := range clusters.Clusters {
 		bySlug[strings.ToLower(strings.TrimSpace(cl.Slug))] = cl
-		// First cluster per jurisdiction wins — used as fallback when a
-		// placement-derived group has no cluster slug.
+		// Prefer the default cluster per jurisdiction — matches the auth
+		// layer's resolution when routing by jurisdiction alone. A non-default
+		// cluster is kept only when no default has been seen yet.
 		j := strings.ToLower(strings.TrimSpace(cl.Jurisdiction))
 		if j != "" {
-			if _, exists := byJurisdiction[j]; !exists {
+			existing, exists := byJurisdiction[j]
+			if !exists || (cl.IsDefault && !existing.IsDefault) {
 				byJurisdiction[j] = cl
 			}
 		}
