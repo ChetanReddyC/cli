@@ -21,14 +21,12 @@ Commands:
   explain  Explain a checkpoint, commit, or session
   tokens   Show token usage and optimization recommendations
   search   Search checkpoints (semantic + keyword)
-  resume   Resume the agent session(s) recorded in a checkpoint
 
 Examples:
   entire checkpoint list
   entire checkpoint explain <id|sha>
   entire checkpoint tokens <id>
-  entire checkpoint search "fix login"
-  entire checkpoint resume <id|sha|branch>`,
+  entire checkpoint search "fix login"`,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
 				return errors.New("not a git repository")

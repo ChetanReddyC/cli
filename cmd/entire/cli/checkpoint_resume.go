@@ -35,8 +35,9 @@ func newCheckpointResumeCmd() *cobra.Command {
 	var force bool
 
 	cmd := &cobra.Command{
-		Use:   "resume [checkpoint-id | commit-sha | branch]",
-		Short: "Resume the agent session(s) recorded in a checkpoint",
+		Use:    "resume [checkpoint-id | commit-sha | branch]",
+		Short:  "Resume the agent session(s) recorded in a checkpoint",
+		Hidden: true,
 		Long: `Resume agent sessions from a committed checkpoint.
 
 The target can be a checkpoint ID (or prefix), a commit SHA (or ref) whose
@@ -47,8 +48,8 @@ one interpretation.
 For a checkpoint or commit target, the branch containing the checkpoint's
 commit is checked out at its current tip before the session logs are
 restored. If no local branch contains it, the session logs are restored
-without switching branches. A branch target behaves like
-'entire session resume <branch>'.
+without switching branches. A branch target checks the branch out and
+resumes its latest checkpoint.
 
 With no target, shows recent checkpoints: an interactive picker on a
 terminal, a plain-text list otherwise.
