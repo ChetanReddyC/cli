@@ -92,15 +92,17 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
 
 	for _, r := range repos {
 		if len(r.Placements) > 0 {
-			homeCell := strings.ToLower(strings.TrimSpace(r.Cell))
 			for _, p := range r.Placements {
-				// Placements don't carry a cluster slug; the top-level
-				// slug applies only to the home placement. Pass it when
-				// the placement's cell matches the top-level cell (home),
-				// empty otherwise — resolveCellBaseURLs falls back to
-				// jurisdiction matching for groups without a slug.
+				// Placements don't carry a cluster slug; the top-level slug
+				// applies only to the home placement. RepoPlacement.Mirror is
+				// the contract-guaranteed home(false)/mirror(true) marker, so
+				// assign the slug to the home placement and leave mirrors
+				// slugless — resolveCellBaseURLs falls back to cell/jurisdiction
+				// matching for groups without a slug. (Keying off Mirror rather
+				// than p.Cell == r.Cell means the join still works if the index
+				// omits the top-level Cell alongside the placement array.)
 				slug := ""
-				if strings.ToLower(strings.TrimSpace(p.Cell)) == homeCell {
+				if !p.Mirror {
 					slug = r.ClusterSlug
 				}
 				addToGroup(p.ID, p.Cell, p.Jurisdiction, slug)
@@ -167,7 +169,15 @@ func resolveCellBaseURLs(ctx context.Context, c cellCoreClient, cells []cellGrou
 			// Last resort: jurisdiction-level fallback using the default
 			// cluster. Less precise, but still routes to the right
 			// jurisdiction when the cell name doesn't appear in any URL.
-			cl, ok = byJurisdiction[cells[i].jurisdiction]
+			if cl, ok = byJurisdiction[cells[i].jurisdiction]; ok {
+				// This binds the group to the jurisdiction's DEFAULT cluster,
+				// which may not be the cell hosting this placement's repo. If
+				// the placement lives in a non-default cell of the jurisdiction
+				// the query can hit a cell that returns nothing — a silent
+				// mirror miss. Log it so such a miss is diagnosable.
+				logging.Debug(ctx, "cell fan-out: jurisdiction-default fallback used (cell name not in any catalog URL); may mis-route within jurisdiction",
+					"cell", cells[i].cell, "jurisdiction", cells[i].jurisdiction, "resolved_cluster", cl.Slug)
+			}
 		}
 		if !ok {
 			logging.Debug(ctx, "cell fan-out: cluster not in catalog, using jurisdiction routing",

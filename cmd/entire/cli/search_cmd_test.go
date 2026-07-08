@@ -14,9 +14,10 @@ import (
 
 // test constants used across code-search tests.
 const (
-	testRepoID1 = "01ABC"
-	testRepoID2 = "02DEF"
-	testCellEU  = "aws-eu-west-1"
+	testRepoID1       = "01ABC"
+	testRepoID2       = "02DEF"
+	testCellEU        = "aws-eu-west-1"
+	testClusterSlugUS = "us-prod"
 )
 
 // TestSearchCmd_AccessibleModeRequiresQuery verifies that accessible mode
