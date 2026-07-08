@@ -29,12 +29,14 @@ type column struct {
 	header string
 }
 
+// Keys are lower-case, single shell tokens (kebab-case for multi-word columns)
+// so `--sort clone-url` needs no quoting; headers stay upper-case display text.
 var (
-	colName     = column{key: "NAME", header: "NAME (owner/repo)"}
-	colCloneURL = column{key: "CLONE URL", header: "CLONE URL"}
-	colPrivate  = column{key: "PRIVATE", header: "PRIVATE"}
-	colAccess   = column{key: "ACCESS", header: "ACCESS"}
-	colStatus   = column{key: "STATUS", header: "STATUS"}
+	colName     = column{key: "name", header: "NAME (owner/repo)"}
+	colCloneURL = column{key: "clone-url", header: "CLONE URL"}
+	colPrivate  = column{key: "private", header: "PRIVATE"}
+	colAccess   = column{key: "access", header: "ACCESS"}
+	colStatus   = column{key: "status", header: "STATUS"}
 )
 
 // columnHeaders is the display-header view of a column set, for the table/field
@@ -94,7 +96,7 @@ func parseSortColumn(spec string, columns []column) (col column, desc bool, err 
 	}
 	valid := make([]string, len(columns))
 	for i, c := range columns {
-		valid[i] = strings.ToLower(c.key)
+		valid[i] = c.key
 	}
 	return column{}, false, fmt.Errorf("unknown sort column %q; valid columns: %s", name, strings.Join(valid, ", "))
 }
