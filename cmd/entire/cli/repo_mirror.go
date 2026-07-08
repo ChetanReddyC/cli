@@ -18,6 +18,18 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
+// Column header names, the single source of truth for both the table headers
+// (mirrorColumns/availableMirrorColumns) and the --sort key switches. parseSort-
+// Column returns the canonical header it matched, so the sort switches compare
+// against these constants directly.
+const (
+	colRepo     = "REPO"
+	colCloneURL = "CLONE URL"
+	colPrivate  = "PRIVATE"
+	colAccess   = "ACCESS"
+	colStatus   = "STATUS"
+)
+
 // mirrorColumns is the human table/field view of a mirror: the scannable
 // owner/repo name, the clone URL you'd copy, and whether the upstream is
 // private. Owner, provider, and cluster aren't columns of their own — they're
@@ -26,7 +38,7 @@ import (
 // only; owner/provider/cluster stay server-side filters, and the wire model's
 // internal ids are dropped. The clone URL is synthesised from the mirror's
 // coords (the form `git clone` accepts), since the list API doesn't return it.
-var mirrorColumns = []string{"REPO", "CLONE URL", "PRIVATE"}
+var mirrorColumns = []string{colRepo, colCloneURL, colPrivate}
 
 // mirrorPrivate renders the PRIVATE column ("yes"/"no"), shared by the table
 // row and the --sort private key so both agree on the cell value.
@@ -43,21 +55,23 @@ func mirrorRow(m coreapi.Mirror) []string {
 	return []string{repo, cloneURL, mirrorPrivate(m)}
 }
 
-// parseSortColumn resolves a --sort spec to a lowercased column name and
-// direction against columns. It trims first, then reads the '-' prefix, so
-// leading/trailing whitespace is handled identically on every path (the
-// direction and the column name never disagree). An empty spec selects the
-// first column. An unknown name errors naming the valid columns.
+// parseSortColumn resolves a --sort spec to the canonical column header it
+// names (one of the columns entries) and a direction. It trims first, then
+// reads the '-' prefix, so leading/trailing whitespace is handled identically
+// on every path (the direction and the column name never disagree). An empty
+// spec selects the first column. An unknown name errors naming the valid
+// columns. Returning the matched header lets callers switch on the col*
+// constants directly.
 func parseSortColumn(spec string, columns []string) (col string, desc bool, err error) {
 	spec = strings.TrimSpace(spec)
 	desc = strings.HasPrefix(spec, "-")
-	name := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(spec, "-")))
+	name := strings.TrimSpace(strings.TrimPrefix(spec, "-"))
 	if name == "" {
-		return strings.ToLower(columns[0]), desc, nil
+		return columns[0], desc, nil
 	}
 	for _, h := range columns {
 		if strings.EqualFold(h, name) {
-			return name, desc, nil
+			return h, desc, nil
 		}
 	}
 	return "", false, fmt.Errorf("unknown sort column %q; valid columns: %s", name, strings.ToLower(strings.Join(columns, ", ")))
@@ -76,9 +90,9 @@ func sortMirrors(mirrors []coreapi.Mirror, spec string) error {
 	}
 	key := func(m coreapi.Mirror) string {
 		switch col {
-		case "clone url":
+		case colCloneURL:
 			return strings.ToLower(mirrorCloneURL(m.ClusterHost, m.Owner, m.Repo))
-		case "private":
+		case colPrivate:
 			return mirrorPrivate(m)
 		default: // repo -> tiebreak alone
 			return ""
@@ -112,9 +126,9 @@ func sortAvailable(avail []coreapi.AvailableMirror, spec string) error {
 	}
 	key := func(m coreapi.AvailableMirror) string {
 		switch col {
-		case "access":
+		case colAccess:
 			return strings.ToLower(string(m.Access))
-		case "status":
+		case colStatus:
 			return strings.ToLower(string(m.Status))
 		default: // repo -> tiebreak alone
 			return ""
@@ -160,7 +174,7 @@ func filterByRepo[T any](items []T, repoOf func(T) string, substr string) []T {
 // clone URL), or "owner-only" (a personal repo of another user; only its
 // owner may mirror it). No clone URL column: an un-onboarded repo doesn't
 // have one yet.
-var availableMirrorColumns = []string{"REPO", "ACCESS", "STATUS"}
+var availableMirrorColumns = []string{colRepo, colAccess, colStatus}
 
 func availableMirrorRow(m coreapi.AvailableMirror) []string {
 	return []string{m.Owner + "/" + m.Repo, string(m.Access), string(m.Status)}
