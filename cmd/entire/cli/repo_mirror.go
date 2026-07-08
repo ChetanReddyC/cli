@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -8,7 +9,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,60 +28,107 @@ import (
 // `git clone` accepts), since the list API doesn't return it.
 var mirrorColumns = []string{"REPO", "CLONE URL", "PRIVATE"}
 
+// mirrorPrivate renders the PRIVATE column ("yes"/"no"), shared by the table
+// row and the --sort private key so both agree on the cell value.
+func mirrorPrivate(m coreapi.Mirror) string {
+	if m.IsPrivate.Or(false) {
+		return "yes"
+	}
+	return "no"
+}
+
 func mirrorRow(m coreapi.Mirror) []string {
 	repo := m.Owner + "/" + m.Repo
 	cloneURL := mirrorCloneURL(m.ClusterHost, m.Owner, m.Repo)
-	private := "no"
-	if m.IsPrivate.Or(false) {
-		private = "yes"
-	}
-	return []string{repo, cloneURL, private}
+	return []string{repo, cloneURL, mirrorPrivate(m)}
 }
 
-// sortMirrorsDefault orders mirrors by the owner/repo name ascending (matching
-// the REPO column and an explicit `--sort repo`), breaking ties by cluster host
-// ascending. It's the default (no --sort) ordering: a repo mirrored on several
-// clusters would otherwise sit in arbitrary server order. Case-insensitive,
-// matching sortRows.
-func sortMirrorsDefault(mirrors []coreapi.Mirror) {
-	sort.SliceStable(mirrors, func(i, j int) bool {
-		ri := strings.ToLower(mirrors[i].Owner + "/" + mirrors[i].Repo)
-		rj := strings.ToLower(mirrors[j].Owner + "/" + mirrors[j].Repo)
-		if ri != rj {
-			return ri < rj
-		}
-		return strings.ToLower(mirrors[i].ClusterHost) < strings.ToLower(mirrors[j].ClusterHost)
-	})
-}
-
-// sortRows orders items in place by one column's rendered value, ascending
-// case-insensitive string order. spec is a header name; a leading '-' sorts
-// descending. An empty spec sorts by the first column. An unknown column name
-// is an error naming the valid columns. Stable, so rows equal on the sort
-// column keep their input order. row must return one cell per header, which the
-// mirror/available row funcs do.
-func sortRows[T any](items []T, headers []string, row func(T) []string, spec string) error {
-	desc := strings.HasPrefix(spec, "-")
+// parseSortColumn resolves a --sort spec to a lowercased column name and
+// direction against columns. It trims first, then reads the '-' prefix, so
+// leading/trailing whitespace is handled identically on every path (the
+// direction and the column name never disagree). An empty spec selects the
+// first column. An unknown name errors naming the valid columns.
+func parseSortColumn(spec string, columns []string) (col string, desc bool, err error) {
+	spec = strings.TrimSpace(spec)
+	desc = strings.HasPrefix(spec, "-")
 	name := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(spec, "-")))
-	idx := 0
-	if name != "" {
-		idx = -1
-		for i, h := range headers {
-			if strings.EqualFold(h, name) {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 {
-			return fmt.Errorf("unknown sort column %q; valid columns: %s", name, strings.ToLower(strings.Join(headers, ", ")))
+	if name == "" {
+		return strings.ToLower(columns[0]), desc, nil
+	}
+	for _, h := range columns {
+		if strings.EqualFold(h, name) {
+			return name, desc, nil
 		}
 	}
-	sort.SliceStable(items, func(a, b int) bool {
-		ka, kb := strings.ToLower(row(items[a])[idx]), strings.ToLower(row(items[b])[idx])
-		if desc {
-			return ka > kb
+	return "", false, fmt.Errorf("unknown sort column %q; valid columns: %s", name, strings.ToLower(strings.Join(columns, ", ")))
+}
+
+// sortMirrors orders mirrors in place by the --sort spec: by the named column's
+// value ascending (case-insensitive), always breaking ties by owner/repo then
+// cluster host so a repo mirrored across clusters (or rows equal on any other
+// column) has a stable, deterministic order rather than arbitrary server order.
+// A '-' prefix reverses the whole ordering. `repo`/default sorts by the
+// tiebreak alone.
+func sortMirrors(mirrors []coreapi.Mirror, spec string) error {
+	col, desc, err := parseSortColumn(spec, mirrorColumns)
+	if err != nil {
+		return err
+	}
+	key := func(m coreapi.Mirror) string {
+		switch col {
+		case "clone url":
+			return strings.ToLower(mirrorCloneURL(m.ClusterHost, m.Owner, m.Repo))
+		case "private":
+			return mirrorPrivate(m)
+		default: // repo -> tiebreak alone
+			return ""
 		}
-		return ka < kb
+	}
+	slices.SortStableFunc(mirrors, func(a, b coreapi.Mirror) int {
+		c := cmp.Compare(key(a), key(b))
+		if c == 0 {
+			c = cmp.Compare(strings.ToLower(a.Owner+"/"+a.Repo), strings.ToLower(b.Owner+"/"+b.Repo))
+		}
+		if c == 0 {
+			c = cmp.Compare(strings.ToLower(a.ClusterHost), strings.ToLower(b.ClusterHost))
+		}
+		if desc {
+			return -c
+		}
+		return c
+	})
+	return nil
+}
+
+// sortAvailable orders available mirrors in place by the --sort spec, matching
+// sortMirrors: by the named column ascending (case-insensitive) with an
+// owner/repo tiebreak for a deterministic order on equal keys. AvailableMirror
+// has no cluster host (the onboardable set is cluster-agnostic), so owner/repo
+// is the only secondary key. A '-' prefix reverses the whole ordering.
+func sortAvailable(avail []coreapi.AvailableMirror, spec string) error {
+	col, desc, err := parseSortColumn(spec, availableMirrorColumns)
+	if err != nil {
+		return err
+	}
+	key := func(m coreapi.AvailableMirror) string {
+		switch col {
+		case "access":
+			return strings.ToLower(string(m.Access))
+		case "status":
+			return strings.ToLower(string(m.Status))
+		default: // repo -> tiebreak alone
+			return ""
+		}
+	}
+	slices.SortStableFunc(avail, func(a, b coreapi.AvailableMirror) int {
+		c := cmp.Compare(key(a), key(b))
+		if c == 0 {
+			c = cmp.Compare(strings.ToLower(a.Owner+"/"+a.Repo), strings.ToLower(b.Owner+"/"+b.Repo))
+		}
+		if desc {
+			return -c
+		}
+		return c
 	})
 	return nil
 }
@@ -93,9 +141,6 @@ func sortRows[T any](items []T, headers []string, row func(T) []string, spec str
 func filterByRepo[T any](items []T, repoOf func(T) string, substr string) []T {
 	substr = strings.TrimSpace(substr)
 	if substr == "" {
-		if items == nil {
-			return []T{}
-		}
 		return items
 	}
 	substr = strings.ToLower(substr)
@@ -443,7 +488,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 						return nil, err
 					}
 					avail := filterByRepo(out.Available, func(m coreapi.AvailableMirror) string { return m.Repo }, repo)
-					if err := sortRows(avail, availableMirrorColumns, availableMirrorRow, sortSpec); err != nil {
+					if err := sortAvailable(avail, sortSpec); err != nil {
 						return nil, err
 					}
 					return avail, nil
@@ -487,16 +532,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 					return nil, err
 				}
 				mirrors = filterByRepo(mirrors, func(m coreapi.Mirror) string { return m.Repo }, repo)
-				normalizedSort := strings.TrimSpace(sortSpec)
-				repoSort := strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(normalizedSort, "-")), "repo")
-				if normalizedSort == "" || repoSort {
-					sortMirrorsDefault(mirrors)
-					if strings.HasPrefix(normalizedSort, "-") {
-						for i, j := 0, len(mirrors)-1; i < j; i, j = i+1, j-1 {
-							mirrors[i], mirrors[j] = mirrors[j], mirrors[i]
-						}
-					}
-				} else if err := sortRows(mirrors, mirrorColumns, mirrorRow, normalizedSort); err != nil {
+				if err := sortMirrors(mirrors, sortSpec); err != nil {
 					return nil, err
 				}
 				return mirrors, nil

@@ -604,6 +604,31 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		require.Contains(t, stdout, "acme/cli")
 		require.NotContains(t, stdout, "acme/web")
 	})
+
+	t.Run("--sort private breaks ties deterministically by owner/repo then cluster", func(t *testing.T) {
+		// A non-repo column sort: all rows share the same private value, so the
+		// order must fall back to the owner/repo + cluster tiebreak rather than
+		// the eu-first order the server delivered.
+		dupes := []coreapi.Mirror{
+			{Owner: "acme", Repo: "web", ClusterHost: "eu-west-1.entire.io"},
+			{Owner: "acme", Repo: "web", ClusterHost: "aws-us-east-2.entire.io"},
+			{Owner: "acme", Repo: "api", ClusterHost: "aws-us-east-2.entire.io"},
+		}
+		serveMirrorList(t, dupes, nil)
+		stdout, _ := runMirrorList(t, "--sort", "private")
+		api := strings.Index(stdout, "entire://aws-us-east-2.entire.io/gh/acme/api")
+		awsWeb := strings.Index(stdout, "entire://aws-us-east-2.entire.io/gh/acme/web")
+		euWeb := strings.Index(stdout, "entire://eu-west-1.entire.io/gh/acme/web")
+		require.Less(t, api, awsWeb, "acme/api sorts before acme/web")
+		require.Less(t, awsWeb, euWeb, "within the acme/web tie, aws cluster sorts before eu")
+	})
+
+	t.Run("--sort with leading whitespace parses direction like the trimmed spec", func(t *testing.T) {
+		serveMirrorList(t, mirrors, nil)
+		stdout, _ := runMirrorList(t, "--sort", " -repo")
+		require.Less(t, strings.Index(stdout, "other/api"), strings.Index(stdout, "acme/web"))
+		require.Less(t, strings.Index(stdout, "acme/web"), strings.Index(stdout, "acme/cli"))
+	})
 }
 
 // TestParseGitHubURL is ported from entiredb's cmd/entire-repo/cli
@@ -1045,66 +1070,126 @@ func TestRemoveMirror(t *testing.T) {
 	})
 }
 
-// sortRowsRow is the TestSortRows fixture: two columns, REPO and PRIVATE,
-// mapped by sortRowsRowFn — exercises sortRows over a real multi-column row.
-type sortRowsRow struct {
-	repo    string
-	private string
-}
-
-var sortRowsHeaders = []string{"REPO", "PRIVATE"}
-
-func sortRowsRowFn(r sortRowsRow) []string { return []string{r.repo, r.private} }
-
-func sortRowsRepos(items []sortRowsRow) []string {
-	out := make([]string, len(items))
-	for i, it := range items {
-		out[i] = it.repo
+// mirrorRepoHosts renders each mirror as "owner/repo@clusterHost" so a sorted
+// slice's order (including the cluster tiebreak) is asserted in one line.
+func mirrorRepoHosts(mirrors []coreapi.Mirror) []string {
+	out := make([]string, len(mirrors))
+	for i, m := range mirrors {
+		out[i] = m.Owner + "/" + m.Repo + "@" + m.ClusterHost
 	}
 	return out
 }
 
-func TestSortRows(t *testing.T) {
+func TestSortMirrors(t *testing.T) {
 	t.Parallel()
 
-	t.Run("empty spec sorts by first column ascending", func(t *testing.T) {
-		t.Parallel()
-		items := []sortRowsRow{{repo: "b/y"}, {repo: "a/x"}, {repo: "c/z"}}
-		require.NoError(t, sortRows(items, sortRowsHeaders, sortRowsRowFn, ""))
-		require.Equal(t, []string{"a/x", "b/y", "c/z"}, sortRowsRepos(items))
-	})
-
-	t.Run("leading dash sorts descending", func(t *testing.T) {
-		t.Parallel()
-		items := []sortRowsRow{{repo: "b/y"}, {repo: "a/x"}, {repo: "c/z"}}
-		require.NoError(t, sortRows(items, sortRowsHeaders, sortRowsRowFn, "-repo"))
-		require.Equal(t, []string{"c/z", "b/y", "a/x"}, sortRowsRepos(items))
-	})
-
-	t.Run("sorts by named column", func(t *testing.T) {
-		t.Parallel()
-		items := []sortRowsRow{{repo: "a", private: "yes"}, {repo: "b", private: "no"}}
-		require.NoError(t, sortRows(items, sortRowsHeaders, sortRowsRowFn, "private"))
-		// "no" < "yes", so the second row comes first.
-		require.Equal(t, []string{"b", "a"}, sortRowsRepos(items))
-	})
-
-	t.Run("stable for equal keys", func(t *testing.T) {
-		t.Parallel()
-		items := []sortRowsRow{
-			{repo: "same", private: "1"},
-			{repo: "same", private: "2"},
-			{repo: "same", private: "3"},
+	// One repo mirrored on two clusters (delivered eu-first) plus a
+	// lexically-earlier repo, so both the primary key and the cluster tiebreak
+	// are observable.
+	base := func() []coreapi.Mirror {
+		return []coreapi.Mirror{
+			{Owner: "acme", Repo: "web", ClusterHost: "eu-west-1.entire.io", IsPrivate: coreapi.NewOptBool(true)},
+			{Owner: "acme", Repo: "web", ClusterHost: "aws-us-east-2.entire.io", IsPrivate: coreapi.NewOptBool(false)},
+			{Owner: "acme", Repo: "api", ClusterHost: "aws-us-east-2.entire.io", IsPrivate: coreapi.NewOptBool(false)},
 		}
-		require.NoError(t, sortRows(items, sortRowsHeaders, sortRowsRowFn, "repo"))
-		require.Equal(t, []string{"1", "2", "3"}, []string{items[0].private, items[1].private, items[2].private})
+	}
+
+	t.Run("default sorts owner/repo then cluster ascending", func(t *testing.T) {
+		t.Parallel()
+		m := base()
+		require.NoError(t, sortMirrors(m, ""))
+		require.Equal(t, []string{
+			"acme/api@aws-us-east-2.entire.io",
+			"acme/web@aws-us-east-2.entire.io",
+			"acme/web@eu-west-1.entire.io",
+		}, mirrorRepoHosts(m))
+	})
+
+	t.Run("-repo reverses the whole ordering, tiebreak included", func(t *testing.T) {
+		t.Parallel()
+		m := base()
+		require.NoError(t, sortMirrors(m, "-repo"))
+		require.Equal(t, []string{
+			"acme/web@eu-west-1.entire.io",
+			"acme/web@aws-us-east-2.entire.io",
+			"acme/api@aws-us-east-2.entire.io",
+		}, mirrorRepoHosts(m))
+	})
+
+	t.Run("non-repo column sorts keep the owner/repo+cluster tiebreak", func(t *testing.T) {
+		t.Parallel()
+		// All three sort keys collide on "private" once acme/api and the aws web
+		// mirror are both public; the deterministic order must fall back to
+		// owner/repo then cluster, not arbitrary input order.
+		m := base()
+		require.NoError(t, sortMirrors(m, "private"))
+		require.Equal(t, []string{
+			// "no" (public) group first, ordered by owner/repo then cluster.
+			"acme/api@aws-us-east-2.entire.io",
+			"acme/web@aws-us-east-2.entire.io",
+			// "yes" (private) group last.
+			"acme/web@eu-west-1.entire.io",
+		}, mirrorRepoHosts(m))
+	})
+
+	t.Run("whitespace spec parses direction from the trimmed spec", func(t *testing.T) {
+		t.Parallel()
+		m := base()
+		require.NoError(t, sortMirrors(m, " -repo"))
+		require.Equal(t, []string{
+			"acme/web@eu-west-1.entire.io",
+			"acme/web@aws-us-east-2.entire.io",
+			"acme/api@aws-us-east-2.entire.io",
+		}, mirrorRepoHosts(m))
 	})
 
 	t.Run("unknown column errors naming valid columns", func(t *testing.T) {
 		t.Parallel()
-		err := sortRows([]sortRowsRow{{repo: "a"}}, sortRowsHeaders, sortRowsRowFn, "nope")
+		err := sortMirrors(base(), "nope")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "unknown sort column")
 		require.Contains(t, err.Error(), "repo")
+	})
+}
+
+func TestSortAvailable(t *testing.T) {
+	t.Parallel()
+
+	base := func() []coreapi.AvailableMirror {
+		return []coreapi.AvailableMirror{
+			{Owner: "acme", Repo: "web", Access: "write", Status: "available"},
+			{Owner: "acme", Repo: "api", Access: "read", Status: "available"},
+			{Owner: "acme", Repo: "cli", Access: "read", Status: "available"},
+		}
+	}
+	repos := func(avail []coreapi.AvailableMirror) []string {
+		out := make([]string, len(avail))
+		for i, m := range avail {
+			out[i] = m.Owner + "/" + m.Repo
+		}
+		return out
+	}
+
+	t.Run("sorts by access with an owner/repo tiebreak on equal keys", func(t *testing.T) {
+		t.Parallel()
+		a := base()
+		require.NoError(t, sortAvailable(a, "access"))
+		// "read" < "write"; within read, acme/api < acme/cli by owner/repo.
+		require.Equal(t, []string{"acme/api", "acme/cli", "acme/web"}, repos(a))
+	})
+
+	t.Run("whitespace spec parses direction from the trimmed spec", func(t *testing.T) {
+		t.Parallel()
+		a := base()
+		require.NoError(t, sortAvailable(a, " -repo"))
+		require.Equal(t, []string{"acme/web", "acme/cli", "acme/api"}, repos(a))
+	})
+
+	t.Run("unknown column errors naming valid columns", func(t *testing.T) {
+		t.Parallel()
+		err := sortAvailable(base(), "nope")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unknown sort column")
+		require.Contains(t, err.Error(), "access")
 	})
 }
