@@ -142,24 +142,36 @@ func (t *rolloutTail) drain() error {
 	}
 }
 
-// waitForRollout polls for the rollout file matching threadID, returning its
-// path or "" if stop fires or the attempts are exhausted. Exhaustion is
-// debug-logged: it is the likely failure mode if a codex release changes the
-// rollout layout, and it would otherwise silently disable live tokens.
+// waitForRollout polls for the rollout file matching threadID until it
+// appears or stop fires — never giving up while the review is running, since
+// a rollout that materialises late (slow codex startup, unusual layout
+// timing) should still get live tokens for the rest of the run. After the
+// expected-quickly window it debug-logs once (the likely signature of a
+// codex release changing the rollout layout, which would otherwise silently
+// disable live tokens) and backs off to a slower poll.
 func waitForRollout(ctx context.Context, sessionDir, threadID string, stop <-chan struct{}) string {
-	for range rolloutPollAttempts {
+	return pollForRollout(ctx, sessionDir, threadID, stop, rolloutPollAttempts, rolloutPollInterval)
+}
+
+func pollForRollout(ctx context.Context, sessionDir, threadID string, stop <-chan struct{}, window int, interval time.Duration) string {
+	for attempt := 0; ; attempt++ {
 		if path := findRolloutBySessionID(sessionDir, threadID); path != "" {
 			return path
+		}
+		wait := interval
+		if attempt >= window {
+			if attempt == window {
+				logging.Debug(ctx, "codex token tail: rollout file still missing; continuing to poll",
+					slog.String("session_dir", sessionDir), slog.String("thread_id", threadID))
+			}
+			wait = interval * 8 // ~2.4s at production cadence — cheap for a minutes-long run
 		}
 		select {
 		case <-stop:
 			return ""
-		case <-time.After(rolloutPollInterval):
+		case <-time.After(wait):
 		}
 	}
-	logging.Debug(ctx, "codex token tail: rollout file never appeared",
-		slog.String("session_dir", sessionDir), slog.String("thread_id", threadID))
-	return ""
 }
 
 // parseRolloutTokenCount extracts cumulative input/output token totals from one

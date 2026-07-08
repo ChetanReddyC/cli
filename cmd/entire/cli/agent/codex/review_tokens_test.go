@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -385,5 +386,38 @@ func TestTailRolloutTokens_ReturnsOnStopWhenNoRollout(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("tailRolloutTokens did not return promptly after stop with no rollout file")
+	}
+}
+
+// TestPollForRollout_KeepsLookingPastTheWindow pins that the poll never
+// gives up while stop is open: a rollout that materialises after the
+// expected-quickly window must still be found (previously the poll returned
+// "" after ~30s and live tokens were lost for the rest of the run).
+func TestPollForRollout_KeepsLookingPastTheWindow(t *testing.T) {
+	// Cannot t.Parallel — uses t.Setenv.
+	dir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", dir)
+	rollout := filepath.Join(dir, "rollout-2026-06-03T08-57-39-"+tailTestThreadID+".jsonl")
+
+	stop := make(chan struct{})
+	defer close(stop)
+	got := make(chan string, 1)
+	go func() {
+		got <- pollForRollout(context.Background(), dir, tailTestThreadID, stop, 3, 10*time.Millisecond)
+	}()
+
+	// Create the file well after the 3-attempt window has elapsed.
+	time.Sleep(200 * time.Millisecond)
+	if err := os.WriteFile(rollout, []byte(tokenLine(1, 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case path := <-got:
+		if path != rollout {
+			t.Fatalf("pollForRollout = %q, want %q (gave up instead of continuing past the window)", path, rollout)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("pollForRollout did not find the late rollout")
 	}
 }
