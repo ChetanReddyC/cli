@@ -1175,6 +1175,9 @@ func TestDetectOrSelectAgent_AgentDetected(t *testing.T) {
 		t.Fatalf("Failed to create .claude directory: %v", err)
 	}
 
+	// No TTY here, so this exercises the non-interactive fallback: the single
+	// detected agent is used without a picker. The interactive path pre-selects
+	// it in the multi-select instead (see FirstRun_SingleBuiltIn test below).
 	var buf bytes.Buffer
 	agents, err := detectOrSelectAgent(context.Background(), &buf, nil)
 	if err != nil {
@@ -1224,6 +1227,48 @@ func TestDetectOrSelectAgent_GeminiDetected(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "Detected agent:") {
 		t.Errorf("Expected output to contain 'Detected agent:', got: %s", output)
+	}
+}
+
+func TestDetectOrSelectAgent_FirstRun_SingleBuiltIn_PromptsWithDetectedPreSelected(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+
+	// Create .claude directory so exactly one built-in agent (Claude Code) is detected.
+	if err := os.MkdirAll(".claude", 0o755); err != nil {
+		t.Fatalf("Failed to create .claude directory: %v", err)
+	}
+
+	// First run: no hooks installed yet.
+	if installed := GetAgentsWithHooksInstalled(context.Background()); len(installed) != 0 {
+		t.Fatalf("Expected no installed hooks on first run, got %v", installed)
+	}
+
+	// selectFn stands in for the interactive form. The detected agent is
+	// pre-selected in the real form; here the user keeps it and adds a second.
+	var receivedAvailable []string
+	selectFn := func(available []string) ([]string, error) {
+		receivedAvailable = available
+		return []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameGemini)}, nil
+	}
+
+	var buf bytes.Buffer
+	agents, err := detectOrSelectAgent(context.Background(), &buf, selectFn)
+	if err != nil {
+		t.Fatalf("detectOrSelectAgent() error = %v", err)
+	}
+
+	// A lone detected built-in agent must no longer be auto-used; the selection
+	// path runs so the user can confirm it or add more agents.
+	if len(receivedAvailable) == 0 {
+		t.Fatal("Expected the agent selection prompt for a single detected agent, but selectFn was not called")
+	}
+	if !slices.Contains(receivedAvailable, string(agent.AgentNameClaudeCode)) {
+		t.Errorf("Expected the detected agent to be offered, got %v", receivedAvailable)
+	}
+	if len(agents) != 2 {
+		t.Fatalf("Expected the user's selection of 2 agents to be honored, got %d", len(agents))
 	}
 }
 

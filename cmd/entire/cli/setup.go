@@ -1462,13 +1462,15 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, localDev, forceHooks b
 // Returns the detected/selected agents and any error.
 //
 // On first run (no hooks installed):
-//   - Single detected built-in agent: used automatically
-//   - Single detected external agent: interactive multi-select prompt
-//   - Multiple/no detected agents: interactive multi-select prompt
+//   - Always shows the interactive multi-select (when a TTY is available)
+//   - Pre-selects detected built-in agents so the user can confirm with enter
+//     or add more; detected external agents are shown but not pre-selected
+//   - Non-interactive (no TTY): uses detected agents, else the default agent
 //
 // On re-run (hooks already installed):
-//   - Always shows the interactive multi-select
+//   - Shows the interactive multi-select (when a TTY is available)
 //   - Pre-selects only agents that have hooks installed (respects prior deselection)
+//   - Non-interactive (no TTY): keeps the currently installed agents
 //
 // selectFn overrides the interactive prompt for testing. When nil, the real form is used.
 // It receives available agent names and returns the selected names.
@@ -1484,13 +1486,12 @@ func detectOrSelectAgent(ctx context.Context, w io.Writer, selectFn func(availab
 	if !hasInstalledHooks {
 		switch {
 		case len(detected) == 1:
-			if isBuiltInAgent(detected[0]) {
-				// When a selectFn is provided (e.g. --yes), skip the single-agent
-				// shortcut so the caller's selection logic runs instead.
-				if selectFn == nil {
-					fmt.Fprintf(w, "Detected agent: %s\n\n", detected[0].Type())
-					return detected, nil
-				}
+			// Announce the single detected built-in agent; it is pre-selected
+			// in the multi-select form below so the user can confirm it or add
+			// more. --yes (selectFn != nil) uses the caller's selection and
+			// skips the announcement.
+			if selectFn == nil && isBuiltInAgent(detected[0]) {
+				fmt.Fprintf(w, "Detected agent: %s\n\n", detected[0].Type())
 			}
 
 		case len(detected) > 1:
