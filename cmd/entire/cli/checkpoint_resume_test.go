@@ -3,12 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/spf13/cobra"
 
@@ -169,5 +171,69 @@ func TestCheckpointResumeAuto_NothingMatched(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "nothing matched") {
 		t.Errorf("Execute() err = %v, want 'nothing matched'", err)
+	}
+}
+
+func TestRecentCheckpoints_SortsNewestFirstAndCaps(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	var infos []checkpoint.CheckpointInfo
+	for i := range 25 {
+		infos = append(infos, checkpoint.CheckpointInfo{
+			CheckpointID: id.MustCheckpointID(fmt.Sprintf("%012x", i)),
+			CreatedAt:    base.Add(time.Duration(i) * time.Hour),
+		})
+	}
+	got := recentCheckpoints(infos, 20)
+	if len(got) != 20 {
+		t.Fatalf("len = %d, want 20", len(got))
+	}
+	if !got[0].CreatedAt.After(got[19].CreatedAt) {
+		t.Errorf("not sorted newest first: got[0]=%v got[19]=%v", got[0].CreatedAt, got[19].CreatedAt)
+	}
+	if got[0].CreatedAt != base.Add(24*time.Hour) {
+		t.Errorf("newest = %v, want %v", got[0].CreatedAt, base.Add(24*time.Hour))
+	}
+}
+
+// go test runs are non-interactive (CanPromptInteractively is false under
+// testing.Testing()), so bare invocation exercises the non-TTY listing.
+func TestCheckpointResumeBare_NonTTYListsCheckpoints(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	cpOld := id.MustCheckpointID("aaa111bbb222")
+	cpNew := id.MustCheckpointID("ccc333ddd444")
+	writeCommittedResumeCheckpoint(t, repo, cpOld, "session-old", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	writeCommittedResumeCheckpoint(t, repo, cpNew, "session-new", time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC))
+
+	cmd, out := newCheckpointResumeTestCmd(t)
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v\noutput: %s", err, out.String())
+	}
+	output := out.String()
+	for _, want := range []string{cpOld.String(), cpNew.String(), "entire checkpoint resume <checkpoint-id>"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Index(output, cpNew.String()) > strings.Index(output, cpOld.String()) {
+		t.Errorf("newest checkpoint should be listed first:\n%s", output)
+	}
+}
+
+func TestCheckpointResumeBare_NoCheckpoints(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	setupResumeTestRepo(t, tmpDir, false)
+
+	cmd, out := newCheckpointResumeTestCmd(t)
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(out.String(), "No committed checkpoints found") {
+		t.Errorf("output should say no checkpoints found, got: %s", out.String())
 	}
 }

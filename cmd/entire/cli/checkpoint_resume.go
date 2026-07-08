@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
+	"sort"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
+	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 )
 
@@ -208,6 +213,95 @@ func resumeResolvedCheckpoint(ctx context.Context, cmd *cobra.Command, lookup *e
 	return resumeSessionOnBranch(ctx, cmd, branch, cpID, force)
 }
 
-func runCheckpointResumePicker(_ context.Context, _ *cobra.Command, _ *explainCheckpointLookup, _ bool) error {
-	return errors.New("pass a checkpoint ID, commit SHA, or branch (picker lands in the next commit)")
+const checkpointResumePickerLimit = 20
+
+func runCheckpointResumePicker(ctx context.Context, cmd *cobra.Command, lookup *explainCheckpointLookup, force bool) error {
+	w := cmd.OutOrStdout()
+
+	entries := recentCheckpoints(lookup.committed, checkpointResumePickerLimit)
+	if len(entries) == 0 {
+		fmt.Fprintln(w, "No committed checkpoints found.")
+		fmt.Fprintln(w, "Checkpoints are created when you commit during an agent session.")
+		return nil
+	}
+	branchIndex := buildCheckpointBranchIndex(lookup.repo)
+
+	if !interactive.CanPromptInteractively() {
+		printCheckpointResumeList(w, entries, branchIndex)
+		return nil
+	}
+
+	selected, ok, err := promptCheckpointSelection(ctx, entries, branchIndex)
+	if err != nil || !ok {
+		return err
+	}
+	return resumeResolvedCheckpoint(ctx, cmd, lookup, selected, force)
+}
+
+func recentCheckpoints(committed []checkpoint.CheckpointInfo, limit int) []checkpoint.CheckpointInfo {
+	sorted := make([]checkpoint.CheckpointInfo, len(committed))
+	copy(sorted, committed)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].CreatedAt.After(sorted[j].CreatedAt)
+	})
+	if len(sorted) > limit {
+		sorted = sorted[:limit]
+	}
+	return sorted
+}
+
+func printCheckpointResumeList(w io.Writer, entries []checkpoint.CheckpointInfo, branchIndex map[string]string) {
+	fmt.Fprintf(w, "Recent checkpoints (newest first, up to %d):\n\n", checkpointResumePickerLimit)
+	for _, e := range entries {
+		branch := branchIndex[e.CheckpointID.String()]
+		if branch == "" {
+			branch = "-"
+		}
+		fmt.Fprintf(w, "  %s  %s  %s  %s\n", e.CheckpointID, e.CreatedAt.Local().Format("2006-01-02 15:04"), branch, checkpointAgentLabel(e))
+	}
+	fmt.Fprintln(w, "\nResume one with: entire checkpoint resume <checkpoint-id>")
+}
+
+const checkpointPickerCancel = "cancel"
+
+func promptCheckpointSelection(ctx context.Context, entries []checkpoint.CheckpointInfo, branchIndex map[string]string) (id.CheckpointID, bool, error) {
+	options := make([]huh.Option[string], 0, len(entries)+1)
+	for _, e := range entries {
+		options = append(options, huh.NewOption(checkpointResumeOptionLabel(e, branchIndex), e.CheckpointID.String()))
+	}
+	options = append(options, huh.NewOption("Cancel", checkpointPickerCancel))
+
+	var choice string
+	form := NewAccessibleForm(huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("Resume which checkpoint?").
+			Description("Checks out the checkpoint's branch (when one contains it) and restores the session log.").
+			Options(options...).
+			Value(&choice),
+	))
+	if err := form.RunWithContext(ctx); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("failed to pick checkpoint: %w", err)
+	}
+	if choice == checkpointPickerCancel {
+		return "", false, nil
+	}
+	return id.CheckpointID(choice), true, nil
+}
+
+func checkpointResumeOptionLabel(e checkpoint.CheckpointInfo, branchIndex map[string]string) string {
+	branch := branchIndex[e.CheckpointID.String()]
+	if branch == "" {
+		branch = "no local branch"
+	}
+	return fmt.Sprintf("%s · %s · %s · %s", e.CheckpointID.DisplayShort(), branch, checkpointAgentLabel(e), timeAgo(e.CreatedAt))
+}
+
+func checkpointAgentLabel(e checkpoint.CheckpointInfo) string {
+	if e.Agent == "" {
+		return unknownAgentLabel
+	}
+	return string(e.Agent)
 }
