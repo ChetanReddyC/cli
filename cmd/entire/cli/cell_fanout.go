@@ -80,11 +80,18 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
 			}
 			byCell[key] = g
 		}
+		// Upgrade an empty slug if a later entry provides one (a mirror
+		// placement may create the group before the home placement adds the
+		// slug).
+		if g.clusterSlug == "" && clusterSlug != "" {
+			g.clusterSlug = clusterSlug
+		}
 		g.repoIDs = append(g.repoIDs, id)
 	}
 
 	for _, r := range repos {
 		if len(r.Placements) > 0 {
+			homeCell := strings.ToLower(strings.TrimSpace(r.Cell))
 			for _, p := range r.Placements {
 				// Placements don't carry a cluster slug; the top-level
 				// slug applies only to the home placement. Pass it when
@@ -92,7 +99,7 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
 				// empty otherwise — resolveCellBaseURLs falls back to
 				// jurisdiction matching for groups without a slug.
 				slug := ""
-				if strings.EqualFold(strings.TrimSpace(p.Cell), strings.TrimSpace(r.Cell)) {
+				if strings.ToLower(strings.TrimSpace(p.Cell)) == homeCell {
 					slug = r.ClusterSlug
 				}
 				addToGroup(p.ID, p.Cell, p.Jurisdiction, slug)
