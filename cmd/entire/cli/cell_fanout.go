@@ -52,27 +52,56 @@ type cellGroup struct {
 // includes the jurisdiction so entries whose index row carries no cell don't
 // collapse across jurisdictions into one group routed by whichever repo came
 // first — they stay per-jurisdiction and route via the jurisdiction fallback.
+//
+// When a RepoIndexEntry has Placements, each placement is added to the group
+// for its own cell/jurisdiction with its placement-specific repo ID. This
+// ensures mirror placements in other regions (e.g. a US-homed repo with an EU
+// mirror) are searched in both cells — matching the BFF's fan-out behavior.
+// When Placements is empty, the top-level Cell/Jurisdiction/ID are used as
+// before (backward compat for index responses that predate placements).
 func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
 	byCell := make(map[string]*cellGroup)
-	for _, r := range repos {
-		id := strings.TrimSpace(r.ID)
+
+	addToGroup := func(id, cell, jurisdiction, clusterSlug string) {
+		id = strings.TrimSpace(id)
 		if id == "" {
-			continue
+			return
 		}
-		cell := strings.ToLower(strings.TrimSpace(r.Cell))
-		jurisdiction := strings.ToLower(strings.TrimSpace(r.Jurisdiction))
+		cell = strings.ToLower(strings.TrimSpace(cell))
+		jurisdiction = strings.ToLower(strings.TrimSpace(jurisdiction))
+		clusterSlug = strings.ToLower(strings.TrimSpace(clusterSlug))
 		key := cell + "\x00" + jurisdiction
 		g, ok := byCell[key]
 		if !ok {
 			g = &cellGroup{
 				cell:         cell,
-				clusterSlug:  strings.ToLower(strings.TrimSpace(r.ClusterSlug)),
+				clusterSlug:  clusterSlug,
 				jurisdiction: jurisdiction,
 			}
 			byCell[key] = g
 		}
 		g.repoIDs = append(g.repoIDs, id)
 	}
+
+	for _, r := range repos {
+		if len(r.Placements) > 0 {
+			for _, p := range r.Placements {
+				// Placements don't carry a cluster slug; the top-level
+				// slug applies only to the home placement. Pass it when
+				// the placement's cell matches the top-level cell (home),
+				// empty otherwise — resolveCellBaseURLs falls back to
+				// jurisdiction matching for groups without a slug.
+				slug := ""
+				if strings.EqualFold(strings.TrimSpace(p.Cell), strings.TrimSpace(r.Cell)) {
+					slug = r.ClusterSlug
+				}
+				addToGroup(p.ID, p.Cell, p.Jurisdiction, slug)
+			}
+		} else {
+			addToGroup(r.ID, r.Cell, r.Jurisdiction, r.ClusterSlug)
+		}
+	}
+
 	cells := make([]cellGroup, 0, len(byCell))
 	for _, g := range byCell {
 		cells = append(cells, *g)
@@ -102,11 +131,25 @@ func resolveCellBaseURLs(ctx context.Context, c cellCoreClient, cells []cellGrou
 		return
 	}
 	bySlug := make(map[string]coreapi.Cluster, len(clusters.Clusters))
+	byJurisdiction := make(map[string]coreapi.Cluster, len(clusters.Clusters))
 	for _, cl := range clusters.Clusters {
 		bySlug[strings.ToLower(strings.TrimSpace(cl.Slug))] = cl
+		// First cluster per jurisdiction wins — used as fallback when a
+		// placement-derived group has no cluster slug.
+		j := strings.ToLower(strings.TrimSpace(cl.Jurisdiction))
+		if j != "" {
+			if _, exists := byJurisdiction[j]; !exists {
+				byJurisdiction[j] = cl
+			}
+		}
 	}
 	for i := range cells {
 		cl, ok := bySlug[cells[i].clusterSlug]
+		if !ok && cells[i].jurisdiction != "" {
+			// Placement-derived groups lack a cluster slug; fall back to
+			// jurisdiction so mirror placements still resolve a baseURL.
+			cl, ok = byJurisdiction[cells[i].jurisdiction]
+		}
 		if !ok {
 			logging.Debug(ctx, "cell fan-out: cluster not in catalog, using jurisdiction routing",
 				"cluster_slug", cells[i].clusterSlug, "cell", cells[i].cell)
