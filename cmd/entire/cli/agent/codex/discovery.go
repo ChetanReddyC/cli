@@ -3,7 +3,6 @@ package codex
 import (
 	"context"
 	"log/slog"
-	"os"
 	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -29,12 +28,13 @@ import (
 //
 //nolint:unparam // error return is part of SkillDiscoverer contract; future implementations may report hard failures
 func (c *CodexAgent) DiscoverReviewSkills(ctx context.Context) ([]agent.DiscoveredSkill, error) {
-	home, err := os.UserHomeDir()
+	// resolveCodexHome is the agent's canonical config-tree resolution
+	// (honors CODEX_HOME) — discovery must see the same skills codex runs.
+	codexHome, err := resolveCodexHome()
 	if err != nil {
-		logging.Debug(ctx, "codex discovery: UserHomeDir failed", slog.String("error", err.Error()))
+		logging.Debug(ctx, "codex discovery: resolve codex home failed", slog.String("error", err.Error()))
 		return nil, nil
 	}
-	codexHome := filepath.Join(home, ".codex")
 
 	form := skilldiscovery.DollarForm
 	var found []agent.DiscoveredSkill

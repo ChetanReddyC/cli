@@ -19,6 +19,7 @@ func withFakeHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "") // hermetic: a dev shell's CODEX_HOME must not leak in
 	return home
 }
 
@@ -110,5 +111,23 @@ func TestCodexAgent_DiscoverReviewSkills_SkipsNonReviewSkill(t *testing.T) {
 	skills := discover(t)
 	if len(skills) != 1 || skills[0].Name != "$code-reviewer" {
 		t.Errorf("want only $code-reviewer; got %+v", skills)
+	}
+}
+
+// TestCodexAgent_DiscoverReviewSkills_HonorsCodexHome pins discovery to the
+// agent's canonical home resolution: the rest of the codex agent resolves its
+// config tree through resolveCodexHome (which honors CODEX_HOME), so skills
+// installed under a custom codex home must be discoverable too — otherwise
+// saved $skills fail spawn-time validation as "not installed" even though
+// codex itself finds and runs them.
+func TestCodexAgent_DiscoverReviewSkills_HonorsCodexHome(t *testing.T) {
+	// Cannot t.Parallel — uses t.Setenv.
+	withFakeHome(t) // HOME points at an empty dir; the skill lives elsewhere
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	writeSkill(t, codexHome, "skills/code-review", "code-review", "Reviews code.")
+
+	if !nameOf(discover(t), "$code-review") {
+		t.Fatal("skill under CODEX_HOME not discovered — discovery must use resolveCodexHome, not ~/.codex")
 	}
 }
