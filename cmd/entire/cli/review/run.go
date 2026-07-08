@@ -47,10 +47,7 @@ func reviewerModelName(r reviewtypes.AgentReviewer) string {
 //   - positive: hard cap.
 //   - zero or negative: no cap.
 func reviewerTimeout(cfg reviewtypes.RunConfig) time.Duration {
-	if cfg.ReviewerTimeout > 0 {
-		return cfg.ReviewerTimeout
-	}
-	return 0
+	return max(cfg.ReviewerTimeout, 0)
 }
 
 var errReviewerTimeoutCause = errors.New("reviewer timeout elapsed")
