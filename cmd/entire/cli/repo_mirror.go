@@ -424,9 +424,10 @@ func newRepoMirrorGetCmd() *cobra.Command {
 		Long: "Show a mirror. <mirror> is either a mirror ULID or an entire:// clone URL\n" +
 			"(entire://<cluster>/gh/<owner>/<repo>) — the form `mirror list` prints and\n" +
 			"`git clone` accepts; a trailing .git, as pasted from `git remote -v`, is\n" +
-			"accepted too. A clone URL is looked up on the core fronting its cluster, so\n" +
-			"it resolves even when that cluster belongs to a federation other than the\n" +
-			"active auth context; a ULID is looked up on the active context.",
+			"accepted too. A clone URL is looked up on the login server fronting its\n" +
+			"cluster, so it resolves even when that cluster belongs to a federation other\n" +
+			"than the active auth context; a ULID is looked up on the active context's\n" +
+			"login server.",
 		Example: "  entire repo mirror get 01KS6KFJR2XS6PZ188MVYE07AN\n" +
 			"  entire repo mirror get entire://aws-us-east-2.entire.io/gh/octocat/hello-world",
 		Args: cobra.ExactArgs(1),
