@@ -606,20 +606,41 @@ func newRepoMirrorGetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "get <mirror>",
 		Short: "Show a mirror by ULID or clone URL",
-		Long: "Show a mirror. <mirror> is either a mirror ULID or an entire:// clone " +
-			"URL\n(entire://<cluster>/gh/<owner>/<repo>) — the form `mirror list` " +
-			"prints and `git clone` accepts.",
+		Long: "Show a mirror. <mirror> is either a mirror ULID or an entire:// clone URL\n" +
+			"(entire://<cluster>/gh/<owner>/<repo>) — the form `mirror list` prints and\n" +
+			"`git clone` accepts; a trailing .git, as pasted from `git remote -v`, is\n" +
+			"accepted too. A clone URL is looked up on the login server fronting its\n" +
+			"cluster, so it resolves even when that cluster belongs to a federation other\n" +
+			"than the active auth context; a ULID is looked up on the active context's\n" +
+			"login server.",
 		Example: "  entire repo mirror get 01KS6KFJR2XS6PZ188MVYE07AN\n" +
 			"  entire repo mirror get entire://aws-us-east-2.entire.io/gh/octocat/hello-world",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreObject(cmd, columnHeaders(mirrorColumns), mirrorRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Mirror, error) {
-				mirrorID, err := resolveMirrorRef(ctx, c, args[0])
+			ref := args[0]
+			show := func(ctx context.Context, c *coreapi.Client) (*coreapi.Mirror, error) {
+				mirrorID, err := resolveMirrorRef(ctx, c, ref)
 				if err != nil {
 					return nil, err
 				}
 				return c.GetMirror(ctx, coreapi.GetMirrorParams{MirrorId: mirrorID})
-			})
+			}
+			// A ULID carries no cluster coordinate, so it can only be looked up
+			// on the active context's core. A clone URL names its cluster — dial
+			// the core fronting that cluster (discovered from its well-known and
+			// authenticated with the matching local context, the same path
+			// create/remove use), so the lookup works when the mirror lives in a
+			// federation other than the active login instead of failing with
+			// "no mirror matching".
+			if looksLikeULID(ref) {
+				return runCoreObject(cmd, columnHeaders(mirrorColumns), mirrorRow, show)
+			}
+			clusterHost, _, _, _, err := parseMirrorCloneURL(ref)
+			if err != nil {
+				cmd.SilenceUsage = true
+				return badMirrorRefErr(err)
+			}
+			return runCoreObjectForCluster(cmd, clusterHost, columnHeaders(mirrorColumns), mirrorRow, show)
 		},
 	}
 }
@@ -636,7 +657,7 @@ func resolveMirrorRef(ctx context.Context, c *coreapi.Client, ref string) (strin
 	}
 	clusterHost, provider, owner, repo, err := parseMirrorCloneURL(ref)
 	if err != nil {
-		return "", fmt.Errorf("%w; pass a mirror ULID or a clone URL (entire://<cluster>/gh/<owner>/<repo>)", err)
+		return "", badMirrorRefErr(err)
 	}
 	mirrors, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Mirror, string, error) {
 		params := coreapi.ListMirrorsParams{
@@ -697,6 +718,13 @@ func parseMirrorCloneURL(raw string) (clusterHost, provider, owner, repo string,
 
 func noMirrorErr(ref string) error {
 	return fmt.Errorf("no mirror matching %q (run `entire repo mirror list` to see clone URLs, or pass a ULID)", ref)
+}
+
+// badMirrorRefErr wraps a clone-URL parse failure with the accepted <mirror>
+// forms. Shared by the pre-dial parse in `mirror get` and resolveMirrorRef so
+// both boundaries report identically.
+func badMirrorRefErr(err error) error {
+	return fmt.Errorf("%w; pass a mirror ULID or a clone URL (entire://<cluster>/gh/<owner>/<repo>)", err)
 }
 
 func newRepoMirrorRemoveCmd() *cobra.Command {
