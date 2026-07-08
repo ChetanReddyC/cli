@@ -147,11 +147,13 @@ func sortAvailable(avail []coreapi.AvailableMirror, spec string) error {
 	return nil
 }
 
-// filterByRepo keeps items whose repo name contains substr (case-insensitive).
-// The control plane already filters by owner/provider/cluster server-side but
-// not by repo name, so `repo mirror list --repo` narrows that last dimension
-// client-side. repoOf extracts the repo field from each item (mirrors and
-// available mirrors both carry one). An empty substr returns items unchanged.
+// filterByRepo keeps items whose repo identifier contains substr (case-
+// insensitive). The control plane already filters by owner/provider/cluster
+// server-side but not by repo name, so `repo mirror list --repo` narrows that
+// last dimension client-side. repoOf returns the item's displayed identifier —
+// the callers pass the owner/repo form shown in the REPO column, so a value
+// copied from the table (e.g. acme/web) matches the row it came from. An empty
+// substr returns items unchanged.
 func filterByRepo[T any](items []T, repoOf func(T) string, substr string) []T {
 	substr = strings.TrimSpace(substr)
 	if substr == "" {
@@ -512,7 +514,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 					if err != nil {
 						return nil, err
 					}
-					avail := filterByRepo(out.Available, func(m coreapi.AvailableMirror) string { return m.Repo }, repo)
+					avail := filterByRepo(out.Available, func(m coreapi.AvailableMirror) string { return m.Owner + "/" + m.Repo }, repo)
 					if err := sortAvailable(avail, sortSpec); err != nil {
 						return nil, err
 					}
@@ -556,7 +558,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 				if err != nil {
 					return nil, err
 				}
-				mirrors = filterByRepo(mirrors, func(m coreapi.Mirror) string { return m.Repo }, repo)
+				mirrors = filterByRepo(mirrors, func(m coreapi.Mirror) string { return m.Owner + "/" + m.Repo }, repo)
 				if err := sortMirrors(mirrors, sortSpec); err != nil {
 					return nil, err
 				}
@@ -567,7 +569,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Filter by cluster public host")
 	cmd.Flags().StringVar(&provider, "provider", "", "Filter by upstream provider (e.g. github)")
 	cmd.Flags().StringVar(&owner, "owner", "", "Filter by upstream owner login")
-	cmd.Flags().StringVar(&repo, "repo", "", "Filter by repo-name substring (case-insensitive)")
+	cmd.Flags().StringVar(&repo, "repo", "", "Filter by owner/repo substring, matching the REPO column (case-insensitive)")
 	cmd.Flags().StringVar(&sortSpec, "sort", "", "Sort by column (header name; prefix '-' for descending). Default: repo name ascending")
 	cmd.Flags().BoolVar(&showAvailable, "show-available", false, "Instead of existing mirrors, list GitHub repos you could onboard as mirrors (ignores --cluster/--provider)")
 	return cmd

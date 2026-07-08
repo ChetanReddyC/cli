@@ -533,6 +533,16 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		require.NotContains(t, stdout, "other/api")
 	})
 
+	t.Run("--repo matches the owner/repo form shown in the REPO column", func(t *testing.T) {
+		// A value copied straight from the displayed REPO column must match the
+		// row it came from; filtering on the bare repo name would drop it.
+		serveMirrorList(t, mirrors, nil)
+		stdout, _ := runMirrorList(t, "--repo", "acme/web")
+		require.Contains(t, stdout, "acme/web")
+		require.NotContains(t, stdout, "acme/cli")
+		require.NotContains(t, stdout, "other/api")
+	})
+
 	t.Run("default output is owner/repo sorted", func(t *testing.T) {
 		serveMirrorList(t, mirrors, nil)
 		stdout, _ := runMirrorList(t)
