@@ -22,10 +22,10 @@ import (
 // owner/repo name, the clone URL you'd copy, and whether the upstream is
 // private. Owner, provider, and cluster aren't columns of their own — they're
 // inferable from the owner/repo pair and the clone URL
-// (entire://<cluster>/gh/<owner>/<repo>), where `--repo` and a bare cluster/
-// provider substring still match — and the wire model's internal ids are
-// dropped. The clone URL is synthesised from the mirror's coords (the form
-// `git clone` accepts), since the list API doesn't return it.
+// (entire://<cluster>/gh/<owner>/<repo>). `--repo` filters on the repo name
+// only; owner/provider/cluster stay server-side filters, and the wire model's
+// internal ids are dropped. The clone URL is synthesised from the mirror's
+// coords (the form `git clone` accepts), since the list API doesn't return it.
 var mirrorColumns = []string{"REPO", "CLONE URL", "PRIVATE"}
 
 // mirrorPrivate renders the PRIVATE column ("yes"/"no"), shared by the table
@@ -469,6 +469,17 @@ func newRepoMirrorListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List mirrors you can see (or, with --show-available, repos you could mirror)",
 		Args:  cobra.NoArgs,
+		// Validate --sort before RunE so a bad column fails fast, without the
+		// network round-trip RunE would otherwise do first. The valid column
+		// set depends on --show-available (different table shape).
+		PreRunE: func(_ *cobra.Command, _ []string) error {
+			cols := mirrorColumns
+			if showAvailable {
+				cols = availableMirrorColumns
+			}
+			_, _, err := parseSortColumn(sortSpec, cols)
+			return err
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if showAvailable {
 				return runCoreList(cmd, "No repos available to mirror.", availableMirrorColumns, availableMirrorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.AvailableMirror, error) {
@@ -542,7 +553,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Filter by cluster public host")
 	cmd.Flags().StringVar(&provider, "provider", "", "Filter by upstream provider (e.g. github)")
 	cmd.Flags().StringVar(&owner, "owner", "", "Filter by upstream owner login")
-	cmd.Flags().StringVar(&repo, "repo", "", "Filter by repo name")
+	cmd.Flags().StringVar(&repo, "repo", "", "Filter by repo-name substring (case-insensitive)")
 	cmd.Flags().StringVar(&sortSpec, "sort", "", "Sort by column (header name; prefix '-' for descending). Default: repo name ascending")
 	cmd.Flags().BoolVar(&showAvailable, "show-available", false, "Instead of existing mirrors, list GitHub repos you could onboard as mirrors (ignores --cluster/--provider)")
 	return cmd
