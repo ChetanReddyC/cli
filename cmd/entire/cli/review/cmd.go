@@ -134,11 +134,13 @@ Flags:
   --models       list the models each agent advertises (optionally --agent NAME)
   --profile NAME select a profile (also accepted as positional arg)
   --prompt TEXT  add one-off per-run instructions for this invocation
-  --timeout DUR  max time each reviewer may run before it's cancelled and marked
-                 failed; also bounds the consolidating judge, whose timeout or
-                 error fails the review with no verdict (default 20m; 0 disables
-                 both bounds). A timed-out reviewer's siblings and the judge
-                 still proceed.
+  --timeout DUR  optional hard cap on each reviewer before it's cancelled and
+                 marked failed. No default — reviewers run until they finish,
+                 like a directly-invoked skill. A positive value also bounds
+                 the consolidating judge, which otherwise keeps its own 20m
+                 default (the judge is never unbounded; its timeout or error
+                 fails the review with no verdict). A timed-out reviewer's
+                 siblings and the judge still proceed.
   --base REF     scope against REF instead of mainline. Useful for stacked
                  PRs where the base is the parent feature branch, not main.
                  Default: first existing of origin/HEAD, origin/main,
