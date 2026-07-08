@@ -251,7 +251,7 @@ To tag an already-finished session as a review, use
 	cmd.Flags().StringVar(&profileOverride, "profile", "", "review profile to run (default: review_default_profile or general)")
 	cmd.Flags().StringVar(&perRunPrompt, "prompt", "", "one-off instructions appended to this review run")
 	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
-	cmd.Flags().DurationVar(&reviewTimeout, "timeout", 0, "optional hard cap per reviewer (default: none — reviewers run until they finish, like a skill invoked directly in a session). When set, it also bounds the consolidating judge; unset, the judge keeps its own 5m default")
+	cmd.Flags().DurationVar(&reviewTimeout, "timeout", 0, "optional hard cap per reviewer (default: none — reviewers run until they finish, like a skill invoked directly in a session). When set, it also bounds the consolidating judge; unset, the judge keeps its own 20m default")
 	// The listing modes and the action modes each select a distinct command
 	// behavior; combining them silently runs one and drops the rest, so reject
 	// the combination up front with a clear cobra error.
@@ -717,7 +717,7 @@ func reviewAgentNames(deps Deps) []string {
 // ProviderTimeout. The judge is a single text-generation call with no event
 // stream, so unlike reviewers it always keeps a bound: an explicit positive
 // --timeout governs it, anything else (unset, 0, or a negative like
-// `--timeout -5m`) maps to 0 so the synthesis default (5m) applies — a
+// `--timeout -5m`) maps to 0 so the synthesis default (20m) applies — a
 // reviewer-side "no cap" must never leak through as "judge unbounded".
 func judgeTimeoutArg(reviewerArg time.Duration) time.Duration {
 	return max(reviewerArg, 0)

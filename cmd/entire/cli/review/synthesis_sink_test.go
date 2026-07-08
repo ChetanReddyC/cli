@@ -366,7 +366,7 @@ func TestSynthesisSink_ExplicitProviderTimeoutHonored(t *testing.T) {
 	if !provider.hadDeadline {
 		t.Fatal("explicit ProviderTimeout must apply a deadline")
 	}
-	// Generous slack: the deadline should be ~1h out, far above the 5m default.
+	// Generous slack: the deadline should be ~1h out, far above the 20m default.
 	if provider.remaining < 30*time.Minute {
 		t.Fatalf("deadline remaining = %v, want ~1h (explicit timeout not honored, fell back to default)", provider.remaining)
 	}
