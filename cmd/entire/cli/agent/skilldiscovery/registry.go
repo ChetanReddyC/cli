@@ -68,8 +68,12 @@ var installHints = map[string][]InstallHint{
 	},
 	"codex": {
 		{
-			Message:     "Install codex-review-pack: codex plugins add <url>",
-			ProvidesAny: []string{"/codex:adversarial-review"},
+			Message: "Install codex-review-pack: codex plugins add <url>",
+			// $-form: codex discovery emits $name/$plugin:name invocations,
+			// and suppression is an exact string match — a slash-form entry
+			// here could never intersect the discovered set, so the hint
+			// would show forever even with the plugin installed.
+			ProvidesAny: []string{"$codex:adversarial-review"},
 		},
 	},
 	"gemini": {

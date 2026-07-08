@@ -72,3 +72,16 @@ func TestIsEligible_IncludesAgentWithOnlyInstallHint(t *testing.T) {
 		t.Error("unknown agent should not be eligible")
 	}
 }
+
+// TestActiveInstallHintsFor_CodexFingerprintMatchesDollarFormDiscovery pins
+// the suppression fingerprint to the invocation form codex discovery actually
+// produces: DiscoverReviewSkills emits `$plugin:name`, so a slash-form
+// ProvidesAny entry could never intersect the discovered set and the hint
+// would show forever even with the plugin installed.
+func TestActiveInstallHintsFor_CodexFingerprintMatchesDollarFormDiscovery(t *testing.T) {
+	t.Parallel()
+	discovered := map[string]struct{}{"$codex:adversarial-review": {}}
+	if hints := skilldiscovery.ActiveInstallHintsFor("codex", discovered); len(hints) != 0 {
+		t.Fatalf("codex hint not suppressed by $-form discovery; got %d hints: %+v", len(hints), hints)
+	}
+}
