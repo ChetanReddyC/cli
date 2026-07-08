@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
@@ -1230,8 +1231,9 @@ func TestDetectOrSelectAgent_GeminiDetected(t *testing.T) {
 	}
 }
 
-func TestDetectOrSelectAgent_FirstRun_SingleBuiltIn_PromptsWithDetectedPreSelected(t *testing.T) {
-	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+func TestDetectOrSelectAgent_FirstRun_SingleBuiltIn_ShowsPickerPreSelected(t *testing.T) {
+	// Not parallel: uses t.Chdir/t.Setenv and swaps the package-level
+	// promptAgentSelection seam.
 	setupTestRepo(t)
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 
@@ -1245,30 +1247,39 @@ func TestDetectOrSelectAgent_FirstRun_SingleBuiltIn_PromptsWithDetectedPreSelect
 		t.Fatalf("Expected no installed hooks on first run, got %v", installed)
 	}
 
-	// selectFn stands in for the interactive form. The detected agent is
-	// pre-selected in the real form; here the user keeps it and adds a second.
-	var receivedAvailable []string
-	selectFn := func(available []string) ([]string, error) {
-		receivedAvailable = available
-		return []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameGemini)}, nil
+	// Stub the real picker so we can assert it is shown (rather than the agent
+	// being auto-used) and inspect which options it was given. Driving the
+	// selectFn == nil path is what makes this a real regression guard: the old
+	// shortcut returned early precisely when selectFn == nil, so a test that
+	// injected a selectFn would have passed even before the fix.
+	prev := promptAgentSelection
+	t.Cleanup(func() { promptAgentSelection = prev })
+	var offered []string
+	var shown bool
+	promptAgentSelection = func(options []huh.Option[string]) ([]string, error) {
+		shown = true
+		for _, o := range options {
+			offered = append(offered, o.Value)
+		}
+		return []string{string(agent.AgentNameClaudeCode)}, nil
 	}
 
 	var buf bytes.Buffer
-	agents, err := detectOrSelectAgent(context.Background(), &buf, selectFn)
+	agents, err := detectOrSelectAgent(context.Background(), &buf, nil)
 	if err != nil {
 		t.Fatalf("detectOrSelectAgent() error = %v", err)
 	}
 
-	// A lone detected built-in agent must no longer be auto-used; the selection
-	// path runs so the user can confirm it or add more agents.
-	if len(receivedAvailable) == 0 {
-		t.Fatal("Expected the agent selection prompt for a single detected agent, but selectFn was not called")
+	// A lone detected built-in agent must no longer be auto-used: the picker
+	// must be shown so the user can confirm it or add more.
+	if !shown {
+		t.Fatal("Expected the picker to be shown for a single detected agent, but it was auto-used")
 	}
-	if !slices.Contains(receivedAvailable, string(agent.AgentNameClaudeCode)) {
-		t.Errorf("Expected the detected agent to be offered, got %v", receivedAvailable)
+	if !slices.Contains(offered, string(agent.AgentNameClaudeCode)) {
+		t.Errorf("Expected the detected agent among the picker options, got %v", offered)
 	}
-	if len(agents) != 2 {
-		t.Fatalf("Expected the user's selection of 2 agents to be honored, got %d", len(agents))
+	if len(agents) != 1 || agents[0].Name() != agent.AgentNameClaudeCode {
+		t.Fatalf("Expected the picked agent [claude-code] to be returned, got %v", agents)
 	}
 }
 
