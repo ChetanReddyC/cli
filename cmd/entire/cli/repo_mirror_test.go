@@ -497,6 +497,21 @@ func runMirrorListErr(t *testing.T, args ...string) error {
 	return err
 }
 
+// requireOrder asserts each needle appears in s, in the given order. It guards
+// presence first: strings.Index returns -1 for an absent needle, so a bare
+// index comparison would pass when the earlier needle is missing entirely
+// (-1 < anyPresentIndex). This fails loudly instead.
+func requireOrder(t *testing.T, s string, needles ...string) {
+	t.Helper()
+	prev := -1
+	for _, n := range needles {
+		i := strings.Index(s, n)
+		require.GreaterOrEqualf(t, i, 0, "expected %q in output", n)
+		require.Greaterf(t, i, prev, "expected %q to come after the previous item", n)
+		prev = i
+	}
+}
+
 // TestRepoMirrorList_FilterSort pins the client-side --repo filter and --sort
 // applied to `repo mirror list` before rendering (server handles
 // owner/provider/cluster), so they shape both the table and --json output and
@@ -522,15 +537,13 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		serveMirrorList(t, mirrors, nil)
 		stdout, _ := runMirrorList(t)
 		// acme/cli < acme/web < other/api by owner/repo
-		require.Less(t, strings.Index(stdout, "acme/cli"), strings.Index(stdout, "acme/web"))
-		require.Less(t, strings.Index(stdout, "acme/web"), strings.Index(stdout, "other/api"))
+		requireOrder(t, stdout, "acme/cli", "acme/web", "other/api")
 	})
 
 	t.Run("--sort -repo reverses the order", func(t *testing.T) {
 		serveMirrorList(t, mirrors, nil)
 		stdout, _ := runMirrorList(t, "--sort", "-repo")
-		require.Less(t, strings.Index(stdout, "other/api"), strings.Index(stdout, "acme/web"))
-		require.Less(t, strings.Index(stdout, "acme/web"), strings.Index(stdout, "acme/cli"))
+		requireOrder(t, stdout, "other/api", "acme/web", "acme/cli")
 	})
 
 	t.Run("--repo applies to --json and keeps [] not null", func(t *testing.T) {
@@ -561,9 +574,9 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		}
 		serveMirrorList(t, dupes, nil)
 		stdout, _ := runMirrorList(t)
-		require.Less(t,
-			strings.Index(stdout, "entire://aws-us-east-2.entire.io/gh/acme/web"),
-			strings.Index(stdout, "entire://eu-west-1.entire.io/gh/acme/web"),
+		requireOrder(t, stdout,
+			"entire://aws-us-east-2.entire.io/gh/acme/web",
+			"entire://eu-west-1.entire.io/gh/acme/web",
 		)
 	})
 
@@ -580,29 +593,34 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		}
 		serveMirrorList(t, dupes, nil)
 		stdout, _ := runMirrorList(t, "--sort", "repo")
-		api := strings.Index(stdout, "entire://aws-us-east-2.entire.io/gh/acme/api")
-		awsWeb := strings.Index(stdout, "entire://aws-us-east-2.entire.io/gh/acme/web")
-		euWeb := strings.Index(stdout, "entire://eu-west-1.entire.io/gh/acme/web")
-		require.Less(t, api, awsWeb, "acme/api sorts before acme/web")
-		require.Less(t, awsWeb, euWeb, "within the acme/web tie, aws cluster sorts before eu")
+		// acme/api before acme/web, and within the acme/web tie aws before eu.
+		requireOrder(t, stdout,
+			"entire://aws-us-east-2.entire.io/gh/acme/api",
+			"entire://aws-us-east-2.entire.io/gh/acme/web",
+			"entire://eu-west-1.entire.io/gh/acme/web",
+		)
 
 		// -repo reverses the whole ordering, tiebreak included.
 		serveMirrorList(t, dupes, nil)
 		stdout, _ = runMirrorList(t, "--sort", "-repo")
-		require.Less(t,
-			strings.Index(stdout, "entire://eu-west-1.entire.io/gh/acme/web"),
-			strings.Index(stdout, "entire://aws-us-east-2.entire.io/gh/acme/web"),
+		requireOrder(t, stdout,
+			"entire://eu-west-1.entire.io/gh/acme/web",
+			"entire://aws-us-east-2.entire.io/gh/acme/web",
 		)
 	})
 
 	t.Run("--repo/--sort apply under --show-available", func(t *testing.T) {
+		// --repo cli keeps two rows (so --sort is observable) and drops the
+		// third, so the filter and the sort are both exercised: `access` orders
+		// read before write, i.e. cli-web before cli-api.
 		serveMirrorList(t, nil, []coreapi.AvailableMirror{
-			{Owner: "acme", Repo: "web", Access: "write", Status: "available"},
-			{Owner: "acme", Repo: "cli", Access: "read", Status: "available"},
+			{Owner: "acme", Repo: "cli-api", Access: "write", Status: "available"},
+			{Owner: "acme", Repo: "cli-web", Access: "read", Status: "available"},
+			{Owner: "other", Repo: "srv", Access: "read", Status: "available"},
 		})
 		stdout, _ := runMirrorList(t, "--show-available", "--repo", "cli", "--sort", "access")
-		require.Contains(t, stdout, "acme/cli")
-		require.NotContains(t, stdout, "acme/web")
+		require.NotContains(t, stdout, "other/srv", "--repo cli must drop the non-matching row")
+		requireOrder(t, stdout, "acme/cli-web", "acme/cli-api")
 	})
 
 	t.Run("--sort private breaks ties deterministically by owner/repo then cluster", func(t *testing.T) {
@@ -616,18 +634,19 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		}
 		serveMirrorList(t, dupes, nil)
 		stdout, _ := runMirrorList(t, "--sort", "private")
-		api := strings.Index(stdout, "entire://aws-us-east-2.entire.io/gh/acme/api")
-		awsWeb := strings.Index(stdout, "entire://aws-us-east-2.entire.io/gh/acme/web")
-		euWeb := strings.Index(stdout, "entire://eu-west-1.entire.io/gh/acme/web")
-		require.Less(t, api, awsWeb, "acme/api sorts before acme/web")
-		require.Less(t, awsWeb, euWeb, "within the acme/web tie, aws cluster sorts before eu")
+		// All rows share the private value, so acme/api sorts before acme/web,
+		// and within the acme/web tie aws before eu.
+		requireOrder(t, stdout,
+			"entire://aws-us-east-2.entire.io/gh/acme/api",
+			"entire://aws-us-east-2.entire.io/gh/acme/web",
+			"entire://eu-west-1.entire.io/gh/acme/web",
+		)
 	})
 
 	t.Run("--sort with leading whitespace parses direction like the trimmed spec", func(t *testing.T) {
 		serveMirrorList(t, mirrors, nil)
 		stdout, _ := runMirrorList(t, "--sort", " -repo")
-		require.Less(t, strings.Index(stdout, "other/api"), strings.Index(stdout, "acme/web"))
-		require.Less(t, strings.Index(stdout, "acme/web"), strings.Index(stdout, "acme/cli"))
+		requireOrder(t, stdout, "other/api", "acme/web", "acme/cli")
 	})
 }
 
