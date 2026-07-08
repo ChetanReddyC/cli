@@ -848,6 +848,115 @@ func TestResolveMirrorRef(t *testing.T) {
 	})
 }
 
+// TestRepoMirrorGet_Routing pins which core `mirror get <ref>` dials. A clone
+// URL names its cluster, so it must be resolved on the core fronting that
+// cluster (clusterCoreClient), not the active context — the original bug:
+// `mirror get entire://<cluster>/…` for a cluster in a federation other than
+// the active login failed with "no mirror matching" until the user switched
+// contexts. A ULID carries no cluster coordinate and stays on the active
+// context; an unparseable ref must error before dialing anything.
+//
+// Not parallel: swaps the package-level activeCoreClient/clusterCoreClient
+// seams.
+func TestRepoMirrorGet_Routing(t *testing.T) {
+	const mirrorULID = "0123456789ABCDEFGHJKMNPQRS"
+	const clusterHost = "eukanuba.partial.to"
+	const cloneURL = "entire://" + clusterHost + "/gh/entirehq/librarian"
+
+	// mirrorServer answers both the list (clone-URL resolution) and the
+	// GetMirror-by-ULID calls for the librarian mirror.
+	mirrorServer := func(t *testing.T) *httptest.Server {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case mirrorsAPIPath:
+				assert.NoError(t, printJSON(w, &coreapi.ListMirrorsOutputBody{Mirrors: []coreapi.Mirror{
+					{MirrorId: mirrorULID, Owner: "entirehq", Repo: "librarian", ClusterHost: clusterHost},
+				}}))
+			case mirrorsAPIPath + "/" + mirrorULID:
+				assert.NoError(t, printJSON(w, &coreapi.Mirror{
+					MirrorId: mirrorULID, Owner: "entirehq", Repo: "librarian", ClusterHost: clusterHost,
+					IsPrivate: coreapi.NewOptBool(true),
+				}))
+			default:
+				t.Errorf("unexpected request path %q", r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	seamActive := func(t *testing.T, fn func(context.Context) (*coreapi.Client, error)) {
+		t.Helper()
+		prev := activeCoreClient
+		activeCoreClient = fn
+		t.Cleanup(func() { activeCoreClient = prev })
+	}
+	seamCluster := func(t *testing.T, fn func(context.Context, string) (*coreapi.Client, error)) {
+		t.Helper()
+		prev := clusterCoreClient
+		clusterCoreClient = fn
+		t.Cleanup(func() { clusterCoreClient = prev })
+	}
+	runGet := func(t *testing.T, ref string) (string, error) {
+		t.Helper()
+		cmd := newRepoCmd()
+		var out, errW bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errW)
+		cmd.SetArgs([]string{"mirror", "get", ref})
+		err := cmd.ExecuteContext(t.Context())
+		return out.String(), err
+	}
+
+	t.Run("clone URL dials the cluster's core, not the active context", func(t *testing.T) {
+		srv := mirrorServer(t)
+		seamActive(t, func(context.Context) (*coreapi.Client, error) {
+			t.Error("clone-URL get dialed the active context's core")
+			return nil, errors.New("wrong core")
+		})
+		var gotHost string
+		seamCluster(t, func(_ context.Context, host string) (*coreapi.Client, error) {
+			gotHost = host
+			return coreapi.NewWithBearer(srv.URL, "tok")
+		})
+		out, err := runGet(t, cloneURL)
+		require.NoError(t, err)
+		require.Equal(t, clusterHost, gotHost, "must resolve on the clone URL's cluster")
+		require.Contains(t, out, "entirehq/librarian")
+		require.Contains(t, out, cloneURL)
+	})
+
+	t.Run("ULID dials the active context", func(t *testing.T) {
+		srv := mirrorServer(t)
+		seamActive(t, func(context.Context) (*coreapi.Client, error) {
+			return coreapi.NewWithBearer(srv.URL, "tok")
+		})
+		seamCluster(t, func(_ context.Context, host string) (*coreapi.Client, error) {
+			t.Errorf("ULID get dialed cluster core %q; a ULID has no cluster coordinate", host)
+			return nil, errors.New("wrong core")
+		})
+		out, err := runGet(t, mirrorULID)
+		require.NoError(t, err)
+		require.Contains(t, out, "entirehq/librarian")
+	})
+
+	t.Run("unparseable ref errors before dialing any core", func(t *testing.T) {
+		seamActive(t, func(context.Context) (*coreapi.Client, error) {
+			t.Error("unparseable ref dialed the active context's core")
+			return nil, errors.New("no dial expected")
+		})
+		seamCluster(t, func(context.Context, string) (*coreapi.Client, error) {
+			t.Error("unparseable ref dialed a cluster core")
+			return nil, errors.New("no dial expected")
+		})
+		_, err := runGet(t, "not-a-url")
+		require.Error(t, err)
+		require.ErrorContains(t, err, "pass a mirror ULID or a clone URL")
+	})
+}
+
 func TestMirrorRow(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
