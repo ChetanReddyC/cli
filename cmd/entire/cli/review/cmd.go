@@ -223,13 +223,12 @@ To tag an already-finished session as a review, use
 			if findings {
 				return runReviewFindings(ctx, cmd, positionalArg, deps.NewSilentError)
 			}
-			// Map the flag to the RunConfig timeout convention: a non-positive
-			// value (the user passed --timeout 0) means "disable", encoded as the
-			// negative sentinel, which disables BOTH the per-reviewer bound and the
-			// judge's deadline. A positive value passes through and bounds both.
-			// (The flag's default is nonzero, so 0 only appears on --timeout 0.)
-			timeoutArg := resolveReviewerTimeoutArg(reviewTimeout)
-			return runReview(ctx, cmd, agentOverride, modelOverride, baseOverride, profileName, perRunPrompt, timeoutArg, deps)
+			// The flag flows through unmapped: RunConfig.ReviewerTimeout is
+			// two-state (positive = hard cap, anything else = no cap), so the
+			// default 0, an explicit --timeout 0, and a negative all mean
+			// "reviewers run until done". The judge derives its own bound via
+			// judgeTimeoutArg and is never uncapped.
+			return runReview(ctx, cmd, agentOverride, modelOverride, baseOverride, profileName, perRunPrompt, reviewTimeout, deps)
 		},
 	}
 	cmd.Flags().BoolVar(&configure, "configure", false, "set up a review profile; shows available agents and accepts --set-* flags for non-interactive config")
@@ -712,29 +711,14 @@ func reviewAgentNames(deps Deps) []string {
 	return names
 }
 
-// resolveReviewerTimeoutArg maps the --timeout flag value to the RunConfig
-// timeout convention used by reviewerTimeout and the judge's providerContext: a
-// non-positive value (the user passed --timeout 0) becomes the negative
-// "disabled" sentinel; a positive value passes through unchanged. The flag's
-// default is nonzero, so 0 only reaches here when the user explicitly set it.
-func resolveReviewerTimeoutArg(flagValue time.Duration) time.Duration {
-	if flagValue <= 0 {
-		return -1
-	}
-	return flagValue
-}
-
-// judgeTimeoutArg maps the resolved reviewer timeout to the judge's
-// ProviderTimeout three-state. The judge is a single text-generation call
-// with no event stream, so unlike reviewers it always keeps a bound: an
-// explicit --timeout governs it, otherwise the synthesis default (5m)
-// applies. The reviewer no-cap sentinel (negative) must not leak through —
-// it would disable the judge bound entirely.
+// judgeTimeoutArg maps the reviewer --timeout value to the judge's
+// ProviderTimeout. The judge is a single text-generation call with no event
+// stream, so unlike reviewers it always keeps a bound: an explicit positive
+// --timeout governs it, anything else (unset, 0, or a negative like
+// `--timeout -5m`) maps to 0 so the synthesis default (5m) applies — a
+// reviewer-side "no cap" must never leak through as "judge unbounded".
 func judgeTimeoutArg(reviewerArg time.Duration) time.Duration {
-	if reviewerArg > 0 {
-		return reviewerArg
-	}
-	return 0
+	return max(reviewerArg, 0)
 }
 
 // runReview executes the main review flow.
