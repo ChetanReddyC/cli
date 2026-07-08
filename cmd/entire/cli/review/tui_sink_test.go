@@ -401,3 +401,68 @@ func TestTUISink_RunFinishedBoundedWhenWedged(t *testing.T) {
 		t.Fatal("RunFinished blocked past its bounded wait on a wedged TUI")
 	}
 }
+
+// stubbornProgram is a teaRunner whose Run NEVER returns, even after Kill —
+// modeling a Bubble Tea teardown stuck restoring a blocked terminal. Send
+// unblocks on Kill so the pump can drain, but done never closes.
+type stubbornProgram struct {
+	killed chan struct{}
+	block  chan struct{}
+}
+
+func newStubbornProgram() *stubbornProgram {
+	return &stubbornProgram{killed: make(chan struct{}), block: make(chan struct{})}
+}
+
+func (p *stubbornProgram) Run() (tea.Model, error) {
+	<-p.block       // never closed — Run never returns
+	return nil, nil //nolint:nilnil // unreachable; mirrors tea.Program.Run's shape
+}
+
+func (p *stubbornProgram) Send(tea.Msg) { <-p.killed }
+
+func (p *stubbornProgram) Kill() {
+	select {
+	case <-p.killed:
+	default:
+		close(p.killed)
+	}
+}
+
+// TestTUISink_WaitIsBoundedWhenProgramNeverExits pins the teardown guarantee:
+// `defer tuiSink.Wait()` must not hang the command forever when the Bubble
+// Tea program never returns from Run, even after Kill. Wait escalates
+// (grace → Kill → grace) and then abandons the goroutine.
+func TestTUISink_WaitIsBoundedWhenProgramNeverExits(t *testing.T) {
+	t.Parallel()
+	prog := newStubbornProgram()
+	sink := newTUISinkWithProgram(prog)
+	sink.Start()
+
+	finished := make(chan struct{})
+	go func() {
+		sink.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(2*tuiPostRunCompleteGrace + 3*time.Second):
+		t.Fatal("Wait hung on a program that never exits — teardown wedge")
+	}
+}
+
+// TestTUISink_WaitJoinsPump pins that a normal Wait joins the pump goroutine
+// (no leak between done closing and the pump observing it).
+func TestTUISink_WaitJoinsPump(t *testing.T) {
+	t.Parallel()
+	prog := newRecordingProgram()
+	sink := newTUISinkWithProgram(prog)
+	sink.Start()
+	prog.Kill()
+	sink.Wait()
+	select {
+	case <-sink.pumpDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait returned before the pump goroutine exited")
+	}
+}

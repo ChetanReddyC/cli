@@ -9,12 +9,14 @@ package review
 import (
 	"context"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"golang.org/x/term"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
 
@@ -164,8 +166,14 @@ func (s *TUISink) Start() {
 	}()
 }
 
-// Wait blocks until the Bubble Tea program exits. Safe to call after Start.
-// If Start was never called, Wait returns immediately.
+// Wait blocks until the Bubble Tea program exits, with a bounded escalation
+// so teardown can never hang: in the normal flow PostRunComplete has already
+// quit the program and Wait returns immediately; otherwise (early-error
+// return paths, or a wedged loop that survived Kill) Wait gives the program
+// one grace period, Kills it, gives it one more, and then abandons the
+// goroutine — a stuck display must not hold command exit hostage. Joins the
+// pump goroutine whenever the program actually exited. Safe to call after
+// Start; if Start was never called, returns immediately.
 func (s *TUISink) Wait() {
 	s.mu.Lock()
 	started := s.started
@@ -173,7 +181,20 @@ func (s *TUISink) Wait() {
 	if !started {
 		return
 	}
-	<-s.done
+	select {
+	case <-s.done:
+		<-s.pumpDone
+		return
+	case <-time.After(tuiPostRunCompleteGrace):
+	}
+	s.program.Kill()
+	select {
+	case <-s.done:
+		<-s.pumpDone
+	case <-time.After(tuiPostRunCompleteGrace):
+		// Bubble Tea never returned from Run despite Kill. Abandon the
+		// program and pump goroutines rather than hanging teardown.
+	}
 }
 
 // AgentEvent (Sink interface): translate ev into a tea.Msg and enqueue it for
@@ -290,5 +311,13 @@ func (s *TUISink) PostRunComplete() {
 	case <-s.done:
 	case <-time.After(tuiPostRunCompleteGrace):
 		s.program.Kill()
+	}
+
+	// Surface silent loss: a healthy run never drops. A non-zero count means
+	// the TUI loop stalled or lagged badly enough to jam the queue — exactly
+	// the diagnostic a future wedge investigation needs first.
+	if n := s.droppedCount(); n > 0 {
+		logging.Debug(context.Background(), "tui sink dropped messages under backpressure",
+			slog.Int("dropped", n))
 	}
 }
