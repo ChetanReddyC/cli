@@ -556,9 +556,9 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		requireOrder(t, stdout, "other/api", "acme/web", "acme/cli")
 	})
 
-	t.Run("--sort name (short form) resolves the NAME column", func(t *testing.T) {
-		// The NAME header carries an inline "(owner/repo)" hint, but the friendly
-		// short "name" must still resolve (parseSortColumn strips the hint).
+	t.Run("--sort name resolves the NAME column by its key", func(t *testing.T) {
+		// The NAME header carries an inline "(owner/repo)" display hint, but the
+		// sort key is the plain "name" — --sort matches on key, not header.
 		serveMirrorList(t, mirrors, nil)
 		stdout, _ := runMirrorList(t, "--sort", "name")
 		requireOrder(t, stdout, "acme/cli", "acme/web", "other/api")
