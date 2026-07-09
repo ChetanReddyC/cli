@@ -599,11 +599,12 @@ func newRepoMirrorListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&name, "name", "", "Filter by owner/repo substring, matching the NAME column (case-insensitive)")
 	cmd.Flags().StringVar(&sortSpec, "sort", "", "Sort by column key (e.g. name, clone-url; prefix '-' for descending). Default: name ascending")
 	cmd.Flags().BoolVar(&showAvailable, "show-available", false, "Instead of existing mirrors, list GitHub repos you could onboard as mirrors (ignores --cluster/--provider)")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newRepoMirrorGetCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "get <mirror>",
 		Short: "Show a mirror by ULID or clone URL",
 		Long: "Show a mirror. <mirror> is either a mirror ULID or an entire:// clone URL\n" +
@@ -643,6 +644,8 @@ func newRepoMirrorGetCmd() *cobra.Command {
 			return runCoreObjectForCluster(cmd, clusterHost, columnHeaders(mirrorColumns), mirrorRow, show)
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 // resolveMirrorRef turns a mirror reference into its ULID. A ULID passes
