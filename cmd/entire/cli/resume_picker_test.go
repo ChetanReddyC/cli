@@ -40,6 +40,25 @@ func TestFilterResumableSessions_ExcludesImported(t *testing.T) {
 	}
 }
 
+func TestCountImportedSessions(t *testing.T) {
+	t.Parallel()
+	states := []*strategy.SessionState{
+		{SessionID: "a", Kind: session.KindImported},
+		{SessionID: "b"},
+		nil,
+		{SessionID: "c", Kind: session.KindImported},
+	}
+	if got := countImportedSessions(states); got != 2 {
+		t.Fatalf("countImportedSessions = %d, want 2", got)
+	}
+	if got := pluralizeImportedSessions(1); got != "1 imported session is" {
+		t.Errorf("singular = %q", got)
+	}
+	if got := pluralizeImportedSessions(3); got != "3 imported sessions are" {
+		t.Errorf("plural = %q", got)
+	}
+}
+
 func TestFilterResumableSessions(t *testing.T) {
 	t.Parallel()
 
