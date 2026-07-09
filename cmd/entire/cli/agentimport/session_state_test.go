@@ -2,8 +2,12 @@ package agentimport
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/go-git/go-git/v6"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -21,6 +25,102 @@ func (fakeImporter) Discover(_, _ string, _ time.Time, _ []string) ([]SessionFil
 	return nil, nil
 }
 func (fakeImporter) SplitTurns(_ SessionFile, _ []byte) ([]Turn, error) { return nil, nil }
+
+// runFakeImporter feeds canned Discover/SplitTurns results so Run's full
+// per-session path (including the writeSessionState call site) can be exercised.
+type runFakeImporter struct {
+	files []SessionFile
+	turns []Turn
+}
+
+func (runFakeImporter) Name() string               { return string(agent.AgentNameClaudeCode) }
+func (runFakeImporter) AgentType() types.AgentType { return agent.AgentTypeClaudeCode }
+func (f runFakeImporter) Discover(_, _ string, _ time.Time, _ []string) ([]SessionFile, error) {
+	return f.files, nil
+}
+func (f runFakeImporter) SplitTurns(_ SessionFile, _ []byte) ([]Turn, error) { return f.turns, nil }
+
+func TestRun_WritesSessionStateForImportedSession(t *testing.T) {
+	// Not parallel: t.Chdir.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	tp := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(tp, []byte("{\"type\":\"user\"}\n"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	repo, err := git.PlainOpen(dir)
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+
+	sid := "44444444-4444-4444-4444-444444444444"
+	imp := runFakeImporter{
+		files: []SessionFile{{Path: tp, SessionID: sid}},
+		turns: []Turn{{UUID: "a", Prompt: "hello", CreatedAt: time.Now().Add(-time.Hour)}},
+	}
+	if _, err := Run(ctx, repo, imp, Options{RepoRoot: dir, Now: time.Now()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		t.Fatalf("NewStateStore: %v", err)
+	}
+	st, err := store.Load(ctx, sid)
+	if err != nil || st == nil {
+		t.Fatalf("Load returned (%v, %v); want an imported state", st, err)
+	}
+	if st.Kind != session.KindImported {
+		t.Errorf("Kind = %q, want %q", st.Kind, session.KindImported)
+	}
+}
+
+func TestRun_DryRunWritesNoSessionState(t *testing.T) {
+	// Not parallel: t.Chdir.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	tp := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(tp, []byte("{\"type\":\"user\"}\n"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	repo, err := git.PlainOpen(dir)
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+
+	sid := "55555555-5555-5555-5555-555555555555"
+	imp := runFakeImporter{
+		files: []SessionFile{{Path: tp, SessionID: sid}},
+		turns: []Turn{{UUID: "a", Prompt: "hello", CreatedAt: time.Now().Add(-time.Hour)}},
+	}
+	if _, err := Run(ctx, repo, imp, Options{RepoRoot: dir, Now: time.Now(), DryRun: true}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		t.Fatalf("NewStateStore: %v", err)
+	}
+	st, err := store.Load(ctx, sid)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if st != nil {
+		t.Fatalf("dry-run must not write a session state, got %+v", st)
+	}
+}
 
 func totalImported(s *session.State) int {
 	if s.TokenUsage == nil {
