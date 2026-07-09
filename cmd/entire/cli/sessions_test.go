@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
+	"github.com/spf13/cobra"
 )
 
 const (
@@ -974,74 +975,44 @@ func TestInfoCmd_JSONOutput(t *testing.T) {
 	}
 }
 
-func TestListCmd_ImportedSessionShowsReadOnly(t *testing.T) {
+func TestImportedSession_MarkedReadOnly(t *testing.T) {
 	setupStopTestRepo(t)
 	ctx := context.Background()
 
 	now := time.Now()
-	imported := makeSessionState("test-imported-list", session.PhaseEnded)
-	imported.Kind = session.KindImported
-	imported.AgentType = testAgentClaude
-	imported.EndedAt = &now
-	imported.StartedAt = now.Add(-1 * time.Hour)
-	if err := strategy.SaveSessionState(ctx, imported); err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	cmd := newListCmd()
-	var stdout bytes.Buffer
-	cmd.SetOut(&stdout)
-	cmd.SetArgs([]string{})
-	if err := cmd.ExecuteContext(ctx); err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-	if !strings.Contains(stdout.String(), "imported (read-only)") {
-		t.Errorf("expected imported session labeled read-only, got:\n%s", stdout.String())
-	}
-}
-
-func TestInfoCmd_ImportedShowsReadOnly(t *testing.T) {
-	setupStopTestRepo(t)
-	ctx := context.Background()
-
-	now := time.Now()
-	imported := makeSessionState("test-imported-info", session.PhaseEnded)
+	imported := makeSessionState("test-imported", session.PhaseEnded)
 	imported.Kind = session.KindImported
 	imported.AgentType = testAgentClaude
 	imported.EndedAt = &now
 	if err := strategy.SaveSessionState(ctx, imported); err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
+		t.Fatalf("SaveSessionState: %v", err)
 	}
 
-	// Text output carries the note.
-	textCmd := newInfoCmd()
-	var textOut bytes.Buffer
-	textCmd.SetOut(&textOut)
-	textCmd.SetArgs([]string{"test-imported-info"})
-	if err := textCmd.ExecuteContext(ctx); err != nil {
-		t.Fatalf("text info error: %v", err)
-	}
-	if !strings.Contains(textOut.String(), "imported history — read-only") {
-		t.Errorf("expected read-only note in text info, got:\n%s", textOut.String())
+	run := func(cmd *cobra.Command, args ...string) string {
+		t.Helper()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(ctx); err != nil {
+			t.Fatalf("%s %v: %v", cmd.Name(), args, err)
+		}
+		return out.String()
 	}
 
-	// JSON output exposes kind + read_only for programmatic consumers/agents.
-	jsonCmd := newInfoCmd()
-	var jsonOut bytes.Buffer
-	jsonCmd.SetOut(&jsonOut)
-	jsonCmd.SetArgs([]string{"test-imported-info", "--json"})
-	if err := jsonCmd.ExecuteContext(ctx); err != nil {
-		t.Fatalf("json info error: %v", err)
+	if list := run(newListCmd()); !strings.Contains(list, "imported (read-only)") {
+		t.Errorf("list: missing read-only label:\n%s", list)
 	}
-	var result map[string]interface{}
-	if err := json.Unmarshal(jsonOut.Bytes(), &result); err != nil {
-		t.Fatalf("invalid JSON: %v\n%s", err, jsonOut.String())
+	if info := run(newInfoCmd(), "test-imported"); !strings.Contains(info, "imported history — read-only") {
+		t.Errorf("info text: missing read-only note:\n%s", info)
 	}
-	if result["read_only"] != true {
-		t.Errorf("expected read_only=true, got: %v", result["read_only"])
+
+	// --json exposes kind + read_only for programmatic consumers/agents.
+	var meta map[string]any
+	if err := json.Unmarshal([]byte(run(newInfoCmd(), "test-imported", "--json")), &meta); err != nil {
+		t.Fatalf("info --json: %v", err)
 	}
-	if result["kind"] != string(session.KindImported) {
-		t.Errorf("expected kind %q, got: %v", session.KindImported, result["kind"])
+	if meta["read_only"] != true || meta["kind"] != string(session.KindImported) {
+		t.Errorf("info --json: read_only=%v kind=%v, want true / %q", meta["read_only"], meta["kind"], session.KindImported)
 	}
 }
 
