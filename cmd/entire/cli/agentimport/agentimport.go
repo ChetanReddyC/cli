@@ -181,25 +181,6 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 	return res, nil
 }
 
-// addTokenUsage folds src into dst (recursing into subagent usage) so an
-// imported session's total matches how the CLI renders per-checkpoint tokens.
-// Either operand may be nil.
-func addTokenUsage(dst, src *types.TokenUsage) *types.TokenUsage {
-	if src == nil {
-		return dst
-	}
-	if dst == nil {
-		dst = &types.TokenUsage{}
-	}
-	dst.InputTokens += src.InputTokens
-	dst.CacheCreationTokens += src.CacheCreationTokens
-	dst.CacheReadTokens += src.CacheReadTokens
-	dst.OutputTokens += src.OutputTokens
-	dst.APICallCount += src.APICallCount
-	dst.SubagentTokens = addTokenUsage(dst.SubagentTokens, src.SubagentTokens)
-	return dst
-}
-
 // writeSessionState upserts a local session.State so an imported session shows
 // up in `entire session list`. It is Kind-gated (KindImported), never sets
 // BaseCommit (imports are commit-less and must not be pinned to HEAD), and uses
@@ -215,7 +196,7 @@ func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns 
 		return fmt.Errorf("open session state store: %w", err)
 	}
 	if existing, lerr := store.Load(ctx, sf.SessionID); lerr == nil && existing != nil &&
-		existing.Kind != session.KindImported {
+		!existing.Kind.IsImported() {
 		return nil // don't overwrite a real (live/attached) session
 	}
 
@@ -234,7 +215,7 @@ func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns 
 		if turn.Model != "" {
 			model = turn.Model
 		}
-		tokens = addTokenUsage(tokens, turn.Tokens)
+		tokens = types.AddTokenUsage(tokens, turn.Tokens)
 	}
 	if started.IsZero() {
 		// No usable per-turn timestamps (some Codex lines): fall back to the
@@ -244,16 +225,15 @@ func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns 
 			ended = started
 		}
 	}
-	endedAt := ended
 	state := &session.State{
 		SessionID:           sf.SessionID,
 		Kind:                session.KindImported,
 		AgentType:           imp.AgentType(),
 		ModelName:           model,
 		StartedAt:           started,
-		EndedAt:             &endedAt,
+		EndedAt:             &ended,
 		Phase:               session.PhaseEnded,
-		LastInteractionTime: &endedAt,
+		LastInteractionTime: &ended,
 		StepCount:           len(turns),
 		TokenUsage:          tokens,
 		LastPrompt:          session.TruncatePromptForStorage(turns[len(turns)-1].Prompt),

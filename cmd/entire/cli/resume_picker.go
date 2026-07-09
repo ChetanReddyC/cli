@@ -81,7 +81,7 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 	if len(resumable) == 0 {
 		fmt.Fprintln(w, "No resumable sessions found.")
 		if n := countImportedSessions(states); n > 0 {
-			fmt.Fprintf(w, "(%s read-only — imported history can't be resumed.)\n", pluralizeImportedSessions(n))
+			fmt.Fprintf(w, "(skipping %d read-only imported session(s) — imported history can't be resumed.)\n", n)
 		}
 		fmt.Fprintln(w, "Tip: pass a branch to resume directly, e.g. 'entire session resume <branch>'.")
 		return nil
@@ -168,7 +168,7 @@ func filterResumableSessions(states []*strategy.SessionState) []*strategy.Sessio
 			continue
 		}
 		// Imported sessions are read-only; they can't be resumed.
-		if s.Kind == session.KindImported {
+		if s.Kind.IsImported() {
 			continue
 		}
 		resumable = append(resumable, s)
@@ -185,19 +185,11 @@ func filterResumableSessions(states []*strategy.SessionState) []*strategy.Sessio
 func countImportedSessions(states []*strategy.SessionState) int {
 	n := 0
 	for _, s := range states {
-		if s != nil && s.Kind == session.KindImported {
+		if s != nil && s.Kind.IsImported() {
 			n++
 		}
 	}
 	return n
-}
-
-// pluralizeImportedSessions renders the count for the picker hint.
-func pluralizeImportedSessions(n int) string {
-	if n == 1 {
-		return "1 imported session is"
-	}
-	return fmt.Sprintf("%d imported sessions are", n)
 }
 
 // sessionLastActiveTime returns the best timestamp to represent when a session

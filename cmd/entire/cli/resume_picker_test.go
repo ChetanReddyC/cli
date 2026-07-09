@@ -51,12 +51,6 @@ func TestCountImportedSessions(t *testing.T) {
 	if got := countImportedSessions(states); got != 2 {
 		t.Fatalf("countImportedSessions = %d, want 2", got)
 	}
-	if got := pluralizeImportedSessions(1); got != "1 imported session is" {
-		t.Errorf("singular = %q", got)
-	}
-	if got := pluralizeImportedSessions(3); got != "3 imported sessions are" {
-		t.Errorf("plural = %q", got)
-	}
 }
 
 func TestFilterResumableSessions(t *testing.T) {

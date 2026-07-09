@@ -93,7 +93,7 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		// and (by design) no BaseCommit. Keep them regardless of the
 		// shadow-branch orphan check below. Gate on Kind, not on commit
 		// presence, so this stays correct once imports are linked to a commit.
-		if state.Kind == session.KindImported {
+		if state.Kind.IsImported() {
 			states = append(states, state)
 			continue
 		}

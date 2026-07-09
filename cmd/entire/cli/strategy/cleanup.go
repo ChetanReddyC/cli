@@ -350,7 +350,7 @@ func ListOrphanedSessionStates(ctx context.Context) ([]CleanupItem, error) {
 
 		// Imported sessions are read-only and commit-less by design — no shadow
 		// branch is ever expected. Never offer them for cleanup.
-		if state.Kind == session.KindImported {
+		if state.Kind.IsImported() {
 			continue
 		}
 

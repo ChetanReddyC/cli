@@ -440,7 +440,7 @@ func writeSessionCard(w io.Writer, s *strategy.SessionState, sty statusStyles) {
 	// Line 3: status · [imported (read-only) ·] started X ago · active X ago · tokens X.Xk
 	var stats []string
 	stats = append(stats, sessionPhaseLabel(s))
-	if s.Kind == session.KindImported {
+	if s.Kind.IsImported() {
 		stats = append(stats, "imported (read-only)")
 	}
 	stats = append(stats, "started "+timeAgo(s.StartedAt))
@@ -610,7 +610,7 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 		Model:          state.ModelName,
 		Status:         status,
 		Kind:           string(state.Kind),
-		ReadOnly:       state.Kind == session.KindImported,
+		ReadOnly:       state.Kind.IsImported(),
 		Branch:         state.Branch,
 		WorktreeID:     state.WorktreeID,
 		WorktreePath:   state.WorktreePath,
@@ -658,7 +658,7 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 
 	fmt.Fprintf(w, "Status:      %s\n", status)
 
-	if state.Kind == session.KindImported {
+	if state.Kind.IsImported() {
 		fmt.Fprintf(w, "Note:        imported history — read-only (not resumable or rewindable)\n")
 	}
 
