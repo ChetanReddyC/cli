@@ -42,8 +42,8 @@ func newCheckpointResumeCmd() *cobra.Command {
 
 The target can be a checkpoint ID (or prefix), a commit SHA (or ref) whose
 message carries an Entire-Checkpoint trailer, or a branch name. Auto-detection
-tries checkpoint ID first, then branch, then commit; use the flags to force
-one interpretation.
+tries checkpoint ID first, then local branch, then commit; use the flags to
+force one interpretation.
 
 For a checkpoint or commit target, the branch containing the checkpoint's
 commit is checked out at its current tip before the session logs are
@@ -120,21 +120,33 @@ func runCheckpointResume(ctx context.Context, cmd *cobra.Command, target, checkp
 	}
 }
 
-// resumeAutoTarget resolves a positional target: checkpoint-ID prefix first,
-// then branch (local or origin-tracking, no network), then commit revision.
+// resumeAutoTarget resolves a positional target: checkpoint-ID prefix first
+// (local, then remote fallback only if nothing local matches), then local
+// branch, then commit revision. Only local branches are auto-detected as
+// branch targets: branchCommit also resolves origin/<name> and, for a target
+// like "HEAD", would wrongly match refs/remotes/origin/HEAD, misrouting
+// revision syntax that must fall through to commit resolution instead
+// (--branch still handles remote-only branches explicitly via runResume).
 // Returns the possibly-swapped lookup so the caller's deferred close stays
 // correct.
 func resumeAutoTarget(ctx context.Context, cmd *cobra.Command, lookup *explainCheckpointLookup, target string, force bool) (*explainCheckpointLookup, error) {
-	if checkpointPrefixShape.MatchString(target) {
+	shapedLikeCheckpoint := checkpointPrefixShape.MatchString(target)
+	if shapedLikeCheckpoint {
+		if matches := matchCheckpointPrefix(lookup, target); len(matches) > 0 {
+			return lookup, resumeMatchedCheckpoints(ctx, cmd, lookup, target, matches, force)
+		}
+	}
+
+	if branchExistsLocally(lookup.repo, target) {
+		return lookup, runResume(ctx, cmd, target, force)
+	}
+
+	if shapedLikeCheckpoint {
 		var matches []id.CheckpointID
 		matches, lookup = matchCheckpointPrefixWithRemoteFallback(ctx, cmd.ErrOrStderr(), lookup, target)
 		if len(matches) > 0 {
 			return lookup, resumeMatchedCheckpoints(ctx, cmd, lookup, target, matches, force)
 		}
-	}
-
-	if _, err := branchCommit(lookup.repo, target); err == nil {
-		return lookup, runResume(ctx, cmd, target, force)
 	}
 
 	err := resumeCommitTarget(ctx, cmd, lookup, target, force)
@@ -152,7 +164,7 @@ func resumeMatchedCheckpoints(ctx context.Context, cmd *cobra.Command, lookup *e
 		return resumeResolvedCheckpoint(ctx, cmd, lookup, matches[0], force)
 	default:
 		renderAmbiguousPrefixFailure(cmd.ErrOrStderr(), prefix, "committed checkpoints", buildAmbiguousCheckpointMatches(matches, lookup.committed))
-		return NewSilentError(fmt.Errorf("%w: %s matches %d checkpoints", errAmbiguousCommitPrefix, prefix, len(matches)))
+		return NewSilentError(fmt.Errorf("%w: checkpoint prefix %s matches %d checkpoints", errAmbiguousCommitPrefix, prefix, len(matches)))
 	}
 }
 
@@ -208,7 +220,8 @@ func resumeResolvedCheckpoint(ctx context.Context, cmd *cobra.Command, lookup *e
 		return resumeByCheckpointID(ctx, w, cmd.ErrOrStderr(), cpID, force)
 	}
 	if otherPath, ok := branchCheckedOutElsewhere(ctx, branch); ok {
-		fmt.Fprint(w, worktreeClashMessage(branch, otherPath, ""))
+		fmt.Fprintf(w, "Branch %q is already checked out at %s.\nResume this checkpoint from that worktree:\n\n  cd %s && entire checkpoint resume %s\n",
+			branch, otherPath, shellQuote(otherPath), cpID)
 		return nil
 	}
 	return resumeSessionOnBranch(ctx, cmd, branch, cpID, force)
@@ -233,8 +246,12 @@ func runCheckpointResumePicker(ctx context.Context, cmd *cobra.Command, lookup *
 	}
 
 	selected, ok, err := promptCheckpointSelection(ctx, entries, branchIndex)
-	if err != nil || !ok {
+	if err != nil {
 		return err
+	}
+	if !ok {
+		fmt.Fprintln(w, "Resume cancelled.")
+		return nil
 	}
 	return resumeResolvedCheckpoint(ctx, cmd, lookup, selected, force)
 }
