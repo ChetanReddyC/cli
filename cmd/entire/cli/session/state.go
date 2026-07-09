@@ -473,6 +473,13 @@ func (s *State) OwnerExited() bool {
 }
 
 func (s *State) IsStale() bool {
+	// Imported sessions are historical, read-only records reconstructed from
+	// pre-existing transcripts; their timestamps are always old by nature.
+	// Never auto-purge them or they'd vanish from `entire session list` on the
+	// first read after import.
+	if s.Kind == KindImported {
+		return false
+	}
 	var since time.Duration
 	if s.LastInteractionTime != nil {
 		since = time.Since(*s.LastInteractionTime)
