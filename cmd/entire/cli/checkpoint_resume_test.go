@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +28,16 @@ func newCheckpointResumeTestCmd(t *testing.T) (*cobra.Command, *bytes.Buffer) {
 	return cmd, out
 }
 
+// setupCheckpointResumeRepo creates an isolated repo, chdirs into it, and
+// points the Claude session dir at a temp location so restore flows can write.
+func setupCheckpointResumeRepo(t *testing.T) (*git.Repository, *git.Worktree, plumbing.Hash) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", filepath.Join(tmpDir, "claude-projects"))
+	return setupResumeTestRepo(t, tmpDir, false)
+}
+
 func TestCheckpointResume_RejectsPositionalWithTargetFlags(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -48,12 +57,7 @@ func TestCheckpointResume_RejectsPositionalWithTargetFlags(t *testing.T) {
 // The checkpoint's commit is on no branch, so the restore-only fallback runs
 // and HEAD must not move.
 func TestCheckpointResumeAuto_ChecksCheckpointBeforeBranch(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-	claudeDir := filepath.Join(tmpDir, "claude-projects")
-	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", claudeDir)
-
-	repo, _, head := setupResumeTestRepo(t, tmpDir, false)
+	repo, _, head := setupCheckpointResumeRepo(t)
 	cpID := id.MustCheckpointID("01HZXW5J8KQ2M3N4P5Q6R7S8T9")
 	writeCommittedResumeCheckpoint(t, repo, cpID, "session-cp-first", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 	branchRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(cpID.String()), head)
@@ -78,16 +82,11 @@ func TestCheckpointResumeAuto_ChecksCheckpointBeforeBranch(t *testing.T) {
 // A target that is a branch name (even hex-shaped) with no matching checkpoint
 // must delegate to the branch flow, i.e. check the branch out.
 func TestCheckpointResumeAuto_BranchBeforeCommit(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-	claudeDir := filepath.Join(tmpDir, "claude-projects")
-	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", claudeDir)
-
-	repo, w, _ := setupResumeTestRepo(t, tmpDir, false)
+	repo, w, _ := setupCheckpointResumeRepo(t)
 	// Ignore .entire/ (as `entire enable` would) so the RunE's logging.Init
 	// creating .entire/logs/ doesn't register as an uncommitted change and
 	// trip switchToBranchForResume's dirty-worktree check.
-	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(".entire/\n"), 0o600); err != nil {
+	if err := os.WriteFile(".gitignore", []byte(".entire/\n"), 0o600); err != nil {
 		t.Fatalf("write .gitignore: %v", err)
 	}
 	if _, err := w.Add(".gitignore"); err != nil {
@@ -119,12 +118,7 @@ func TestCheckpointResumeAuto_BranchBeforeCommit(t *testing.T) {
 // commit is on master (indexed by buildCheckpointBranchIndex) and master is
 // already checked out, so the flow ends in a restored session.
 func TestCheckpointResumeCommit_ResolvesTrailer(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-	claudeDir := filepath.Join(tmpDir, "claude-projects")
-	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", claudeDir)
-
-	repo, w, _ := setupResumeTestRepo(t, tmpDir, false)
+	repo, w, _ := setupCheckpointResumeRepo(t)
 	cpID := id.MustCheckpointID("abc123def456")
 	writeCommittedResumeCheckpoint(t, repo, cpID, "session-commit", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 	commitHash, err := w.Commit("work\n\nEntire-Checkpoint: "+cpID.String(), &git.CommitOptions{
@@ -151,12 +145,7 @@ func TestCheckpointResumeCommit_ResolvesTrailer(t *testing.T) {
 // branch or checkpoint named "HEAD", it must fall through to commit
 // resolution and resume the checkpoint referenced by HEAD's trailer.
 func TestCheckpointResumeAuto_HeadResolvesAsCommit(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-	claudeDir := filepath.Join(tmpDir, "claude-projects")
-	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", claudeDir)
-
-	repo, w, head := setupResumeTestRepo(t, tmpDir, false)
+	repo, w, head := setupCheckpointResumeRepo(t)
 	cpID := id.MustCheckpointID("abc123def456")
 	writeCommittedResumeCheckpoint(t, repo, cpID, "session-head", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 	if _, err := w.Commit("work\n\nEntire-Checkpoint: "+cpID.String(), &git.CommitOptions{
@@ -211,28 +200,6 @@ func TestCheckpointResumeAuto_NothingMatched(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "nothing matched") {
 		t.Errorf("Execute() err = %v, want 'nothing matched'", err)
-	}
-}
-
-func TestRecentCheckpoints_SortsNewestFirstAndCaps(t *testing.T) {
-	t.Parallel()
-	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	var infos []checkpoint.CheckpointInfo
-	for i := range 25 {
-		infos = append(infos, checkpoint.CheckpointInfo{
-			CheckpointID: id.MustCheckpointID(fmt.Sprintf("%012x", i)),
-			CreatedAt:    base.Add(time.Duration(i) * time.Hour),
-		})
-	}
-	got := recentCheckpoints(infos, 20)
-	if len(got) != 20 {
-		t.Fatalf("len = %d, want 20", len(got))
-	}
-	if !got[0].CreatedAt.After(got[19].CreatedAt) {
-		t.Errorf("not sorted newest first: got[0]=%v got[19]=%v", got[0].CreatedAt, got[19].CreatedAt)
-	}
-	if got[0].CreatedAt != base.Add(24*time.Hour) {
-		t.Errorf("newest = %v, want %v", got[0].CreatedAt, base.Add(24*time.Hour))
 	}
 }
 

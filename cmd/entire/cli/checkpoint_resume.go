@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
-	"sort"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -19,12 +17,6 @@ import (
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 )
-
-// checkpointPrefixShape matches strings that could be a checkpoint ID or a
-// prefix of one (legacy 12-hex or 26-char Crockford ULID). Targets that can't
-// be checkpoint IDs (e.g. "feature/foo") skip the store lookup and its
-// remote-fetch fallback entirely.
-var checkpointPrefixShape = regexp.MustCompile(`^(?:[0-9a-f]{1,12}|[0-9ABCDEFGHJKMNPQRSTVWXYZ]{1,26})$`)
 
 var errNoResumeCommit = errors.New("no commit found")
 
@@ -130,7 +122,9 @@ func runCheckpointResume(ctx context.Context, cmd *cobra.Command, target, checkp
 // Returns the possibly-swapped lookup so the caller's deferred close stays
 // correct.
 func resumeAutoTarget(ctx context.Context, cmd *cobra.Command, lookup *explainCheckpointLookup, target string, force bool) (*explainCheckpointLookup, error) {
-	shapedLikeCheckpoint := checkpointPrefixShape.MatchString(target)
+	// Targets that can't be checkpoint IDs (e.g. "feature/foo") skip the
+	// store lookup and its remote-fetch fallback entirely.
+	shapedLikeCheckpoint := id.CouldBePrefix(target)
 	if shapedLikeCheckpoint {
 		if matches := matchCheckpointPrefix(lookup, target); len(matches) > 0 {
 			return lookup, resumeMatchedCheckpoints(ctx, cmd, lookup, target, matches, force)
@@ -232,7 +226,12 @@ const checkpointResumePickerLimit = 20
 func runCheckpointResumePicker(ctx context.Context, cmd *cobra.Command, lookup *explainCheckpointLookup, force bool) error {
 	w := cmd.OutOrStdout()
 
-	entries := recentCheckpoints(lookup.committed, checkpointResumePickerLimit)
+	// store.List (behind lookup.committed) already returns checkpoints
+	// newest-first; see checkpoint.sortCheckpointInfosByRecency.
+	entries := lookup.committed
+	if len(entries) > checkpointResumePickerLimit {
+		entries = entries[:checkpointResumePickerLimit]
+	}
 	if len(entries) == 0 {
 		fmt.Fprintln(w, "No committed checkpoints found.")
 		fmt.Fprintln(w, "Checkpoints are created when you commit during an agent session.")
@@ -256,18 +255,6 @@ func runCheckpointResumePicker(ctx context.Context, cmd *cobra.Command, lookup *
 	return resumeResolvedCheckpoint(ctx, cmd, lookup, selected, force)
 }
 
-func recentCheckpoints(committed []checkpoint.CheckpointInfo, limit int) []checkpoint.CheckpointInfo {
-	sorted := make([]checkpoint.CheckpointInfo, len(committed))
-	copy(sorted, committed)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		return sorted[i].CreatedAt.After(sorted[j].CreatedAt)
-	})
-	if len(sorted) > limit {
-		sorted = sorted[:limit]
-	}
-	return sorted
-}
-
 func printCheckpointResumeList(w io.Writer, entries []checkpoint.CheckpointInfo, branchIndex map[string]string) {
 	fmt.Fprintf(w, "Recent checkpoints (newest first, up to %d):\n\n", checkpointResumePickerLimit)
 	for _, e := range entries {
@@ -280,14 +267,12 @@ func printCheckpointResumeList(w io.Writer, entries []checkpoint.CheckpointInfo,
 	fmt.Fprintln(w, "\nResume one with: entire checkpoint resume <checkpoint-id>")
 }
 
-const checkpointPickerCancel = "cancel"
-
 func promptCheckpointSelection(ctx context.Context, entries []checkpoint.CheckpointInfo, branchIndex map[string]string) (id.CheckpointID, bool, error) {
 	options := make([]huh.Option[string], 0, len(entries)+1)
 	for _, e := range entries {
 		options = append(options, huh.NewOption(checkpointResumeOptionLabel(e, branchIndex), e.CheckpointID.String()))
 	}
-	options = append(options, huh.NewOption("Cancel", checkpointPickerCancel))
+	options = append(options, huh.NewOption("Cancel", resumePickerCancel))
 
 	var choice string
 	form := NewAccessibleForm(huh.NewGroup(
@@ -303,7 +288,7 @@ func promptCheckpointSelection(ctx context.Context, entries []checkpoint.Checkpo
 		}
 		return "", false, fmt.Errorf("failed to pick checkpoint: %w", err)
 	}
-	if choice == checkpointPickerCancel {
+	if choice == resumePickerCancel {
 		return "", false, nil
 	}
 	return id.CheckpointID(choice), true, nil

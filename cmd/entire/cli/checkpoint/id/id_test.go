@@ -309,3 +309,27 @@ func TestCheckpointID_Path(t *testing.T) {
 		})
 	}
 }
+
+func TestCouldBePrefix(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"abc123", true},
+		{"abc123def456", true},
+		{"01HZXW5J8KQ2M3N4P5Q6R7S8T9", true},
+		{"01HZXW", true},
+		{"HEAD", true},
+		{"", false},
+		{"abc123def4567", false},
+		{"feature/foo", false},
+		{"abcdefI", false},
+		{"01hzxw5j8kq2m3n4p5q6r7s8t9x", false},
+	}
+	for _, tt := range tests {
+		if got := CouldBePrefix(tt.input); got != tt.want {
+			t.Errorf("CouldBePrefix(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}

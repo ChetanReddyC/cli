@@ -44,6 +44,20 @@ const ulidPattern = `[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}`
 // a loose shape, not authoritative validation).
 const CheckpointPattern = `(?:` + Pattern + `|` + ulidPattern + `)`
 
+// prefixShapeRegex matches strings shaped like a checkpoint ID or a prefix of
+// one: 1-12 lowercase hex characters (legacy) or 1-26 Crockford base32
+// characters (ULID). Kept next to Pattern/ulidPattern so the alphabet and
+// width bounds cannot drift from the full-ID patterns above.
+var prefixShapeRegex = regexp.MustCompile(`^(?:[0-9a-f]{1,12}|[0-9ABCDEFGHJKMNPQRSTVWXYZ]{1,26})$`)
+
+// CouldBePrefix reports whether s is shaped like a checkpoint ID or a prefix
+// of one. It is a cheap gate for callers deciding whether a free-form target
+// could name a checkpoint before paying for a store lookup; it is not
+// validation (see Validate).
+func CouldBePrefix(s string) bool {
+	return prefixShapeRegex.MatchString(s)
+}
+
 // ShortIDLength is the standard length for truncating IDs for display purposes.
 // Used for tool use IDs, session IDs, and commit hashes in logs and messages.
 const ShortIDLength = 12
