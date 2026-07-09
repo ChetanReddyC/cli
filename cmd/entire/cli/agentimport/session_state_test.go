@@ -4,8 +4,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-git/go-git/v6"
 
@@ -40,122 +42,94 @@ func (f runFakeImporter) Discover(_, _ string, _ time.Time, _ []string) ([]Sessi
 }
 func (f runFakeImporter) SplitTurns(_ SessionFile, _ []byte) ([]Turn, error) { return f.turns, nil }
 
-func TestRun_WritesSessionStateForImportedSession(t *testing.T) {
-	// Not parallel: t.Chdir.
+// importRepo creates an isolated git repo and chdirs into it so session-state
+// resolution (git common dir from cwd) targets it. Callers must not use
+// t.Parallel (t.Chdir).
+func importRepo(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "f.txt", "x")
-	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "init")
-	tp := filepath.Join(dir, "session.jsonl")
-	if err := os.WriteFile(tp, []byte("{\"type\":\"user\"}\n"), 0o600); err != nil {
-		t.Fatalf("write transcript: %v", err)
-	}
 	t.Chdir(dir)
-
-	ctx := context.Background()
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatalf("open repo: %v", err)
-	}
-
-	sid := "44444444-4444-4444-4444-444444444444"
-	imp := runFakeImporter{
-		files: []SessionFile{{Path: tp, SessionID: sid}},
-		turns: []Turn{{UUID: "a", Prompt: "hello", CreatedAt: time.Now().Add(-time.Hour)}},
-	}
-	if _, err := Run(ctx, repo, imp, Options{RepoRoot: dir, Now: time.Now()}); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	store, err := session.NewStateStore(ctx)
-	if err != nil {
-		t.Fatalf("NewStateStore: %v", err)
-	}
-	st, err := store.Load(ctx, sid)
-	if err != nil || st == nil {
-		t.Fatalf("Load returned (%v, %v); want an imported state", st, err)
-	}
-	if st.Kind != session.KindImported {
-		t.Errorf("Kind = %q, want %q", st.Kind, session.KindImported)
-	}
+	return dir
 }
 
-func TestRun_DryRunWritesNoSessionState(t *testing.T) {
-	// Not parallel: t.Chdir.
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "f.txt", "x")
-	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "init")
-	tp := filepath.Join(dir, "session.jsonl")
-	if err := os.WriteFile(tp, []byte("{\"type\":\"user\"}\n"), 0o600); err != nil {
-		t.Fatalf("write transcript: %v", err)
-	}
-	t.Chdir(dir)
-
+// loadState reads a session state by id from the current repo's store.
+func loadState(t *testing.T, sid string) *session.State {
+	t.Helper()
 	ctx := context.Background()
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatalf("open repo: %v", err)
-	}
-
-	sid := "55555555-5555-5555-5555-555555555555"
-	imp := runFakeImporter{
-		files: []SessionFile{{Path: tp, SessionID: sid}},
-		turns: []Turn{{UUID: "a", Prompt: "hello", CreatedAt: time.Now().Add(-time.Hour)}},
-	}
-	if _, err := Run(ctx, repo, imp, Options{RepoRoot: dir, Now: time.Now(), DryRun: true}); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
 	store, err := session.NewStateStore(ctx)
 	if err != nil {
 		t.Fatalf("NewStateStore: %v", err)
 	}
 	st, err := store.Load(ctx, sid)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("Load %s: %v", sid, err)
 	}
-	if st != nil {
-		t.Fatalf("dry-run must not write a session state, got %+v", st)
-	}
+	return st
 }
 
-func totalImported(s *session.State) int {
-	if s.TokenUsage == nil {
-		return 0
+func TestRun_WritesSessionStateExceptDryRun(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		dryRun    bool
+		wantState bool
+	}{
+		{"writes imported session state", false, true},
+		{"dry-run writes nothing", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := importRepo(t)
+			testutil.WriteFile(t, dir, "f.txt", "x")
+			testutil.GitAdd(t, dir, "f.txt")
+			testutil.GitCommit(t, dir, "init")
+			transcript := filepath.Join(dir, "session.jsonl")
+			if err := os.WriteFile(transcript, []byte(`{"type":"user"}`+"\n"), 0o600); err != nil {
+				t.Fatalf("write transcript: %v", err)
+			}
+			repo, err := git.PlainOpen(dir)
+			if err != nil {
+				t.Fatalf("open repo: %v", err)
+			}
+
+			ctx := context.Background()
+			const sid = "claude-run-session"
+			imp := runFakeImporter{
+				files: []SessionFile{{Path: transcript, SessionID: sid}},
+				turns: []Turn{{UUID: "a", Prompt: "hello", CreatedAt: time.Now().Add(-time.Hour)}},
+			}
+			if _, err := Run(ctx, repo, imp, Options{RepoRoot: dir, Now: time.Now(), DryRun: tc.dryRun}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			st := loadState(t, sid)
+			switch {
+			case tc.wantState && (st == nil || st.Kind != session.KindImported):
+				t.Fatalf("want imported session state, got %+v", st)
+			case !tc.wantState && st != nil:
+				t.Fatalf("dry-run must not write session state, got %+v", st)
+			}
+		})
 	}
-	return s.TokenUsage.InputTokens + s.TokenUsage.OutputTokens +
-		s.TokenUsage.CacheCreationTokens + s.TokenUsage.CacheReadTokens
 }
 
 func TestWriteSessionState_CreatesListableImportedState(t *testing.T) {
-	// Not parallel: t.Chdir + git-cwd resolution.
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
-
+	importRepo(t)
 	ctx := context.Background()
-	t0 := time.Now().Add(-48 * time.Hour)
-	t1 := t0.Add(30 * time.Minute)
-	sf := SessionFile{Path: "/does/not/matter.jsonl", SessionID: "11111111-1111-1111-1111-111111111111"}
+	started := time.Now().Add(-48 * time.Hour)
+	ended := started.Add(30 * time.Minute)
+	sf := SessionFile{Path: "session.jsonl", SessionID: "claude-basic-session"}
 	turns := []Turn{
-		{UUID: "a", Prompt: "first prompt", Model: "claude-x", CreatedAt: t0, Tokens: &types.TokenUsage{InputTokens: 10, OutputTokens: 5}},
-		{UUID: "b", Prompt: "second prompt", Model: "claude-x", CreatedAt: t1, Tokens: &types.TokenUsage{InputTokens: 3, OutputTokens: 2}},
+		{UUID: "a", Prompt: "opening prompt", Model: "claude-x", CreatedAt: started, Tokens: &types.TokenUsage{InputTokens: 10, OutputTokens: 5}},
+		{UUID: "b", Prompt: "latest prompt", Model: "claude-x", CreatedAt: ended, Tokens: &types.TokenUsage{InputTokens: 3, OutputTokens: 2}},
 	}
 
 	if err := writeSessionState(ctx, fakeImporter{}, sf, turns); err != nil {
 		t.Fatalf("writeSessionState: %v", err)
 	}
 
-	store, err := session.NewStateStore(ctx)
-	if err != nil {
-		t.Fatalf("NewStateStore: %v", err)
-	}
-	st, err := store.Load(ctx, sf.SessionID)
-	if err != nil || st == nil {
-		t.Fatalf("Load returned (%v, %v); want a state", st, err)
+	st := loadState(t, sf.SessionID)
+	if st == nil {
+		t.Fatal("no session state written")
 	}
 	if st.Kind != session.KindImported {
 		t.Errorf("Kind = %q, want %q", st.Kind, session.KindImported)
@@ -166,66 +140,73 @@ func TestWriteSessionState_CreatesListableImportedState(t *testing.T) {
 	if st.AgentType != agent.AgentTypeClaudeCode {
 		t.Errorf("AgentType = %q, want %q", st.AgentType, agent.AgentTypeClaudeCode)
 	}
-	if !st.StartedAt.Equal(t0) {
-		t.Errorf("StartedAt = %v, want %v (earliest turn)", st.StartedAt, t0)
-	}
-	if st.EndedAt == nil || !st.EndedAt.Equal(t1) {
-		t.Errorf("EndedAt = %v, want %v (latest turn)", st.EndedAt, t1)
+	if !st.StartedAt.Equal(started) || st.EndedAt == nil || !st.EndedAt.Equal(ended) {
+		t.Errorf("timestamps = [%v, %v], want [%v, %v] (earliest/latest turn)", st.StartedAt, st.EndedAt, started, ended)
 	}
 	if st.StepCount != 2 {
 		t.Errorf("StepCount = %d, want 2", st.StepCount)
 	}
-	if got := totalImported(st); got != 20 {
+	if got := sessionTokenTotal(st); got != 20 {
 		t.Errorf("token total = %d, want 20", got)
 	}
-	if st.LastPrompt != "second prompt" {
+	if st.LastPrompt != "latest prompt" {
 		t.Errorf("LastPrompt = %q, want the most recent turn's prompt", st.LastPrompt)
 	}
 }
 
-func TestWriteSessionState_DoesNotClobberLiveSession(t *testing.T) {
-	// Not parallel: t.Chdir.
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
-
+func TestWriteSessionState_CollapsesAndTruncatesLastPrompt(t *testing.T) {
+	importRepo(t)
 	ctx := context.Background()
-	sid := "22222222-2222-2222-2222-222222222222"
+
+	longPrompt := "please   fix\n\n\tthe   login   bug " + strings.Repeat("x", 300)
+	sf := SessionFile{Path: "session.jsonl", SessionID: "claude-long-prompt-session"}
+	if err := writeSessionState(ctx, fakeImporter{}, sf, []Turn{{UUID: "a", Prompt: longPrompt, CreatedAt: time.Now()}}); err != nil {
+		t.Fatalf("writeSessionState: %v", err)
+	}
+
+	got := loadState(t, sf.SessionID).LastPrompt
+	if n := utf8.RuneCountInString(got); n > session.MaxLastPromptRunes {
+		t.Errorf("LastPrompt rune count = %d, want <= %d", n, session.MaxLastPromptRunes)
+	}
+	if strings.ContainsAny(got, "\n\t") || strings.Contains(got, "  ") {
+		t.Errorf("LastPrompt not whitespace-collapsed: %q", got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("LastPrompt should be truncated with ellipsis: %q", got)
+	}
+}
+
+func TestWriteSessionState_DoesNotClobberLiveSession(t *testing.T) {
+	importRepo(t)
+	ctx := context.Background()
+
+	const sid = "claude-live-session"
 	store, err := session.NewStateStore(ctx)
 	if err != nil {
 		t.Fatalf("NewStateStore: %v", err)
 	}
-	live := &session.State{SessionID: sid, Phase: session.PhaseActive, StartedAt: time.Now()}
-	if err := store.Save(ctx, live); err != nil {
+	if err := store.Save(ctx, &session.State{SessionID: sid, Phase: session.PhaseActive, StartedAt: time.Now()}); err != nil {
 		t.Fatalf("seed live state: %v", err)
 	}
 
-	sf := SessionFile{Path: "/x.jsonl", SessionID: sid}
-	turns := []Turn{{UUID: "a", Prompt: "p", CreatedAt: time.Now()}}
-	if err := writeSessionState(ctx, fakeImporter{}, sf, turns); err != nil {
+	sf := SessionFile{Path: "session.jsonl", SessionID: sid}
+	if err := writeSessionState(ctx, fakeImporter{}, sf, []Turn{{UUID: "a", Prompt: "p", CreatedAt: time.Now()}}); err != nil {
 		t.Fatalf("writeSessionState: %v", err)
 	}
 
-	got, err := store.Load(ctx, sid)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	got := loadState(t, sid)
 	if got == nil || got.Kind == session.KindImported || got.Phase != session.PhaseActive {
 		t.Fatalf("import clobbered a live session: %+v", got)
 	}
 }
 
-func TestImportedSessionSurvivesListing(t *testing.T) {
-	// Not parallel: t.Chdir.
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
-
+func TestWriteSessionState_SurvivesListingWhenOld(t *testing.T) {
+	importRepo(t)
 	ctx := context.Background()
+
 	old := time.Now().Add(-30 * 24 * time.Hour) // 30 days > 7-day stale threshold
-	sf := SessionFile{Path: "/x.jsonl", SessionID: "33333333-3333-3333-3333-333333333333"}
-	turns := []Turn{{UUID: "a", Prompt: "p", CreatedAt: old}}
-	if err := writeSessionState(ctx, fakeImporter{}, sf, turns); err != nil {
+	sf := SessionFile{Path: "session.jsonl", SessionID: "claude-old-session"}
+	if err := writeSessionState(ctx, fakeImporter{}, sf, []Turn{{UUID: "a", Prompt: "p", CreatedAt: old}}); err != nil {
 		t.Fatalf("writeSessionState: %v", err)
 	}
 
@@ -233,13 +214,18 @@ func TestImportedSessionSurvivesListing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSessionStates: %v", err)
 	}
-	found := false
 	for _, s := range states {
 		if s.SessionID == sf.SessionID {
-			found = true
+			return
 		}
 	}
-	if !found {
-		t.Fatal("imported session (30 days old) was not returned by ListSessionStates")
+	t.Fatal("30-day-old imported session was not returned by ListSessionStates")
+}
+
+func sessionTokenTotal(s *session.State) int {
+	if s.TokenUsage == nil {
+		return 0
 	}
+	return s.TokenUsage.InputTokens + s.TokenUsage.OutputTokens +
+		s.TokenUsage.CacheCreationTokens + s.TokenUsage.CacheReadTokens
 }
