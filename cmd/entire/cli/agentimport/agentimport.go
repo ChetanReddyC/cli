@@ -256,7 +256,7 @@ func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns 
 		LastInteractionTime: &endedAt,
 		StepCount:           len(turns),
 		TokenUsage:          tokens,
-		LastPrompt:          turns[0].Prompt,
+		LastPrompt:          turns[len(turns)-1].Prompt,
 		LastCheckpointID:    DeriveCheckpointID(sf.SessionID, turns[len(turns)-1].UUID),
 	}
 	if err := store.Save(ctx, state); err != nil {

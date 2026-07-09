@@ -178,8 +178,8 @@ func TestWriteSessionState_CreatesListableImportedState(t *testing.T) {
 	if got := totalImported(st); got != 20 {
 		t.Errorf("token total = %d, want 20", got)
 	}
-	if st.LastPrompt != "first prompt" {
-		t.Errorf("LastPrompt = %q, want the opening prompt", st.LastPrompt)
+	if st.LastPrompt != "second prompt" {
+		t.Errorf("LastPrompt = %q, want the most recent turn's prompt", st.LastPrompt)
 	}
 }
 
