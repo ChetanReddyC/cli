@@ -164,6 +164,10 @@ func filterResumableSessions(states []*strategy.SessionState) []*strategy.Sessio
 		if s.Phase == session.PhaseActive {
 			continue
 		}
+		// Imported sessions are read-only; they can't be resumed.
+		if s.Kind == session.KindImported {
+			continue
+		}
 		resumable = append(resumable, s)
 	}
 	sort.SliceStable(resumable, func(i, j int) bool {
