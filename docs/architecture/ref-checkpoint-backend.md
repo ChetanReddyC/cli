@@ -34,7 +34,7 @@ Backends register in `checkpoint/registry.go`. Each carries a `gitBacked` capabi
 
 Only a git-backed backend can be the primary, because the lifecycle paths above operate through the repo and its refs; a non-git-backed backend has no such ref to drive them. The two built-in backends — `git-branch` and `git-refs` — are **both** git-backed and are registered directly in the built-in registry map. The `Register()` entry point is for non-git-backed (mirror-only) backends and is used in practice only by test-only backends, so a production binary can never select an unregistered one.
 
-A **one-of-each-type** rule lets two distinct git-backed backends run in the same topology — specifically `git-refs` as primary with `git-branch` as a mirror, which is the safe rollout configuration (see [Rollout](#configuration-and-rollout)).
+A **one-of-each-type** rule permits two distinct git-backed backends in the same topology. Note, though, that the branch→refs migration deliberately does **not** run `git-branch` as a mirror of `git-refs`. Cross-format compatibility comes from read routing plus the version policy — every reader (CLI, entire.io, entire-api) reads refs first and falls back to the branch — not from dual-writing the same checkpoint into both backends (see [Migration and coexistence](#migration-and-coexistence)). Mirroring stays available as a general mechanism, primarily for non-git-backed targets (e.g. a filesystem store).
 
 ## Ref layout and sharding
 
@@ -144,8 +144,7 @@ Backend selection lives in the `checkpoints` block of settings (`settings/checkp
 ```json
 {
   "checkpoints": {
-    "primary": { "type": "git-refs" },
-    "mirrors": [ { "type": "git-branch" } ]
+    "primary": { "type": "git-refs" }
   }
 }
 ```
@@ -161,11 +160,12 @@ Backend selection lives in the `checkpoints` block of settings (`settings/checkp
 
 ### Rollout states
 
-| State | `primary` | `mirrors` | Behavior |
-|-------|-----------|-----------|----------|
-| **Default** | `git-branch` | — | Legacy behavior; v1 branch only |
-| **Parallel** | `git-refs` | `[git-branch]` | Reads are authoritative from refs (bugs surface immediately), while v1 is still written for downgrade safety |
-| **Refs-only** | `git-refs` | — | Refs are the sole store |
+The switch is a **primary flip**, not a dual-write phase. There is no "run both backends in parallel" step — see [Migration and coexistence](#migration-and-coexistence) for why read routing makes it unnecessary.
+
+| State | `primary` | Behavior |
+|-------|-----------|----------|
+| **Default** (today) | `git-branch` | Hex checkpoints on the `v1` branch; unchanged legacy behavior |
+| **Refs-only** | `git-refs` | New checkpoints are ULIDs written as per-checkpoint refs; pre-existing hex/`v1` checkpoints stay readable via the read-routing fallback |
 
 ## Checkpoint version and policy
 
@@ -180,7 +180,18 @@ Both are in the CLI's read **and** write sets. The repo-wide checkpoint policy (
 
 ## Migration and coexistence
 
-The read-routing rules above are what make a hex-on-branch repo and a ULID-in-refs repo the same repo: nothing needs to move for both formats to be readable. When checkpoints *are* migrated from the branch into refs, they are written under `RefName(hexID)` — i.e. **hex-named refs** — which is why a hex ID under a git-refs primary is looked up in refs first and only then falls back to the branch.
+The read-routing rules above are what make a hex-on-branch repo and a ULID-in-refs repo the same repo: nothing needs to move for both formats to be readable, so the branch→refs switch is a primary flip with **no dual-write step**.
+
+Concretely, flipping the primary to git-refs means new checkpoints are ULIDs stored as per-checkpoint refs, while every checkpoint already written to the `v1` branch stays exactly where it is and keeps resolving through the branch fallback. This works because **every reader routes the same way — refs first (for both ID formats), branch fallback for the legacy format** — not just the CLI but also entire.io and entire-api. So a repo can move to refs-only on the remote without keeping the `v1` branch alive for any reader's benefit.
+
+A mixed fleet is fine and needs no special handling:
+
+- A **modern** CLI (or the server) on git-refs primary reads everything: ULID/refs checkpoints directly, and older hex/`v1` checkpoints via the fallback.
+- An **old** CLI keeps writing hex checkpoints to the `v1` branch, and everyone modern still reads those. It simply **cannot read** newer ULID/refs checkpoints — which is the intended behavior: it fails closed, and the [version policy](#checkpoint-version-and-policy) (`checkpoint_min_version`) turns that into an explicit "upgrade" nudge rather than a silent half-working state.
+
+This is why running `git-branch` as a *mirror* of git-refs is **not** part of the migration: it would dual-write every checkpoint into both backends to keep `v1` populated, but no reader needs that — read routing already covers both formats, and the "old client can't read the new format" case is a feature, not something to paper over.
+
+When checkpoints *are* actively migrated from the branch into refs (a path that is tooling-only today, not an official flow), they are written under `RefName(hexID)` — i.e. **hex-named refs** — which is why a hex ID under a git-refs primary is looked up in refs first and only then falls back to the branch.
 
 ## Key files
 
@@ -202,5 +213,4 @@ The read-routing rules above are what make a hex-on-branch repo and a ULID-in-re
 
 - **Storage-level `List` is local-only** — no remote enumeration of checkpoint refs. `List` at the routing layer still unions the two local stores.
 - **OPF (OpenAI Privacy Filter) at pre-push is git-branch-only for now.** The per-ref push does not run OPF re-redaction; that is deferred until after the store lands. See `strategy/manual_commit_opf_rewrite.go` and [security-and-privacy.md](../security-and-privacy.md).
-- **v1 mirror push for full downgrade safety** is a rollout concern handled by running git-branch as a mirror (the Parallel state), not an automatic behavior of the refs store itself.
-- **No write-time ULID⇒refs boundary guard.** Nothing at write time enforces that a ULID checkpoint only condenses onto refs. A config flip or a missing `ENTIRE_CHECKPOINTS_PRIMARY` in an amending environment could, in principle, land a ULID on the v1 branch, which readers (routing ULIDs to refs) would then fail to find. The guard must be topology-role aware (git-branch legitimately receives ULIDs when it is a *mirror* of a git-refs primary), so it belongs with the routing layer, not in the branch store's write path.
+- **The "ULIDs never land on the branch" invariant is not yet enforced at write time.** A config flip or a missing `ENTIRE_CHECKPOINTS_PRIMARY` in an amending environment could, in principle, condense a ULID checkpoint onto the `v1` branch, which readers (routing ULIDs to refs only) would then fail to find. Because git-branch is *not* a mirror of git-refs (see [Migration and coexistence](#migration-and-coexistence)), a ULID reaching the git-branch write path is unambiguously a bug — so enforcing this is a straightforward reject at that write path, not a topology-role-aware check.
