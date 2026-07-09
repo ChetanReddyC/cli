@@ -15,7 +15,7 @@ import (
 // fakeImporter is the minimal Importer needed to exercise writeSessionState.
 type fakeImporter struct{}
 
-func (fakeImporter) Name() string               { return "claude-code" }
+func (fakeImporter) Name() string               { return string(agent.AgentNameClaudeCode) }
 func (fakeImporter) AgentType() types.AgentType { return agent.AgentTypeClaudeCode }
 func (fakeImporter) Discover(_, _ string, _ time.Time, _ []string) ([]SessionFile, error) {
 	return nil, nil
@@ -106,7 +106,10 @@ func TestWriteSessionState_DoesNotClobberLiveSession(t *testing.T) {
 		t.Fatalf("writeSessionState: %v", err)
 	}
 
-	got, _ := store.Load(ctx, sid)
+	got, err := store.Load(ctx, sid)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if got == nil || got.Kind == session.KindImported || got.Phase != session.PhaseActive {
 		t.Fatalf("import clobbered a live session: %+v", got)
 	}
