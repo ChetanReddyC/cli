@@ -22,7 +22,7 @@ This repo contains the CLI for Entire.
 
 ### Command Layout
 
-The visible CLI is organized around five noun groups plus a small set of
+The visible CLI is organized around a set of noun groups plus a small set of
 top-level verbs. The groups are the canonical home for each verb; legacy
 top-level shortcuts remain functional but hidden, and emit a deprecation hint
 pointing at the canonical group form. Newer experimental command families are
@@ -58,6 +58,13 @@ their canonical paths are still runnable.
   takes `--everywhere` (revoke every session on the active core, not just the
   current one) and `--all-contexts` (log out of every saved login)
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+- `org`: control-plane organization management — `create`, `list`, `get`, `delete`
+- `project`: control-plane project management — `create`, `list`, `get`, `delete`
+- `repo`: control-plane repository lifecycle — `create`, `list`, `get`, `delete`,
+  `clone`, plus the `mirror` and `visibility` subtrees. Git content operations
+  (log, diff, …) are intentionally out of scope.
+- `grant`: manage access grants and org membership — `org`, `project`, and `repo`
+  each support `add` / `list` / `remove`
 
 Experimental command families advertised through `entire labs`:
 
@@ -65,7 +72,17 @@ Experimental command families advertised through `entire labs`:
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
-`configure`, `agent-help`.
+`configure`, `agent-help`, `api`.
+
+`api` is an authenticated passthrough to Entire's HTTP APIs (gh-style): it
+attaches the right bearer and dials the right host so callers don't plumb auth
+themselves. `--to core` (default) hits the control plane; `--to cell` hits an
+entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
+jurisdiction's cell instead of the caller's home cell and implies `--to cell`
+(cell routing + identity-token exchange live in `auth.NewEntireAPICellClient`
+via `auth.CellTarget`). `{owner}`/`{repo}`/`{repo_id}` in the path are filled
+from the current repo's origin remote. It is visible in `entire help` and
+`entire agent-help`, so agents discover it as the supported way to call the API.
 
 `agent-help` renders machine-readable, agent-facing usage live from the Cobra
 command tree (so it always matches the installed binary): bare prints a
