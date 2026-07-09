@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -104,50 +105,52 @@ func runCheckpointResume(ctx context.Context, cmd *cobra.Command, target, checkp
 	case commitFlag != "":
 		return resumeCommitTarget(ctx, cmd, lookup, commitFlag, force)
 	case target != "":
-		var resumeErr error
-		lookup, resumeErr = resumeAutoTarget(ctx, cmd, lookup, target, force)
-		return resumeErr
+		return resumeAutoTarget(ctx, cmd, lookup, target, force)
 	default:
 		return runCheckpointResumePicker(ctx, cmd, lookup, force)
 	}
 }
 
-// resumeAutoTarget resolves a positional target: checkpoint-ID prefix first
-// (local, then remote fallback only if nothing local matches), then local
-// branch, then commit revision. Only local branches are auto-detected as
-// branch targets: branchCommit also resolves origin/<name> and, for a target
-// like "HEAD", would wrongly match refs/remotes/origin/HEAD, misrouting
-// revision syntax that must fall through to commit resolution instead
-// (--branch still handles remote-only branches explicitly via runResume).
-// Returns the possibly-swapped lookup so the caller's deferred close stays
-// correct.
-func resumeAutoTarget(ctx context.Context, cmd *cobra.Command, lookup *explainCheckpointLookup, target string, force bool) (*explainCheckpointLookup, error) {
+// resumeAutoTarget resolves a positional target, trying in order: local
+// checkpoint-ID prefix, local branch, remote checkpoint fallback, commit
+// revision. The local branch check runs before the remote checkpoint fetch so
+// branch names never pay a network round-trip. Only local branches are
+// auto-detected as branch targets: branchCommit also resolves origin/<name>
+// and, for a target like "HEAD", would wrongly match refs/remotes/origin/HEAD,
+// misrouting revision syntax that must fall through to commit resolution
+// instead (--branch still handles remote-only branches explicitly via
+// runResume). A lookup swapped in by the remote fallback is closed here; the
+// caller keeps ownership of the lookup it passed in.
+func resumeAutoTarget(ctx context.Context, cmd *cobra.Command, lookup *explainCheckpointLookup, target string, force bool) error {
 	// Targets that can't be checkpoint IDs (e.g. "feature/foo") skip the
 	// store lookup and its remote-fetch fallback entirely.
 	shapedLikeCheckpoint := id.CouldBePrefix(target)
 	if shapedLikeCheckpoint {
 		if matches := matchCheckpointPrefix(lookup, target); len(matches) > 0 {
-			return lookup, resumeMatchedCheckpoints(ctx, cmd, lookup, target, matches, force)
+			return resumeMatchedCheckpoints(ctx, cmd, lookup, target, matches, force)
 		}
 	}
 
 	if branchExistsLocally(lookup.repo, target) {
-		return lookup, runResume(ctx, cmd, target, force)
+		return runResume(ctx, cmd, target, force)
 	}
 
 	if shapedLikeCheckpoint {
-		var matches []id.CheckpointID
-		matches, lookup = matchCheckpointPrefixWithRemoteFallback(ctx, cmd.ErrOrStderr(), lookup, target)
+		matches, fresh := matchCheckpointPrefixWithRemoteFallback(ctx, cmd.ErrOrStderr(), lookup, target)
+		if fresh != lookup {
+			defer func() { _ = fresh.Close() }()
+			lookup = fresh
+		}
 		if len(matches) > 0 {
-			return lookup, resumeMatchedCheckpoints(ctx, cmd, lookup, target, matches, force)
+			return resumeMatchedCheckpoints(ctx, cmd, lookup, target, matches, force)
 		}
 	}
 
 	err := resumeCommitTarget(ctx, cmd, lookup, target, force)
 	if errors.Is(err, errNoResumeCommit) {
-		return lookup, fmt.Errorf("nothing matched %q as a checkpoint ID, branch, or commit\nHint: run 'entire checkpoint list' to see available checkpoints", target)
+		return fmt.Errorf("nothing matched %q as a checkpoint ID, branch, or commit\nHint: run 'entire checkpoint list' to see available checkpoints", target)
 	}
-	return lookup, err
+	return err
 }
 
 func resumeMatchedCheckpoints(ctx context.Context, cmd *cobra.Command, lookup *explainCheckpointLookup, prefix string, matches []id.CheckpointID, force bool) error {
@@ -175,6 +178,9 @@ func resumeCommitTarget(ctx context.Context, cmd *cobra.Command, lookup *explain
 			renderAmbiguousPrefixFailure(errW, ref, "commits", buildAmbiguousCommitMatches(lookup.repo, ambiguousMatches))
 			return NewSilentError(err)
 		}
+		logging.Debug(ctx, "checkpoint resume: commit resolution failed",
+			slog.String("ref", ref),
+			slog.String("error", err.Error()))
 		return fmt.Errorf("%w matching %q", errNoResumeCommit, ref)
 	}
 	commit, err := lookup.repo.CommitObject(hash)

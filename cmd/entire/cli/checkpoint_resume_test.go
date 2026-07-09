@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -74,7 +75,7 @@ func TestCheckpointResumeAuto_ChecksCheckpointBeforeBranch(t *testing.T) {
 		t.Errorf("output should mention restore-only fallback, got: %s", out.String())
 	}
 	branch, err := GetCurrentBranch(context.Background())
-	if err != nil || branch != "master" {
+	if err != nil || branch != masterBaseBranch {
 		t.Errorf("HEAD moved: branch = %q err = %v, want master", branch, err)
 	}
 }
@@ -157,10 +158,10 @@ func TestCheckpointResumeAuto_HeadResolvesAsCommit(t *testing.T) {
 
 	// Seed origin/HEAD like a real clone has: auto-detection must not classify
 	// "HEAD" as a branch via branchCommit's origin/<name> fallback.
-	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewRemoteReferenceName("origin", "master"), head)); err != nil {
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewRemoteReferenceName("origin", masterBaseBranch), head)); err != nil {
 		t.Fatalf("create origin/master: %v", err)
 	}
-	if err := repo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.NewRemoteHEADReferenceName("origin"), plumbing.NewRemoteReferenceName("origin", "master"))); err != nil {
+	if err := repo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.NewRemoteHEADReferenceName("origin"), plumbing.NewRemoteReferenceName("origin", masterBaseBranch))); err != nil {
 		t.Fatalf("create origin/HEAD: %v", err)
 	}
 
@@ -171,6 +172,98 @@ func TestCheckpointResumeAuto_HeadResolvesAsCommit(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "session-head") {
 		t.Errorf("output should mention restored session ID, got: %s", out.String())
+	}
+}
+
+// --checkpoint forces checkpoint interpretation, including prefix matching.
+// The checkpoint's commit is on no branch, so the restore-only fallback runs.
+func TestCheckpointResumeFlag_Checkpoint(t *testing.T) {
+	repo, _, _ := setupCheckpointResumeRepo(t)
+	cpID := id.MustCheckpointID("abc123def456")
+	writeCommittedResumeCheckpoint(t, repo, cpID, "session-flag", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	cmd, out := newCheckpointResumeTestCmd(t)
+	cmd.SetArgs([]string{"--checkpoint", "abc123"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v\noutput: %s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "session-flag") {
+		t.Errorf("output should mention restored session ID, got: %s", out.String())
+	}
+}
+
+func TestCheckpointResumeFlag_AmbiguousCheckpointPrefix(t *testing.T) {
+	repo, _, _ := setupCheckpointResumeRepo(t)
+	cpA := id.MustCheckpointID("abc123def456")
+	cpB := id.MustCheckpointID("abc123aaa111")
+	writeCommittedResumeCheckpoint(t, repo, cpA, "session-a", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	writeCommittedResumeCheckpoint(t, repo, cpB, "session-b", time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC))
+
+	cmd, out := newCheckpointResumeTestCmd(t)
+	cmd.SetArgs([]string{"--checkpoint", "abc123"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("Execute() = nil, want error for ambiguous checkpoint prefix")
+	}
+	output := out.String()
+	if !strings.Contains(output, "Ambiguous checkpoint prefix") {
+		t.Errorf("output should render the ambiguity failure, got: %s", output)
+	}
+	for _, cpID := range []id.CheckpointID{cpA, cpB} {
+		if !strings.Contains(output, cpID.String()) {
+			t.Errorf("output should list match %s, got: %s", cpID, output)
+		}
+	}
+}
+
+// When the checkpoint's branch is checked out in another worktree, resume must
+// point there instead of switching branches or restoring logs.
+func TestCheckpointResume_WorktreeClash(t *testing.T) {
+	repo, w, baseHead := setupCheckpointResumeRepo(t)
+	cpID := id.MustCheckpointID("abc123def456")
+	writeCommittedResumeCheckpoint(t, repo, cpID, "session-clash", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	// Put the trailer commit on a branch that is NOT master: commit on master,
+	// point "feat" at it, then move master back to the base commit.
+	trailerCommit, err := w.Commit("work\n\nEntire-Checkpoint: "+cpID.String(), &git.CommitOptions{
+		AllowEmptyCommits: true,
+		Author:            &object.Signature{Name: "Test User", Email: "test@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("feat"), trailerCommit)); err != nil {
+		t.Fatalf("create feat: %v", err)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName(masterBaseBranch), baseHead)); err != nil {
+		t.Fatalf("reset master: %v", err)
+	}
+
+	clashDir := filepath.Join(t.TempDir(), "clash-wt")
+	worktreeAdd := exec.CommandContext(context.Background(), "git", "worktree", "add", clashDir, "feat")
+	if addOut, err := worktreeAdd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, addOut)
+	}
+	t.Cleanup(func() {
+		if err := exec.CommandContext(context.Background(), "git", "worktree", "remove", clashDir, "--force").Run(); err != nil {
+			t.Logf("git worktree remove: %v", err)
+		}
+	})
+
+	cmd, out := newCheckpointResumeTestCmd(t)
+	cmd.SetArgs([]string{cpID.String()})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v\noutput: %s", err, out.String())
+	}
+	output := out.String()
+	if !strings.Contains(output, "already checked out") {
+		t.Errorf("output should mention the worktree clash, got: %s", output)
+	}
+	if !strings.Contains(output, "entire checkpoint resume "+cpID.String()) {
+		t.Errorf("output should include the checkpoint-specific resume command, got: %s", output)
+	}
+	branch, err := GetCurrentBranch(context.Background())
+	if err != nil || branch != masterBaseBranch {
+		t.Errorf("HEAD moved: branch = %q err = %v, want master", branch, err)
 	}
 }
 

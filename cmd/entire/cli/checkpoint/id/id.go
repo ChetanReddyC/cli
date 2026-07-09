@@ -46,8 +46,8 @@ const CheckpointPattern = `(?:` + Pattern + `|` + ulidPattern + `)`
 
 // prefixShapeRegex matches strings shaped like a checkpoint ID or a prefix of
 // one: 1-12 lowercase hex characters (legacy) or 1-26 Crockford base32
-// characters (ULID). Kept next to Pattern/ulidPattern so the alphabet and
-// width bounds cannot drift from the full-ID patterns above.
+// characters (ULID). Kept next to Pattern/ulidPattern as a reminder to update
+// them together when the ID formats change.
 var prefixShapeRegex = regexp.MustCompile(`^(?:[0-9a-f]{1,12}|[0-9ABCDEFGHJKMNPQRSTVWXYZ]{1,26})$`)
 
 // CouldBePrefix reports whether s is shaped like a checkpoint ID or a prefix
