@@ -35,8 +35,8 @@ func newCheckpointResumeCmd() *cobra.Command {
 
 The target can be a checkpoint ID (or prefix), a commit SHA (or ref) whose
 message carries an Entire-Checkpoint trailer, or a branch name. Auto-detection
-tries checkpoint ID first, then local branch, then commit; use the flags to
-force one interpretation.
+tries checkpoint ID first, then local branch, then commit, then remote branch
+(offering to fetch it); use the flags to force one interpretation.
 
 For a checkpoint or commit target, the branch containing the checkpoint's
 commit is checked out at its current tip before the session logs are
@@ -113,14 +113,14 @@ func runCheckpointResume(ctx context.Context, cmd *cobra.Command, target, checkp
 
 // resumeAutoTarget resolves a positional target, trying in order: local
 // checkpoint-ID prefix, local branch, remote checkpoint fallback, commit
-// revision. The local branch check runs before the remote checkpoint fetch so
-// branch names never pay a network round-trip. Only local branches are
-// auto-detected as branch targets: branchCommit also resolves origin/<name>
-// and, for a target like "HEAD", would wrongly match refs/remotes/origin/HEAD,
-// misrouting revision syntax that must fall through to commit resolution
-// instead (--branch still handles remote-only branches explicitly via
-// runResume). A lookup swapped in by the remote fallback is closed here; the
-// caller keeps ownership of the lookup it passed in.
+// revision, and finally remote branch — resuming another machine's work
+// usually means the branch isn't local yet, so runResume offers to fetch it.
+// The local branch check runs before the remote checkpoint fetch so branch
+// names never pay a network round-trip, and remote branches are tried only
+// after commit resolution so revision syntax like HEAD (which would match
+// refs/remotes/origin/HEAD) cannot be misrouted into the branch flow. A
+// lookup swapped in by the remote fallback is closed here; the caller keeps
+// ownership of the lookup it passed in.
 func resumeAutoTarget(ctx context.Context, cmd *cobra.Command, lookup *explainCheckpointLookup, target string, force bool) error {
 	// Targets that can't be checkpoint IDs (e.g. "feature/foo") skip the
 	// store lookup and its remote-fetch fallback entirely.
@@ -148,6 +148,9 @@ func resumeAutoTarget(ctx context.Context, cmd *cobra.Command, lookup *explainCh
 
 	err := resumeCommitTarget(ctx, cmd, lookup, target, force)
 	if errors.Is(err, errNoResumeCommit) {
+		if remoteExists, remoteErr := BranchExistsOnRemote(ctx, target); remoteErr == nil && remoteExists {
+			return runResume(ctx, cmd, target, force)
+		}
 		return fmt.Errorf("nothing matched %q as a checkpoint ID, branch, or commit\nHint: run 'entire checkpoint list' to see available checkpoints", target)
 	}
 	return err

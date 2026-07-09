@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
@@ -265,6 +266,38 @@ func TestCheckpointResume_WorktreeClash(t *testing.T) {
 	branch, err := GetCurrentBranch(context.Background())
 	if err != nil || branch != masterBaseBranch {
 		t.Errorf("HEAD moved: branch = %q err = %v, want master", branch, err)
+	}
+}
+
+// A target that is neither a checkpoint, local branch, nor commit must fall
+// back to remote branches: resuming another machine's work usually means the
+// branch only exists on origin. --force skips the fetch confirmation.
+func TestCheckpointResumeAuto_RemoteBranchFallback(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	repo, _, _ := setupCheckpointResumeRepo(t)
+
+	originDir := t.TempDir()
+	testutil.InitRepo(t, originDir)
+	testutil.WriteFile(t, originDir, "f.txt", "remote content")
+	testutil.GitAdd(t, originDir, "f.txt")
+	testutil.GitCommit(t, originDir, "remote work")
+	branchCmd := exec.CommandContext(context.Background(), "git", "branch", "remote-feature")
+	branchCmd.Dir = originDir
+	if out, err := branchCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git branch: %v\n%s", err, out)
+	}
+	if _, err := repo.CreateRemote(&config.RemoteConfig{Name: "origin", URLs: []string{originDir}}); err != nil {
+		t.Fatalf("create remote: %v", err)
+	}
+
+	cmd, out := newCheckpointResumeTestCmd(t)
+	cmd.SetArgs([]string{"remote-feature", "--force"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v\noutput: %s", err, out.String())
+	}
+	branch, err := GetCurrentBranch(context.Background())
+	if err != nil || branch != "remote-feature" {
+		t.Errorf("current branch = %q err = %v, want remote-feature", branch, err)
 	}
 }
 
