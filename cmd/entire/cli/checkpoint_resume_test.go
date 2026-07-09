@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/spf13/cobra"
 
 	"github.com/go-git/go-git/v6"
@@ -140,11 +141,10 @@ func TestCheckpointResumeCommit_ResolvesTrailer(t *testing.T) {
 	}
 }
 
-// "HEAD" is shaped like a checkpoint prefix (Crockford ULID alphabet) and
-// happens to also resolve via branchCommit's origin/<name> fallback (as
+// "HEAD" resolves via branchCommit's origin/<name> fallback (as
 // refs/remotes/origin/HEAD) in the old auto-detection order. With no local
-// branch or checkpoint named "HEAD", it must fall through to commit
-// resolution and resume the checkpoint referenced by HEAD's trailer.
+// branch named "HEAD", it must fall through to commit resolution and resume
+// the checkpoint referenced by HEAD's trailer.
 func TestCheckpointResumeAuto_HeadResolvesAsCommit(t *testing.T) {
 	repo, w, head := setupCheckpointResumeRepo(t)
 	cpID := id.MustCheckpointID("abc123def456")
@@ -218,6 +218,7 @@ func TestCheckpointResumeFlag_AmbiguousCheckpointPrefix(t *testing.T) {
 // When the checkpoint's branch is checked out in another worktree, resume must
 // point there instead of switching branches or restoring logs.
 func TestCheckpointResume_WorktreeClash(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	repo, w, baseHead := setupCheckpointResumeRepo(t)
 	cpID := id.MustCheckpointID("abc123def456")
 	writeCommittedResumeCheckpoint(t, repo, cpID, "session-clash", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
