@@ -348,6 +348,12 @@ func ListOrphanedSessionStates(ctx context.Context) ([]CleanupItem, error) {
 			continue
 		}
 
+		// Imported sessions are read-only and commit-less by design — no shadow
+		// branch is ever expected. Never offer them for cleanup.
+		if state.Kind == session.KindImported {
+			continue
+		}
+
 		// Check if session has checkpoints in committed checkpoint storage
 		hasCheckpoints := sessionsWithCheckpoints[state.SessionID]
 
