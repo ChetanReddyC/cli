@@ -12,17 +12,15 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// newRepoCmd is the hidden `entire repo` command group: control-plane
+// newRepoCmd is the `entire repo` command group: control-plane
 // repository lifecycle (create, list within a project, get, delete), the
 // `mirror` and `visibility` subtrees, plus the `clone` convenience that
 // resolves a mirror and shells out to `git clone`. Other git content
-// operations (log, diff, …) remain intentionally out of scope here. Surfaced
-// via `entire labs`.
+// operations (log, diff, …) remain intentionally out of scope here.
 func newRepoCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "repo",
-		Short:  "Manage Entire repositories",
-		Hidden: true,
+		Use:   "repo",
+		Short: "Manage Entire repositories",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newRepoCreateCmd())
@@ -149,11 +147,12 @@ func newRepoCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&projectID, "project", "", "Owning project (name or ULID) (required)")
 	cmd.Flags().StringVar(&clusterHost, "cluster-host", "", "Public host of the cluster to pin the repo to (defaults to the jurisdiction default)")
 	markRequired(cmd, "project")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newRepoListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list <project>",
 		Short: "List repositories in a project",
 		Long:  "List repositories in a project, addressed by name or ULID.",
@@ -178,6 +177,8 @@ func newRepoListCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 func newRepoGetCmd() *cobra.Command {
@@ -197,6 +198,7 @@ func newRepoGetCmd() *cobra.Command {
 		},
 	}
 	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -285,6 +287,7 @@ func newRepoVisibilityGetCmd() *cobra.Command {
 		},
 	}
 	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -318,6 +321,7 @@ func newRepoVisibilitySetCmd() *cobra.Command {
 		},
 	}
 	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
 	return cmd
 }
 
