@@ -140,16 +140,21 @@ func yesNo(b bool) string {
 	return "no"
 }
 
-// clusterHostBySlug maps each cluster's slug to the bare host of its public URL,
-// the host `git clone` needs in the entire:// clone URL. /repos placements carry
-// only the cluster slug, so the clone URL for a mirror row is reconstructed by
-// joining the placement slug against the cluster catalog (GET /clusters).
+// clusterHostBySlug maps each cluster's slug to the validated bare host of its
+// public URL, the host `git clone` needs in the entire:// clone URL. /repos
+// placements carry only the cluster slug, so the clone URL for a mirror row is
+// reconstructed by joining the placement slug against the cluster catalog (GET
+// /clusters). A cluster whose publicUrl fails validation is omitted from the
+// map, so its mirrors render with a dashed clone URL rather than a spoofable
+// one — this guards the host@evil.com catalog-poisoning trick, where a naive
+// url.Parse would demote the real host to userinfo and yield host=evil.com
+// (see hostFromPublicURL / validateClusterHost).
 func clusterHostBySlug(clusters []coreapi.Cluster) map[string]string {
 	m := make(map[string]string, len(clusters))
 	for _, cl := range clusters {
-		host := cl.PublicUrl
-		if u, err := url.Parse(cl.PublicUrl); err == nil && u.Host != "" {
-			host = u.Host
+		host, err := hostFromPublicURL(cl.PublicUrl)
+		if err != nil {
+			continue // unsafe/malformed publicUrl: omit → dashed clone URL, never a spoofed one
 		}
 		m[cl.Slug] = host
 	}
@@ -164,7 +169,10 @@ func clusterHostBySlug(clusters []coreapi.Cluster) map[string]string {
 // (native Entire) placements are skipped: `repo mirror list` is the mirror
 // directory, and a native repo has no GitHub mirror clone URL to advertise
 // (fabricating an entire://.../gh/... URL for one would point nowhere). A repo
-// with only native placements therefore doesn't appear here.
+// with only native placements therefore doesn't appear here. A mirror whose
+// cluster host can't be resolved (unknown slug, or a publicUrl that failed
+// validation) still lists, but with an empty clone URL that renders as "-" —
+// the row is kept, no unsafe URL is printed.
 func buildRepoDir(entries []coreapi.RepoIndexEntry, hostBySlug map[string]string) []repoDirRow {
 	var rows []repoDirRow
 	for _, e := range entries {

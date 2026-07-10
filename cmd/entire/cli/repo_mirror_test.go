@@ -419,9 +419,9 @@ func serveRepoList(t *testing.T, repos []coreapi.RepoIndexEntry, clusters []core
 }
 
 // serveRepoListClustersError is serveRepoList with a failing /clusters catalog:
-// /repos answers normally but the slug→host lookup 500s, so `list` must degrade
-// (warn, omit clone URLs) instead of aborting. Points the active-context client
-// seam at the server for the test.
+// /repos answers normally but the slug→host lookup 500s, so `list` must fail
+// instead of returning mirror rows with silently empty clone URLs. Points the
+// active-context client seam at the server for the test.
 func serveRepoListClustersError(t *testing.T, repos []coreapi.RepoIndexEntry) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -550,6 +550,39 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		})
 		err := runMirrorListErr(t)
 		require.Error(t, err)
+	})
+
+	t.Run("a malformed catalog publicUrl lists the mirror with a dashed clone URL, never a spoofed one", func(t *testing.T) {
+		// The `bad` cluster's publicUrl smuggles evil.com via userinfo; it must
+		// never produce a clone URL. The mirror still lists, just with "-".
+		serveRepoList(t, []coreapi.RepoIndexEntry{
+			onboardedEntry("acme/web", "private", "us"),
+			onboardedEntry("acme/bad", "private", "bad"),
+		}, []coreapi.Cluster{
+			{Slug: "us", PublicUrl: "https://aws-us-east-2.entire.io"},
+			{Slug: "bad", PublicUrl: "https://aws-us-east-2.entire.io@evil.com"},
+		}, false)
+
+		stdout, stderr, err := execMirrorList(t)
+		require.NoError(t, err)
+		require.Contains(t, stdout, "entire://aws-us-east-2.entire.io/gh/acme/web")
+		require.Contains(t, stdout, "acme/bad", "the mirror is still listed")
+		require.NotContains(t, stdout, "evil.com", "a spoofed host must never reach a clone URL")
+		require.NotContains(t, stderr, "omitted", "no warning: the row is kept with a dashed clone URL")
+	})
+
+	t.Run("a malformed catalog publicUrl keeps the mirror in --json with no clone URL", func(t *testing.T) {
+		serveRepoList(t, []coreapi.RepoIndexEntry{
+			onboardedEntry("acme/bad", "private", "us"),
+		}, []coreapi.Cluster{
+			{Slug: "us", PublicUrl: "https://aws-us-east-2.entire.io@evil.com"},
+		}, false)
+
+		stdout, _, err := execMirrorList(t, "--json")
+		require.NoError(t, err)
+		require.Contains(t, stdout, `"repo": "acme/bad"`, "the mirror still lists")
+		require.NotContains(t, stdout, "cloneUrl", "empty clone URL is omitted from JSON")
+		require.NotContains(t, stdout, "evil.com")
 	})
 }
 
@@ -1154,10 +1187,18 @@ func TestClusterHostBySlug(t *testing.T) {
 	t.Parallel()
 	m := clusterHostBySlug([]coreapi.Cluster{
 		{Slug: "us", PublicUrl: "https://aws-us-east-2.entire.io"},
-		{Slug: "bare", PublicUrl: "eu-west-1.entire.io"}, // no scheme: kept verbatim
+		{Slug: "bare", PublicUrl: "eu-west-1.entire.io"}, // no scheme: normalized safely
 	})
 	require.Equal(t, "aws-us-east-2.entire.io", m["us"])
 	require.Equal(t, "eu-west-1.entire.io", m["bare"])
+
+	// A publicUrl that smuggles a host via userinfo is rejected and omitted, so
+	// its slug has no entry — a mirror there renders a dashed clone URL, never
+	// a spoofed one.
+	m = clusterHostBySlug([]coreapi.Cluster{
+		{Slug: "us", PublicUrl: "https://aws-us-east-2.entire.io@evil.com"},
+	})
+	require.Empty(t, m)
 }
 
 func TestBuildRepoDir(t *testing.T) {
@@ -1188,13 +1229,14 @@ func TestBuildRepoDir(t *testing.T) {
 		require.Equal(t, "entire://eu-west-1.entire.io/gh/acme/web", rows[1].CloneURL)
 	})
 
-	t.Run("unknown cluster slug leaves the clone URL empty", func(t *testing.T) {
+	t.Run("unknown cluster slug keeps the row with an empty clone URL", func(t *testing.T) {
 		t.Parallel()
 		rows := buildRepoDir([]coreapi.RepoIndexEntry{
 			onboardedEntry("a/b", "public", "ghost"),
 		}, map[string]string{})
 		require.Len(t, rows, 1)
-		require.Empty(t, rows[0].CloneURL)
+		require.Empty(t, rows[0].CloneURL, "unresolved host → dashed clone URL, row kept")
+		require.Equal(t, "ghost", rows[0].Cluster)
 	})
 
 	t.Run("native (non-mirror) placements are dropped, not given fabricated clone URLs", func(t *testing.T) {
