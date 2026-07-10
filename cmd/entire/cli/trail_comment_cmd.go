@@ -42,14 +42,15 @@ func trailSubcommandSelector(cmd *cobra.Command) string {
 // branch / --branch) and invokes fn inside an authenticated API context. It
 // centralizes the resolution boilerplate shared by the comment and attachment
 // subtrees.
-func withNumberedTrail(cmd *cobra.Command, w io.Writer, fn func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error) error {
+func withNumberedTrail(cmd *cobra.Command, fn func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error) error {
 	repoOverride := trailRepoFlag(cmd)
 	selector := trailSubcommandSelector(cmd)
 	branch := trailBranchFlag(cmd)
 	if selector != "" && strings.TrimSpace(branch) != "" {
 		return errors.New("pass --trail or --branch, not both")
 	}
-	return runAuthenticatedTrailAPI(cmd.Context(), w, trailInsecureHTTP(cmd), repoOverride, func(ctx context.Context, client *api.Client) error {
+	// Auth/not-logged-in messages go to stderr; w carries command output only.
+	return runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), repoOverride, func(ctx context.Context, client *api.Client) error {
 		found, forge, owner, repo, err := resolveNumberedTrail(ctx, client, repoOverride, selector, branch)
 		if err != nil {
 			return err
@@ -90,7 +91,7 @@ func newTrailCommentListCmd() *cobra.Command {
 		Short: "List discussion threads on a trail",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return withNumberedTrail(cmd, cmd.OutOrStdout(), func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
+			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
 				resp, err := client.Get(ctx, trailThreadsPath(forge, owner, repo, found.Number))
 				if err != nil {
 					return fmt.Errorf("failed to list threads: %w", err)
@@ -155,7 +156,7 @@ func newTrailCommentShowCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			threadID := args[0]
-			return withNumberedTrail(cmd, cmd.OutOrStdout(), func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
+			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
 				resp, err := client.Get(ctx, trailThreadPath(forge, owner, repo, found.Number, threadID))
 				if err != nil {
 					return fmt.Errorf("failed to fetch thread: %w", err)
@@ -212,7 +213,7 @@ func newTrailCommentAddCmd() *cobra.Command {
 			if strings.TrimSpace(body) == "" {
 				return errors.New("--body is required")
 			}
-			return withNumberedTrail(cmd, cmd.OutOrStdout(), func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
+			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
 				req := api.TrailThreadCreateRequest{Title: strings.TrimSpace(title), Body: body}
 				resp, err := client.Post(ctx, trailThreadsPath(forge, owner, repo, found.Number), req)
 				if err != nil {
@@ -250,7 +251,7 @@ func newTrailCommentReplyCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			threadID := args[0]
-			return withNumberedTrail(cmd, cmd.OutOrStdout(), func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
+			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
 				if strings.TrimSpace(body) == "" {
 					return errors.New("--body is required")
 				}
@@ -284,7 +285,7 @@ func newTrailCommentEditCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			threadID, messageID := args[0], args[1]
-			return withNumberedTrail(cmd, cmd.OutOrStdout(), func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
+			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
 				if strings.TrimSpace(body) == "" {
 					return errors.New("--body is required")
 				}
@@ -337,7 +338,7 @@ func newTrailCommentDeleteCmd() *cobra.Command {
 					return nil
 				}
 			}
-			return withNumberedTrail(cmd, cmd.OutOrStdout(), func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
+			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
 				resp, err := client.Delete(ctx, trailThreadMessagePath(forge, owner, repo, found.Number, threadID, messageID))
 				if err != nil {
 					return fmt.Errorf("failed to delete message: %w", err)
@@ -362,7 +363,7 @@ func newTrailCommentResolveCmd(use string, resolved bool, shortVerb, successVerb
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			threadID := args[0]
-			return withNumberedTrail(cmd, cmd.OutOrStdout(), func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
+			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
 				req := api.TrailThreadUpdateRequest{Resolved: &resolved}
 				resp, err := client.Patch(ctx, trailThreadPath(forge, owner, repo, found.Number, threadID), req)
 				if err != nil {

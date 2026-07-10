@@ -1225,7 +1225,11 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 		path := trailNumberPath(forge, owner, repoName, found.Number)
 
 		// The server rejects body + metadata in one PATCH, so send them as
-		// separate requests when both are present.
+		// separate requests when both are present. These two calls are not
+		// atomic: if the metadata PATCH lands and the body PATCH then fails, the
+		// metadata change persists. Report that partial state explicitly so the
+		// caller knows the metadata already applied and only the body needs a
+		// retry, rather than assuming nothing changed.
 		meta, hasMeta, bodyReq := splitTrailUpdate(updateReq)
 		if hasMeta {
 			if err := sendTrailPatch(ctx, client, path, meta); err != nil {
@@ -1234,6 +1238,9 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 		}
 		if bodyReq != nil {
 			if err := sendTrailPatch(ctx, client, path, *bodyReq); err != nil {
+				if hasMeta {
+					return fmt.Errorf("trail metadata was updated, but the body update failed (the metadata change already applied; retry only the --body change): %w", err)
+				}
 				return err
 			}
 		}
@@ -1327,10 +1334,12 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 		req.Body = &inputs.Body
 	}
 	if inputs.TypeChanged {
-		req.Type = &inputs.Type
+		typ := strings.TrimSpace(inputs.Type)
+		req.Type = &typ
 	}
 	if inputs.PriorityChanged {
-		req.Priority = &inputs.Priority
+		priority := strings.TrimSpace(inputs.Priority)
+		req.Priority = &priority
 	}
 	// Replace-set fields: compute the full new list from the current trail.
 	if len(inputs.LabelAdd) > 0 || len(inputs.LabelRemove) > 0 {
@@ -1350,10 +1359,12 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 }
 
 // splitTrailUpdate separates a full update into a metadata request and an
-// optional body request. The server rejects a body update combined with any
-// metadata field except labels (trails.ts:4384), so the two must be sent as
-// separate PATCH calls. hasMeta reports whether the metadata request has any
-// field set.
+// optional body request. The server rejects a body update combined with
+// status/title/assignees/reviewers/type/priority (trails.ts:4384), so the two
+// must be sent as separate PATCH calls. Labels are exempt server-side, but for
+// simplicity they travel in the metadata request too; the only cost is one
+// extra PATCH in the rare body+labels-only update, which is harmless. hasMeta
+// reports whether the metadata request has any field set.
 func splitTrailUpdate(full api.TrailUpdateRequest) (meta api.TrailUpdateRequest, hasMeta bool, bodyReq *api.TrailUpdateRequest) {
 	if full.Body != nil {
 		b := *full.Body

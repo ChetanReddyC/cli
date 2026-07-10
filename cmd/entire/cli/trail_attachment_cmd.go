@@ -61,7 +61,7 @@ func newTrailAttachmentListCmd() *cobra.Command {
 		Short: "List attachments on a trail",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return withNumberedTrail(cmd, cmd.OutOrStdout(), func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
+			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
 				resp, err := client.Get(ctx, trailAttachmentsPath(forge, owner, repo, found.Number))
 				if err != nil {
 					return fmt.Errorf("failed to list attachments: %w", err)
@@ -114,7 +114,7 @@ func newTrailAttachmentAddCmd() *cobra.Command {
 				return err
 			}
 			filename := filepath.Base(path)
-			return withNumberedTrail(cmd, cmd.OutOrStdout(), func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
+			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
 				uploadPath := trailAttachmentsPath(forge, owner, repo, found.Number) +
 					"?filename=" + url.QueryEscape(filename) + "&kind=image"
 				headers := http.Header{"Content-Type": []string{contentType}}
@@ -164,7 +164,7 @@ func newTrailAttachmentRemoveCmd() *cobra.Command {
 			if !force {
 				return errors.New("refusing to delete attachment without confirmation; pass --force")
 			}
-			return withNumberedTrail(cmd, cmd.OutOrStdout(), func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
+			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error {
 				resp, err := client.Delete(ctx, trailAttachmentPath(forge, owner, repo, found.Number, id))
 				if err != nil {
 					return fmt.Errorf("failed to delete attachment: %w", err)

@@ -35,7 +35,8 @@ deployment to have trail-watch configured (otherwise the server returns 503).`,
 				return errors.New("pass a trail selector or --branch, not both")
 			}
 			repoOverride := trailRepoFlag(cmd)
-			return runAuthenticatedTrailAPI(cmd.Context(), cmd.OutOrStdout(), trailInsecureHTTP(cmd), repoOverride, func(ctx context.Context, client *api.Client) error {
+			// Auth/not-logged-in messages go to stderr; stdout carries output only.
+			return runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), repoOverride, func(ctx context.Context, client *api.Client) error {
 				forge, owner, repoName, err := resolveTrailRepoOrRemote(ctx, repoOverride)
 				if err != nil {
 					return err

@@ -1581,3 +1581,19 @@ func TestNewTrailCreateRequestCarriesMetadata(t *testing.T) {
 		t.Fatalf("assignees = %v, want [alice]", req.Assignees)
 	}
 }
+
+func TestBuildTrailUpdateRequestTrimsTypeAndPriority(t *testing.T) {
+	t.Parallel()
+	req := buildTrailUpdateRequest(&api.TrailResource{}, trailUpdateInputs{
+		Type:            "  bug  ",
+		TypeChanged:     true,
+		Priority:        "  high ",
+		PriorityChanged: true,
+	})
+	if req.Type == nil || *req.Type != string(trail.TypeBug) {
+		t.Fatalf("Type on wire = %v, want trimmed bug", req.Type)
+	}
+	if req.Priority == nil || *req.Priority != string(trail.PriorityHigh) {
+		t.Fatalf("Priority on wire = %v, want trimmed high", req.Priority)
+	}
+}
