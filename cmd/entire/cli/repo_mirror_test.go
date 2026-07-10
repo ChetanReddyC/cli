@@ -418,6 +418,35 @@ func serveRepoList(t *testing.T, repos []coreapi.RepoIndexEntry, clusters []core
 	return recCh
 }
 
+// serveRepoListClustersError is serveRepoList with a failing /clusters catalog:
+// /repos answers normally but the slug→host lookup 500s, so `list` must degrade
+// (warn, omit clone URLs) instead of aborting. Points the active-context client
+// seam at the server for the test.
+func serveRepoListClustersError(t *testing.T, repos []coreapi.RepoIndexEntry) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/clusters":
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/api/v1/repos":
+			w.Header().Set("Content-Type", "application/json")
+			if err := printJSON(w, &coreapi.ListReposOutputBody{Repos: repos}); err != nil {
+				t.Errorf("encode repos response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := activeCoreClient
+	activeCoreClient = func(context.Context) (*coreapi.Client, error) {
+		return coreapi.NewWithBearer(srv.URL, "tok")
+	}
+	t.Cleanup(func() { activeCoreClient = prev })
+}
+
 // execMirrorList runs `list` under a parent that carries the control-plane
 // persistent flags (--insecure-http-auth); --json is a local flag on the list
 // command itself, so tests can exercise --json and the client-side --name/--sort
@@ -510,6 +539,21 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		stdout, stderr := runMirrorList(t, "--json")
 		require.NotContains(t, stderr, "truncated")
 		require.Contains(t, stdout, `"cloneUrl"`, "--json emits the flat directory rows")
+	})
+
+	t.Run("a catalog fetch failure degrades gracefully: repos still list, clone URLs omitted", func(t *testing.T) {
+		// The clone URL is synthesised from the cluster catalog, but the
+		// directory (candidates especially) is useful without it, so a /clusters
+		// failure must warn and carry on rather than abort the whole listing.
+		serveRepoListClustersError(t, []coreapi.RepoIndexEntry{
+			onboardedEntry("acme/web", "private", "us"),
+			candidateEntry("acme/mkt", "public", coreapi.RepoCandidateAccessAdmin, true),
+		})
+		stdout, stderr := runMirrorList(t)
+		require.Contains(t, stderr, "cluster catalog")
+		require.Contains(t, stdout, "acme/web", "the mirror still lists without a clone URL")
+		require.Contains(t, stdout, "acme/mkt", "candidates are unaffected by a catalog failure")
+		require.NotContains(t, stdout, "entire://", "no clone URL can be synthesised without the catalog")
 	})
 }
 

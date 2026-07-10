@@ -589,11 +589,20 @@ func newRepoMirrorListCmd() *cobra.Command {
 				// synthesized clone URL (see mirrorCloneURL): if /repos ever
 				// returns the clone URL (or host) on a placement, drop both this
 				// ListClusters call and the synthesis.
-				clusters, err := c.ListClusters(ctx)
-				if err != nil {
-					return nil, err
+				//
+				// Degrade gracefully rather than fail the whole listing: the
+				// directory (candidates especially) is useful without clone URLs,
+				// and buildRepoDir already leaves the CLONE URL empty ("-") for any
+				// slug it can't resolve. So on a catalog error warn on stderr and
+				// carry on with an empty map instead of aborting.
+				hostBySlug := map[string]string{}
+				if clusters, err := c.ListClusters(ctx); err != nil {
+					if !jsonRequested(cmd) {
+						fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not fetch the cluster catalog (%v); clone URLs are omitted.\n", err)
+					}
+				} else {
+					hostBySlug = clusterHostBySlug(clusters.Clusters)
 				}
-				hostBySlug := clusterHostBySlug(clusters.Clusters)
 				out, err := c.ListRepos(ctx, coreapi.ListReposParams{Scope: coreapi.NewOptListReposScope(coreapi.ListReposScopeAll)})
 				if err != nil {
 					return nil, err
