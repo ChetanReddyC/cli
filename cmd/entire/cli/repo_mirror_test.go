@@ -541,19 +541,15 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		require.Contains(t, stdout, `"cloneUrl"`, "--json emits the flat directory rows")
 	})
 
-	t.Run("a catalog fetch failure degrades gracefully: repos still list, clone URLs omitted", func(t *testing.T) {
-		// The clone URL is synthesised from the cluster catalog, but the
-		// directory (candidates especially) is useful without it, so a /clusters
-		// failure must warn and carry on rather than abort the whole listing.
+	t.Run("a catalog fetch failure fails the whole command", func(t *testing.T) {
+		// The clone URL is the payload of a mirror listing and --json suppresses
+		// the banner, so a catalog error must abort rather than hand back rows
+		// with silently empty clone URLs.
 		serveRepoListClustersError(t, []coreapi.RepoIndexEntry{
 			onboardedEntry("acme/web", "private", "us"),
-			candidateEntry("acme/mkt", "public", coreapi.RepoCandidateAccessAdmin, true),
 		})
-		stdout, stderr := runMirrorList(t)
-		require.Contains(t, stderr, "cluster catalog")
-		require.Contains(t, stdout, "acme/web", "the mirror still lists without a clone URL")
-		require.Contains(t, stdout, "acme/mkt", "candidates are unaffected by a catalog failure")
-		require.NotContains(t, stdout, "entire://", "no clone URL can be synthesised without the catalog")
+		err := runMirrorListErr(t)
+		require.Error(t, err)
 	})
 }
 
