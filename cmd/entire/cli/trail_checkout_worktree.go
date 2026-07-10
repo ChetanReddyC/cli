@@ -68,7 +68,7 @@ func gitCommonDirForTrailWorktree(ctx context.Context) (string, error) {
 	return filepath.Clean(gitDir), nil
 }
 
-func trailWorktreeBaseRoot(ctx context.Context) (string, error) { //nolint:unused // used by later tasks
+func trailWorktreeBaseRoot(ctx context.Context) (string, error) {
 	gitDir, err := gitCommonDirForTrailWorktree(ctx)
 	if err != nil {
 		return "", err
@@ -134,7 +134,7 @@ func ensureTrailWorktreeIgnoreRule(ctx context.Context, w io.Writer, root string
 	return nil
 }
 
-func appendIgnoreRule(path, rule string) error { //nolint:unparam // rule parameter defined in brief signature
+func appendIgnoreRule(path, rule string) error { //nolint:unparam // rule is constant today; the writer serves both ignore files
 	content, err := os.ReadFile(path) //nolint:gosec // path derived from repo root / git common dir
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to read %s: %w", path, err)
@@ -295,6 +295,142 @@ func copyIncludedFile(src, dst string) error {
 	if err := os.Chmod(dst, srcInfo.Mode().Perm()); err != nil {
 		_ = os.Remove(dst)
 		return err //nolint:wrapcheck // chmod error is sufficient for caller context
+	}
+	return nil
+}
+
+// checkoutTrailWorktree checks branch out into a managed worktree under
+// <main-root>/.entire/worktrees instead of switching the current checkout.
+// The final output line is a shell-safe `cd '<path>'` hint.
+func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string, force bool, trailNumber int) error { //nolint:unparam // force is false in every caller today; it forwards to ensureTrailWorktreeBranchAvailable and ensureTrailWorktreeIgnoreRule, which branch on it
+	if err := ValidateBranchName(ctx, branch); err != nil {
+		return err
+	}
+
+	if existing, ok, err := findWorktreeForBranch(ctx, branch); err != nil {
+		return err
+	} else if ok {
+		fmt.Fprintf(w, "Worktree already exists at %s\n", existing)
+		fmt.Fprintf(w, "cd %s\n", shellQuotePath(existing))
+		return nil
+	}
+
+	proceed, err := ensureTrailWorktreeBranchAvailable(ctx, w, branch, force)
+	if err != nil {
+		return err
+	}
+	if !proceed {
+		fmt.Fprintf(w, "Checkout of branch %s cancelled.\n", branch)
+		return nil
+	}
+
+	root, err := trailWorktreeBaseRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to find main worktree root: %w", err)
+	}
+	if err := ensureTrailWorktreeIgnoreRule(ctx, w, root, force); err != nil {
+		return err
+	}
+
+	worktreePath := defaultTrailWorktreePath(root, branch, trailNumber)
+	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o750); err != nil {
+		return fmt.Errorf("failed to create worktree parent: %w", err)
+	}
+	add := exec.CommandContext(ctx, "git", "worktree", "add", worktreePath, branch)
+	add.Dir = root
+	if output, err := add.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to create worktree: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	if err := copyWorktreeIncludeFiles(ctx, errW, root, worktreePath); err != nil {
+		fmt.Fprintf(errW, "warning: could not copy %s files: %v\n", worktreeIncludeFile, err)
+	}
+
+	fmt.Fprintf(w, "Worktree ready at %s\n", worktreePath)
+	fmt.Fprintf(w, "cd %s\n", shellQuotePath(worktreePath))
+	return nil
+}
+
+// findWorktreeForBranch reports whether branch is already checked out in a
+// worktree managed under <main-root>/.entire/worktrees.
+func findWorktreeForBranch(ctx context.Context, branch string) (string, bool, error) {
+	root, err := trailWorktreeBaseRoot(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to find main worktree root: %w", err)
+	}
+	managedRoot := normalizeWorktreePath(filepath.Join(root, filepath.FromSlash(trailWorktreesRelDir)))
+
+	cmd := exec.CommandContext(ctx, "git", "worktree", "list", "--porcelain")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", false, fmt.Errorf("failed to list worktrees: %w", err)
+	}
+	var currentPath string
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			currentPath = ""
+			continue
+		}
+		if strings.HasPrefix(line, "worktree ") {
+			currentPath = strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
+			continue
+		}
+		if strings.TrimPrefix(line, "branch ") == "refs/heads/"+branch && currentPath != "" {
+			normalized := normalizeWorktreePath(currentPath)
+			if normalized == managedRoot || strings.HasPrefix(normalized, managedRoot+string(filepath.Separator)) {
+				return currentPath, true, nil
+			}
+		}
+	}
+	return "", false, nil
+}
+
+// ensureTrailWorktreeBranchAvailable makes sure branch exists locally,
+// fetching it from origin when it only exists there. It returns false when
+// the user declined the fetch prompt. --force and non-interactive runs fetch
+// without prompting.
+func ensureTrailWorktreeBranchAvailable(ctx context.Context, w io.Writer, branch string, force bool) (bool, error) {
+	exists, err := BranchExistsLocally(ctx, branch)
+	if err != nil {
+		return false, fmt.Errorf("failed to check branch: %w", err)
+	}
+	if exists {
+		return true, nil
+	}
+
+	remoteExists, err := BranchExistsOnRemote(ctx, branch)
+	if err != nil {
+		return false, fmt.Errorf("failed to check remote branch: %w", err)
+	}
+	if !remoteExists {
+		return false, fmt.Errorf("branch %q not found locally or on origin", branch)
+	}
+	if !force && interactive.CanPromptInteractively() {
+		shouldFetch, err := promptFetchFromRemote(branch)
+		if err != nil {
+			return false, err
+		}
+		if !shouldFetch {
+			return false, nil
+		}
+	}
+
+	fmt.Fprintf(w, "Fetching branch '%s' from origin...\n", branch)
+	if err := fetchTrailWorktreeBranch(ctx, branch); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// fetchTrailWorktreeBranch fetches origin's branch directly into refs/heads
+// so `git worktree add` can check it out without touching the current
+// checkout.
+func fetchTrailWorktreeBranch(ctx context.Context, branch string) error {
+	refSpec := fmt.Sprintf("refs/heads/%s:refs/heads/%s", branch, branch)
+	cmd := exec.CommandContext(ctx, "git", "fetch", "origin", refSpec)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to fetch branch from origin: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
 }
