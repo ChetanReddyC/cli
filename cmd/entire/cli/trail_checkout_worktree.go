@@ -54,7 +54,7 @@ func gitCommonDirForTrailWorktree(ctx context.Context) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to get git common dir: %w", err)
+		return "", gitOutputError("failed to get git common dir", err)
 	}
 	gitDir := strings.TrimSpace(string(output))
 	if !filepath.IsAbs(gitDir) {
@@ -78,9 +78,11 @@ func trailWorktreeBaseRoot(ctx context.Context) (string, error) {
 	return filepath.Dir(gitDir), nil
 }
 
-// ensureTrailWorktreeIgnoreRule makes sure .entire/worktrees/ is git-ignored.
-// Already ignored (any mechanism) → silent no-op. Otherwise the rule is
-// appended to the repo-root .gitignore; committing it is the user's choice.
+// ensureTrailWorktreeIgnoreRule appends the .entire/worktrees/ rule to an
+// existing repo-root .gitignore when the directory isn't already ignored.
+// Already ignored, or no .gitignore at all → silent no-op: the CLI doesn't
+// impose ignore policy on a repo that hasn't opted into one, and committing
+// the appended rule stays the user's choice.
 func ensureTrailWorktreeIgnoreRule(ctx context.Context, w io.Writer, root string) error {
 	check := exec.CommandContext(ctx, "git", "check-ignore", "-q", trailWorktreesRelDir+"/")
 	check.Dir = root
@@ -419,6 +421,17 @@ func validateTrailWorktreeReuse(ctx context.Context, path, branch string) error 
 	return nil
 }
 
+// gitOutputError formats a failed git invocation, including git's stderr
+// (captured by cmd.Output in ExitError.Stderr) when it carries a diagnostic —
+// the bare error is usually just "exit status 128".
+func gitOutputError(action string, err error) error {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(bytes.TrimSpace(exitErr.Stderr)) > 0 {
+		return fmt.Errorf("%s: %s: %w", action, bytes.TrimSpace(exitErr.Stderr), err)
+	}
+	return fmt.Errorf("%s: %w", action, err)
+}
+
 func staleTrailWorktreeError(branch, path string) error {
 	return fmt.Errorf("branch %q is registered to a missing worktree at %s; run 'git worktree prune' to clear it", branch, path)
 }
@@ -437,11 +450,7 @@ func findWorktreeForBranch(ctx context.Context, branch, root string) (match trai
 	cmd.Dir = root
 	output, err := cmd.Output()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && len(bytes.TrimSpace(exitErr.Stderr)) > 0 {
-			return trailWorktreeMatch{}, false, fmt.Errorf("failed to list worktrees: %s: %w", bytes.TrimSpace(exitErr.Stderr), err)
-		}
-		return trailWorktreeMatch{}, false, fmt.Errorf("failed to list worktrees: %w", err)
+		return trailWorktreeMatch{}, false, gitOutputError("failed to list worktrees", err)
 	}
 	// Empty currentRoot: match any worktree, including the current checkout.
 	path, found := parseWorktreeForBranch(string(output), branch, "")

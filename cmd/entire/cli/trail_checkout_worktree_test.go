@@ -643,6 +643,16 @@ func TestFindWorktreeForBranch_SurfacesGitError(t *testing.T) {
 	}
 }
 
+func TestGitCommonDirForTrailWorktree_SurfacesGitError(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	t.Chdir(t.TempDir())
+
+	_, err := gitCommonDirForTrailWorktree(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not a git repository") {
+		t.Fatalf("error = %v, want git stderr in message", err)
+	}
+}
+
 func TestCheckoutTrailWorktree_RejectsInvalidBranch(t *testing.T) {
 	t.Parallel()
 
