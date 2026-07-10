@@ -61,10 +61,18 @@ func TestSanitizeTrailWorktreeName(t *testing.T) {
 func TestAppendIgnoreRule(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "sub", "exclude")
-	for range 2 {
-		if err := appendIgnoreRule(path); err != nil {
+	path := filepath.Join(t.TempDir(), "gitignore")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	for i := range 2 {
+		appended, err := appendIgnoreRule(path)
+		if err != nil {
 			t.Fatalf("appendIgnoreRule: %v", err)
+		}
+		wantAppended := i == 0
+		if appended != wantAppended {
+			t.Fatalf("appendIgnoreRule appended = %v, want %v", appended, wantAppended)
 		}
 	}
 	content, err := os.ReadFile(path)
@@ -86,8 +94,12 @@ func TestAppendIgnoreRule_AddsNewlineBeforeRule(t *testing.T) {
 	if err := os.WriteFile(path, []byte("node_modules"), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if err := appendIgnoreRule(path); err != nil {
+	appended, err := appendIgnoreRule(path)
+	if err != nil {
 		t.Fatalf("appendIgnoreRule: %v", err)
+	}
+	if !appended {
+		t.Fatal("appendIgnoreRule appended = false, want true")
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -98,11 +110,28 @@ func TestAppendIgnoreRule_AddsNewlineBeforeRule(t *testing.T) {
 	}
 }
 
+func TestAppendIgnoreRule_MissingFileNoop(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "gitignore")
+	appended, err := appendIgnoreRule(path)
+	if err != nil {
+		t.Fatalf("appendIgnoreRule: %v", err)
+	}
+	if appended {
+		t.Fatal("appendIgnoreRule appended = true, want false")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("gitignore stat = %v, want not exist", err)
+	}
+}
+
 func TestEnsureTrailWorktreeIgnoreRule_AppendsGitignore(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, ".gitignore", "node_modules\n")
 	t.Chdir(repoDir)
 
 	var out bytes.Buffer
@@ -118,6 +147,25 @@ func TestEnsureTrailWorktreeIgnoreRule_AppendsGitignore(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), ".gitignore") {
 		t.Fatalf("output = %q, want notice mentioning .gitignore", out.String())
+	}
+}
+
+func TestEnsureTrailWorktreeIgnoreRule_MissingGitignoreNoop(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	t.Chdir(repoDir)
+
+	var out bytes.Buffer
+	if err := ensureTrailWorktreeIgnoreRule(context.Background(), &out, repoDir); err != nil {
+		t.Fatalf("ensureTrailWorktreeIgnoreRule: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("output = %q, want silence", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, ".gitignore")); !os.IsNotExist(err) {
+		t.Fatalf(".gitignore stat = %v, want not exist", err)
 	}
 }
 
@@ -507,6 +555,33 @@ func TestCheckoutTrailWorktree_StaleManagedWorktreeErrorsWithPruneHint(t *testin
 	}
 	if _, statErr := os.Stat(worktreePath); !os.IsNotExist(statErr) {
 		t.Fatalf("worktree path stat = %v, want not recreated", statErr)
+	}
+}
+
+func TestCheckoutTrailWorktree_StaleManagedWorktreeDirectoryErrorsWithPruneHint(t *testing.T) {
+	repoDir := newTrailWorktreeTestRepo(t)
+	runGit(t, repoDir, "branch", "feature/stale-dir")
+	t.Chdir(repoDir)
+
+	var out1, err1 bytes.Buffer
+	if err := checkoutTrailWorktree(context.Background(), &out1, &err1, "feature/stale-dir", false, 4); err != nil {
+		t.Fatalf("first checkout: %v; stderr: %s", err, err1.String())
+	}
+	worktreePath := filepath.Join(repoDir, ".entire", "worktrees", "trail-4-feature-stale-dir")
+	if err := os.RemoveAll(worktreePath); err != nil {
+		t.Fatalf("remove worktree dir: %v", err)
+	}
+	if err := os.MkdirAll(worktreePath, 0o750); err != nil {
+		t.Fatalf("replace worktree dir: %v", err)
+	}
+
+	var out2, err2 bytes.Buffer
+	err := checkoutTrailWorktree(context.Background(), &out2, &err2, "feature/stale-dir", false, 4)
+	if err == nil || !strings.Contains(err.Error(), "git worktree prune") {
+		t.Fatalf("error = %v, want prune hint", err)
+	}
+	if strings.Contains(out2.String(), "Worktree already exists") {
+		t.Fatalf("output = %q, want no reuse message", out2.String())
 	}
 }
 

@@ -93,26 +93,29 @@ func ensureTrailWorktreeIgnoreRule(ctx context.Context, w io.Writer, root string
 		return fmt.Errorf("failed to check ignore status of %s: %w", trailWorktreesRelDir, err)
 	}
 
-	if err := appendIgnoreRule(filepath.Join(root, ".gitignore")); err != nil {
+	appended, err := appendIgnoreRule(filepath.Join(root, ".gitignore"))
+	if err != nil {
 		return err
 	}
-	fmt.Fprintln(w, "Added .entire/worktrees/ to .gitignore — commit it to keep the rule.")
+	if appended {
+		fmt.Fprintln(w, "Added .entire/worktrees/ to .gitignore — commit it to keep the rule.")
+	}
 	return nil
 }
 
-func appendIgnoreRule(path string) error {
+func appendIgnoreRule(path string) (bool, error) {
 	const rule = trailWorktreesRelDir + "/"
 	content, err := os.ReadFile(path) //nolint:gosec // path derived from repo root / git common dir
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("failed to read %s: %w", path, err)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to read %s: %w", path, err)
 	}
 	for line := range strings.SplitSeq(string(content), "\n") {
 		if strings.TrimSpace(line) == rule {
-			return nil
+			return false, nil
 		}
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return fmt.Errorf("failed to create %s: %w", filepath.Dir(path), err)
 	}
 	prefix := ""
 	if len(content) > 0 && !strings.HasSuffix(string(content), "\n") {
@@ -120,9 +123,9 @@ func appendIgnoreRule(path string) error {
 	}
 	updated := string(content) + prefix + rule + "\n"
 	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil { //nolint:gosec // path derived from repo root / git common dir
-		return fmt.Errorf("failed to update %s: %w", path, err)
+		return false, fmt.Errorf("failed to update %s: %w", path, err)
 	}
-	return nil
+	return true, nil
 }
 
 const worktreeIncludeFile = ".worktreeinclude"
@@ -316,14 +319,14 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 			if !match.managed {
 				return fmt.Errorf("branch %q is already checked out at %s", branch, match.path)
 			}
+			if err := validateTrailWorktreeReuse(ctx, match.path, branch); err != nil {
+				return staleTrailWorktreeError(branch, match.path)
+			}
 			fmt.Fprintf(w, "Worktree already exists at %s\n", match.path)
 			fmt.Fprintf(w, "cd %s\n", shellQuote(match.path))
 			return nil
 		case errors.Is(statErr, fs.ErrNotExist):
-			// The worktree directory was deleted by hand, leaving a stale git
-			// registration that blocks a fresh `git worktree add` for the
-			// branch. Cleaning it up is the user's call.
-			return fmt.Errorf("branch %q is registered to a missing worktree at %s; run 'git worktree prune' to clear it", branch, match.path)
+			return staleTrailWorktreeError(branch, match.path)
 		default:
 			return fmt.Errorf("failed to check worktree at %s: %w", match.path, statErr)
 		}
@@ -359,6 +362,49 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 	fmt.Fprintf(w, "Worktree ready at %s\n", worktreePath)
 	fmt.Fprintf(w, "cd %s\n", shellQuote(worktreePath))
 	return nil
+}
+
+func validateTrailWorktreeReuse(ctx context.Context, path, branch string) error {
+	expectedCommonDir, err := gitCommonDirForTrailWorktree(ctx)
+	if err != nil {
+		return err
+	}
+
+	showTop := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--show-toplevel")
+	output, err := showTop.Output()
+	if err != nil {
+		return err //nolint:wrapcheck // caller reports a prune hint, not this low-level probe
+	}
+	if normalizeWorktreePath(strings.TrimSpace(string(output))) != normalizeWorktreePath(path) {
+		return errors.New("path is not a worktree root")
+	}
+
+	showCommon := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--git-common-dir")
+	output, err = showCommon.Output()
+	if err != nil {
+		return err //nolint:wrapcheck // caller reports a prune hint, not this low-level probe
+	}
+	commonDir := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(path, commonDir)
+	}
+	if normalizeWorktreePath(commonDir) != normalizeWorktreePath(expectedCommonDir) {
+		return errors.New("path belongs to another repository")
+	}
+
+	showBranch := exec.CommandContext(ctx, "git", "-C", path, "branch", "--show-current")
+	output, err = showBranch.Output()
+	if err != nil {
+		return err //nolint:wrapcheck // caller reports a prune hint, not this low-level probe
+	}
+	if strings.TrimSpace(string(output)) != branch {
+		return fmt.Errorf("worktree is not on branch %q", branch)
+	}
+	return nil
+}
+
+func staleTrailWorktreeError(branch, path string) error {
+	return fmt.Errorf("branch %q is registered to a missing worktree at %s; run 'git worktree prune' to clear it", branch, path)
 }
 
 // trailWorktreeMatch describes an existing worktree that has a branch checked
