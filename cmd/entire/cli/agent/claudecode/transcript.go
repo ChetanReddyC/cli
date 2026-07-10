@@ -395,8 +395,15 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	// Calculate token usage from parsed transcript
 	mainUsage := CalculateTokenUsage(parsed)
 
-	// Extract spawned agent IDs from the same parsed transcript
-	agentIDs := ExtractSpawnedAgentIDs(parsed)
+	// Extract spawned agent IDs from the FULL transcript (startLine=0), not the
+	// sliced portion. A subagent spawned before this checkpoint's startLine can
+	// keep writing to its transcript in later turns; scanning only the slice
+	// would miss it and undercount subagent token usage (#329).
+	fullParsed, err := transcript.ParseFromBytes(transcriptData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
+	}
+	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
 
 	// Calculate subagent token usage (skip when subagentsDir is empty to avoid reading from cwd)
 	if len(agentIDs) > 0 && subagentsDir != "" {
@@ -449,8 +456,15 @@ func (c *ClaudeCodeAgent) ExtractAllModifiedFiles(transcriptData []byte, startLi
 		}
 	}
 
-	// Find spawned subagents and collect their modified files (skip when subagentsDir is empty to avoid reading from cwd)
-	agentIDs := ExtractSpawnedAgentIDs(parsed)
+	// Find spawned subagents from the FULL transcript (startLine=0): a subagent
+	// spawned before this checkpoint's startLine may keep modifying files in
+	// later turns, and scanning only the slice would miss it (#329). Main-agent
+	// file extraction above stays scoped to the slice.
+	fullParsed, err := transcript.ParseFromBytes(transcriptData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
+	}
+	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
 	if subagentsDir == "" {
 		return files, nil
 	}

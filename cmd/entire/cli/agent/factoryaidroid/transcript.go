@@ -366,7 +366,14 @@ func CalculateTotalTokenUsageFromBytes(data []byte, startLine int, subagentsDir 
 
 	mainUsage := CalculateTokenUsage(parsed)
 
-	agentIDs := ExtractSpawnedAgentIDs(parsed)
+	// Extract spawned agent IDs from the FULL transcript (startLine=0): a
+	// subagent spawned before this checkpoint's startLine can keep writing to
+	// its transcript, so scanning only the slice would undercount it (#329).
+	fullParsed, _, err := ParseDroidTranscriptFromBytes(data, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
+	}
+	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
 	if len(agentIDs) > 0 && subagentsDir != "" {
 		subagentUsage := &agent.TokenUsage{}
 		for agentID := range agentIDs {
@@ -409,7 +416,15 @@ func ExtractAllModifiedFilesFromBytes(data []byte, startLine int, subagentsDir s
 		fileSet[f] = true
 	}
 
-	agentIDs := ExtractSpawnedAgentIDs(parsed)
+	// Find spawned subagents from the FULL transcript (startLine=0): a subagent
+	// spawned before this checkpoint's startLine may keep modifying files in
+	// later turns, and scanning only the slice would miss it (#329). Main-agent
+	// file extraction above stays scoped to the slice.
+	fullParsed, _, err := ParseDroidTranscriptFromBytes(data, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
+	}
+	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
 	if subagentsDir == "" {
 		return files, nil
 	}
