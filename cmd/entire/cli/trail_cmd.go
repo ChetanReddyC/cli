@@ -89,6 +89,9 @@ func newTrailCmd() *cobra.Command {
 	cmd.AddCommand(newTrailApproveCmd())
 	cmd.AddCommand(newTrailRequestChangesCmd())
 	cmd.AddCommand(newTrailApprovalsCmd())
+	cmd.AddCommand(newTrailCommentCmd())
+	cmd.AddCommand(newTrailAttachmentCmd())
+	cmd.AddCommand(newTrailWatchersCmd())
 
 	return cmd
 }
