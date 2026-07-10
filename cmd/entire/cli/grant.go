@@ -42,9 +42,9 @@ func validateGrantRole(role string) error {
 	}
 }
 
-// newGrantCmd is the hidden `entire grant` command group: manage access
+// newGrantCmd is the `entire grant` command group: manage access
 // grants and org membership on the Entire control plane. Org, project, and
-// repo each support add / list / remove. Surfaced via `entire labs`.
+// repo each support add / list / remove.
 //
 // Grantees are addressed by a provider-qualified handle (e.g. github:alice),
 // which the CLI resolves to the provider account behind the scenes. `remove`
@@ -52,9 +52,8 @@ func validateGrantRole(role string) error {
 // repo) are addressed by name or ULID.
 func newGrantCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "grant",
-		Short:  "Manage Entire access grants and org membership",
-		Hidden: true,
+		Use:   "grant",
+		Short: "Manage Entire access grants and org membership",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newGrantOrgCmd())
@@ -69,7 +68,7 @@ func newGrantCmd() *cobra.Command {
 // saying where the grant comes from; ID keeps the ULID for revoke.
 var (
 	orgMemberColumns = []string{"ACCOUNT", "ROLE", "STATUS"}
-	grantColumns     = []string{"GRANTEE-TYPE", "GRANTEE", "ID", "ROLE", "SOURCE"}
+	grantColumns     = []string{"GRANTEE", "ROLE", "SOURCE", "TYPE", "ID"}
 )
 
 func orgMemberRow(m coreapi.Membership) []string {
@@ -77,13 +76,13 @@ func orgMemberRow(m coreapi.Membership) []string {
 }
 
 func projectGrantRow(g coreapi.ProjectGrant) []string {
-	return []string{g.GranteeType, granteeName(g.GranteeName, g.GranteeId), g.GranteeId, g.Role, g.Source}
+	return []string{granteeName(g.GranteeName, g.GranteeId), g.Role, g.Source, g.GranteeType, g.GranteeId}
 }
 
 // repoGrantRow mirrors projectGrantRow; RepoGrant and ProjectGrant share the
 // grantee/role/source shape, so both reuse grantColumns.
 func repoGrantRow(g coreapi.RepoGrant) []string {
-	return []string{g.GranteeType, granteeName(g.GranteeName, g.GranteeId), g.GranteeId, g.Role, g.Source}
+	return []string{granteeName(g.GranteeName, g.GranteeId), g.Role, g.Source, g.GranteeType, g.GranteeId}
 }
 
 // granteeName returns the friendly name when the server resolved one, falling
@@ -117,14 +116,14 @@ func newGrantOrgAddCmd() *cobra.Command {
 		Example: "  entire grant org add acme github:alice --role admin",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
+			return runCoreMutation(cmd, func(ctx context.Context, c *coreapi.Client) (string, any, error) {
 				orgID, err := resolveOrgRef(ctx, c, args[0])
 				if err != nil {
-					return nil, err
+					return "", nil, err
 				}
 				provider, providerUserID, err := resolveGranteeProvider(ctx, c, args[1])
 				if err != nil {
-					return nil, err
+					return "", nil, err
 				}
 				body := &coreapi.AddOrgMemberInputBody{
 					Provider:       provider,
@@ -133,25 +132,30 @@ func newGrantOrgAddCmd() *cobra.Command {
 				if role != "" {
 					r, err := parseOrgRole(role)
 					if err != nil {
-						return nil, err
+						return "", nil, err
 					}
 					body.Role = coreapi.NewOptAddOrgMemberInputBodyRole(r)
 				}
-				return c.AddOrgMember(ctx, body, coreapi.AddOrgMemberParams{OrgId: orgID})
+				m, err := c.AddOrgMember(ctx, body, coreapi.AddOrgMemberParams{OrgId: orgID})
+				if err != nil {
+					return "", nil, err
+				}
+				return fmt.Sprintf("✓ Added %s to org %s as %s", args[1], args[0], m.Role), m, nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&role, "role", "", "org role: owner, admin, or member (default member)")
+	cmd.Flags().StringVar(&role, "role", "", "Org role: owner, admin, or member (default member)")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newGrantOrgListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list <org>",
 		Short: "List org members",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreList(cmd, orgMemberColumns, orgMemberRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Membership, error) {
+			return runCoreList(cmd, "No members found.", orgMemberColumns, orgMemberRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Membership, error) {
 				orgID, err := resolveOrgRef(ctx, c, args[0])
 				if err != nil {
 					return nil, err
@@ -170,6 +174,8 @@ func newGrantOrgListCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 func newGrantOrgRemoveCmd() *cobra.Command {
@@ -228,36 +234,41 @@ func newGrantProjectAddCmd() *cobra.Command {
 				cmd.SilenceUsage = true
 				return err
 			}
-			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
+			return runCoreMutation(cmd, func(ctx context.Context, c *coreapi.Client) (string, any, error) {
 				projID, err := resolveProjectRef(ctx, c, args[0])
 				if err != nil {
-					return nil, err
+					return "", nil, err
 				}
 				provider, providerUserID, err := resolveGranteeProvider(ctx, c, args[1])
 				if err != nil {
-					return nil, err
+					return "", nil, err
 				}
 				body := &coreapi.GrantProjectAccessInputBody{
 					Provider:       provider,
 					ProviderUserId: providerUserID,
 					Role:           coreapi.GrantProjectAccessInputBodyRole(role),
 				}
-				return c.GrantProjectAccess(ctx, body, coreapi.GrantProjectAccessParams{ProjectId: projID})
+				out, err := c.GrantProjectAccess(ctx, body, coreapi.GrantProjectAccessParams{ProjectId: projID})
+				if err != nil {
+					return "", nil, err
+				}
+				return fmt.Sprintf("✓ Granted %s %s access to project %s", args[1], role, args[0]), out, nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&role, "role", "", "project role: reader, writer, or admin (required)")
+	cmd.Flags().StringVar(&role, "role", "", "Project role: reader, writer, or admin (required)")
 	markRequired(cmd, "role")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newGrantProjectListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list <project>",
 		Short: "List project members",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreList(cmd, grantColumns, projectGrantRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.ProjectGrant, error) {
+			return runCoreList(cmd, "No grants found.", grantColumns, projectGrantRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.ProjectGrant, error) {
 				projID, err := resolveProjectRef(ctx, c, args[0])
 				if err != nil {
 					return nil, err
@@ -276,6 +287,8 @@ func newGrantProjectListCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 func newGrantProjectRemoveCmd() *cobra.Command {
@@ -372,27 +385,32 @@ func newGrantRepoAddCmd() *cobra.Command {
 				cmd.SilenceUsage = true
 				return err
 			}
-			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
+			return runCoreMutation(cmd, func(ctx context.Context, c *coreapi.Client) (string, any, error) {
 				repoID, err := resolveRepoRef(ctx, c, args[0], project)
 				if err != nil {
-					return nil, err
+					return "", nil, err
 				}
 				provider, providerUserID, err := resolveGranteeProvider(ctx, c, args[1])
 				if err != nil {
-					return nil, err
+					return "", nil, err
 				}
 				body := &coreapi.GrantRepoAccessInputBody{
 					Provider:       provider,
 					ProviderUserId: providerUserID,
 					Role:           coreapi.GrantRepoAccessInputBodyRole(role),
 				}
-				return c.GrantRepoAccess(ctx, body, coreapi.GrantRepoAccessParams{RepoId: repoID})
+				out, err := c.GrantRepoAccess(ctx, body, coreapi.GrantRepoAccessParams{RepoId: repoID})
+				if err != nil {
+					return "", nil, err
+				}
+				return fmt.Sprintf("✓ Granted %s %s access to repo %s", args[1], role, args[0]), out, nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&role, "role", "", "repo role: reader, writer, or admin (required)")
+	cmd.Flags().StringVar(&role, "role", "", "Repo role: reader, writer, or admin (required)")
 	bindRepoProjectFlag(cmd, &project)
 	markRequired(cmd, "role")
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -403,7 +421,7 @@ func newGrantRepoListCmd() *cobra.Command {
 		Short: "List repo grants",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreList(cmd, grantColumns, repoGrantRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.RepoGrant, error) {
+			return runCoreList(cmd, "No grants found.", grantColumns, repoGrantRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.RepoGrant, error) {
 				repoID, err := resolveRepoRef(ctx, c, args[0], project)
 				if err != nil {
 					return nil, err
@@ -423,6 +441,7 @@ func newGrantRepoListCmd() *cobra.Command {
 		},
 	}
 	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -478,11 +497,11 @@ func revokeRepoGrantee(ctx context.Context, cmd *cobra.Command, c *coreapi.Clien
 func revokeGrant(cmd *cobra.Command, verb, subject string, revoke func() error) error {
 	if err := revoke(); err != nil {
 		if isCoreNotFound(err) {
-			cmd.Printf("%s: no such grant; nothing to revoke\n", subject)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: no such grant; nothing to revoke\n", subject)
 			return nil
 		}
 		return err
 	}
-	cmd.Printf("%s %s\n", verb, subject)
+	fmt.Fprintf(cmd.OutOrStdout(), "✓ %s %s\n", verb, subject)
 	return nil
 }

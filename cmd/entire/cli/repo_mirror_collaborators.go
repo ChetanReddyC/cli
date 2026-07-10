@@ -48,7 +48,7 @@ func newRepoMirrorCollaboratorsCmd() *cobra.Command {
 }
 
 func newRepoMirrorCollaboratorsListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list <github-url> [cluster-host]",
 		Short: "List the users with access to a mirror",
 		Long: "Lists the principals that can pull the mirror of <github-url> on " +
@@ -69,7 +69,7 @@ func newRepoMirrorCollaboratorsListCmd() *cobra.Command {
 				cmd.SilenceUsage = true
 				return fmt.Errorf("invalid [cluster-host]: %w", err)
 			}
-			return runCoreListForCluster(cmd, clusterHost, mirrorCollaboratorColumns, mirrorCollaboratorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.MirrorCollaborator, error) {
+			return runCoreListForCluster(cmd, clusterHost, "No collaborators found.", mirrorCollaboratorColumns, mirrorCollaboratorRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.MirrorCollaborator, error) {
 				out, err := c.ListMirrorCollaborators(ctx, coreapi.ListMirrorCollaboratorsParams{
 					Provider:    coreapi.ListMirrorCollaboratorsProviderGithub,
 					Owner:       owner,
@@ -83,4 +83,6 @@ func newRepoMirrorCollaboratorsListCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }

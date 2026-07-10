@@ -145,8 +145,8 @@ func (c *Client) GetStream(ctx context.Context, path string, headers http.Header
 	return c.do(ctx, http.MethodGet, path, nil, headers)
 }
 
-// Post sends an authenticated POST request with a JSON body to the given API-relative path.
-func (c *Client) Post(ctx context.Context, path string, body any) (*http.Response, error) {
+// doJSON sends an authenticated request with an optional JSON-marshaled body.
+func (c *Client) doJSON(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -155,33 +155,22 @@ func (c *Client) Post(ctx context.Context, path string, body any) (*http.Respons
 		}
 		reader = bytes.NewReader(data)
 	}
-	return c.do(ctx, http.MethodPost, path, reader, nil)
+	return c.do(ctx, method, path, reader, nil)
+}
+
+// Post sends an authenticated POST request with a JSON body to the given API-relative path.
+func (c *Client) Post(ctx context.Context, path string, body any) (*http.Response, error) {
+	return c.doJSON(ctx, http.MethodPost, path, body)
 }
 
 // Put sends an authenticated PUT request with a JSON body to the given API-relative path.
 func (c *Client) Put(ctx context.Context, path string, body any) (*http.Response, error) {
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("marshal request body: %w", err)
-		}
-		reader = bytes.NewReader(data)
-	}
-	return c.do(ctx, http.MethodPut, path, reader, nil)
+	return c.doJSON(ctx, http.MethodPut, path, body)
 }
 
 // Patch sends an authenticated PATCH request with a JSON body to the given API-relative path.
 func (c *Client) Patch(ctx context.Context, path string, body any) (*http.Response, error) {
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("marshal request body: %w", err)
-		}
-		reader = bytes.NewReader(data)
-	}
-	return c.do(ctx, http.MethodPatch, path, reader, nil)
+	return c.doJSON(ctx, http.MethodPatch, path, body)
 }
 
 // Delete sends an authenticated DELETE request to the given API-relative path.
