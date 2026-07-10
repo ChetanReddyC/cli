@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	huh "charm.land/huh/v2"
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
@@ -79,10 +78,9 @@ func trailWorktreeBaseRoot(ctx context.Context) (string, error) {
 }
 
 // ensureTrailWorktreeIgnoreRule makes sure .entire/worktrees/ is git-ignored.
-// Already ignored (any mechanism) → silent no-op. Interactively it offers the
-// shared .gitignore first; declining, aborting, --force, or a non-TTY all fall
-// back to the local-only .git/info/exclude. Either write prints a notice.
-func ensureTrailWorktreeIgnoreRule(ctx context.Context, w io.Writer, root string, force bool) error {
+// Already ignored (any mechanism) → silent no-op. Otherwise the rule is
+// appended to the repo-root .gitignore; committing it is the user's choice.
+func ensureTrailWorktreeIgnoreRule(ctx context.Context, w io.Writer, root string) error {
 	check := exec.CommandContext(ctx, "git", "check-ignore", "-q", trailWorktreesRelDir+"/")
 	check.Dir = root
 	err := check.Run()
@@ -94,39 +92,10 @@ func ensureTrailWorktreeIgnoreRule(ctx context.Context, w io.Writer, root string
 		return fmt.Errorf("failed to check ignore status of %s: %w", trailWorktreesRelDir, err)
 	}
 
-	useGitignore := false
-	if !force && interactive.CanPromptInteractively() {
-		confirmed := true
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title("Add .entire/worktrees/ to .gitignore?").
-					Description("Choosing No adds a local-only rule to .git/info/exclude instead.").
-					Value(&confirmed),
-			),
-		)
-		if err := form.Run(); err != nil {
-			if !errors.Is(err, huh.ErrUserAborted) {
-				return fmt.Errorf("failed to get confirmation: %w", err)
-			}
-			confirmed = false
-		}
-		useGitignore = confirmed
-	}
-
-	if useGitignore {
-		if err := appendIgnoreRule(filepath.Join(root, ".gitignore")); err != nil {
-			return err
-		}
-		fmt.Fprintln(w, "Added .entire/worktrees/ to .gitignore — commit this when convenient.")
-		return nil
-	}
-	// root came from trailWorktreeBaseRoot, which guarantees <root>/.git is the
-	// git common dir even when running from a linked worktree.
-	if err := appendIgnoreRule(filepath.Join(root, ".git", "info", "exclude")); err != nil {
+	if err := appendIgnoreRule(filepath.Join(root, ".gitignore")); err != nil {
 		return err
 	}
-	fmt.Fprintln(w, "Added .entire/worktrees/ to .git/info/exclude (local to this clone).")
+	fmt.Fprintln(w, "Added .entire/worktrees/ to .gitignore — commit it to keep the rule.")
 	return nil
 }
 
@@ -366,7 +335,7 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 		return nil
 	}
 
-	if err := ensureTrailWorktreeIgnoreRule(ctx, w, root, force); err != nil {
+	if err := ensureTrailWorktreeIgnoreRule(ctx, w, root); err != nil {
 		return err
 	}
 

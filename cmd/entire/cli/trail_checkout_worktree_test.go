@@ -98,7 +98,7 @@ func TestAppendIgnoreRule_AddsNewlineBeforeRule(t *testing.T) {
 	}
 }
 
-func TestEnsureTrailWorktreeIgnoreRule_NonTTYWritesExclude(t *testing.T) {
+func TestEnsureTrailWorktreeIgnoreRule_AppendsGitignore(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 
 	repoDir := t.TempDir()
@@ -106,21 +106,18 @@ func TestEnsureTrailWorktreeIgnoreRule_NonTTYWritesExclude(t *testing.T) {
 	t.Chdir(repoDir)
 
 	var out bytes.Buffer
-	if err := ensureTrailWorktreeIgnoreRule(context.Background(), &out, repoDir, false); err != nil {
+	if err := ensureTrailWorktreeIgnoreRule(context.Background(), &out, repoDir); err != nil {
 		t.Fatalf("ensureTrailWorktreeIgnoreRule: %v", err)
 	}
-	content, err := os.ReadFile(filepath.Join(repoDir, ".git", "info", "exclude"))
+	content, err := os.ReadFile(filepath.Join(repoDir, ".gitignore"))
 	if err != nil {
-		t.Fatalf("read exclude: %v", err)
+		t.Fatalf("read .gitignore: %v", err)
 	}
 	if !strings.Contains(string(content), ".entire/worktrees/") {
-		t.Fatalf("exclude = %q, want .entire/worktrees/ rule", string(content))
+		t.Fatalf(".gitignore = %q, want .entire/worktrees/ rule", string(content))
 	}
-	if !strings.Contains(out.String(), ".git/info/exclude") {
-		t.Fatalf("output = %q, want notice mentioning .git/info/exclude", out.String())
-	}
-	if _, err := os.Stat(filepath.Join(repoDir, ".gitignore")); !os.IsNotExist(err) {
-		t.Fatalf(".gitignore stat = %v, want not exist", err)
+	if !strings.Contains(out.String(), ".gitignore") {
+		t.Fatalf("output = %q, want notice mentioning .gitignore", out.String())
 	}
 }
 
@@ -129,21 +126,22 @@ func TestEnsureTrailWorktreeIgnoreRule_AlreadyIgnoredIsSilentNoop(t *testing.T) 
 
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
-	testutil.WriteFile(t, repoDir, ".gitignore", ".entire/worktrees/\n")
+	testutil.WriteFile(t, repoDir, ".gitignore", ".entire/\n")
 	t.Chdir(repoDir)
 
 	var out bytes.Buffer
-	if err := ensureTrailWorktreeIgnoreRule(context.Background(), &out, repoDir, false); err != nil {
+	if err := ensureTrailWorktreeIgnoreRule(context.Background(), &out, repoDir); err != nil {
 		t.Fatalf("ensureTrailWorktreeIgnoreRule: %v", err)
 	}
 	if out.Len() != 0 {
 		t.Fatalf("output = %q, want silence", out.String())
 	}
-	if _, err := os.Stat(filepath.Join(repoDir, ".git", "info", "exclude")); err == nil {
-		content, readErr := os.ReadFile(filepath.Join(repoDir, ".git", "info", "exclude"))
-		if readErr == nil && strings.Contains(string(content), ".entire/worktrees/") {
-			t.Fatalf("exclude gained the rule despite .gitignore already covering it")
-		}
+	content, err := os.ReadFile(filepath.Join(repoDir, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .gitignore: %v", err)
+	}
+	if got, want := string(content), ".entire/\n"; got != want {
+		t.Fatalf(".gitignore = %q, want untouched %q", got, want)
 	}
 }
 
@@ -344,12 +342,12 @@ func TestCheckoutTrailWorktree_CreatesWorktree(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(wantPath, ".env")); err != nil {
 		t.Fatalf(".worktreeinclude copy missing: %v", err)
 	}
-	excludeContent, err := os.ReadFile(filepath.Join(repoDir, ".git", "info", "exclude"))
+	gitignoreContent, err := os.ReadFile(filepath.Join(repoDir, ".gitignore"))
 	if err != nil {
-		t.Fatalf("read exclude: %v", err)
+		t.Fatalf("read .gitignore: %v", err)
 	}
-	if !strings.Contains(string(excludeContent), ".entire/worktrees/") {
-		t.Fatalf("exclude = %q, want .entire/worktrees/ rule", string(excludeContent))
+	if !strings.Contains(string(gitignoreContent), ".entire/worktrees/") {
+		t.Fatalf(".gitignore = %q, want .entire/worktrees/ rule", string(gitignoreContent))
 	}
 }
 
@@ -395,11 +393,8 @@ func TestCheckoutTrailWorktree_BranchCheckedOutInMainWorktree(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(repoDir, ".entire", "worktrees")); !os.IsNotExist(statErr) {
 		t.Fatalf(".entire/worktrees stat = %v, want not exist", statErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(repoDir, ".git", "info", "exclude")); statErr == nil {
-		content, readErr := os.ReadFile(filepath.Join(repoDir, ".git", "info", "exclude"))
-		if readErr == nil && strings.Contains(string(content), ".entire/worktrees/") {
-			t.Fatalf("exclude gained the rule despite failing before the ignore-rule write")
-		}
+	if _, statErr := os.Stat(filepath.Join(repoDir, ".gitignore")); !os.IsNotExist(statErr) {
+		t.Fatalf(".gitignore stat = %v, want no ignore rule written before the failure", statErr)
 	}
 }
 
