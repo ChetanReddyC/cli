@@ -1262,7 +1262,7 @@ trail is looked up against that repository's origin remote.`,
 	}
 
 	cmd.Flags().StringVar(&trailSelector, "trail", "", "Trail to check out (number, id, or branch; defaults to the current branch's trail)")
-	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip the prompt before fetching a remote-only branch")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip the prompt before fetching a remote-only branch (with --worktree, also skip the ignore-rule prompt)")
 	cmd.Flags().BoolVar(&worktree, "worktree", false, "Check out the trail branch in a worktree under .entire/worktrees instead of switching this checkout")
 
 	return cmd

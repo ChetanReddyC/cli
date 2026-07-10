@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	huh "charm.land/huh/v2"
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
@@ -175,8 +176,20 @@ func copyWorktreeIncludeFiles(ctx context.Context, errW io.Writer, root, dest st
 	if err != nil {
 		return err
 	}
-	for _, rel := range matchIncludePatterns(patterns, ignored) {
-		if err := copyIncludedFile(filepath.Join(root, rel), filepath.Join(dest, rel)); err != nil {
+	matches := matchIncludePatterns(patterns, ignored)
+	if len(matches) == 0 {
+		return nil
+	}
+	// dest is a fresh checkout of the trail branch, whose content the invoking
+	// user did not author. os.Root confines writes to dest even if the branch
+	// contains a tracked symlinked directory pointing outside it.
+	destRoot, err := os.OpenRoot(dest)
+	if err != nil {
+		return fmt.Errorf("failed to open worktree root: %w", err)
+	}
+	defer destRoot.Close()
+	for _, rel := range matches {
+		if err := copyIncludedFile(filepath.Join(root, rel), destRoot, rel); err != nil {
 			fmt.Fprintf(errW, "warning: skipped %s: %v\n", filepath.ToSlash(rel), err)
 		}
 	}
@@ -256,7 +269,10 @@ func cleanRelativeIncludeFile(rel string) (string, bool) {
 	return clean, true
 }
 
-func copyIncludedFile(src, dst string) error {
+// copyIncludedFile copies src into destRoot at rel. destRoot confines all
+// writes to the worktree root, so a tracked symlinked directory in the
+// branch cannot redirect the copy outside the worktree.
+func copyIncludedFile(src string, destRoot *os.Root, rel string) error {
 	srcInfo, err := os.Lstat(src)
 	if err != nil {
 		return err //nolint:wrapcheck // lstat error is sufficient for caller context
@@ -276,25 +292,25 @@ func copyIncludedFile(src, dst string) error {
 	if !openedInfo.Mode().IsRegular() || !os.SameFile(srcInfo, openedInfo) {
 		return errors.New("source changed while opening")
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+	if err := destRoot.MkdirAll(filepath.Dir(rel), 0o750); err != nil {
 		return err //nolint:wrapcheck // mkdir error is sufficient for caller context
 	}
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, srcInfo.Mode().Perm()) //nolint:gosec // dst is inside the new worktree
+	out, err := destRoot.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, srcInfo.Mode().Perm())
 	if err != nil {
 		return err //nolint:wrapcheck // openfile error is sufficient for caller context
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close()
-		_ = os.Remove(dst)
-		return err //nolint:wrapcheck // copy error is sufficient for caller context
+		_ = destRoot.Remove(rel) //nolint:errcheck // best-effort cleanup after a failed copy
+		return err               //nolint:wrapcheck // copy error is sufficient for caller context
 	}
 	if err := out.Close(); err != nil {
-		_ = os.Remove(dst)
-		return err //nolint:wrapcheck // close error is sufficient for caller context
+		_ = destRoot.Remove(rel) //nolint:errcheck // best-effort cleanup after a failed copy
+		return err               //nolint:wrapcheck // close error is sufficient for caller context
 	}
-	if err := os.Chmod(dst, srcInfo.Mode().Perm()); err != nil {
-		_ = os.Remove(dst)
-		return err //nolint:wrapcheck // chmod error is sufficient for caller context
+	if err := destRoot.Chmod(rel, srcInfo.Mode().Perm()); err != nil {
+		_ = destRoot.Remove(rel) //nolint:errcheck // best-effort cleanup after a failed copy
+		return err               //nolint:wrapcheck // chmod error is sufficient for caller context
 	}
 	return nil
 }
@@ -307,9 +323,14 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 		return err
 	}
 
-	if existing, ok, err := findWorktreeForBranch(ctx, branch); err != nil {
+	existing, managed, found, err := findWorktreeForBranch(ctx, branch)
+	if err != nil {
 		return err
-	} else if ok {
+	}
+	if found {
+		if !managed {
+			return fmt.Errorf("branch %q is already checked out at %s", branch, existing)
+		}
 		fmt.Fprintf(w, "Worktree already exists at %s\n", existing)
 		fmt.Fprintf(w, "cd %s\n", shellQuotePath(existing))
 		return nil
@@ -351,19 +372,20 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 	return nil
 }
 
-// findWorktreeForBranch reports whether branch is already checked out in a
-// worktree managed under <main-root>/.entire/worktrees.
-func findWorktreeForBranch(ctx context.Context, branch string) (string, bool, error) {
+// findWorktreeForBranch reports whether branch is already checked out in any
+// worktree, and whether that worktree is managed under
+// <main-root>/.entire/worktrees.
+func findWorktreeForBranch(ctx context.Context, branch string) (path string, managed bool, found bool, err error) {
 	root, err := trailWorktreeBaseRoot(ctx)
 	if err != nil {
-		return "", false, fmt.Errorf("failed to find main worktree root: %w", err)
+		return "", false, false, fmt.Errorf("failed to find main worktree root: %w", err)
 	}
 	managedRoot := normalizeWorktreePath(filepath.Join(root, filepath.FromSlash(trailWorktreesRelDir)))
 
 	cmd := exec.CommandContext(ctx, "git", "worktree", "list", "--porcelain")
 	output, err := cmd.Output()
 	if err != nil {
-		return "", false, fmt.Errorf("failed to list worktrees: %w", err)
+		return "", false, false, fmt.Errorf("failed to list worktrees: %w", err)
 	}
 	var currentPath string
 	for _, line := range strings.Split(string(output), "\n") {
@@ -378,12 +400,11 @@ func findWorktreeForBranch(ctx context.Context, branch string) (string, bool, er
 		}
 		if strings.TrimPrefix(line, "branch ") == "refs/heads/"+branch && currentPath != "" {
 			normalized := normalizeWorktreePath(currentPath)
-			if normalized == managedRoot || strings.HasPrefix(normalized, managedRoot+string(filepath.Separator)) {
-				return currentPath, true, nil
-			}
+			isManaged := normalized == managedRoot || strings.HasPrefix(normalized, managedRoot+string(filepath.Separator))
+			return currentPath, isManaged, true, nil
 		}
 	}
-	return "", false, nil
+	return "", false, false, nil
 }
 
 // ensureTrailWorktreeBranchAvailable makes sure branch exists locally,
@@ -427,6 +448,9 @@ func ensureTrailWorktreeBranchAvailable(ctx context.Context, w io.Writer, branch
 // so `git worktree add` can check it out without touching the current
 // checkout.
 func fetchTrailWorktreeBranch(ctx context.Context, branch string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
 	refSpec := fmt.Sprintf("refs/heads/%s:refs/heads/%s", branch, branch)
 	cmd := exec.CommandContext(ctx, "git", "fetch", "origin", refSpec)
 	if output, err := cmd.CombinedOutput(); err != nil {

@@ -277,6 +277,33 @@ func TestCopyWorktreeIncludeFiles_SkipsSymlinkWithWarning(t *testing.T) {
 	}
 }
 
+func TestCopyWorktreeIncludeFiles_RefusesSymlinkedDirEscape(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, ".gitignore", "sub/"+testEnvFile+"\n")
+	testutil.WriteFile(t, repoDir, ".worktreeinclude", "sub/"+testEnvFile+"\n")
+	testutil.WriteFile(t, repoDir, "sub/"+testEnvFile, "SECRET=1\n")
+
+	dest := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dest, "sub")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	var errOut bytes.Buffer
+	if err := copyWorktreeIncludeFiles(context.Background(), &errOut, repoDir, dest); err != nil {
+		t.Fatalf("copyWorktreeIncludeFiles: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "warning: skipped sub/"+testEnvFile) {
+		t.Fatalf("stderr = %q, want skip warning for sub/%s", errOut.String(), testEnvFile)
+	}
+	if _, err := os.Stat(filepath.Join(outside, testEnvFile)); !os.IsNotExist(err) {
+		t.Fatalf("%s stat in outside dir = %v, want not exist", testEnvFile, err)
+	}
+}
+
 func newTrailWorktreeTestRepo(t *testing.T) string {
 	t.Helper()
 	testutil.IsolateGitConfigEnv(t)
@@ -375,6 +402,28 @@ func TestCheckoutTrailWorktree_FromLinkedWorktreeCreatesSibling(t *testing.T) {
 	nested := filepath.Join(firstPath, ".entire", "worktrees", "trail-8-feature-second")
 	if _, err := os.Stat(nested); !os.IsNotExist(err) {
 		t.Fatalf("nested worktree stat = %v, want not exist", err)
+	}
+}
+
+func TestCheckoutTrailWorktree_BranchCheckedOutInMainWorktree(t *testing.T) {
+	repoDir := newTrailWorktreeTestRepo(t)
+	startBranch := currentBranchInDir(t, repoDir)
+	t.Chdir(repoDir)
+
+	var out, errOut bytes.Buffer
+	err := checkoutTrailWorktree(context.Background(), &out, &errOut, startBranch, false, 1)
+	if err == nil || !strings.Contains(err.Error(), "already checked out at") {
+		t.Fatalf("error = %v, want already-checked-out error", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(repoDir, ".entire", "worktrees")); !os.IsNotExist(statErr) {
+		t.Fatalf(".entire/worktrees stat = %v, want not exist", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(repoDir, ".git", "info", "exclude")); statErr == nil {
+		content, readErr := os.ReadFile(filepath.Join(repoDir, ".git", "info", "exclude"))
+		if readErr == nil && strings.Contains(string(content), ".entire/worktrees/") {
+			t.Fatalf("exclude gained the rule despite failing before the ignore-rule write")
+		}
 	}
 }
 
