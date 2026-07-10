@@ -326,8 +326,7 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 			if err := validateTrailWorktreeReuse(ctx, match.path, branch); err != nil {
 				return staleTrailWorktreeError(branch, match.path)
 			}
-			fmt.Fprintf(w, "Worktree already exists at %s\n", match.path)
-			fmt.Fprintf(w, "cd %s\n", shellQuote(match.path))
+			printTrailWorktreeLocation(w, errW, "Worktree already exists at "+match.path, match.path)
 			return nil
 		case errors.Is(statErr, fs.ErrNotExist):
 			return staleTrailWorktreeError(branch, match.path)
@@ -336,16 +335,16 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 		}
 	}
 
-	proceed, err := ensureTrailWorktreeBranchAvailable(ctx, w, branch, force)
+	proceed, err := ensureTrailWorktreeBranchAvailable(ctx, errW, branch, force)
 	if err != nil {
 		return err
 	}
 	if !proceed {
-		fmt.Fprintf(w, "Checkout of branch %s cancelled.\n", branch)
+		fmt.Fprintf(errW, "Checkout of branch %s cancelled.\n", branch)
 		return nil
 	}
 
-	if err := ensureTrailWorktreeIgnoreRule(ctx, w, root); err != nil {
+	if err := ensureTrailWorktreeIgnoreRule(ctx, errW, root); err != nil {
 		return err
 	}
 
@@ -363,9 +362,22 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 		fmt.Fprintf(errW, "warning: could not copy %s files: %v\n", worktreeIncludeFile, err)
 	}
 
-	fmt.Fprintf(w, "Worktree ready at %s\n", worktreePath)
-	fmt.Fprintf(w, "cd %s\n", shellQuote(worktreePath))
+	printTrailWorktreeLocation(w, errW, "Worktree ready at "+worktreePath, worktreePath)
 	return nil
+}
+
+// printTrailWorktreeLocation reports where the worktree lives. On a terminal
+// it prints the note and a copy-paste cd hint. Otherwise stdout carries only
+// the bare path — so `cd "$(entire trail checkout <n> --worktree)"` works —
+// and the note goes to stderr.
+func printTrailWorktreeLocation(w, errW io.Writer, note, path string) {
+	if interactive.IsTerminalWriter(w) {
+		fmt.Fprintln(w, note)
+		fmt.Fprintf(w, "cd %s\n", shellQuote(path))
+		return
+	}
+	fmt.Fprintln(errW, note)
+	fmt.Fprintln(w, path)
 }
 
 func validateTrailWorktreeReuse(ctx context.Context, path, branch string) error {

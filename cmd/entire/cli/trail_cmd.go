@@ -1241,7 +1241,9 @@ is checked out, fetching it from origin first when it only exists there.
 With --worktree, the branch is checked out into a git worktree under
 .entire/worktrees at the repo root instead of switching this checkout, and the
 command prints a cd command for the new worktree. Gitignored files matching
-.worktreeinclude patterns are copied into the worktree.
+.worktreeinclude patterns are copied into the worktree. When stdout is not a
+terminal, only the worktree path is printed, so scripts can use
+cd "$(entire trail checkout <trail> --worktree)".
 
 This must be run from within a clone of the repository the trail belongs to; the
 trail is looked up against that repository's origin remote.`,
@@ -1293,7 +1295,7 @@ func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool,
 		}
 
 		if opts.Worktree {
-			fmt.Fprintf(w, "Checking out %s in a worktree\n", describeTrailRef(found))
+			fmt.Fprintf(errW, "Checking out %s in a worktree\n", describeTrailRef(found))
 			return checkoutTrailWorktree(ctx, w, errW, branch, opts.Force, found.Number)
 		}
 

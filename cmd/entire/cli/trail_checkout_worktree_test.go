@@ -396,8 +396,11 @@ func TestCheckoutTrailWorktree_CreatesWorktree(t *testing.T) {
 	}
 
 	wantPath := filepath.Join(repoDir, ".entire", "worktrees", "trail-7-feature-test")
-	if !strings.Contains(out.String(), "cd "+shellQuote(wantPath)) {
-		t.Fatalf("output = %q, want cd hint for %q", out.String(), wantPath)
+	if got, want := out.String(), wantPath+"\n"; got != want {
+		t.Fatalf("stdout = %q, want bare path %q for script use", got, want)
+	}
+	if !strings.Contains(errOut.String(), "Worktree ready at "+wantPath) {
+		t.Fatalf("stderr = %q, want progress notice", errOut.String())
 	}
 	if got := currentBranchInDir(t, repoDir); got != startBranch {
 		t.Fatalf("current branch = %q, want unchanged %q", got, startBranch)
@@ -477,8 +480,13 @@ func TestCheckoutTrailWorktree_ReusesExistingWorktree(t *testing.T) {
 	if err := checkoutTrailWorktree(context.Background(), &out2, &err2, "feature/reuse", false, 9); err != nil {
 		t.Fatalf("second checkout: %v; stderr: %s", err, err2.String())
 	}
-	if !strings.Contains(out2.String(), "Worktree already exists") {
-		t.Fatalf("second output = %q, want existing-worktree message", out2.String())
+	wantPath := filepath.Join(repoDir, ".entire", "worktrees", "trail-9-feature-reuse")
+	gotPath := strings.TrimSuffix(out2.String(), "\n")
+	if strings.Contains(gotPath, "\n") || normalizeWorktreePath(gotPath) != normalizeWorktreePath(wantPath) {
+		t.Fatalf("second stdout = %q, want bare path %q for script use", out2.String(), wantPath)
+	}
+	if !strings.Contains(err2.String(), "Worktree already exists") {
+		t.Fatalf("second stderr = %q, want existing-worktree message", err2.String())
 	}
 }
 
