@@ -18,6 +18,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 const (
@@ -49,6 +50,9 @@ func sanitizeTrailWorktreeName(branch string) string {
 
 // gitCommonDirForTrailWorktree returns the absolute git common dir, which is
 // the main repo's .git directory even when run from a linked worktree.
+// session.GetGitCommonDir is not reused here because it returns relative
+// rev-parse results as-is; this feature needs an absolute path for the
+// worktree location and the printed cd hint.
 func gitCommonDirForTrailWorktree(ctx context.Context) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
 	output, err := cmd.Output()
@@ -135,7 +139,7 @@ func appendIgnoreRule(path string) error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to read %s: %w", path, err)
 	}
-	for _, line := range strings.Split(string(content), "\n") {
+	for line := range strings.SplitSeq(string(content), "\n") {
 		if strings.TrimSpace(line) == rule {
 			return nil
 		}
@@ -203,7 +207,7 @@ func loadWorktreeIncludePatterns(root string) ([]string, error) {
 		return nil, fmt.Errorf("failed to read %s: %w", worktreeIncludeFile, err)
 	}
 	var patterns []string
-	for _, raw := range strings.Split(string(data), "\n") {
+	for raw := range strings.SplitSeq(string(data), "\n") {
 		line := strings.TrimRight(raw, "\r")
 		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -223,7 +227,7 @@ func listIgnoredFiles(ctx context.Context, root string) ([]string, error) {
 		return nil, fmt.Errorf("failed to list ignored files: %w", err)
 	}
 	var files []string
-	for _, f := range bytes.Split(output, []byte{0}) {
+	for f := range bytes.SplitSeq(output, []byte{0}) {
 		if len(f) > 0 {
 			files = append(files, string(f))
 		}
@@ -248,6 +252,10 @@ func matchIncludePatterns(patterns, files []string) []string {
 	return included
 }
 
+// isManagedTrailWorktreePath excludes paths under .entire/worktrees from the
+// copy candidates: once the ignore rule ships, sibling trail worktrees' own
+// ignored files (e.g. their .env) appear in `git ls-files --ignored` at the
+// main root and would otherwise be copied into every new worktree.
 func isManagedTrailWorktreePath(rel string) bool {
 	slash := filepath.ToSlash(rel)
 	return slash == trailWorktreesRelDir || strings.HasPrefix(slash, trailWorktreesRelDir+"/")
@@ -258,7 +266,7 @@ func cleanRelativeIncludeFile(rel string) (string, bool) {
 		return "", false
 	}
 	clean := filepath.Clean(filepath.FromSlash(rel))
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	if clean == "." || paths.IsRelativeTraversal(clean) {
 		return "", false
 	}
 	return clean, true
@@ -323,16 +331,16 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 		return fmt.Errorf("failed to find main worktree root: %w", err)
 	}
 
-	existing, managed, found, err := findWorktreeForBranch(ctx, branch, root)
+	match, found, err := findWorktreeForBranch(ctx, branch, root)
 	if err != nil {
 		return err
 	}
 	if found {
-		if !managed {
-			return fmt.Errorf("branch %q is already checked out at %s", branch, existing)
+		if !match.managed {
+			return fmt.Errorf("branch %q is already checked out at %s", branch, match.path)
 		}
-		fmt.Fprintf(w, "Worktree already exists at %s\n", existing)
-		fmt.Fprintf(w, "cd %s\n", shellQuote(existing))
+		fmt.Fprintf(w, "Worktree already exists at %s\n", match.path)
+		fmt.Fprintf(w, "cd %s\n", shellQuote(match.path))
 		return nil
 	}
 
@@ -368,24 +376,30 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 	return nil
 }
 
-// findWorktreeForBranch reports whether branch is already checked out in any
-// worktree, and whether that worktree is managed under
-// <root>/.entire/worktrees.
-func findWorktreeForBranch(ctx context.Context, branch, root string) (path string, managed bool, found bool, err error) {
+// trailWorktreeMatch describes an existing worktree that has a branch checked
+// out; managed means it lives under <root>/.entire/worktrees.
+type trailWorktreeMatch struct {
+	path    string
+	managed bool
+}
+
+// findWorktreeForBranch returns the worktree that has branch checked out,
+// with found reporting whether any worktree does.
+func findWorktreeForBranch(ctx context.Context, branch, root string) (match trailWorktreeMatch, found bool, err error) {
 	cmd := exec.CommandContext(ctx, "git", "worktree", "list", "--porcelain")
 	output, err := cmd.Output()
 	if err != nil {
-		return "", false, false, fmt.Errorf("failed to list worktrees: %w", err)
+		return trailWorktreeMatch{}, false, fmt.Errorf("failed to list worktrees: %w", err)
 	}
 	// Empty currentRoot: match any worktree, including the current checkout.
-	path, found = parseWorktreeForBranch(string(output), branch, "")
+	path, found := parseWorktreeForBranch(string(output), branch, "")
 	if !found {
-		return "", false, false, nil
+		return trailWorktreeMatch{}, false, nil
 	}
 	managedRoot := normalizeWorktreePath(filepath.Join(root, filepath.FromSlash(trailWorktreesRelDir)))
 	normalized := normalizeWorktreePath(path)
-	managed = normalized == managedRoot || strings.HasPrefix(normalized, managedRoot+string(filepath.Separator))
-	return path, managed, true, nil
+	managed := normalized == managedRoot || strings.HasPrefix(normalized, managedRoot+string(filepath.Separator))
+	return trailWorktreeMatch{path: path, managed: managed}, true, nil
 }
 
 // ensureTrailWorktreeBranchAvailable makes sure branch exists locally,
