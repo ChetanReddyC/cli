@@ -27,10 +27,7 @@ const (
 )
 
 func defaultTrailWorktreePath(repoRoot, branch string, trailNumber int) string {
-	name := sanitizeTrailWorktreeName(branch)
-	if trailNumber > 0 {
-		name = fmt.Sprintf("trail-%d-%s", trailNumber, name)
-	}
+	name := fmt.Sprintf("trail-%d-%s", trailNumber, sanitizeTrailWorktreeName(branch))
 	return filepath.Join(repoRoot, filepath.FromSlash(trailWorktreesRelDir), name)
 }
 
@@ -322,6 +319,12 @@ func copyIncludedFile(src string, destRoot *os.Root, rel string) error {
 // <main-root>/.entire/worktrees instead of switching the current checkout.
 // The final output line is a shell-safe `cd '<path>'` hint.
 func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string, force bool, trailNumber int) error {
+	// The trail number disambiguates the worktree directory: sanitized branch
+	// names are lossy (feature/x and feature-x collide), so an unnumbered
+	// trail cannot get a unique location.
+	if trailNumber <= 0 {
+		return fmt.Errorf("trail for branch %q has no number yet; cannot check out into a worktree", branch)
+	}
 	if err := ValidateBranchName(ctx, branch); err != nil {
 		return err
 	}
@@ -336,12 +339,22 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 		return err
 	}
 	if found {
-		if !match.managed {
-			return fmt.Errorf("branch %q is already checked out at %s", branch, match.path)
+		switch _, statErr := os.Stat(match.path); {
+		case statErr == nil:
+			if !match.managed {
+				return fmt.Errorf("branch %q is already checked out at %s", branch, match.path)
+			}
+			fmt.Fprintf(w, "Worktree already exists at %s\n", match.path)
+			fmt.Fprintf(w, "cd %s\n", shellQuote(match.path))
+			return nil
+		case errors.Is(statErr, fs.ErrNotExist):
+			// The worktree directory was deleted by hand, leaving a stale git
+			// registration that blocks a fresh `git worktree add` for the
+			// branch. Cleaning it up is the user's call.
+			return fmt.Errorf("branch %q is registered to a missing worktree at %s; run 'git worktree prune' to clear it", branch, match.path)
+		default:
+			return fmt.Errorf("failed to check worktree at %s: %w", match.path, statErr)
 		}
-		fmt.Fprintf(w, "Worktree already exists at %s\n", match.path)
-		fmt.Fprintf(w, "cd %s\n", shellQuote(match.path))
-		return nil
 	}
 
 	proceed, err := ensureTrailWorktreeBranchAvailable(ctx, w, branch, force)

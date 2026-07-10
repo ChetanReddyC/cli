@@ -25,8 +25,8 @@ func TestDefaultTrailWorktreePath(t *testing.T) {
 		trailNumber int
 		want        string
 	}{
-		{"with number", "peter/feature.auth", 123, filepath.Join("/repo", ".entire", "worktrees", "trail-123-peter-feature.auth")},
-		{"without number", "feature/other", 0, filepath.Join("/repo", ".entire", "worktrees", "feature-other")},
+		{"slash branch", "peter/feature.auth", 123, filepath.Join("/repo", ".entire", "worktrees", "trail-123-peter-feature.auth")},
+		{"plain branch", "feature-other", 7, filepath.Join("/repo", ".entire", "worktrees", "trail-7-feature-other")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -455,6 +455,62 @@ func TestCheckoutTrailWorktree_FetchesRemoteOnlyBranch(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(wantPath, "remote.txt")); err != nil {
 		t.Fatalf("remote branch file missing: %v", err)
+	}
+}
+
+func TestCheckoutTrailWorktree_RejectsUnnumberedTrail(t *testing.T) {
+	repoDir := newTrailWorktreeTestRepo(t)
+	runGit(t, repoDir, "branch", "feature/unnumbered")
+	t.Chdir(repoDir)
+
+	var out, errOut bytes.Buffer
+	err := checkoutTrailWorktree(context.Background(), &out, &errOut, "feature/unnumbered", false, 0)
+	if err == nil || !strings.Contains(err.Error(), "has no number yet") {
+		t.Fatalf("error = %v, want no-number rejection", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(repoDir, ".entire", "worktrees")); !os.IsNotExist(statErr) {
+		t.Fatalf(".entire/worktrees stat = %v, want not exist", statErr)
+	}
+}
+
+func TestCheckoutTrailWorktree_StaleManagedWorktreeErrorsWithPruneHint(t *testing.T) {
+	repoDir := newTrailWorktreeTestRepo(t)
+	runGit(t, repoDir, "branch", "feature/stale")
+	t.Chdir(repoDir)
+
+	var out1, err1 bytes.Buffer
+	if err := checkoutTrailWorktree(context.Background(), &out1, &err1, "feature/stale", false, 4); err != nil {
+		t.Fatalf("first checkout: %v; stderr: %s", err, err1.String())
+	}
+	worktreePath := filepath.Join(repoDir, ".entire", "worktrees", "trail-4-feature-stale")
+	if err := os.RemoveAll(worktreePath); err != nil {
+		t.Fatalf("remove worktree dir: %v", err)
+	}
+
+	var out2, err2 bytes.Buffer
+	err := checkoutTrailWorktree(context.Background(), &out2, &err2, "feature/stale", false, 4)
+	if err == nil || !strings.Contains(err.Error(), "git worktree prune") {
+		t.Fatalf("error = %v, want prune hint", err)
+	}
+	if _, statErr := os.Stat(worktreePath); !os.IsNotExist(statErr) {
+		t.Fatalf("worktree path stat = %v, want not recreated", statErr)
+	}
+}
+
+func TestCheckoutTrailWorktree_StaleNonManagedWorktreeErrors(t *testing.T) {
+	repoDir := newTrailWorktreeTestRepo(t)
+	runGit(t, repoDir, "branch", "feature/manual")
+	manualPath := filepath.Join(t.TempDir(), "manual")
+	runGit(t, repoDir, "worktree", "add", manualPath, "feature/manual")
+	if err := os.RemoveAll(manualPath); err != nil {
+		t.Fatalf("remove manual worktree: %v", err)
+	}
+	t.Chdir(repoDir)
+
+	var out, errOut bytes.Buffer
+	err := checkoutTrailWorktree(context.Background(), &out, &errOut, "feature/manual", false, 5)
+	if err == nil || !strings.Contains(err.Error(), "git worktree prune") {
+		t.Fatalf("error = %v, want prune hint", err)
 	}
 }
 
