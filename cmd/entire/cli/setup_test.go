@@ -1165,6 +1165,35 @@ func TestEnableCmd_ForceAndStrategyFlagsOnConfiguredDisabledRepo_ReenablesAndUpd
 	}
 }
 
+// Regression for #1140: `entire enable --checkpoint-remote ...` (no --project)
+// on a repo disabled at the project level must re-enable the project
+// settings.json, not write the enabled flag to a shadow settings.local.json —
+// which left the file the user disabled still enabled=false.
+func TestEnableCmd_StrategyFlagsOnDisabledProjectRepo_EnablesProjectFile(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsDisabled) // settings.json: {"enabled": false}
+	writeClaudeHooksFixture(t)
+
+	cmd := newEnableCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--checkpoint-remote", "github:org/repo", "--skip-push-sessions"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable error = %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+
+	// The project file the user disabled must be enabled again.
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("load project settings: %v", err)
+	}
+	if !projectS.Enabled {
+		t.Errorf("settings.json still enabled=false after enable; the enabled flag went to the wrong file (#1140)")
+	}
+}
+
 // Tests for detectOrSelectAgent
 
 func TestDetectOrSelectAgent_AgentDetected(t *testing.T) {

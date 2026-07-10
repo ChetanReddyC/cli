@@ -1118,7 +1118,13 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 		printEnabledStatus(ctx, w)
 		return nil
 	}
-	return runEnable(ctx, w, opts.UseProjectSettings)
+	// Enable in the same file the setup flow just wrote to. Without this, a plain
+	// `entire enable` (no --project/--local) resolves the strategy write to the
+	// existing project settings.json but wrote the enabled flag to
+	// settings.local.json, leaving the project file the user disabled still
+	// enabled=false (#1140). settingsTargetFile picks the correct scope.
+	targetFile, _ := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
+	return runEnable(ctx, w, targetFile == settings.EntireSettingsFile)
 }
 
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
