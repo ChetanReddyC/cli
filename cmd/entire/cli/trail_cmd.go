@@ -86,6 +86,9 @@ func newTrailCmd() *cobra.Command {
 	cmd.AddCommand(newTrailDeleteCmd())
 	cmd.AddCommand(newTrailFindingCmd())
 	cmd.AddCommand(newTrailWatchCmd())
+	cmd.AddCommand(newTrailApproveCmd())
+	cmd.AddCommand(newTrailRequestChangesCmd())
+	cmd.AddCommand(newTrailApprovalsCmd())
 
 	return cmd
 }
@@ -273,6 +276,19 @@ func printTrailDetails(w io.Writer, m *trail.Metadata, webURL, bodyText string) 
 	}
 	if len(m.Assignees) > 0 {
 		fmt.Fprintf(w, "  Assignees: %s\n", strings.Join(m.Assignees, ", "))
+	}
+	if strings.TrimSpace(string(m.Type)) != "" {
+		fmt.Fprintf(w, "  Type:      %s\n", m.Type)
+	}
+	if p := strings.TrimSpace(string(m.Priority)); p != "" && p != string(trail.PriorityNone) {
+		fmt.Fprintf(w, "  Priority:  %s\n", m.Priority)
+	}
+	if len(m.Reviewers) > 0 {
+		parts := make([]string, 0, len(m.Reviewers))
+		for _, r := range m.Reviewers {
+			parts = append(parts, fmt.Sprintf("%s (%s)", r.Login, r.Status))
+		}
+		fmt.Fprintf(w, "  Reviewers: %s\n", strings.Join(parts, ", "))
 	}
 	fmt.Fprintf(w, "  Created: %s\n", m.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
 	fmt.Fprintf(w, "  Updated: %s\n", m.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))
@@ -738,7 +754,8 @@ func pluralize(s string, count int) string {
 }
 
 func newTrailCreateCmd() *cobra.Command {
-	var title, body, base, branch, status string
+	var title, body, base, branch, status, typeStr, priorityStr string
+	var assignees []string
 	var checkout, noBranch bool
 
 	cmd := &cobra.Command{
@@ -749,7 +766,7 @@ func newTrailCreateCmd() *cobra.Command {
 			if err := ensureNoTrailRepoOverride(cmd, "trail create"); err != nil {
 				return err
 			}
-			return runTrailCreate(cmd, title, body, base, branch, status, checkout, noBranch)
+			return runTrailCreate(cmd, title, body, base, branch, status, typeStr, priorityStr, assignees, checkout, noBranch)
 		},
 	}
 
@@ -758,6 +775,9 @@ func newTrailCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&base, "base", "", "Base branch (defaults to detected default branch)")
 	cmd.Flags().StringVar(&branch, "branch", "", "Branch for the trail (defaults to current branch)")
 	cmd.Flags().StringVar(&status, "status", "", "Initial status (defaults to open)")
+	cmd.Flags().StringVar(&typeStr, "type", "", fmt.Sprintf("Type (%s)", formatValidTypes()))
+	cmd.Flags().StringVar(&priorityStr, "priority", "", fmt.Sprintf("Priority (%s)", formatValidPriorities()))
+	cmd.Flags().StringSliceVar(&assignees, "add-assignee", nil, "Assign user(s) by login")
 	cmd.Flags().BoolVar(&checkout, "checkout", false, "Check out the branch after creating it")
 	cmd.Flags().BoolVar(&noBranch, "no-branch", false, "Create a branchless trail")
 
@@ -765,13 +785,23 @@ func newTrailCreateCmd() *cobra.Command {
 }
 
 //nolint:cyclop // sequential steps for creating a trail — splitting would obscure the flow
-func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr string, checkout, noBranch bool) error {
+func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, typeStr, priorityStr string, assignees []string, checkout, noBranch bool) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
 	if err := validateTrailCreateFlagCombos(cmd, checkout, noBranch); err != nil {
 		return err
+	}
+	if cmd.Flags().Changed("type") {
+		if !trail.Type(strings.TrimSpace(typeStr)).IsValid() {
+			return fmt.Errorf("invalid type %q: valid values are %s", typeStr, formatValidTypes())
+		}
+	}
+	if cmd.Flags().Changed("priority") {
+		if !trail.Priority(strings.TrimSpace(priorityStr)).IsValid() {
+			return fmt.Errorf("invalid priority %q: valid values are %s", priorityStr, formatValidPriorities())
+		}
 	}
 
 	repo, err := strategy.OpenRepository(ctx)
@@ -804,7 +834,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr str
 		return err
 	}
 
-	createResp, err := postTrailCreate(ctx, client, forge, owner, repoName, title, body, branch, base, statusStr)
+	createResp, err := postTrailCreate(ctx, client, forge, owner, repoName, title, body, branch, base, statusStr, strings.TrimSpace(typeStr), strings.TrimSpace(priorityStr), assignees)
 	if err != nil {
 		cleanupCreatedTrailBranch(repo, branch, branchState.LocalCreated, branchState.RemotePushed, errW)
 		return err
@@ -937,8 +967,8 @@ func ensureTrailCreateBranchExists(w io.Writer, repo *git.Repository, branch, cu
 	return nil
 }
 
-func postTrailCreate(ctx context.Context, client *api.Client, forge, owner, repoName, title, body, branch, base, statusStr string) (api.TrailCreateResponse, error) {
-	createReq := newTrailCreateRequest(title, body, branch, base, statusStr)
+func postTrailCreate(ctx context.Context, client *api.Client, forge, owner, repoName, title, body, branch, base, statusStr, typeStr, priorityStr string, assignees []string) (api.TrailCreateResponse, error) {
+	createReq := newTrailCreateRequest(title, body, branch, base, statusStr, typeStr, priorityStr, assignees)
 	resp, err := client.Post(ctx, trailsBasePath(forge, owner, repoName), createReq)
 	if err != nil {
 		noteTrailCommandEnablement(ctx, client, err)
@@ -986,12 +1016,15 @@ func maybeCheckoutTrailCreateBranch(ctx context.Context, cmd *cobra.Command, w i
 	return nil
 }
 
-func newTrailCreateRequest(title, body, branch, base, statusStr string) api.TrailCreateRequest {
+func newTrailCreateRequest(title, body, branch, base, statusStr, typeStr, priorityStr string, assignees []string) api.TrailCreateRequest {
 	req := api.TrailCreateRequest{
-		Title:  title,
-		Body:   body,
-		Base:   base,
-		Status: statusStr,
+		Title:     title,
+		Body:      body,
+		Base:      base,
+		Status:    statusStr,
+		Type:      typeStr,
+		Priority:  priorityStr,
+		Assignees: assignees,
 	}
 	if branch != "" {
 		req.BranchName = branch
@@ -1001,8 +1034,8 @@ func newTrailCreateRequest(title, body, branch, base, statusStr string) api.Trai
 }
 
 func newTrailUpdateCmd() *cobra.Command {
-	var statusStr, title, body, branch string
-	var labelAdd, labelRemove []string
+	var statusStr, title, body, branch, typeStr, priorityStr string
+	var labelAdd, labelRemove, assigneeAdd, assigneeRemove, reviewerAdd, reviewerRemove []string
 
 	cmd := &cobra.Command{
 		Use:   "update",
@@ -1013,16 +1046,24 @@ func newTrailUpdateCmd() *cobra.Command {
 				return err
 			}
 			return runTrailUpdate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailUpdateInputs{
-				Status:        statusStr,
-				StatusChanged: cmd.Flags().Changed("status"),
-				Title:         title,
-				TitleChanged:  cmd.Flags().Changed("title"),
-				Body:          body,
-				BodyChanged:   cmd.Flags().Changed("body"),
-				Branch:        branch,
-				Repo:          trailRepoFlag(cmd),
-				LabelAdd:      labelAdd,
-				LabelRemove:   labelRemove,
+				Status:          statusStr,
+				StatusChanged:   cmd.Flags().Changed("status"),
+				Title:           title,
+				TitleChanged:    cmd.Flags().Changed("title"),
+				Body:            body,
+				BodyChanged:     cmd.Flags().Changed("body"),
+				Branch:          branch,
+				Repo:            trailRepoFlag(cmd),
+				LabelAdd:        labelAdd,
+				LabelRemove:     labelRemove,
+				AssigneeAdd:     assigneeAdd,
+				AssigneeRemove:  assigneeRemove,
+				ReviewerAdd:     reviewerAdd,
+				ReviewerRemove:  reviewerRemove,
+				Type:            typeStr,
+				TypeChanged:     cmd.Flags().Changed("type"),
+				Priority:        priorityStr,
+				PriorityChanged: cmd.Flags().Changed("priority"),
 			})
 		},
 	}
@@ -1033,21 +1074,35 @@ func newTrailUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&branch, "branch", "", "Branch to update trail for (defaults to current)")
 	cmd.Flags().StringSliceVar(&labelAdd, "add-label", nil, "Add label(s)")
 	cmd.Flags().StringSliceVar(&labelRemove, "remove-label", nil, "Remove label(s)")
+	cmd.Flags().StringSliceVar(&assigneeAdd, "add-assignee", nil, "Add assignee(s) by login")
+	cmd.Flags().StringSliceVar(&assigneeRemove, "remove-assignee", nil, "Remove assignee(s) by login")
+	cmd.Flags().StringSliceVar(&reviewerAdd, "add-reviewer", nil, "Request reviewer(s) by login")
+	cmd.Flags().StringSliceVar(&reviewerRemove, "remove-reviewer", nil, "Remove requested reviewer(s) by login")
+	cmd.Flags().StringVar(&typeStr, "type", "", fmt.Sprintf("Set type (%s)", formatValidTypes()))
+	cmd.Flags().StringVar(&priorityStr, "priority", "", fmt.Sprintf("Set priority (%s)", formatValidPriorities()))
 
 	return cmd
 }
 
 type trailUpdateInputs struct {
-	Status        string
-	StatusChanged bool
-	Title         string
-	TitleChanged  bool
-	Body          string
-	BodyChanged   bool
-	Branch        string
-	Repo          string
-	LabelAdd      []string
-	LabelRemove   []string
+	Status          string
+	StatusChanged   bool
+	Title           string
+	TitleChanged    bool
+	Body            string
+	BodyChanged     bool
+	Branch          string
+	Repo            string
+	LabelAdd        []string
+	LabelRemove     []string
+	AssigneeAdd     []string
+	AssigneeRemove  []string
+	ReviewerAdd     []string
+	ReviewerRemove  []string
+	Type            string
+	TypeChanged     bool
+	Priority        string
+	PriorityChanged bool
 }
 
 func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, inputs trailUpdateInputs) error {
@@ -1079,7 +1134,11 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 		statusStr := inputs.Status
 		title := inputs.Title
 		body := inputs.Body
-		noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged && inputs.LabelAdd == nil && inputs.LabelRemove == nil
+		noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged &&
+			inputs.LabelAdd == nil && inputs.LabelRemove == nil &&
+			inputs.AssigneeAdd == nil && inputs.AssigneeRemove == nil &&
+			inputs.ReviewerAdd == nil && inputs.ReviewerRemove == nil &&
+			!inputs.TypeChanged && !inputs.PriorityChanged
 		if noFlags {
 			metadata := found.ToMetadata()
 			// Build status options with current value as default.
@@ -1123,24 +1182,36 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 		statusStr = strings.TrimSpace(statusStr)
 		title = strings.TrimSpace(title)
 		if err := validateTrailUpdateFields(trailUpdateInputs{
-			Status:        statusStr,
-			StatusChanged: inputs.StatusChanged,
-			Title:         title,
-			TitleChanged:  inputs.TitleChanged,
+			Status:          statusStr,
+			StatusChanged:   inputs.StatusChanged,
+			Title:           title,
+			TitleChanged:    inputs.TitleChanged,
+			Type:            inputs.Type,
+			TypeChanged:     inputs.TypeChanged,
+			Priority:        inputs.Priority,
+			PriorityChanged: inputs.PriorityChanged,
 		}); err != nil {
 			return err
 		}
 
 		// Build update request with only changed fields.
 		updateReq := buildTrailUpdateRequest(found, trailUpdateInputs{
-			Status:        statusStr,
-			StatusChanged: inputs.StatusChanged,
-			Title:         title,
-			TitleChanged:  inputs.TitleChanged,
-			Body:          body,
-			BodyChanged:   inputs.BodyChanged,
-			LabelAdd:      inputs.LabelAdd,
-			LabelRemove:   inputs.LabelRemove,
+			Status:          statusStr,
+			StatusChanged:   inputs.StatusChanged,
+			Title:           title,
+			TitleChanged:    inputs.TitleChanged,
+			Body:            body,
+			BodyChanged:     inputs.BodyChanged,
+			LabelAdd:        inputs.LabelAdd,
+			LabelRemove:     inputs.LabelRemove,
+			AssigneeAdd:     inputs.AssigneeAdd,
+			AssigneeRemove:  inputs.AssigneeRemove,
+			ReviewerAdd:     inputs.ReviewerAdd,
+			ReviewerRemove:  inputs.ReviewerRemove,
+			Type:            inputs.Type,
+			TypeChanged:     inputs.TypeChanged,
+			Priority:        inputs.Priority,
+			PriorityChanged: inputs.PriorityChanged,
 		})
 
 		// The single-trail endpoint is keyed by trail number, not id; the server
@@ -1148,18 +1219,20 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 		if found.Number <= 0 {
 			return fmt.Errorf("trail for branch %q has no number yet; cannot update", branch)
 		}
-		resp, err := client.Patch(ctx, trailNumberPath(forge, owner, repoName, found.Number), updateReq)
-		if err != nil {
-			return fmt.Errorf("failed to update trail: %w", err)
-		}
-		defer resp.Body.Close()
-		if err := checkTrailResponse(resp); err != nil {
-			return err
-		}
+		path := trailNumberPath(forge, owner, repoName, found.Number)
 
-		var updateResp api.TrailUpdateResponse
-		if err := api.DecodeJSON(resp, &updateResp); err != nil {
-			return fmt.Errorf("failed to decode update response: %w", err)
+		// The server rejects body + metadata in one PATCH, so send them as
+		// separate requests when both are present.
+		meta, hasMeta, bodyReq := splitTrailUpdate(updateReq)
+		if hasMeta {
+			if err := sendTrailPatch(ctx, client, path, meta); err != nil {
+				return err
+			}
+		}
+		if bodyReq != nil {
+			if err := sendTrailPatch(ctx, client, path, *bodyReq); err != nil {
+				return err
+			}
 		}
 
 		fmt.Fprintf(w, "Updated trail for branch %s\n", branch)
@@ -1177,7 +1250,64 @@ func validateTrailUpdateFields(inputs trailUpdateInputs) error {
 			return fmt.Errorf("invalid status %q: valid values are %s", inputs.Status, formatValidStatuses())
 		}
 	}
+	if inputs.TypeChanged {
+		if typ := trail.Type(strings.TrimSpace(inputs.Type)); !typ.IsValid() {
+			return fmt.Errorf("invalid type %q: valid values are %s", inputs.Type, formatValidTypes())
+		}
+	}
+	if inputs.PriorityChanged {
+		if p := trail.Priority(strings.TrimSpace(inputs.Priority)); !p.IsValid() {
+			return fmt.Errorf("invalid priority %q: valid values are %s", inputs.Priority, formatValidPriorities())
+		}
+	}
 	return nil
+}
+
+// formatValidTypes lists the valid trail types for error messages.
+func formatValidTypes() string {
+	parts := make([]string, 0, len(trail.ValidTypes()))
+	for _, t := range trail.ValidTypes() {
+		parts = append(parts, string(t))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// formatValidPriorities lists the valid trail priorities for error messages.
+func formatValidPriorities() string {
+	parts := make([]string, 0, len(trail.ValidPriorities()))
+	for _, p := range trail.ValidPriorities() {
+		parts = append(parts, string(p))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// mergeStringSet returns current with add appended (dedup, order-preserving)
+// and remove entries deleted. Used for replace-set fields (labels, assignees,
+// requested reviewers) whose PATCH endpoint takes the full new list.
+func mergeStringSet(current, add, remove []string) []string {
+	out := make([]string, 0, len(current)+len(add))
+	out = append(out, current...)
+	for _, a := range add {
+		found := false
+		for _, e := range out {
+			if e == a {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, a)
+		}
+	}
+	for _, r := range remove {
+		for i, e := range out {
+			if e == r {
+				out = append(out[:i], out[i+1:]...)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // buildTrailUpdateRequest constructs a PATCH request body from the current trail and the requested changes.
@@ -1193,35 +1323,62 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 	if inputs.BodyChanged {
 		req.Body = &inputs.Body
 	}
-
-	// Handle label changes: merge adds, remove removes.
+	if inputs.TypeChanged {
+		req.Type = &inputs.Type
+	}
+	if inputs.PriorityChanged {
+		req.Priority = &inputs.Priority
+	}
+	// Replace-set fields: compute the full new list from the current trail.
 	if len(inputs.LabelAdd) > 0 || len(inputs.LabelRemove) > 0 {
-		labels := make([]string, 0, len(current.Labels)+len(inputs.LabelAdd))
-		labels = append(labels, current.Labels...)
-		for _, l := range inputs.LabelAdd {
-			found := false
-			for _, existing := range labels {
-				if existing == l {
-					found = true
-					break
-				}
-			}
-			if !found {
-				labels = append(labels, l)
-			}
-		}
-		for _, l := range inputs.LabelRemove {
-			for i, existing := range labels {
-				if existing == l {
-					labels = append(labels[:i], labels[i+1:]...)
-					break
-				}
-			}
-		}
+		labels := mergeStringSet(current.Labels, inputs.LabelAdd, inputs.LabelRemove)
 		req.Labels = &labels
+	}
+	if len(inputs.AssigneeAdd) > 0 || len(inputs.AssigneeRemove) > 0 {
+		assignees := mergeStringSet(current.Assignees, inputs.AssigneeAdd, inputs.AssigneeRemove)
+		req.Assignees = &assignees
+	}
+	if len(inputs.ReviewerAdd) > 0 || len(inputs.ReviewerRemove) > 0 {
+		reviewers := mergeStringSet(current.RequestedReviewers, inputs.ReviewerAdd, inputs.ReviewerRemove)
+		req.RequestedReviewers = &reviewers
 	}
 
 	return req
+}
+
+// splitTrailUpdate separates a full update into a metadata request and an
+// optional body request. The server rejects a body update combined with any
+// metadata field except labels (trails.ts:4384), so the two must be sent as
+// separate PATCH calls. hasMeta reports whether the metadata request has any
+// field set.
+func splitTrailUpdate(full api.TrailUpdateRequest) (meta api.TrailUpdateRequest, hasMeta bool, bodyReq *api.TrailUpdateRequest) {
+	if full.Body != nil {
+		b := *full.Body
+		bodyReq = &api.TrailUpdateRequest{Body: &b}
+	}
+	meta = full
+	meta.Body = nil
+	hasMeta = meta.Status != nil || meta.Title != nil || meta.Labels != nil ||
+		meta.Assignees != nil || meta.RequestedReviewers != nil ||
+		meta.Type != nil || meta.Priority != nil
+	return meta, hasMeta, bodyReq
+}
+
+// sendTrailPatch issues a single trail PATCH and validates the response.
+func sendTrailPatch(ctx context.Context, client *api.Client, path string, req api.TrailUpdateRequest) error {
+	resp, err := client.Patch(ctx, path, req)
+	if err != nil {
+		return fmt.Errorf("failed to update trail: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return err
+	}
+	var updateResp api.TrailUpdateResponse
+	if err := api.DecodeJSON(resp, &updateResp); err != nil {
+		return fmt.Errorf("failed to decode update response: %w", err)
+	}
+	return nil
 }
 
 func newTrailCheckoutCmd() *cobra.Command {
