@@ -314,7 +314,11 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 		return err
 	}
 	if found {
-		switch _, statErr := os.Stat(match.path); {
+		// Lstat: a symlink planted at the registered path must not pass as a
+		// healthy worktree directory.
+		switch info, statErr := os.Lstat(match.path); {
+		case statErr == nil && !info.IsDir():
+			return fmt.Errorf("branch %q is registered to %s, which is not a directory", branch, match.path)
 		case statErr == nil:
 			if !match.managed {
 				return fmt.Errorf("branch %q is already checked out at %s", branch, match.path)
@@ -418,8 +422,13 @@ type trailWorktreeMatch struct {
 // with found reporting whether any worktree does.
 func findWorktreeForBranch(ctx context.Context, branch, root string) (match trailWorktreeMatch, found bool, err error) {
 	cmd := exec.CommandContext(ctx, "git", "worktree", "list", "--porcelain")
+	cmd.Dir = root
 	output, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(bytes.TrimSpace(exitErr.Stderr)) > 0 {
+			return trailWorktreeMatch{}, false, fmt.Errorf("failed to list worktrees: %s: %w", bytes.TrimSpace(exitErr.Stderr), err)
+		}
 		return trailWorktreeMatch{}, false, fmt.Errorf("failed to list worktrees: %w", err)
 	}
 	// Empty currentRoot: match any worktree, including the current checkout.

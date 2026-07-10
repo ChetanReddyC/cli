@@ -602,6 +602,39 @@ func TestCheckoutTrailWorktree_StaleNonManagedWorktreeErrors(t *testing.T) {
 	}
 }
 
+func TestCheckoutTrailWorktree_RegisteredPathNotADirectory(t *testing.T) {
+	repoDir := newTrailWorktreeTestRepo(t)
+	runGit(t, repoDir, "branch", "feature/swapped")
+	t.Chdir(repoDir)
+
+	var out1, err1 bytes.Buffer
+	if err := checkoutTrailWorktree(context.Background(), &out1, &err1, "feature/swapped", false, 6); err != nil {
+		t.Fatalf("first checkout: %v; stderr: %s", err, err1.String())
+	}
+	worktreePath := filepath.Join(repoDir, ".entire", "worktrees", "trail-6-feature-swapped")
+	if err := os.RemoveAll(worktreePath); err != nil {
+		t.Fatalf("remove worktree dir: %v", err)
+	}
+	if err := os.Symlink(repoDir, worktreePath); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	var out2, err2 bytes.Buffer
+	err := checkoutTrailWorktree(context.Background(), &out2, &err2, "feature/swapped", false, 6)
+	if err == nil || !strings.Contains(err.Error(), "is not a directory") {
+		t.Fatalf("error = %v, want not-a-directory rejection", err)
+	}
+}
+
+func TestFindWorktreeForBranch_SurfacesGitError(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+
+	_, _, err := findWorktreeForBranch(context.Background(), "any", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "not a git repository") {
+		t.Fatalf("error = %v, want git stderr in message", err)
+	}
+}
+
 func TestCheckoutTrailWorktree_RejectsInvalidBranch(t *testing.T) {
 	t.Parallel()
 
