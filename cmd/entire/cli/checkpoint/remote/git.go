@@ -33,6 +33,63 @@ const CheckpointTokenEnvVar = "ENTIRE_CHECKPOINT_TOKEN"
 
 var sshTokenWarningOnce sync.Once //nolint:gochecknoglobals // intentional per-process gate
 
+// nonInteractiveSSHKey marks a context whose checkpoint git subprocesses must
+// never block on an interactive SSH prompt (e.g. a key passphrase when no
+// ssh-agent is running).
+type nonInteractiveSSHKey struct{}
+
+// WithNonInteractiveSSH marks ctx so every checkpoint git command spawned under
+// it runs SSH with BatchMode=yes, failing fast instead of hanging on an
+// interactive prompt. Set this at best-effort, non-interactive entry points such
+// as the git pre-push hook: a blocked passphrase prompt there would hang the
+// user's own `git push` until the checkpoint push budget kills it, with no way
+// to type the passphrase. Foreground commands (resume, explain) leave it unset
+// so they can still prompt.
+func WithNonInteractiveSSH(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nonInteractiveSSHKey{}, true)
+}
+
+func nonInteractiveSSHFromContext(ctx context.Context) bool {
+	v, ok := ctx.Value(nonInteractiveSSHKey{}).(bool)
+	return ok && v
+}
+
+// withBatchModeSSH returns env with GIT_SSH_COMMAND set so ssh runs with
+// BatchMode=yes. An existing GIT_SSH_COMMAND (from the environment or a caller's
+// custom ssh wrapper) is preserved and extended rather than replaced, and the
+// flag is only appended when absent so the result is idempotent.
+func withBatchModeSSH(env []string) []string {
+	const key = "GIT_SSH_COMMAND="
+	base := "ssh"
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, key); ok {
+			if trimmed := strings.TrimSpace(v); trimmed != "" {
+				base = trimmed
+			}
+			continue
+		}
+		out = append(out, e)
+	}
+	if !strings.Contains(base, "BatchMode") {
+		base += " -o BatchMode=yes"
+	}
+	return append(out, key+base)
+}
+
+// applyNonInteractiveSSH sets BatchMode SSH on cmd when ctx is marked
+// non-interactive (see WithNonInteractiveSSH). No-op otherwise, so foreground
+// commands keep their interactive prompt behavior.
+func applyNonInteractiveSSH(ctx context.Context, cmd *exec.Cmd) {
+	if !nonInteractiveSSHFromContext(ctx) {
+		return
+	}
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = withBatchModeSSH(cmd.Env)
+}
+
 // FetchOptions configures a git fetch operation.
 type FetchOptions struct {
 	Remote   string   // remote name or URL (required)
@@ -357,6 +414,11 @@ func newCommand(ctx context.Context, args ...string) *exec.Cmd {
 		c := exec.CommandContext(ctx, "git", finalArgs...)
 		c.Stdin = nil // Disconnect stdin to prevent hanging in hook context
 		terminateOnCancel(c)
+		// Fail fast on interactive SSH prompts (e.g. a key passphrase with no
+		// ssh-agent) when the caller marked ctx non-interactive. HTTPS token
+		// auth rebuilds cmd.Env below (SSH is not used there), so this only
+		// takes effect on the SSH/no-token paths that actually run ssh.
+		applyNonInteractiveSSH(ctx, c)
 		return c
 	}
 

@@ -1089,3 +1089,87 @@ func TestStampNewlyCreatedRemote_StampsUnderCancelledContext(t *testing.T) {
 	assert.True(t, gitConfigBool(context.Background(), repoDir, "remote."+url+".skipFetchAll"),
 		"stamp must land even though the parent context is cancelled")
 }
+
+func TestWithBatchModeSSH(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   []string
+		want string
+	}{
+		{
+			name: "no existing GIT_SSH_COMMAND defaults to ssh",
+			in:   []string{"PATH=/usr/bin"},
+			want: "ssh -o BatchMode=yes",
+		},
+		{
+			name: "preserves and extends a custom ssh command",
+			in:   []string{"GIT_SSH_COMMAND=ssh -i /home/me/.ssh/id"},
+			want: "ssh -i /home/me/.ssh/id -o BatchMode=yes",
+		},
+		{
+			name: "idempotent when BatchMode already present",
+			in:   []string{"GIT_SSH_COMMAND=ssh -o BatchMode=yes"},
+			want: "ssh -o BatchMode=yes",
+		},
+		{
+			name: "blank GIT_SSH_COMMAND falls back to ssh",
+			in:   []string{"GIT_SSH_COMMAND=   "},
+			want: "ssh -o BatchMode=yes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := withBatchModeSSH(tt.in)
+			got, ok := envToMap(out)["GIT_SSH_COMMAND"]
+			assert.True(t, ok, "GIT_SSH_COMMAND should be set")
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestWithBatchModeSSH_PreservesOtherVarsWithoutDuplicating(t *testing.T) {
+	t.Parallel()
+
+	out := withBatchModeSSH([]string{"PATH=/usr/bin", "HOME=/home/me", "GIT_SSH_COMMAND=ssh"})
+
+	count := 0
+	for _, e := range out {
+		if strings.HasPrefix(e, "GIT_SSH_COMMAND=") {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "should not duplicate GIT_SSH_COMMAND")
+
+	m := envToMap(out)
+	assert.Equal(t, "/usr/bin", m["PATH"])
+	assert.Equal(t, "/home/me", m["HOME"])
+	assert.Equal(t, "ssh -o BatchMode=yes", m["GIT_SSH_COMMAND"])
+}
+
+// TestNewCommand_NonInteractiveSSH verifies that a checkpoint git command built
+// under a non-interactive context carries GIT_SSH_COMMAND with BatchMode=yes, so
+// an SSH push cannot hang on a passphrase prompt (issue #1523). Without the
+// marker, the command is left untouched so foreground commands keep interactive
+// prompting.
+func TestNewCommand_NonInteractiveSSH(t *testing.T) {
+	// Not parallel: manipulates the checkpoint token env var.
+	t.Setenv(CheckpointTokenEnvVar, "") // ensure SSH/no-token path
+
+	t.Run("marked context adds BatchMode", func(t *testing.T) {
+		ctx := WithNonInteractiveSSH(context.Background())
+		cmd := newCommand(ctx, "push", "--no-verify", "origin", "entire/checkpoints/v1")
+		sshCmd, ok := envToMap(cmd.Env)["GIT_SSH_COMMAND"]
+		assert.True(t, ok, "non-interactive command must set GIT_SSH_COMMAND")
+		assert.Contains(t, sshCmd, "BatchMode=yes")
+	})
+
+	t.Run("unmarked context leaves env untouched", func(t *testing.T) {
+		cmd := newCommand(context.Background(), "push", "--no-verify", "origin", "entire/checkpoints/v1")
+		// No token and no marker: newCommand should not populate cmd.Env, so no
+		// BatchMode is injected and the process inherits the parent environment.
+		assert.Nil(t, cmd.Env, "unmarked command should not set a custom env")
+	})
