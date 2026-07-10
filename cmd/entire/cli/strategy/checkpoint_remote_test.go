@@ -865,6 +865,94 @@ func TestFetchMetadataBranch_DisconnectedPreservesLocalCheckpoint(t *testing.T) 
 	assert.Contains(t, files, "bb/bbbbbbbbbb/metadata.json", "local-only checkpoint should be replayed when there is no common ancestor")
 }
 
+// TestEnsurePrimaryRef_FetchesFromCheckpointRemoteInsteadOfOrphan reproduces
+// issue #1374: enabling Entire on a second device where a checkpoint_remote is
+// configured and already holds entire/checkpoints/v1 must fetch that branch
+// rather than creating an empty orphan (which hides existing checkpoints and is
+// later rejected non-fast-forward).
+//
+// Not parallel: uses t.Chdir().
+func TestEnsurePrimaryRef_FetchesFromCheckpointRemoteInsteadOfOrphan(t *testing.T) {
+	ctx := context.Background()
+
+	// Checkpoint remote: a repo that already holds entire/checkpoints/v1 with a
+	// real (non-empty) commit — models the branch created on device A.
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	remoteDefaultBranch := checkpointRemoteCurrentBranch(ctx, t, remoteDir)
+
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "aaaaaaaaaaaa", "device-a")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", remoteDefaultBranch)
+	remoteTip := checkpointRemoteRevParse(ctx, t, remoteDir, paths.MetadataBranchName)
+
+	// Local repo (device B): origin points at the main repo and a separate
+	// checkpoint_remote is configured; the local metadata branch does not exist.
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	runCheckpointRemoteGit(ctx, t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
+		0o644,
+	))
+
+	// The SSH origin + github checkpoint_remote resolves (via remote.FetchURL)
+	// to git@github.com:org/checkpoints.git. Redirect that derived URL to the
+	// local file:// remote so the real fetch path runs hermetically.
+	redirectGitURL(t, localDir, "git@github.com:org/checkpoints.git", "file://"+remoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	// Sanity: derivation produces the URL we redirected.
+	url, err := remote.FetchURL(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "git@github.com:org/checkpoints.git", url)
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	require.NoError(t, EnsurePrimaryRef(ctx, repo))
+
+	// The local metadata branch must now match the checkpoint remote's tip,
+	// not a fresh empty orphan.
+	localTip := checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName)
+	assert.Equal(t, remoteTip, localTip,
+		"EnsurePrimaryRef must fetch entire/checkpoints/v1 from the configured checkpoint_remote instead of creating an empty orphan")
+
+	// And it must carry the real checkpoint data (proving it is not an empty tree).
+	files := checkpointRemoteMetadataFiles(ctx, t, localDir)
+	assert.Contains(t, files, "aa/aaaaaaaaaa/"+paths.MetadataFileName,
+		"the bootstrapped branch should contain the checkpoint committed on the remote")
+}
+
+// redirectGitURL appends a git `url.<replacement>.insteadOf = <match>` rule to
+// the repo-local config so any git operation on matchURL is transparently
+// rewritten to replacementURL. This lets tests point a derived remote URL at a
+// local file:// repository with no network access. Repo-local config is honored
+// regardless of the ambient GIT_CONFIG_* environment.
+func redirectGitURL(t *testing.T, repoDir, matchURL, replacementURL string) {
+	t.Helper()
+	configPath := filepath.Join(repoDir, ".git", "config")
+	f, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, f.Close()) }()
+	_, err = fmt.Fprintf(f, "\n[url %q]\n\tinsteadOf = %s\n", replacementURL, matchURL)
+	require.NoError(t, err)
+}
+
 func runCheckpointRemoteGit(ctx context.Context, t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.CommandContext(ctx, "git", args...)

@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -522,6 +523,15 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		return nil
 	}
 
+	// A dedicated checkpoint_remote may already hold the metadata branch (e.g.
+	// enabling Entire on a second device). Fetch it before creating a fresh
+	// empty orphan: an orphan would diverge from the real branch, hide existing
+	// checkpoints, and be rejected non-fast-forward on later syncs.
+	if bootstrapPrimaryFromCheckpointRemote(ctx, repo, refs.Primary) {
+		fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from checkpoint remote\n", primaryName)
+		return nil
+	}
+
 	// No local ref and nothing to bootstrap from — create empty orphan
 	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
 	obj := repo.Storer.NewEncodedObject()
@@ -577,6 +587,73 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 
 	fmt.Fprintf(os.Stderr, "  ✓ Created orphan ref %s for session metadata\n", primaryName)
 	return nil
+}
+
+// bootstrapPrimaryFromCheckpointRemote tries to populate a missing local primary
+// metadata ref from a configured checkpoint_remote before the caller falls back
+// to creating an empty orphan. When a separate checkpoint_remote already holds
+// the real entire/checkpoints/v1 branch (the common second-device case), a fresh
+// local orphan would diverge from it — hiding existing checkpoints and causing
+// non-fast-forward rejections on the next fetch.
+//
+// All resolution is pinned to repo's worktree (settings, origin URL, fetch
+// working directory, ref promotion) so the decision depends on the repository
+// being ensured rather than the ambient working directory.
+//
+// It returns true only when the fetch succeeds and the local primary ref now
+// points at the remote branch. Every failure is non-fatal and returns false so
+// the caller creates the empty orphan: `entire enable` must never break on a
+// missing checkpoint remote, an unresolvable URL, or a network/auth error.
+func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Repository, primary plumbing.ReferenceName) bool {
+	worktreeRoot, err := getRepoPath(repo)
+	if err != nil {
+		logging.Debug(ctx, "checkpoint-remote: cannot resolve worktree root for enable bootstrap",
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	// Pin settings/remote resolution to this repo's worktree.
+	ctx = settings.WithWorktreeRoot(ctx, worktreeRoot)
+
+	if !remote.Configured(ctx) {
+		return false
+	}
+	url, err := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: worktreeRoot})
+	if err != nil || strings.TrimSpace(url) == "" {
+		logging.Debug(ctx, "checkpoint-remote: skipping enable bootstrap; no fetch URL",
+			slog.Any("error", err),
+		)
+		return false
+	}
+
+	branchName := primary.Short()
+	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + branchName)
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true); err != nil {
+		logging.Debug(ctx, "checkpoint-remote: enable bootstrap fetch failed; creating empty orphan",
+			slog.String("url", remote.RedactURL(url)),
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
+
+	tmpRef, err := repo.Reference(tmpRefName, true)
+	if err != nil {
+		logging.Debug(ctx, "checkpoint-remote: fetched metadata ref missing after enable bootstrap",
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	if err := SafelyAdvanceLocalRef(ctx, repo, primary, tmpRef.Hash()); err != nil {
+		logging.Debug(ctx, "checkpoint-remote: could not advance local metadata ref on enable bootstrap",
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	logging.Info(ctx, "checkpoint-remote: bootstrapped metadata branch on enable",
+		slog.String("ref", primary.String()),
+	)
+	return true
 }
 
 // isEmptyMetadataBranch returns true if the branch ref points to a commit with an empty tree.
