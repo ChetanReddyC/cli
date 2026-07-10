@@ -302,7 +302,7 @@ func copyIncludedFile(src, dst string) error {
 // checkoutTrailWorktree checks branch out into a managed worktree under
 // <main-root>/.entire/worktrees instead of switching the current checkout.
 // The final output line is a shell-safe `cd '<path>'` hint.
-func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string, force bool, trailNumber int) error { //nolint:unparam // force is false in every caller today; it forwards to ensureTrailWorktreeBranchAvailable and ensureTrailWorktreeIgnoreRule, which branch on it
+func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string, force bool, trailNumber int) error {
 	if err := ValidateBranchName(ctx, branch); err != nil {
 		return err
 	}
