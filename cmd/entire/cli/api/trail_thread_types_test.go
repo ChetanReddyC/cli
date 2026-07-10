@@ -71,21 +71,3 @@ func TestTrailThreadUpdateRequestMarshalsResolvedFalse(t *testing.T) {
 		t.Errorf("got %s, want {}", b2)
 	}
 }
-
-func TestTrailAttachmentDecodesNullableFields(t *testing.T) {
-	t.Parallel()
-	payload := []byte(`{"attachment":{"id":"a1","trail_id":"t1","repo_id":"r1","kind":"image",
-	  "content_type":"image/png","filename":"x.png","size_bytes":1234,
-	  "width":null,"height":null,"created_by_user_id":null,
-	  "created_at":"2026-07-10T00:00:00Z","deleted_at":null}}`)
-	var out TrailAttachmentUploadResponse
-	if err := json.Unmarshal(payload, &out); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if out.Attachment.SizeBytes != 1234 || out.Attachment.ContentType != "image/png" {
-		t.Errorf("attachment = %#v", out.Attachment)
-	}
-	if out.Attachment.Width != nil || out.Attachment.DeletedAt != nil {
-		t.Errorf("nullable fields should be nil: %#v", out.Attachment)
-	}
-}

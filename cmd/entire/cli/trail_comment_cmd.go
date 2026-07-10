@@ -40,8 +40,7 @@ func trailSubcommandSelector(cmd *cobra.Command) string {
 
 // withNumberedTrail resolves a numbered trail (by --trail selector or current
 // branch / --branch) and invokes fn inside an authenticated API context. It
-// centralizes the resolution boilerplate shared by the comment and attachment
-// subtrees.
+// centralizes the resolution boilerplate for the comment subtree.
 func withNumberedTrail(cmd *cobra.Command, fn func(ctx context.Context, client *api.Client, found *api.TrailResource, forge, owner, repo string) error) error {
 	repoOverride := trailRepoFlag(cmd)
 	selector := trailSubcommandSelector(cmd)
