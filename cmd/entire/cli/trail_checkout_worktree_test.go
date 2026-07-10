@@ -11,6 +11,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
+const testEnvFile = ".env"
+
 func TestDefaultTrailWorktreePath(t *testing.T) {
 	t.Parallel()
 
@@ -149,5 +151,126 @@ func TestEnsureTrailWorktreeIgnoreRule_AlreadyIgnoredIsSilentNoop(t *testing.T) 
 		if readErr == nil && strings.Contains(string(content), ".entire/worktrees/") {
 			t.Fatalf("exclude gained the rule despite .gitignore already covering it")
 		}
+	}
+}
+
+func TestMatchIncludePatterns(t *testing.T) {
+	t.Parallel()
+
+	files := []string{
+		testEnvFile,
+		"config/.env.local",
+		".entire/worktrees/other/.env",
+		"/abs/.env",
+		"../escape/.env",
+		"node_modules/pkg/x.js",
+	}
+	got := matchIncludePatterns([]string{testEnvFile, "*.local"}, files)
+	want := []string{testEnvFile, filepath.Join("config", ".env.local")}
+	if len(got) != len(want) {
+		t.Fatalf("matchIncludePatterns() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("matchIncludePatterns() = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestLoadWorktreeIncludePatterns(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	content := "# secrets\n\n.env\n*.local\n"
+	if err := os.WriteFile(filepath.Join(root, ".worktreeinclude"), []byte(content), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	got, err := loadWorktreeIncludePatterns(root)
+	if err != nil {
+		t.Fatalf("loadWorktreeIncludePatterns: %v", err)
+	}
+	want := []string{".env", "*.local"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("patterns = %v, want %v", got, want)
+	}
+}
+
+func TestLoadWorktreeIncludePatterns_MissingFile(t *testing.T) {
+	t.Parallel()
+
+	got, err := loadWorktreeIncludePatterns(t.TempDir())
+	if err != nil {
+		t.Fatalf("loadWorktreeIncludePatterns: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("patterns = %v, want none", got)
+	}
+}
+
+func TestCopyWorktreeIncludeFiles(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, ".gitignore", testEnvFile+"\n")
+	testutil.WriteFile(t, repoDir, ".worktreeinclude", testEnvFile+"\n")
+	testutil.WriteFile(t, repoDir, testEnvFile, "SECRET=1\n")
+	testutil.WriteFile(t, repoDir, "sub/"+testEnvFile, "SECRET=2\n")
+	testutil.GitAdd(t, repoDir, ".gitignore", ".worktreeinclude")
+	testutil.GitCommit(t, repoDir, "init")
+
+	dest := t.TempDir()
+	var errOut bytes.Buffer
+	if err := copyWorktreeIncludeFiles(context.Background(), &errOut, repoDir, dest); err != nil {
+		t.Fatalf("copyWorktreeIncludeFiles: %v; stderr: %s", err, errOut.String())
+	}
+	for _, rel := range []string{testEnvFile, "sub/" + testEnvFile} {
+		if _, err := os.Stat(filepath.Join(dest, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("copied file %s missing: %v", rel, err)
+		}
+	}
+}
+
+func TestCopyWorktreeIncludeFiles_NoIncludeFileCopiesNothing(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, ".gitignore", testEnvFile+"\n")
+	testutil.WriteFile(t, repoDir, testEnvFile, "SECRET=1\n")
+
+	dest := t.TempDir()
+	var errOut bytes.Buffer
+	if err := copyWorktreeIncludeFiles(context.Background(), &errOut, repoDir, dest); err != nil {
+		t.Fatalf("copyWorktreeIncludeFiles: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, testEnvFile)); !os.IsNotExist(err) {
+		t.Fatalf("%s stat = %v, want not exist", testEnvFile, err)
+	}
+}
+
+func TestCopyWorktreeIncludeFiles_SkipsSymlinkWithWarning(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+
+	const symlinkPath = "link.env"
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, ".gitignore", symlinkPath+"\ntarget.txt\n")
+	testutil.WriteFile(t, repoDir, ".worktreeinclude", symlinkPath+"\n")
+	testutil.WriteFile(t, repoDir, "target.txt", "x\n")
+	if err := os.Symlink(filepath.Join(repoDir, "target.txt"), filepath.Join(repoDir, symlinkPath)); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	dest := t.TempDir()
+	var errOut bytes.Buffer
+	if err := copyWorktreeIncludeFiles(context.Background(), &errOut, repoDir, dest); err != nil {
+		t.Fatalf("copyWorktreeIncludeFiles: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "warning: skipped "+symlinkPath) {
+		t.Fatalf("stderr = %q, want skip warning for %s", errOut.String(), symlinkPath)
+	}
+	if _, err := os.Stat(filepath.Join(dest, symlinkPath)); !os.IsNotExist(err) {
+		t.Fatalf("%s stat = %v, want not exist", symlinkPath, err)
 	}
 }

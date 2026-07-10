@@ -1,16 +1,19 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	huh "charm.land/huh/v2"
+	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 )
@@ -151,6 +154,147 @@ func appendIgnoreRule(path, rule string) error { //nolint:unparam // rule parame
 	updated := string(content) + prefix + rule + "\n"
 	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil { //nolint:gosec // path derived from repo root / git common dir
 		return fmt.Errorf("failed to update %s: %w", path, err)
+	}
+	return nil
+}
+
+const worktreeIncludeFile = ".worktreeinclude"
+
+// copyWorktreeIncludeFiles copies ignored files matching .worktreeinclude
+// patterns from the main worktree root into a freshly created worktree.
+// Per-file failures warn and skip; they never fail the checkout.
+func copyWorktreeIncludeFiles(ctx context.Context, errW io.Writer, root, dest string) error {
+	patterns, err := loadWorktreeIncludePatterns(root)
+	if err != nil {
+		return err
+	}
+	if len(patterns) == 0 {
+		return nil
+	}
+	ignored, err := listIgnoredFiles(ctx, root)
+	if err != nil {
+		return err
+	}
+	for _, rel := range matchIncludePatterns(patterns, ignored) {
+		if err := copyIncludedFile(filepath.Join(root, rel), filepath.Join(dest, rel)); err != nil {
+			fmt.Fprintf(errW, "warning: skipped %s: %v\n", filepath.ToSlash(rel), err)
+		}
+	}
+	return nil
+}
+
+// loadWorktreeIncludePatterns reads .worktreeinclude from root. A missing
+// file means nothing gets copied. Lines are gitignore-style patterns; blank
+// lines and #-comments are skipped.
+func loadWorktreeIncludePatterns(root string) ([]string, error) {
+	data, err := os.ReadFile(filepath.Join(root, worktreeIncludeFile)) //nolint:gosec // path derived from repo root
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", worktreeIncludeFile, err)
+	}
+	var patterns []string
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		patterns = append(patterns, line)
+	}
+	return patterns, nil
+}
+
+// listIgnoredFiles returns untracked files ignored by repo ignore rules,
+// relative to root.
+func listIgnoredFiles(ctx context.Context, root string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+	cmd.Dir = root
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ignored files: %w", err)
+	}
+	var files []string
+	for _, f := range bytes.Split(output, []byte{0}) {
+		if len(f) > 0 {
+			files = append(files, string(f))
+		}
+	}
+	return files, nil
+}
+
+func matchIncludePatterns(patterns, files []string) []string {
+	ps := make([]gitignore.Pattern, 0, len(patterns))
+	for _, pattern := range patterns {
+		ps = append(ps, gitignore.ParsePattern(pattern, nil))
+	}
+	matcher := gitignore.NewMatcher(ps)
+	included := make([]string, 0, len(files))
+	for _, file := range files {
+		rel, ok := cleanRelativeIncludeFile(file)
+		if !ok || isManagedTrailWorktreePath(rel) || !matcher.Match(strings.Split(filepath.ToSlash(rel), "/"), false) {
+			continue
+		}
+		included = append(included, rel)
+	}
+	return included
+}
+
+func isManagedTrailWorktreePath(rel string) bool {
+	slash := filepath.ToSlash(rel)
+	return slash == trailWorktreesRelDir || strings.HasPrefix(slash, trailWorktreesRelDir+"/")
+}
+
+func cleanRelativeIncludeFile(rel string) (string, bool) {
+	if rel == "" || filepath.IsAbs(rel) {
+		return "", false
+	}
+	clean := filepath.Clean(filepath.FromSlash(rel))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return clean, true
+}
+
+func copyIncludedFile(src, dst string) error {
+	srcInfo, err := os.Lstat(src)
+	if err != nil {
+		return err //nolint:wrapcheck // lstat error is sufficient for caller context
+	}
+	if !srcInfo.Mode().IsRegular() {
+		return errors.New("source is not a regular file")
+	}
+	in, err := os.Open(src) //nolint:gosec // src derived from repo root + .worktreeinclude
+	if err != nil {
+		return err //nolint:wrapcheck // open error is sufficient for caller context
+	}
+	defer in.Close()
+	openedInfo, err := in.Stat()
+	if err != nil {
+		return err //nolint:wrapcheck // stat error is sufficient for caller context
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(srcInfo, openedInfo) {
+		return errors.New("source changed while opening")
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+		return err //nolint:wrapcheck // mkdir error is sufficient for caller context
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, srcInfo.Mode().Perm()) //nolint:gosec // dst is inside the new worktree
+	if err != nil {
+		return err //nolint:wrapcheck // openfile error is sufficient for caller context
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err //nolint:wrapcheck // copy error is sufficient for caller context
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return err //nolint:wrapcheck // close error is sufficient for caller context
+	}
+	if err := os.Chmod(dst, srcInfo.Mode().Perm()); err != nil {
+		_ = os.Remove(dst)
+		return err //nolint:wrapcheck // chmod error is sufficient for caller context
 	}
 	return nil
 }
