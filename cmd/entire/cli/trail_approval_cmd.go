@@ -28,10 +28,11 @@ func buildApprovalRequest(event, message string) (api.TrailApprovalRequest, erro
 	return api.TrailApprovalRequest{Event: event, Body: msg}, nil
 }
 
-// resolveTrailForApproval resolves a numbered trail by optional selector,
-// falling back to the current branch (or --branch). Approvals target the
-// trail number, so a trail without a number is rejected.
-func resolveTrailForApproval(ctx context.Context, client *api.Client, repoOverride, selector, branch string) (*api.TrailResource, string, string, string, error) {
+// resolveNumberedTrail resolves a trail by optional selector, falling back to
+// the current branch (or --branch), and requires it to have a number (the
+// number-keyed subresource endpoints — approvals, threads — reject a trail
+// without one).
+func resolveNumberedTrail(ctx context.Context, client *api.Client, repoOverride, selector, branch string) (*api.TrailResource, string, string, string, error) {
 	forge, owner, repoName, err := resolveTrailRepoOrRemote(ctx, repoOverride)
 	if err != nil {
 		return nil, "", "", "", err
@@ -41,7 +42,7 @@ func resolveTrailForApproval(ctx context.Context, client *api.Client, repoOverri
 		return nil, "", "", "", err
 	}
 	if found.Number <= 0 {
-		return nil, "", "", "", errors.New("trail has no number yet; cannot submit an approval")
+		return nil, "", "", "", errors.New("trail has no number yet")
 	}
 	return found, forge, owner, repoName, nil
 }
@@ -63,7 +64,7 @@ func submitTrailApproval(ctx context.Context, w io.Writer, insecureHTTP bool, re
 		return err
 	}
 	return runAuthenticatedTrailAPI(ctx, w, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client) error {
-		found, forge, owner, repoName, err := resolveTrailForApproval(ctx, client, repoOverride, selector, branch)
+		found, forge, owner, repoName, err := resolveNumberedTrail(ctx, client, repoOverride, selector, branch)
 		if err != nil {
 			return err
 		}
@@ -146,7 +147,7 @@ func runTrailApprovals(ctx context.Context, w io.Writer, insecureHTTP bool, repo
 		return errors.New("pass a trail selector or --branch, not both")
 	}
 	return runAuthenticatedTrailAPI(ctx, w, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client) error {
-		found, forge, owner, repoName, err := resolveTrailForApproval(ctx, client, repoOverride, selector, branch)
+		found, forge, owner, repoName, err := resolveNumberedTrail(ctx, client, repoOverride, selector, branch)
 		if err != nil {
 			return err
 		}
