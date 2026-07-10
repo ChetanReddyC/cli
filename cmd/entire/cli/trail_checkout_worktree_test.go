@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -57,22 +58,12 @@ func TestSanitizeTrailWorktreeName(t *testing.T) {
 	}
 }
 
-func TestShellQuotePath(t *testing.T) {
-	t.Parallel()
-
-	got := shellQuotePath("/tmp/it's here")
-	want := `'/tmp/it'\''s here'`
-	if got != want {
-		t.Fatalf("shellQuotePath() = %q, want %q", got, want)
-	}
-}
-
 func TestAppendIgnoreRule(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "sub", "exclude")
 	for range 2 {
-		if err := appendIgnoreRule(path, ".entire/worktrees/"); err != nil {
+		if err := appendIgnoreRule(path); err != nil {
 			t.Fatalf("appendIgnoreRule: %v", err)
 		}
 	}
@@ -95,7 +86,7 @@ func TestAppendIgnoreRule_AddsNewlineBeforeRule(t *testing.T) {
 	if err := os.WriteFile(path, []byte("node_modules"), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if err := appendIgnoreRule(path, ".entire/worktrees/"); err != nil {
+	if err := appendIgnoreRule(path); err != nil {
 		t.Fatalf("appendIgnoreRule: %v", err)
 	}
 	content, err := os.ReadFile(path)
@@ -169,13 +160,8 @@ func TestMatchIncludePatterns(t *testing.T) {
 	}
 	got := matchIncludePatterns([]string{testEnvFile, "*.local"}, files)
 	want := []string{testEnvFile, filepath.Join("config", ".env.local")}
-	if len(got) != len(want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("matchIncludePatterns() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("matchIncludePatterns() = %v, want %v", got, want)
-		}
 	}
 }
 
@@ -192,7 +178,7 @@ func TestLoadWorktreeIncludePatterns(t *testing.T) {
 		t.Fatalf("loadWorktreeIncludePatterns: %v", err)
 	}
 	want := []string{".env", "*.local"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	if !slices.Equal(got, want) {
 		t.Fatalf("patterns = %v, want %v", got, want)
 	}
 }
@@ -318,16 +304,6 @@ func newTrailWorktreeTestRepo(t *testing.T) string {
 	return repoDir
 }
 
-func runTrailWorktreeGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", args...)
-	cmd.Dir = dir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
-	}
-}
-
 func currentBranchInDir(t *testing.T, dir string) string {
 	t.Helper()
 	cmd := exec.CommandContext(context.Background(), "git", "branch", "--show-current")
@@ -341,7 +317,7 @@ func currentBranchInDir(t *testing.T, dir string) string {
 
 func TestCheckoutTrailWorktree_CreatesWorktree(t *testing.T) {
 	repoDir := newTrailWorktreeTestRepo(t)
-	runTrailWorktreeGit(t, repoDir, "branch", "feature/test")
+	runGit(t, repoDir, "branch", "feature/test")
 	testutil.WriteFile(t, repoDir, ".worktreeinclude", ".env\n")
 	testutil.WriteFile(t, repoDir, ".env", "SECRET=1\n")
 	testutil.WriteFile(t, repoDir, ".gitignore", ".env\n")
@@ -356,7 +332,7 @@ func TestCheckoutTrailWorktree_CreatesWorktree(t *testing.T) {
 	}
 
 	wantPath := filepath.Join(repoDir, ".entire", "worktrees", "trail-7-feature-test")
-	if !strings.Contains(out.String(), "cd "+shellQuotePath(wantPath)) {
+	if !strings.Contains(out.String(), "cd "+shellQuote(wantPath)) {
 		t.Fatalf("output = %q, want cd hint for %q", out.String(), wantPath)
 	}
 	if got := currentBranchInDir(t, repoDir); got != startBranch {
@@ -379,8 +355,8 @@ func TestCheckoutTrailWorktree_CreatesWorktree(t *testing.T) {
 
 func TestCheckoutTrailWorktree_FromLinkedWorktreeCreatesSibling(t *testing.T) {
 	repoDir := newTrailWorktreeTestRepo(t)
-	runTrailWorktreeGit(t, repoDir, "branch", "feature/first")
-	runTrailWorktreeGit(t, repoDir, "branch", "feature/second")
+	runGit(t, repoDir, "branch", "feature/first")
+	runGit(t, repoDir, "branch", "feature/second")
 	t.Chdir(repoDir)
 
 	var out1, err1 bytes.Buffer
@@ -429,7 +405,7 @@ func TestCheckoutTrailWorktree_BranchCheckedOutInMainWorktree(t *testing.T) {
 
 func TestCheckoutTrailWorktree_ReusesExistingWorktree(t *testing.T) {
 	repoDir := newTrailWorktreeTestRepo(t)
-	runTrailWorktreeGit(t, repoDir, "branch", "feature/reuse")
+	runGit(t, repoDir, "branch", "feature/reuse")
 	t.Chdir(repoDir)
 
 	var out1, err1 bytes.Buffer
@@ -454,18 +430,18 @@ func TestCheckoutTrailWorktree_FetchesRemoteOnlyBranch(t *testing.T) {
 	originDir := filepath.Join(tmp, "origin.git")
 	seedDir := filepath.Join(tmp, "seed")
 	repoDir := filepath.Join(tmp, "local")
-	runTrailWorktreeGit(t, tmp, "init", "--bare", originDir)
+	runGit(t, tmp, "init", "--bare", originDir)
 	testutil.InitRepo(t, seedDir)
 	testutil.WriteFile(t, seedDir, "README.md", "test\n")
 	testutil.GitAdd(t, seedDir, "README.md")
 	testutil.GitCommit(t, seedDir, "initial")
-	runTrailWorktreeGit(t, seedDir, "checkout", "-b", "feature/remote")
+	runGit(t, seedDir, "checkout", "-b", "feature/remote")
 	testutil.WriteFile(t, seedDir, "remote.txt", "remote\n")
 	testutil.GitAdd(t, seedDir, "remote.txt")
 	testutil.GitCommit(t, seedDir, "remote branch")
-	runTrailWorktreeGit(t, seedDir, "remote", "add", "origin", originDir)
-	runTrailWorktreeGit(t, seedDir, "push", "origin", "--all")
-	runTrailWorktreeGit(t, tmp, "clone", originDir, repoDir)
+	runGit(t, seedDir, "remote", "add", "origin", originDir)
+	runGit(t, seedDir, "push", "origin", "--all")
+	runGit(t, tmp, "clone", originDir, repoDir)
 	t.Chdir(repoDir)
 
 	var out, errOut bytes.Buffer

@@ -16,6 +16,7 @@ import (
 	huh "charm.land/huh/v2"
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 )
 
@@ -44,10 +45,6 @@ func sanitizeTrailWorktreeName(branch string) string {
 		return trailWorktreeFallbackName
 	}
 	return name
-}
-
-func shellQuotePath(path string) string {
-	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
 // gitCommonDirForTrailWorktree returns the absolute git common dir, which is
@@ -96,7 +93,6 @@ func ensureTrailWorktreeIgnoreRule(ctx context.Context, w io.Writer, root string
 		return fmt.Errorf("failed to check ignore status of %s: %w", trailWorktreesRelDir, err)
 	}
 
-	const rule = trailWorktreesRelDir + "/"
 	useGitignore := false
 	if !force && interactive.CanPromptInteractively() {
 		confirmed := true
@@ -118,24 +114,23 @@ func ensureTrailWorktreeIgnoreRule(ctx context.Context, w io.Writer, root string
 	}
 
 	if useGitignore {
-		if err := appendIgnoreRule(filepath.Join(root, ".gitignore"), rule); err != nil {
+		if err := appendIgnoreRule(filepath.Join(root, ".gitignore")); err != nil {
 			return err
 		}
 		fmt.Fprintln(w, "Added .entire/worktrees/ to .gitignore — commit this when convenient.")
 		return nil
 	}
-	gitDir, err := gitCommonDirForTrailWorktree(ctx)
-	if err != nil {
-		return err
-	}
-	if err := appendIgnoreRule(filepath.Join(gitDir, "info", "exclude"), rule); err != nil {
+	// root came from trailWorktreeBaseRoot, which guarantees <root>/.git is the
+	// git common dir even when running from a linked worktree.
+	if err := appendIgnoreRule(filepath.Join(root, ".git", "info", "exclude")); err != nil {
 		return err
 	}
 	fmt.Fprintln(w, "Added .entire/worktrees/ to .git/info/exclude (local to this clone).")
 	return nil
 }
 
-func appendIgnoreRule(path, rule string) error { //nolint:unparam // rule is constant today; the writer serves both ignore files
+func appendIgnoreRule(path string) error {
+	const rule = trailWorktreesRelDir + "/"
 	content, err := os.ReadFile(path) //nolint:gosec // path derived from repo root / git common dir
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to read %s: %w", path, err)
@@ -323,7 +318,12 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 		return err
 	}
 
-	existing, managed, found, err := findWorktreeForBranch(ctx, branch)
+	root, err := trailWorktreeBaseRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to find main worktree root: %w", err)
+	}
+
+	existing, managed, found, err := findWorktreeForBranch(ctx, branch, root)
 	if err != nil {
 		return err
 	}
@@ -332,7 +332,7 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 			return fmt.Errorf("branch %q is already checked out at %s", branch, existing)
 		}
 		fmt.Fprintf(w, "Worktree already exists at %s\n", existing)
-		fmt.Fprintf(w, "cd %s\n", shellQuotePath(existing))
+		fmt.Fprintf(w, "cd %s\n", shellQuote(existing))
 		return nil
 	}
 
@@ -345,10 +345,6 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 		return nil
 	}
 
-	root, err := trailWorktreeBaseRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to find main worktree root: %w", err)
-	}
 	if err := ensureTrailWorktreeIgnoreRule(ctx, w, root, force); err != nil {
 		return err
 	}
@@ -368,43 +364,28 @@ func checkoutTrailWorktree(ctx context.Context, w, errW io.Writer, branch string
 	}
 
 	fmt.Fprintf(w, "Worktree ready at %s\n", worktreePath)
-	fmt.Fprintf(w, "cd %s\n", shellQuotePath(worktreePath))
+	fmt.Fprintf(w, "cd %s\n", shellQuote(worktreePath))
 	return nil
 }
 
 // findWorktreeForBranch reports whether branch is already checked out in any
 // worktree, and whether that worktree is managed under
-// <main-root>/.entire/worktrees.
-func findWorktreeForBranch(ctx context.Context, branch string) (path string, managed bool, found bool, err error) {
-	root, err := trailWorktreeBaseRoot(ctx)
-	if err != nil {
-		return "", false, false, fmt.Errorf("failed to find main worktree root: %w", err)
-	}
-	managedRoot := normalizeWorktreePath(filepath.Join(root, filepath.FromSlash(trailWorktreesRelDir)))
-
+// <root>/.entire/worktrees.
+func findWorktreeForBranch(ctx context.Context, branch, root string) (path string, managed bool, found bool, err error) {
 	cmd := exec.CommandContext(ctx, "git", "worktree", "list", "--porcelain")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", false, false, fmt.Errorf("failed to list worktrees: %w", err)
 	}
-	var currentPath string
-	for _, line := range strings.Split(string(output), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			currentPath = ""
-			continue
-		}
-		if strings.HasPrefix(line, "worktree ") {
-			currentPath = strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
-			continue
-		}
-		if strings.TrimPrefix(line, "branch ") == "refs/heads/"+branch && currentPath != "" {
-			normalized := normalizeWorktreePath(currentPath)
-			isManaged := normalized == managedRoot || strings.HasPrefix(normalized, managedRoot+string(filepath.Separator))
-			return currentPath, isManaged, true, nil
-		}
+	// Empty currentRoot: match any worktree, including the current checkout.
+	path, found = parseWorktreeForBranch(string(output), branch, "")
+	if !found {
+		return "", false, false, nil
 	}
-	return "", false, false, nil
+	managedRoot := normalizeWorktreePath(filepath.Join(root, filepath.FromSlash(trailWorktreesRelDir)))
+	normalized := normalizeWorktreePath(path)
+	managed = normalized == managedRoot || strings.HasPrefix(normalized, managedRoot+string(filepath.Separator))
+	return path, managed, true, nil
 }
 
 // ensureTrailWorktreeBranchAvailable makes sure branch exists locally,
@@ -452,8 +433,17 @@ func fetchTrailWorktreeBranch(ctx context.Context, branch string) error {
 	defer cancel()
 
 	refSpec := fmt.Sprintf("refs/heads/%s:refs/heads/%s", branch, branch)
-	cmd := exec.CommandContext(ctx, "git", "fetch", "origin", refSpec)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	// NoFilter: the worktree checkout needs full branch content; a partial
+	// clone would leave blobs missing.
+	output, err := remote.Fetch(ctx, remote.FetchOptions{
+		Remote:   "origin",
+		RefSpecs: []string{refSpec},
+		NoFilter: true,
+	})
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return errors.New("fetch timed out after 2 minutes")
+		}
 		return fmt.Errorf("failed to fetch branch from origin: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
