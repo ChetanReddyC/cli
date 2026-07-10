@@ -1010,6 +1010,77 @@ func TestEnableCmd_InitRepoFlagsMutuallyExclusive(t *testing.T) {
 	}
 }
 
+// withPipedStdin redirects os.Stdin to a pipe carrying input for the
+// duration of the test, so interactive (accessible) prompts read a
+// scripted answer instead of blocking on a real terminal.
+func withPipedStdin(t *testing.T, input string) {
+	t.Helper()
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close() })
+	go func() {
+		pw.WriteString(input) //nolint:errcheck // test helper
+		pw.Close()
+	}()
+	old := os.Stdin
+	os.Stdin = pr
+	t.Cleanup(func() { os.Stdin = old })
+}
+
+// TestConfirmInitRepo_DefaultsToNo verifies that pressing Enter (empty
+// input) at the init-repo prompt declines. `entire enable` is often run
+// reflexively, so a stray run in a non-repo directory must not initialize
+// a repo on the user's behalf. Regression guard for issue #1717.
+func TestConfirmInitRepo_DefaultsToNo(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	t.Setenv("ACCESSIBLE", "1")
+	withPipedStdin(t, "\n")
+
+	proceed, err := confirmInitRepo(io.Discard, t.TempDir(), GitHubBootstrapOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if proceed {
+		t.Fatal("confirmInitRepo should default to No (decline) on empty input")
+	}
+}
+
+// TestConfirmInitRepo_ExplicitYesProceeds verifies an explicit "y" still
+// opts in, so the safer default doesn't block intentional use.
+func TestConfirmInitRepo_ExplicitYesProceeds(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	t.Setenv("ACCESSIBLE", "1")
+	withPipedStdin(t, "y\n")
+
+	proceed, err := confirmInitRepo(io.Discard, t.TempDir(), GitHubBootstrapOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !proceed {
+		t.Fatal("confirmInitRepo should proceed when the user explicitly answers yes")
+	}
+}
+
+// TestConfirmCreateGitHubRepo_DefaultsToNo verifies that pressing Enter at
+// the GitHub-repo prompt declines. Creating and pushing a remote repository
+// publishes the directory's contents, so it must never happen just because
+// the user pressed Enter. Regression guard for issue #1717.
+func TestConfirmCreateGitHubRepo_DefaultsToNo(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	t.Setenv("ACCESSIBLE", "1")
+	withPipedStdin(t, "\n")
+
+	confirmed, err := confirmCreateGitHubRepo(t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if confirmed {
+		t.Fatal("confirmCreateGitHubRepo should default to No on empty input")
+	}
+}
+
 // restoreCwd chdirs into dir for the duration of the test.
 func restoreCwd(t *testing.T, dir string) {
 	t.Helper()

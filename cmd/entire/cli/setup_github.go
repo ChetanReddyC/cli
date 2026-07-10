@@ -181,7 +181,7 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 	// implies intent) or when we're non-interactive (keep the documented
 	// happy path: default to yes).
 	if useGitHub && !opts.Yes && !ghFlagsProvided(opts) && interactive.CanPromptInteractively() {
-		confirmed, err := confirmCreateGitHubRepo()
+		confirmed, err := confirmCreateGitHubRepo(cwd)
 		if err != nil {
 			return nil, err
 		}
@@ -308,14 +308,19 @@ func ghFlagsProvided(opts GitHubBootstrapOptions) bool {
 }
 
 // confirmCreateGitHubRepo asks the user whether they want to also create
-// a matching GitHub repository. Interactive-only; callers gate on
-// interactive.CanPromptInteractively.
-func confirmCreateGitHubRepo() (bool, error) {
-	confirmed := true
+// a matching GitHub repository and push to it. Interactive-only; callers
+// gate on interactive.CanPromptInteractively.
+//
+// Defaults to No: creating and pushing a remote repository publishes the
+// directory's contents on the user's behalf, so it must never happen just
+// because the user pressed Enter. The absolute path is in the title so it's
+// clear which directory would be published.
+func confirmCreateGitHubRepo(cwd string) (bool, error) {
+	confirmed := false
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewConfirm().
-				Title("Create a matching repository on GitHub?").
+				Title(fmt.Sprintf("Create a GitHub repository and push the contents of %s?", cwd)).
 				Value(&confirmed),
 		),
 	)
@@ -344,12 +349,16 @@ func confirmInitRepo(_ io.Writer, cwd string, opts GitHubBootstrapOptions) (bool
 		return false, nil
 	}
 
-	folder := filepath.Base(cwd)
-	confirmed := true
+	// Default to No: `entire enable` is often run reflexively inside an
+	// existing project, so a stray run in the wrong (non-repo) directory
+	// must not initialize a repo just because the user pressed Enter. The
+	// absolute path is in the title so a wrong-directory mistake is obvious
+	// in both interactive and accessible modes.
+	confirmed := false
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewConfirm().
-				Title(fmt.Sprintf("No git repository in %q. Initialize one here?", folder)).
+				Title(fmt.Sprintf("Not a git repository. Initialize a new one in %s?", cwd)).
 				Value(&confirmed),
 		),
 	)
