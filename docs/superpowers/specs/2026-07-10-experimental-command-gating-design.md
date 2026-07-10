@@ -98,9 +98,13 @@ commands in other packages (`review`, `investigate`) set `Hidden: true`
 internally. Overriding at the registration site means we do not edit those
 packages and there is a single source of truth for the gate.
 
-The cobra group is always registered on the parent (even in release builds where
-every child is hidden) so cobra never panics on an unregistered `GroupID`. When
-all children are hidden, cobra omits the empty group header from help output.
+The cobra group is registered (and `GroupID` set) **only when experimental
+commands are visible**. In release builds the children are simply marked Hidden
+with no `GroupID`. This is deliberate: registering an always-empty group would
+make cobra relabel every *other* root command under its "Additional Commands:"
+header (cobra puts ungrouped commands there whenever any group exists), changing
+release help for no reason. Leaving `GroupID` empty also means cobra never
+references an unregistered group, so it cannot panic.
 
 ### Wiring
 
@@ -124,8 +128,10 @@ keep the diff focused on registration sites.
   ```
   -X github.com/entireio/cli/cmd/entire/cli/experimental.Visible=false
   ```
-  - `.goreleaser.yaml` (prod `entire` build)
-  - `.goreleaser.nonprod.yaml` (nightly/internal — also hidden, per decision)
+  - `.goreleaser.yaml` (prod `entire` build) — stamped.
+  - `.goreleaser.nonprod.yaml` — **not stamped**: it builds only the
+    `git-remote-entire` helper, never the `entire` binary, so there is nothing
+    to gate there. (The earlier "hide in nonprod too" decision is moot.)
 
 ### mise convenience task
 
@@ -149,6 +155,14 @@ This is ergonomic only; any non-GoReleaser build already defaults to visible.
   - dev (`Visible="true"`): each has `Hidden == false`, `GroupID == "experimental"`,
     and the parent reports `ContainsGroup("experimental")`.
   - Cannot `t.Parallel()` — mutates the global `Visible`; save/restore in the test.
+- Existing tests that asserted these commands were `Hidden` are updated to assert
+  the experimental gate instead (grouped under `experimental.GroupID` in the
+  default developer test build): `TestRootCommand_HasInvestigate`,
+  `TestExpertsCommandIsExperimentalAndListedInLabs`,
+  `TestCheckpointSearchIsVisibleButTopLevelSearchIsExperimental`,
+  `TestCheckpointPolicyCommandIsExperimental`, and the labs help tests
+  (`TestRootHelp_AlwaysShowsLabs`, `TestRootHelp_ReleaseHidesExperimental`,
+  `TestRootHelp_DevShowsExperimentalGroup`).
 
 ## Non-goals
 
