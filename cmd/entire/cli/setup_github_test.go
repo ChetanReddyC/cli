@@ -1010,11 +1010,15 @@ func TestEnableCmd_InitRepoFlagsMutuallyExclusive(t *testing.T) {
 	}
 }
 
-// withPipedStdin redirects os.Stdin to a pipe carrying input for the
-// duration of the test, so interactive (accessible) prompts read a
-// scripted answer instead of blocking on a real terminal.
-func withPipedStdin(t *testing.T, input string) {
+// withInteractivePromptStdin forces interactive, accessible (text-based)
+// prompt mode and feeds input to os.Stdin for the duration of the test, so a
+// huh prompt reads a scripted answer instead of opening /dev/tty or blocking
+// on a real terminal. ENTIRE_TEST_TTY makes CanPromptInteractively report
+// true; ACCESSIBLE makes the form read os.Stdin rather than dial the terminal.
+func withInteractivePromptStdin(t *testing.T, input string) {
 	t.Helper()
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	t.Setenv("ACCESSIBLE", "1")
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -1034,9 +1038,7 @@ func withPipedStdin(t *testing.T, input string) {
 // reflexively, so a stray run in a non-repo directory must not initialize
 // a repo on the user's behalf. Regression guard for issue #1717.
 func TestConfirmInitRepo_DefaultsToNo(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "1")
-	t.Setenv("ACCESSIBLE", "1")
-	withPipedStdin(t, "\n")
+	withInteractivePromptStdin(t, "\n")
 
 	proceed, err := confirmInitRepo(io.Discard, t.TempDir(), GitHubBootstrapOptions{})
 	if err != nil {
@@ -1050,9 +1052,7 @@ func TestConfirmInitRepo_DefaultsToNo(t *testing.T) {
 // TestConfirmInitRepo_ExplicitYesProceeds verifies an explicit "y" still
 // opts in, so the safer default doesn't block intentional use.
 func TestConfirmInitRepo_ExplicitYesProceeds(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "1")
-	t.Setenv("ACCESSIBLE", "1")
-	withPipedStdin(t, "y\n")
+	withInteractivePromptStdin(t, "y\n")
 
 	proceed, err := confirmInitRepo(io.Discard, t.TempDir(), GitHubBootstrapOptions{})
 	if err != nil {
@@ -1068,9 +1068,7 @@ func TestConfirmInitRepo_ExplicitYesProceeds(t *testing.T) {
 // publishes the directory's contents, so it must never happen just because
 // the user pressed Enter. Regression guard for issue #1717.
 func TestConfirmCreateGitHubRepo_DefaultsToNo(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "1")
-	t.Setenv("ACCESSIBLE", "1")
-	withPipedStdin(t, "\n")
+	withInteractivePromptStdin(t, "\n")
 
 	confirmed, err := confirmCreateGitHubRepo(t.TempDir())
 	if err != nil {
@@ -1078,6 +1076,72 @@ func TestConfirmCreateGitHubRepo_DefaultsToNo(t *testing.T) {
 	}
 	if confirmed {
 		t.Fatal("confirmCreateGitHubRepo should default to No on empty input")
+	}
+}
+
+// TestConfirmPushToRemote_DefaultsToNo verifies that pressing Enter at the
+// push prompt declines. Pushing publishes the directory's contents, so it
+// must never happen just because the user pressed Enter, even after they
+// opted into creating the repo. Regression guard for issue #1717.
+func TestConfirmPushToRemote_DefaultsToNo(t *testing.T) {
+	withInteractivePromptStdin(t, "\n")
+
+	confirmed, err := confirmPushToRemote("octocat/example")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if confirmed {
+		t.Fatal("confirmPushToRemote should default to No on empty input")
+	}
+}
+
+// TestRunGitHubBootstrapFinalize_HonorsPushFalse verifies that finalize
+// respects state.push == false: the GitHub repo is still created and origin
+// configured, but nothing is pushed and the user is told how to publish
+// manually. The push *decision* (default No on Enter) is covered separately
+// by TestConfirmPushToRemote_DefaultsToNo; this test covers finalize honoring
+// that decision.
+func TestRunGitHubBootstrapFinalize_HonorsPushFalse(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	r := newFakeRunner()
+	r.set("git", []string{"add", "-A"}, "", nil)
+	r.set("git", []string{"status", "--porcelain"}, " M f\n", nil)
+	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "Seed"}, "", nil)
+	r.set("gh", []string{
+		"repo", "create", "octocat/no-push",
+		"--private",
+		"--source=.",
+		"--remote=origin",
+	}, "", nil)
+
+	s := &bootstrapState{
+		runner:     r,
+		cwd:        dir,
+		useGitHub:  true,
+		fullName:   "octocat/no-push",
+		visibility: "private",
+		commit:     true,
+		message:    "Seed",
+		push:       false,
+	}
+
+	var out bytes.Buffer
+	if err := runGitHubBootstrapFinalize(context.Background(), &out, s); err != nil {
+		t.Fatalf("finalize failed: %v", err)
+	}
+
+	// The repo is still created (create guard was accepted)...
+	if !r.hasCall(argsMatch("gh", []string{"repo", "create"})) {
+		t.Fatal("expected gh repo create to run")
+	}
+	// ...but the push guard was declined, so nothing is pushed.
+	if r.hasCall(argsMatch("git", []string{"push"})) {
+		t.Fatal("git push must not run when the push guard was declined")
+	}
+	if !strings.Contains(out.String(), "Skipped push") {
+		t.Fatalf("expected 'Skipped push' guidance in output, got: %s", out.String())
 	}
 }
 
@@ -1176,26 +1240,9 @@ func TestResolveRepoName_YesRepoExistsWithTTY_FallsBackToPrompt(t *testing.T) {
 	// When --yes is set, the name is taken, and a TTY is available,
 	// resolveRepoName should print a conflict message and fall through
 	// to the interactive prompt. We verify the conflict message was
-	// printed (proving the fallback path was taken).
-	t.Setenv("ENTIRE_TEST_TTY", "1")
-
-	// Force accessible (text-based) mode so the huh form reads from
-	// os.Stdin instead of trying to open /dev/tty via bubbletea.
-	// Pipe a unique name so the form completes instead of blocking.
-	t.Setenv("ACCESSIBLE", "1")
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { pr.Close() })
-	go func() {
-		// The form reads one line; provide a unique name so it exits the loop.
-		pw.WriteString("unique-test-repo\n") //nolint:errcheck // test helper
-		pw.Close()
-	}()
-	oldStdin := os.Stdin
-	os.Stdin = pr
-	t.Cleanup(func() { os.Stdin = oldStdin })
+	// printed (proving the fallback path was taken). Pipe a unique name so
+	// the form completes with it instead of blocking.
+	withInteractivePromptStdin(t, "unique-test-repo\n")
 
 	dir := t.TempDir()
 	restoreCwd(t, dir)
