@@ -640,6 +640,32 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		require.NotContains(t, stdout, "acme/web", "mirror has no access dimension and is dropped by --access")
 	})
 
+	t.Run("--private is tri-state (private / public / all)", func(t *testing.T) {
+		mixed := func() []coreapi.RepoIndexEntry {
+			return []coreapi.RepoIndexEntry{
+				onboardedEntry("acme/secret", "private", "us"),
+				onboardedEntry("acme/open", "public", "us"),
+			}
+		}
+		// --private → private only.
+		serveRepoList(t, mixed(), clusters, false)
+		stdout, _ := runMirrorList(t, "--private")
+		require.Contains(t, stdout, "acme/secret")
+		require.NotContains(t, stdout, "acme/open", "public dropped by --private")
+
+		// --private=false → public only.
+		serveRepoList(t, mixed(), clusters, false)
+		stdout, _ = runMirrorList(t, "--private=false")
+		require.Contains(t, stdout, "acme/open")
+		require.NotContains(t, stdout, "acme/secret", "private dropped by --private=false")
+
+		// omitted → both (the flag is not Changed, so no filtering).
+		serveRepoList(t, mixed(), clusters, false)
+		stdout, _ = runMirrorList(t)
+		require.Contains(t, stdout, "acme/secret")
+		require.Contains(t, stdout, "acme/open")
+	})
+
 	t.Run("default output is owner/repo sorted", func(t *testing.T) {
 		serveRepoList(t, repos(), clusters, false)
 		stdout, _ := runMirrorList(t)

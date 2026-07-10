@@ -556,6 +556,7 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 
 func newRepoMirrorListCmd() *cobra.Command {
 	var cluster, owner, name, status, access string
+	var private bool
 	var sortSpec string
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -639,6 +640,13 @@ func newRepoMirrorListCmd() *cobra.Command {
 						return !strings.EqualFold(r.Access, access)
 					})
 				}
+				if cmd.Flags().Changed("private") {
+					// Tri-state: gate on Changed so an unset flag means "all", while
+					// --private / --private=false narrow to private / public rows.
+					rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
+						return r.Private != private
+					})
+				}
 				if err := sortRepoDir(rows, sortSpec); err != nil {
 					return nil, err
 				}
@@ -651,6 +659,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&name, "name", "", "Filter by owner/repo substring, matching the NAME column (case-insensitive)")
 	cmd.Flags().StringVar(&status, "status", "", "Filter by exact STATUS (mirrors: ready/processing/failed/suspended; candidates: available/owner-only)")
 	cmd.Flags().StringVar(&access, "access", "", "Filter by exact ACCESS (candidates only: read/write/admin)")
+	cmd.Flags().BoolVar(&private, "private", false, "Filter by visibility: --private for private only, --private=false for public only (omit for all)")
 	cmd.Flags().StringVar(&sortSpec, "sort", "", "Sort by column key (e.g. name, clone-url; prefix '-' for descending). Default: name ascending")
 	addJSONFlag(cmd)
 	return cmd
