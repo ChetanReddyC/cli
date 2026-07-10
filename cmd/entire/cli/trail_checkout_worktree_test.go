@@ -151,7 +151,6 @@ func TestMatchIncludePatterns(t *testing.T) {
 	files := []string{
 		testEnvFile,
 		"config/.env.local",
-		".entire/worktrees/other/.env",
 		"/abs/.env",
 		"../escape/.env",
 		"node_modules/pkg/x.js",
@@ -160,6 +159,25 @@ func TestMatchIncludePatterns(t *testing.T) {
 	want := []string{testEnvFile, filepath.Join("config", ".env.local")}
 	if !slices.Equal(got, want) {
 		t.Fatalf("matchIncludePatterns() = %v, want %v", got, want)
+	}
+}
+
+func TestListIgnoredFiles_ExcludesManagedWorktreePaths(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, ".gitignore", ".env\n.entire/\n")
+	testutil.WriteFile(t, repoDir, testEnvFile, "SECRET=1\n")
+	testutil.WriteFile(t, repoDir, ".entire/worktrees/other/.env", "SECRET=2\n")
+
+	got, err := listIgnoredFiles(context.Background(), repoDir)
+	if err != nil {
+		t.Fatalf("listIgnoredFiles: %v", err)
+	}
+	want := []string{testEnvFile}
+	if !slices.Equal(got, want) {
+		t.Fatalf("listIgnoredFiles() = %v, want %v", got, want)
 	}
 }
 

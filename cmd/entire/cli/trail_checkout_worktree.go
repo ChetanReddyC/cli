@@ -17,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -184,7 +185,9 @@ func loadWorktreeIncludePatterns(root string) ([]string, error) {
 }
 
 // listIgnoredFiles returns untracked files ignored by repo ignore rules,
-// relative to root.
+// relative to root. Paths under .entire/worktrees are excluded: sibling trail
+// worktrees' own ignored files (e.g. their .env) appear in the listing at the
+// main root and would otherwise be copied into every new worktree.
 func listIgnoredFiles(ctx context.Context, root string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
 	cmd.Dir = root
@@ -194,7 +197,7 @@ func listIgnoredFiles(ctx context.Context, root string) ([]string, error) {
 	}
 	var files []string
 	for f := range bytes.SplitSeq(output, []byte{0}) {
-		if len(f) > 0 {
+		if len(f) > 0 && !isManagedTrailWorktreePath(string(f)) {
 			files = append(files, string(f))
 		}
 	}
@@ -210,7 +213,7 @@ func matchIncludePatterns(patterns, files []string) []string {
 	included := make([]string, 0, len(files))
 	for _, file := range files {
 		rel, ok := cleanRelativeIncludeFile(file)
-		if !ok || isManagedTrailWorktreePath(rel) || !matcher.Match(strings.Split(filepath.ToSlash(rel), "/"), false) {
+		if !ok || !matcher.Match(strings.Split(filepath.ToSlash(rel), "/"), false) {
 			continue
 		}
 		included = append(included, rel)
@@ -218,10 +221,6 @@ func matchIncludePatterns(patterns, files []string) []string {
 	return included
 }
 
-// isManagedTrailWorktreePath excludes paths under .entire/worktrees from the
-// copy candidates: once the ignore rule ships, sibling trail worktrees' own
-// ignored files (e.g. their .env) appear in `git ls-files --ignored` at the
-// main root and would otherwise be copied into every new worktree.
 func isManagedTrailWorktreePath(rel string) bool {
 	slash := filepath.ToSlash(rel)
 	return slash == trailWorktreesRelDir || strings.HasPrefix(slash, trailWorktreesRelDir+"/")
@@ -261,26 +260,30 @@ func copyIncludedFile(src string, destRoot *os.Root, rel string) error {
 	if !openedInfo.Mode().IsRegular() || !os.SameFile(srcInfo, openedInfo) {
 		return errors.New("source changed while opening")
 	}
-	if err := destRoot.MkdirAll(filepath.Dir(rel), 0o750); err != nil {
+	if err := osroot.MkdirAll(destRoot, filepath.Dir(rel), 0o750); err != nil {
 		return err //nolint:wrapcheck // mkdir error is sufficient for caller context
 	}
 	out, err := destRoot.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, srcInfo.Mode().Perm())
 	if err != nil {
 		return err //nolint:wrapcheck // openfile error is sufficient for caller context
 	}
+	copied := false
+	defer func() {
+		if !copied {
+			_ = out.Close()
+			_ = osroot.Remove(destRoot, rel) //nolint:errcheck // best-effort cleanup after a failed copy
+		}
+	}()
 	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		_ = destRoot.Remove(rel) //nolint:errcheck // best-effort cleanup after a failed copy
-		return err               //nolint:wrapcheck // copy error is sufficient for caller context
+		return err //nolint:wrapcheck // copy error is sufficient for caller context
 	}
 	if err := out.Close(); err != nil {
-		_ = destRoot.Remove(rel) //nolint:errcheck // best-effort cleanup after a failed copy
-		return err               //nolint:wrapcheck // close error is sufficient for caller context
+		return err //nolint:wrapcheck // close error is sufficient for caller context
 	}
 	if err := destRoot.Chmod(rel, srcInfo.Mode().Perm()); err != nil {
-		_ = destRoot.Remove(rel) //nolint:errcheck // best-effort cleanup after a failed copy
-		return err               //nolint:wrapcheck // chmod error is sufficient for caller context
+		return err //nolint:wrapcheck // chmod error is sufficient for caller context
 	}
+	copied = true
 	return nil
 }
 
