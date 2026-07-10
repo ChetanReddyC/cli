@@ -63,14 +63,17 @@ package experimental
 
 import "github.com/spf13/cobra"
 
-// State is stamped by GoReleaser via ldflags
-// (-X github.com/entireio/cli/cmd/entire/cli/experimental.State=false)
-// to hide experimental commands in shipped binaries. It defaults to "true",
-// so every non-release build (go build, go run, mise) shows them.
-var State = "true"
+// Visible controls whether experimental commands are shown in help. It is
+// stamped by GoReleaser via ldflags
+// (-X github.com/entireio/cli/cmd/entire/cli/experimental.Visible=false)
+// to hide them in shipped binaries. It defaults to "true", so every
+// non-release build (go build, go run, mise) shows them. The commands remain
+// experimental and fully runnable regardless of this flag — it only toggles
+// visibility.
+var Visible = "true"
 
-// Enabled reports whether experimental commands are visible.
-func Enabled() bool { return State != "false" }
+// IsVisible reports whether experimental commands are shown in help.
+func IsVisible() bool { return Visible != "false" }
 
 // GroupID is the cobra group experimental commands are filed under.
 const GroupID = "experimental"
@@ -84,7 +87,7 @@ func Register(parent, child *cobra.Command) {
 	if !parent.ContainsGroup(GroupID) {
 		parent.AddGroup(&cobra.Group{ID: GroupID, Title: groupTitle})
 	}
-	child.Hidden = !Enabled()
+	child.Hidden = !IsVisible()
 	child.GroupID = GroupID
 	parent.AddCommand(child)
 }
@@ -114,12 +117,12 @@ keep the diff focused on registration sites.
 
 ### Build gating
 
-- Dev — `go build ./cmd/entire`, `go run`, mise: no ldflags → `State="true"` →
-  experimental visible and grouped.
+- Dev — `go build ./cmd/entire`, `go run`, mise: no ldflags → `Visible="true"`
+  → experimental visible and grouped.
 - Release — both GoReleaser configs, `entire` binary only (not
   `git-remote-entire`), add to the `ldflags` list:
   ```
-  -X github.com/entireio/cli/cmd/entire/cli/experimental.State=false
+  -X github.com/entireio/cli/cmd/entire/cli/experimental.Visible=false
   ```
   - `.goreleaser.yaml` (prod `entire` build)
   - `.goreleaser.nonprod.yaml` (nightly/internal — also hidden, per decision)
@@ -138,14 +141,14 @@ This is ergonomic only; any non-GoReleaser build already defaults to visible.
 ## Testing
 
 - `cmd/entire/cli/experimental/experimental_test.go`: truth table for
-  `Enabled()` (`State` = "true" / "false" / "" / arbitrary). Save/restore
-  `State`; cannot `t.Parallel()` (mutates package global).
-- cli-level test (in the `cli` package): flip `experimental.State`, build the
+  `IsVisible()` (`Visible` = "true" / "false" / "" / arbitrary). Save/restore
+  `Visible`; cannot `t.Parallel()` (mutates package global).
+- cli-level test (in the `cli` package): flip `experimental.Visible`, build the
   root command, and assert:
-  - release (`State="false"`): each of the 10 commands has `Hidden == true`.
-  - dev (`State="true"`): each has `Hidden == false`, `GroupID == "experimental"`,
+  - release (`Visible="false"`): each of the 10 commands has `Hidden == true`.
+  - dev (`Visible="true"`): each has `Hidden == false`, `GroupID == "experimental"`,
     and the parent reports `ContainsGroup("experimental")`.
-  - Cannot `t.Parallel()` — mutates the global `State`; save/restore in the test.
+  - Cannot `t.Parallel()` — mutates the global `Visible`; save/restore in the test.
 
 ## Non-goals
 
