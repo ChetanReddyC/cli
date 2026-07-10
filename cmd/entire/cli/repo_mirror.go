@@ -555,7 +555,7 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 }
 
 func newRepoMirrorListCmd() *cobra.Command {
-	var cluster, owner, name string
+	var cluster, owner, name, status, access string
 	var sortSpec string
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -624,6 +624,21 @@ func newRepoMirrorListCmd() *cobra.Command {
 							!strings.EqualFold(hostBySlug[r.Cluster], cluster)
 					})
 				}
+				if status != "" {
+					// Exact (case-insensitive) match on the displayed STATUS cell,
+					// which spans both row types: mirrors (ready/processing/failed/
+					// suspended) and candidates (available/owner-only).
+					rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
+						return !strings.EqualFold(r.Status, status)
+					})
+				}
+				if access != "" {
+					// ACCESS is candidate-only (read/write/admin); mirror rows carry
+					// none, so --access naturally narrows to matching candidates.
+					rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
+						return !strings.EqualFold(r.Access, access)
+					})
+				}
 				if err := sortRepoDir(rows, sortSpec); err != nil {
 					return nil, err
 				}
@@ -634,6 +649,8 @@ func newRepoMirrorListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Keep only mirrors on this cluster, by slug or public host (drops onboardable candidates)")
 	cmd.Flags().StringVar(&owner, "owner", "", "Filter by upstream owner login")
 	cmd.Flags().StringVar(&name, "name", "", "Filter by owner/repo substring, matching the NAME column (case-insensitive)")
+	cmd.Flags().StringVar(&status, "status", "", "Filter by exact STATUS (mirrors: ready/processing/failed/suspended; candidates: available/owner-only)")
+	cmd.Flags().StringVar(&access, "access", "", "Filter by exact ACCESS (candidates only: read/write/admin)")
 	cmd.Flags().StringVar(&sortSpec, "sort", "", "Sort by column key (e.g. name, clone-url; prefix '-' for descending). Default: name ascending")
 	addJSONFlag(cmd)
 	return cmd

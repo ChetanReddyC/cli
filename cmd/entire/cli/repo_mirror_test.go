@@ -604,6 +604,42 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		require.NotContains(t, stdout, "other/api", "eu mirror must be dropped by --cluster <us host>")
 	})
 
+	t.Run("--status filters by exact status across both row types", func(t *testing.T) {
+		mixed := func() []coreapi.RepoIndexEntry {
+			return []coreapi.RepoIndexEntry{
+				onboardedEntry("acme/web", "private", "us"),                                  // mirror → STATUS "ready"
+				candidateEntry("acme/mkt", "public", coreapi.RepoCandidateAccessAdmin, true), // candidate → STATUS "available"
+			}
+		}
+		serveRepoList(t, mixed(), clusters, false)
+		stdout, _ := runMirrorList(t, "--status", "ready")
+		require.Contains(t, stdout, "acme/web")
+		require.NotContains(t, stdout, "acme/mkt", "available candidate dropped by --status ready")
+
+		serveRepoList(t, mixed(), clusters, false)
+		stdout, _ = runMirrorList(t, "--status", "available")
+		require.Contains(t, stdout, "acme/mkt")
+		require.NotContains(t, stdout, "acme/web", "ready mirror dropped by --status available")
+	})
+
+	t.Run("--status is case-insensitive", func(t *testing.T) {
+		serveRepoList(t, []coreapi.RepoIndexEntry{onboardedEntry("acme/web", "public", "us")}, clusters, false)
+		stdout, _ := runMirrorList(t, "--status", "READY")
+		require.Contains(t, stdout, "acme/web")
+	})
+
+	t.Run("--access filters candidates and drops mirrors, which have no access", func(t *testing.T) {
+		serveRepoList(t, []coreapi.RepoIndexEntry{
+			onboardedEntry("acme/web", "private", "us"), // mirror → empty ACCESS
+			candidateEntry("acme/adm", "public", coreapi.RepoCandidateAccessAdmin, true),
+			candidateEntry("acme/rdo", "public", coreapi.RepoCandidateAccessRead, true),
+		}, clusters, false)
+		stdout, _ := runMirrorList(t, "--access", "admin")
+		require.Contains(t, stdout, "acme/adm")
+		require.NotContains(t, stdout, "acme/rdo", "read candidate dropped by --access admin")
+		require.NotContains(t, stdout, "acme/web", "mirror has no access dimension and is dropped by --access")
+	})
+
 	t.Run("default output is owner/repo sorted", func(t *testing.T) {
 		serveRepoList(t, repos(), clusters, false)
 		stdout, _ := runMirrorList(t)
