@@ -345,7 +345,7 @@ func confirmCreateGitHubRepo(cwd string) (bool, error) {
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewConfirm().
-				Title(fmt.Sprintf("Create a GitHub repository for %s?", cwd)).
+				Title(fmt.Sprintf("Create a GitHub repository for %q?", cwd)).
 				Value(&confirmed),
 		),
 	)
@@ -371,7 +371,7 @@ func confirmPushToRemote(fullName string) (bool, error) {
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewConfirm().
-				Title(fmt.Sprintf("Push the initial commit to %s?", fullName)).
+				Title(fmt.Sprintf("Push the initial commit to %q?", fullName)).
 				Value(&confirmed),
 		),
 	)
@@ -409,7 +409,7 @@ func confirmInitRepo(_ io.Writer, cwd string, opts GitHubBootstrapOptions) (bool
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewConfirm().
-				Title(fmt.Sprintf("Warning: Not a git repository. Initialize a new one in %s?", cwd)).
+				Title(fmt.Sprintf("Warning: Not a git repository. Initialize a new one in %q?", cwd)).
 				Value(&confirmed),
 		),
 	)
