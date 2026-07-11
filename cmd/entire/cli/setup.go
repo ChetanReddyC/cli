@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1303,14 +1304,7 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 // Writes to the target file (local by default, project with --project),
 // and also updates the other file if it exists, so they can't get out of sync.
 func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
-	s, err := LoadEntireSettings(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	s.Enabled = true
-
-	if err := saveEnabledState(ctx, s, useProjectSettings); err != nil {
+	if err := setEnabledFlag(ctx, true, useProjectSettings); err != nil {
 		return err
 	}
 
@@ -1320,19 +1314,63 @@ func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error 
 }
 
 func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
-	s, err := LoadEntireSettings(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	s.Enabled = false
-
-	if err := saveEnabledState(ctx, s, useProjectSettings); err != nil {
+	if err := setEnabledFlag(ctx, false, useProjectSettings); err != nil {
 		return err
 	}
 
 	fmt.Fprintln(w, "Entire is now disabled.")
 	return nil
+}
+
+// setEnabledFlag flips only the "enabled" key in the target settings file's
+// raw JSON, and also updates the other scope's file if it exists, so
+// local/project can't get out of sync. Unlike saveEnabledState, this operates
+// on each file's own raw content rather than the LoadEntireSettings merged
+// view: that view flattens settings.local.json overrides (local_dev,
+// log_level, personal strategy_options/checkpoint_remote, ...) on top of
+// settings.json, so writing the merged struct back through SaveEntireSettings
+// would leak a developer's local-only overrides into the shared, committed
+// project file whenever a bare `entire enable`/`entire disable` resolves to
+// settings.json (#1140). Merge semantics still apply everywhere enable/
+// disable *read* current state (e.g. IsEnabled); only the write path needs to
+// stay scoped to the target file.
+func setEnabledFlag(ctx context.Context, enabled, useProjectSettings bool) error {
+	if useProjectSettings {
+		if err := setEnabledRaw(ctx, settings.LoadProjectRaw, settings.SaveProjectRaw, enabled); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
+		// Also update local if it exists, so it doesn't override.
+		if localExists(ctx) {
+			if err := setEnabledRaw(ctx, settings.LoadLocalRaw, settings.SaveLocalRaw, enabled); err != nil {
+				return fmt.Errorf("failed to save local settings: %w", err)
+			}
+		}
+	} else {
+		if err := setEnabledRaw(ctx, settings.LoadLocalRaw, settings.SaveLocalRaw, enabled); err != nil {
+			return fmt.Errorf("failed to save local settings: %w", err)
+		}
+	}
+	return nil
+}
+
+// setEnabledRaw loads a settings file via load, sets its "enabled" key, and
+// writes it back via save, preserving every other key already in that file.
+func setEnabledRaw(
+	ctx context.Context,
+	load func(context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error),
+	save func(path string, raw map[string]json.RawMessage) error,
+	enabled bool,
+) error {
+	path, raw, _, err := load(ctx)
+	if err != nil {
+		return err
+	}
+	value, err := json.Marshal(enabled)
+	if err != nil {
+		return fmt.Errorf("marshal enabled flag: %w", err)
+	}
+	raw["enabled"] = value
+	return save(path, raw)
 }
 
 // saveEnabledState writes settings to the target file and also updates the

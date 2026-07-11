@@ -510,6 +510,97 @@ func TestRunDisable_CreatesLocalSettingsWhenMissing(t *testing.T) {
 	}
 }
 
+// TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides verifies that
+// `entire enable --project` with a local-only override present (e.g.
+// local_dev, set via settings.local.json) does not write that override into
+// the shared, committed project settings.json — only the enabled flag should
+// change there (#1140 finding: runEnable must not round-trip the merged
+// settings view through the project file).
+func TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides(t *testing.T) {
+	setupTestDir(t)
+	writeSettings(t, testSettingsDisabled)
+	writeLocalSettings(t, `{"enabled": true, "local_dev": true}`)
+
+	var buf bytes.Buffer
+	if err := runEnable(context.Background(), &buf, true); err != nil {
+		t.Fatalf("runEnable(project=true) error = %v", err)
+	}
+
+	// The merged view is correctly enabled.
+	enabled, err := IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if !enabled {
+		t.Error("expected enabled after runEnable --project")
+	}
+
+	// The project file must be flipped to enabled, and must NOT gain the
+	// local-only override.
+	projectContent, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to read project settings: %v", err)
+	}
+	if !strings.Contains(string(projectContent), `"enabled":true`) && !strings.Contains(string(projectContent), `"enabled": true`) {
+		t.Errorf("project settings should have enabled:true, got: %s", projectContent)
+	}
+	if strings.Contains(string(projectContent), "local_dev") {
+		t.Errorf("project settings must not leak local-only override local_dev, got: %s", projectContent)
+	}
+
+	// The local file's own override must be preserved untouched.
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), "local_dev") {
+		t.Errorf("local settings should still contain local_dev override, got: %s", localContent)
+	}
+}
+
+// TestRunEnable_LocalScope_PreservesLocalOnlyFields verifies that `entire
+// enable` (default, no --project) with an existing local-only override only
+// flips the enabled flag in settings.local.json and leaves the rest of that
+// file's own content (like local_dev) intact.
+func TestRunEnable_LocalScope_PreservesLocalOnlyFields(t *testing.T) {
+	setupTestDir(t)
+	writeSettings(t, testSettingsEnabled)
+	writeLocalSettings(t, `{"enabled": false, "local_dev": true}`)
+
+	var buf bytes.Buffer
+	if err := runEnable(context.Background(), &buf, false); err != nil {
+		t.Fatalf("runEnable(project=false) error = %v", err)
+	}
+
+	enabled, err := IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if !enabled {
+		t.Error("expected enabled after runEnable")
+	}
+
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), `"enabled":true`) && !strings.Contains(string(localContent), `"enabled": true`) {
+		t.Errorf("local settings should have enabled:true, got: %s", localContent)
+	}
+	if !strings.Contains(string(localContent), "local_dev") {
+		t.Errorf("local settings should still contain local_dev override, got: %s", localContent)
+	}
+
+	// Project settings must be untouched by the local-scope write.
+	projectContent, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to read project settings: %v", err)
+	}
+	if strings.Contains(string(projectContent), "local_dev") {
+		t.Errorf("project settings must not gain local-only override local_dev, got: %s", projectContent)
+	}
+}
+
 func TestDetermineSettingsTarget_ExplicitLocalFlag(t *testing.T) {
 	tmpDir := t.TempDir()
 
