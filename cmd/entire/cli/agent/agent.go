@@ -66,6 +66,15 @@ type Agent interface {
 	GetSessionDir(repoPath string) (string, error)
 
 	// ResolveSessionFile returns the path to the session transcript file.
+	//
+	// SECURITY CONTRACT: agentSessionID is used to build a filesystem path and
+	// some implementations use it as a directory component or (Codex/Pi) return
+	// it verbatim when absolute. Callers that source agentSessionID from
+	// untrusted data (e.g. checkpoint metadata on the shared
+	// entire/checkpoints/v1 branch, hook input) MUST validate it with
+	// validation.ValidateSessionID first. The resume/rewind restore paths do
+	// this at their choke points (transcript.resolveTranscriptPath and
+	// strategy.RestoreLogsOnly); do not call this with unvalidated input.
 	ResolveSessionFile(sessionDir, agentSessionID string) string
 
 	// ReadSession reads session data from agent's storage.
@@ -179,6 +188,20 @@ type TranscriptPreparer interface {
 	PrepareTranscript(ctx context.Context, sessionRef string) error
 }
 
+// SidecarImageProvider is implemented by agents that keep images OUTSIDE the
+// transcript Entire condenses — e.g. Cursor stores pasted images in a per-session
+// SQLite blob store, not the JSONL transcript. The strategy layer calls this
+// during condensation/finalize to capture those images as checkpoint assets so
+// they're preserved with the session. Best-effort: returns nil (no error) when
+// the sidecar store is unavailable or unreadable.
+type SidecarImageProvider interface {
+	Agent
+
+	// SidecarImages returns images stored outside the transcript for the session
+	// identified by sessionRef (the transcript path).
+	SidecarImages(ctx context.Context, sessionRef string) ([]CompactedTranscriptAsset, error)
+}
+
 // TokenCalculator provides token usage calculation for a session.
 // The framework calls this during step save and checkpoint if implemented.
 type TokenCalculator interface {
@@ -186,6 +209,20 @@ type TokenCalculator interface {
 
 	// CalculateTokenUsage computes token usage from the transcript starting at the given offset.
 	CalculateTokenUsage(transcriptData []byte, fromOffset int) (*TokenUsage, error)
+}
+
+// ModelExtractor extracts the LLM model identifier from a transcript for agents
+// that do not report the model through lifecycle hooks. Pi, for example, records
+// the model on every assistant message (message.model) but its hook events carry
+// no model field, so the transcript is the only source. The framework calls this
+// during condensation to backfill session state when the model is otherwise
+// unknown.
+type ModelExtractor interface {
+	Agent
+
+	// ExtractModel returns the model identifier from the transcript (e.g.
+	// "gpt-5.5"), or "" if none can be determined.
+	ExtractModel(transcriptData []byte) (string, error)
 }
 
 // TextGenerator is an optional interface for agents whose CLI supports

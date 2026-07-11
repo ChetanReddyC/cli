@@ -11,10 +11,10 @@ package review
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitexec"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/storer"
@@ -90,7 +90,7 @@ func ComputeScopeStats(ctx context.Context, repo *git.Repository, baseOverride s
 		}
 		baseRef = baseOverride
 	} else {
-		baseRef, err = detectScopeBaseRef(ctx, repo)
+		baseRef, err = fallbackScopeRef(repo)
 		if err != nil {
 			return ScopeStats{}, fmt.Errorf("detect scope base ref: %w", err)
 		}
@@ -122,9 +122,22 @@ func ComputeScopeStats(ctx context.Context, repo *git.Repository, baseOverride s
 	}, nil
 }
 
-// detectScopeBaseRef returns the mainline ref the review should be scoped
-// against, walking the fallback chain origin/HEAD → origin/main →
-// origin/master → main → master and returning the first that exists.
+// repoWorktreePath returns the working-tree path for repo, or an error if the
+// repo is bare or its worktree can't be resolved. ComputeScopeStats uses this
+// as the cwd for the runGit invocations in countCommits / countFilesChanged /
+// countUncommitted.
+func repoWorktreePath(repo *git.Repository) (string, error) {
+	wt, err := repo.Worktree()
+	if err != nil {
+		return "", fmt.Errorf("resolve worktree: %w", err)
+	}
+	return wt.Filesystem().Root(), nil
+}
+
+// fallbackScopeRef returns the mainline ref the review should be scoped
+// against: the first existing ref from the fallback chain origin/HEAD →
+// origin/main → origin/master → main → master. Returns an error naming the
+// tried refs if none exist.
 //
 // A previous implementation tried to be clever: it picked the merged-into-HEAD
 // branch with the most recent committerdate, on the theory that stacked PRs
@@ -141,25 +154,6 @@ func ComputeScopeStats(ctx context.Context, repo *git.Repository, baseOverride s
 // Stacked PR review is now served by the explicit `--base <ref>` flag at
 // the command surface, not an inference. The default stays predictable
 // (always mainline); the override is explicit when users actually want it.
-func detectScopeBaseRef(_ context.Context, repo *git.Repository) (string, error) {
-	return fallbackScopeRef(repo)
-}
-
-// repoWorktreePath returns the working-tree path for repo, or an error if the
-// repo is bare or its worktree can't be resolved. ComputeScopeStats uses this
-// as the cwd for the runGit invocations in countCommits / countFilesChanged /
-// countUncommitted.
-func repoWorktreePath(repo *git.Repository) (string, error) {
-	wt, err := repo.Worktree()
-	if err != nil {
-		return "", fmt.Errorf("resolve worktree: %w", err)
-	}
-	return wt.Filesystem().Root(), nil
-}
-
-// fallbackScopeRef returns the first existing ref from the fallback chain:
-// origin/HEAD → origin/main → origin/master → main → master.
-// Returns an error naming the tried refs if none exist.
 func fallbackScopeRef(repo *git.Repository) (string, error) {
 	chain := []string{"origin/HEAD", "origin/main", "origin/master", "main", "master"}
 	for _, name := range chain {
@@ -250,26 +244,8 @@ func countUncommitted(ctx context.Context, repoRoot string) (int, error) {
 	return len(strings.Split(trimmed, "\n")), nil
 }
 
-// runGit runs `git <args>` in repoDir and returns stdout as a string.
-// stderr is captured separately and surfaced in the error wrap on non-zero
-// exit. Stdout and stderr are NOT combined — git emits warnings on stderr
-// even on successful commands (shallow-clone notices, safe.directory
-// advisories, etc.) and merging them would corrupt parsed output (e.g.,
-// strconv.Atoi on the result of `rev-list --count` would fail).
+// runGit runs `git <args>` in repoDir and returns stdout as a string. Thin
+// wrapper around gitexec.Run preserved so existing call sites don't change.
 func runGit(ctx context.Context, repoRoot string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = repoRoot
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		// Surface stderr so callers see why git rejected the command,
-		// not just "exit status 128".
-		stderrTxt := strings.TrimSpace(stderr.String())
-		if stderrTxt != "" {
-			return "", fmt.Errorf("git %s: %w (stderr: %s)", args[0], err, stderrTxt)
-		}
-		return "", fmt.Errorf("git %s: %w", args[0], err)
-	}
-	return string(out), nil
+	return gitexec.Run(ctx, repoRoot, args...) //nolint:wrapcheck // gitexec already wraps
 }

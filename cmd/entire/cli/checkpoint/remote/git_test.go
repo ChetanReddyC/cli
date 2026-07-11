@@ -3,12 +3,13 @@ package remote
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -27,10 +28,10 @@ func TestExtractRemoteFromArgs(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"fetch with URL", []string{"fetch", "https://github.com/org/repo.git", "refs/heads/main"}, "https://github.com/org/repo.git"},
+		{"fetch with URL", []string{"fetch", "--no-auto-gc", "https://github.com/org/repo.git", "refs/heads/main"}, "https://github.com/org/repo.git"},
 		{"push with flags", []string{"push", "--no-verify", "--porcelain", "origin", "main"}, "origin"},
 		{"ls-remote", []string{"ls-remote", "origin", "refs/heads/*"}, "origin"},
-		{"fetch with filter", []string{"fetch", "--no-tags", "--filter=blob:none", "https://host/r.git", "+refs/heads/main:refs/tmp"}, "https://host/r.git"},
+		{"fetch with filter", []string{"fetch", "--no-auto-gc", "--no-tags", "--filter=blob:none", "https://host/r.git", "+refs/heads/main:refs/tmp"}, "https://host/r.git"},
 		{"empty args", []string{}, ""},
 		{"subcommand only", []string{"fetch"}, ""},
 		{"only flags", []string{"fetch", "--no-tags"}, ""},
@@ -144,7 +145,7 @@ func TestResolvePushCommandTarget(t *testing.T) {
 		{
 			// Without checkpoint_remote configured the push should use the
 			// remote name so git updates refs/remotes/origin/<branch> and
-			// subsequent hasUnpushedSessionsCommon checks can short-circuit.
+			// subsequent hasUnpushedBranchRef checks can short-circuit.
 			name:         "no checkpoint remote keeps remote name",
 			originURL:    "git@github.com:acme/app.git",
 			settingsJSON: `{"enabled":true}`,
@@ -256,6 +257,178 @@ func TestResolveFetchTarget(t *testing.T) {
 	})
 }
 
+func TestFetch_Unshallow(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Unshallow=true deepens a shallow repo", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+
+		bareDir, cloneDir := setupShallowClone(ctx, t)
+		require.True(t, isShallowRepository(ctx, cloneDir), "test setup should produce a shallow repo")
+
+		out, err := Fetch(ctx, FetchOptions{
+			Remote:    "file://" + bareDir,
+			RefSpecs:  []string{"+refs/heads/main:refs/remotes/origin/main"},
+			NoTags:    true,
+			Unshallow: true,
+			Dir:       cloneDir,
+		})
+		require.NoError(t, err, "fetch output: %s", out)
+
+		assert.False(t, isShallowRepository(ctx, cloneDir),
+			"Unshallow=true should remove shallow state when the repo is shallow")
+	})
+
+	t.Run("Unshallow=false leaves shallow state alone", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+
+		bareDir, cloneDir := setupShallowClone(ctx, t)
+		require.True(t, isShallowRepository(ctx, cloneDir))
+
+		out, err := Fetch(ctx, FetchOptions{
+			Remote:   "file://" + bareDir,
+			RefSpecs: []string{"+refs/heads/main:refs/remotes/origin/main"},
+			NoTags:   true,
+			Dir:      cloneDir,
+		})
+		require.NoError(t, err, "fetch output: %s", out)
+
+		assert.True(t, isShallowRepository(ctx, cloneDir),
+			"a fetch without Unshallow must not silently convert a shallow repo to a full one")
+	})
+}
+
+func TestFetch_Shallow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	bareDir, _ := setupShallowClone(ctx, t)
+	// Make a fresh non-shallow clone, then fetch with Shallow=true and check
+	// .git/shallow appears.
+	cloneDir := t.TempDir()
+	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+bareDir, cloneDir)
+	require.False(t, isShallowRepository(ctx, cloneDir), "fresh clone should not be shallow")
+
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   "file://" + bareDir,
+		RefSpecs: []string{"+refs/heads/main:refs/remotes/origin/main"},
+		NoTags:   true,
+		Shallow:  true,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	assert.True(t, isShallowRepository(ctx, cloneDir),
+		"Shallow=true should request --depth=1 and leave the repo shallow")
+}
+
+// TestFetch_Depth verifies that Depth is ref-scoped: it fully fetches (heals)
+// the named branch while leaving an independently-shallow branch shallow —
+// unlike Unshallow, which is repo-global.
+func TestFetch_Depth(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "bare.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	runIsolatedGit(ctx, t, "", "init", "--bare", bareDir)
+
+	testutil.InitRepo(t, seedDir)
+	runIsolatedGit(ctx, t, seedDir, "remote", "add", "origin", bareDir)
+	for _, c := range []string{"m1", "m2", "m3"} { // main: 3 commits
+		testutil.WriteFile(t, seedDir, "f.txt", c)
+		testutil.GitAdd(t, seedDir, "f.txt")
+		testutil.GitCommit(t, seedDir, c)
+	}
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, seedDir, "checkout", "--orphan", "meta")
+	runIsolatedGit(ctx, t, seedDir, "rm", "-rf", ".")
+	for _, c := range []string{"c1", "c2"} { // meta: 2 commits
+		testutil.WriteFile(t, seedDir, "g.txt", c)
+		testutil.GitAdd(t, seedDir, "g.txt")
+		testutil.GitCommit(t, seedDir, c)
+	}
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/meta")
+
+	// Shallow clone of main + shallow fetch of meta → both branches shallow.
+	cloneDir := filepath.Join(tmpDir, "clone")
+	runIsolatedGit(ctx, t, "", "clone", "--depth=1", "--single-branch", "--branch", "main", "file://"+bareDir, cloneDir)
+	runIsolatedGit(ctx, t, cloneDir, "fetch", "--depth=1", "origin", "+refs/heads/meta:refs/remotes/origin/meta")
+	require.True(t, isShallowRepository(ctx, cloneDir))
+	require.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/meta"))
+	require.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/main"))
+
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   "file://" + bareDir,
+		RefSpecs: []string{"+refs/heads/meta:refs/remotes/origin/meta"},
+		NoTags:   true,
+		Depth:    1_000_000_000,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	assert.Equal(t, 2, revListCount(ctx, t, cloneDir, "refs/remotes/origin/meta"),
+		"Depth should fully fetch (heal) the named branch")
+	assert.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/main"),
+		"Depth is ref-scoped: an independently-shallow branch must stay shallow")
+	assert.True(t, isShallowRepository(ctx, cloneDir),
+		"repo stays shallow because main is still bounded")
+}
+
+func revListCount(ctx context.Context, t *testing.T, dir, ref string) int {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", "rev-list", "--count", ref)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	require.NoError(t, err)
+	return n
+}
+
+// setupShallowClone creates a bare origin, a seed repo with one commit pushed
+// to it, a shallow (--depth=1) clone, and then advances origin by one more
+// commit so that a subsequent fetch into the clone has work to do. Returns the
+// bare origin path and the shallow clone path.
+func setupShallowClone(ctx context.Context, t *testing.T) (bareDir, cloneDir string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	bareDir = filepath.Join(tmpDir, "bare.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir = filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	testutil.WriteFile(t, seedDir, "f.txt", "init")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "init")
+
+	runIsolatedGit(ctx, t, "", "init", "--bare", bareDir)
+	runIsolatedGit(ctx, t, seedDir, "remote", "add", "origin", bareDir)
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--depth=1", "--branch", "main", "file://"+bareDir, cloneDir)
+
+	testutil.WriteFile(t, seedDir, "f.txt", "init\nnext\n")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "next")
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+
+	return bareDir, cloneDir
+}
+
+func runIsolatedGit(ctx context.Context, t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run(), "git %v", args)
+}
+
 func TestAppendCheckpointTokenEnv(t *testing.T) {
 	t.Parallel()
 
@@ -307,48 +480,6 @@ func TestAppendCheckpointTokenEnv(t *testing.T) {
 		assert.Contains(t, env, "GIT_CONFIG_COUNT=1")
 		assert.Contains(t, env, "GIT_CONFIG_KEY_0=http.extraHeader")
 	})
-}
-
-func TestCatFilesReadsBlobAndMissingSpec(t *testing.T) {
-	t.Parallel()
-
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-
-	blobHash := writeRemoteGitBlob(t, repoDir, "metadata")
-	missingHash := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-
-	results := CatFiles(context.Background(), CatFilesOptions{
-		Specs: []string{blobHash, missingHash},
-		Dir:   repoDir,
-	})
-
-	assert.Equal(t, []byte("metadata"), results[blobHash].Content)
-	assert.False(t, results[blobHash].Missing)
-	require.NoError(t, results[blobHash].Err)
-	assert.True(t, results[missingHash].Missing)
-	require.NoError(t, results[missingHash].Err)
-}
-
-func TestCatFilesErrorIncludesStderr(t *testing.T) {
-	t.Parallel()
-
-	err := catFilesError(errors.New("exit status 128"), "fatal: could not fetch blob\n")
-
-	assert.Contains(t, err.Error(), "fatal: could not fetch blob")
-}
-
-func writeRemoteGitBlob(t *testing.T, dir, content string) string {
-	t.Helper()
-
-	cmd := exec.CommandContext(t.Context(), "git", "hash-object", "-w", "--stdin")
-	cmd.Dir = dir
-	cmd.Stdin = strings.NewReader(content)
-	output, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git hash-object failed: %v", err)
-	}
-	return strings.TrimSpace(string(output))
 }
 
 func TestIsValidToken(t *testing.T) {
@@ -591,7 +722,7 @@ func TestNewCommand_GIT_TERMINAL_PROMPT_Coexistence(t *testing.T) {
 	t.Setenv(CheckpointTokenEnvVar, "coexist-token")
 
 	cmd := newCommand(context.Background(),
-		"fetch", "--no-tags", "--filter=blob:none", "https://github.com/org/repo.git", "refs/heads/main")
+		"fetch", "--no-auto-gc", "--no-tags", "--filter=blob:none", "https://github.com/org/repo.git", "refs/heads/main")
 	require.NotNil(t, cmd.Env)
 
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")

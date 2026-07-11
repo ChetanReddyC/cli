@@ -15,6 +15,8 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
+	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 )
 
@@ -37,8 +39,8 @@ const (
 // This is the main entry point for the version check system.
 // The function is silent on all errors to avoid interrupting CLI operations.
 func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
-	// Skip checks for dev builds
-	if currentVersion == "dev" || currentVersion == "" {
+	// Skip checks for local/unreleased builds.
+	if isDevBuild(currentVersion) {
 		return
 	}
 
@@ -97,24 +99,17 @@ func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
 	}
 }
 
-// globalConfigDirPath returns the expanded path to the global config directory (~/.config/entire).
-func globalConfigDirPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("getting home directory: %w", err)
-	}
-	return filepath.Join(home, globalConfigDirName), nil
+// globalConfigDirPath returns the CLI's global config directory. Resolution
+// lives in userdirs.Config — the single implementation shared by all
+// config-dir consumers (contexts.json, the file token store, this cache).
+func globalConfigDirPath() string {
+	return userdirs.Config()
 }
 
 // ensureGlobalConfigDir creates the global config directory if it doesn't exist.
 func ensureGlobalConfigDir() error {
-	configDir, err := globalConfigDirPath()
-	if err != nil {
-		return err
-	}
-
 	//nolint:gosec // ~/.config/entire is user home directory, 0o755 is appropriate
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
+	if err := os.MkdirAll(globalConfigDirPath(), 0o755); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
 
@@ -122,23 +117,14 @@ func ensureGlobalConfigDir() error {
 }
 
 // cacheFilePath returns the full path to the version check cache file.
-func cacheFilePath() (string, error) {
-	configDir, err := globalConfigDirPath()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(configDir, cacheFileName), nil
+func cacheFilePath() string {
+	return filepath.Join(globalConfigDirPath(), cacheFileName)
 }
 
 // loadCache loads the version check cache from disk.
 // Returns an error if the file doesn't exist or is corrupted.
 func loadCache() (*VersionCache, error) {
-	filePath, err := cacheFilePath()
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := os.ReadFile(filePath) //nolint:gosec // cacheFilePath is safe
+	data, err := os.ReadFile(cacheFilePath())
 	if err != nil {
 		return nil, fmt.Errorf("reading cache file: %w", err)
 	}
@@ -154,10 +140,7 @@ func loadCache() (*VersionCache, error) {
 // saveCache saves the version check cache to disk.
 // Uses atomic write semantics (write to temp file, then rename).
 func saveCache(cache *VersionCache) error {
-	filePath, err := cacheFilePath()
-	if err != nil {
-		return err
-	}
+	filePath := cacheFilePath()
 
 	// Marshal to JSON
 	data, err := json.MarshalIndent(cache, "", "  ")
@@ -202,7 +185,7 @@ func fetchLatestVersion(ctx context.Context) (string, error) {
 	}
 
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "entire-cli")
+	req.Header.Set("User-Agent", versioninfo.UserAgent())
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -246,7 +229,7 @@ func fetchLatestNightlyVersion(ctx context.Context) (string, error) {
 	}
 
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "entire-cli/"+versioninfo.Version)
+	req.Header.Set("User-Agent", versioninfo.UserAgent())
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -308,15 +291,30 @@ func isOutdated(current, latest string) bool {
 		latest = "v" + latest
 	}
 
-	// Skip notification for dev builds (e.g., "1.0.0-dev-xxx").
-	// These are local development builds and shouldn't trigger update notifications.
+	// Local/unreleased builds shouldn't trigger update notifications.
 	// Normal prereleases (e.g., "1.0.0-rc1") should still be compared normally.
-	if strings.Contains(semver.Prerelease(current), "dev") {
+	if isDevBuild(current) {
 		return false
 	}
 
 	// semver.Compare returns -1 if current < latest
 	return semver.Compare(current, latest) < 0
+}
+
+// isDevBuild reports whether v identifies a local, unreleased build that
+// should not be nagged to update. This covers the "dev" sentinel and empty
+// string (an unstamped binary), a Go pseudo-version (built from a commit that
+// isn't a tagged release), and any build carrying +metadata such as "+dirty".
+// Released builds — stable tags, nightly tags, and `go install ...@<tag>` —
+// have clean semver and return false.
+func isDevBuild(v string) bool {
+	if v == "" || v == "dev" {
+		return true
+	}
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	return !semver.IsValid(v) || module.IsPseudoVersion(v) || semver.Build(v) != ""
 }
 
 func versionCacheKey(version string) string {
@@ -397,9 +395,9 @@ func updateCommand(currentVersion string) string {
 	switch installManagerForCurrentBinary() {
 	case installManagerBrew:
 		if releaseChannel(currentVersion) == installChannelNightly {
-			return "brew upgrade entire@nightly"
+			return "brew upgrade --yes entire@nightly"
 		}
-		return "brew upgrade entire"
+		return "brew upgrade --yes entire"
 	case installManagerMise:
 		return "mise upgrade entire"
 	case installManagerScoop:
@@ -410,6 +408,13 @@ func updateCommand(currentVersion string) string {
 		return "curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly"
 	}
 	return "curl -fsSL https://entire.io/install.sh | bash"
+}
+
+func UpdateCommandForCurrentBinary(currentVersion string) string {
+	if !canAutoInstall() {
+		return downloadsURL
+	}
+	return updateCommand(currentVersion)
 }
 
 // printNotification prints the version update notification to the user.

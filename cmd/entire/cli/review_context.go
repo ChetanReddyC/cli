@@ -11,10 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	git "github.com/go-git/go-git/v6"
-
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -30,11 +29,7 @@ const (
 )
 
 type reviewContextSessionMetadataReader interface {
-	ReadSessionMetadata(ctx context.Context, checkpointID checkpointid.CheckpointID, sessionIndex int) (*checkpoint.CommittedMetadata, error)
-}
-
-type reviewContextSessionMetadataPromptsReader interface {
-	ReadSessionMetadataAndPrompts(ctx context.Context, checkpointID checkpointid.CheckpointID, sessionIndex int) (*checkpoint.SessionContent, error)
+	ReadSessionMetadata(ctx context.Context, checkpointID checkpointid.CheckpointID, sessionIndex int) (*checkpoint.Metadata, error)
 }
 
 func reviewCheckpointContext(ctx context.Context, worktreeRoot string, scopeBaseRef string) string {
@@ -62,11 +57,12 @@ func joinReviewContextSections(sections ...string) string {
 // in-progress session context is surfaced even when there are no committed
 // checkpoints in scope (the common case: branch with only uncommitted work).
 func reviewSessionContextForCurrentHead(ctx context.Context, worktreeRoot string) string {
-	repo, err := git.PlainOpen(worktreeRoot)
+	repo, err := gitrepo.OpenPath(worktreeRoot)
 	if err != nil {
 		logging.Debug(ctx, "review session context: open repo", slog.String("error", err.Error()))
 		return ""
 	}
+	defer repo.Close()
 	head, err := repo.Head()
 	if err != nil {
 		logging.Debug(ctx, "review session context: resolve HEAD", slog.String("error", err.Error()))
@@ -92,19 +88,18 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 		return ""
 	}
 
-	repo, err := git.PlainOpen(worktreeRoot)
+	repo, err := gitrepo.OpenPath(worktreeRoot)
 	if err != nil {
 		logging.Debug(ctx, "review checkpoint context: open repo", slog.String("error", err.Error()))
 		return ""
 	}
-	checkpointReader, readerErr := newCommittedCheckpointReader(ctx, repo, committedCheckpointReaderOptions{
-		fetchRemoteLog: "review checkpoint context: no v2 fetch remote",
-	})
-	if readerErr != nil {
-		logging.Debug(ctx, "review checkpoint context: checkpoint reader unavailable", slog.String("error", readerErr.Error()))
+	defer repo.Close()
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	if err != nil {
+		logging.Debug(ctx, "review checkpoint context: open store", slog.String("error", err.Error()))
 		return ""
 	}
-	reader := checkpointReader.reader
+	store := stores.Persistent
 
 	var lines []string
 	seen := map[checkpointid.CheckpointID]bool{}
@@ -121,12 +116,12 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 				continue
 			}
 
-			summary, err := checkpoint.ReadCommittedCheckpoint(ctx, reader, cpID)
+			summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
 			if err != nil {
 				lines = append(lines, fmt.Sprintf("- %s: checkpoint metadata unavailable", cpID))
 				continue
 			}
-			detail := reviewCheckpointDetail(ctx, reader, cpID, summary)
+			detail := reviewCheckpointDetail(ctx, store, cpID, summary)
 			if detail == "" {
 				detail = "no summary or prompt recorded"
 			}
@@ -274,7 +269,7 @@ func formatReviewSessionLine(worktreeRoot string, st *session.State) string {
 
 func reviewCheckpointDetail(
 	ctx context.Context,
-	reader checkpoint.CommittedReader,
+	reader checkpoint.SessionReader,
 	cpID checkpointid.CheckpointID,
 	summary *checkpoint.CheckpointSummary,
 ) string {
@@ -308,10 +303,10 @@ type reviewContextSessionDetail struct {
 
 func readReviewContextSessionMetadata(
 	ctx context.Context,
-	reader checkpoint.CommittedReader,
+	reader checkpoint.SessionReader,
 	cpID checkpointid.CheckpointID,
 	sessionIndex int,
-) (*checkpoint.CommittedMetadata, error) {
+) (*checkpoint.Metadata, error) {
 	if r, ok := reader.(reviewContextSessionMetadataReader); ok {
 		return r.ReadSessionMetadata(ctx, cpID, sessionIndex) //nolint:wrapcheck // Best-effort prompt context.
 	}
@@ -327,30 +322,15 @@ func readReviewContextSessionMetadata(
 
 func readReviewContextSessionPrompts(
 	ctx context.Context,
-	reader checkpoint.CommittedReader,
+	reader checkpoint.SessionReader,
 	cpID checkpointid.CheckpointID,
 	sessionIndex int,
 ) (string, error) {
-	if r, ok := reader.(reviewContextSessionMetadataPromptsReader); ok {
-		content, err := r.ReadSessionMetadataAndPrompts(ctx, cpID, sessionIndex)
-		if err == nil {
-			if content == nil {
-				return "", errors.New("session content is nil")
-			}
-			return content.Prompts, nil
-		}
-		if !errors.Is(err, checkpoint.ErrCheckpointNotFound) {
-			return "", err //nolint:wrapcheck // Best-effort prompt context.
-		}
-	}
-	content, err := reader.ReadSessionContent(ctx, cpID, sessionIndex)
+	prompts, err := reader.ReadSessionPrompts(ctx, cpID, sessionIndex)
 	if err != nil {
 		return "", err //nolint:wrapcheck // Best-effort prompt context.
 	}
-	if content == nil {
-		return "", errors.New("session content is nil")
-	}
-	return content.Prompts, nil
+	return prompts, nil
 }
 
 func reviewSummaryText(summary *checkpoint.Summary) string {
@@ -399,10 +379,7 @@ func truncateReviewContextText(value string) string {
 }
 
 func reviewContextCheckpointNoun(count int) string {
-	if count == 1 {
-		return "checkpoint"
-	}
-	return "checkpoints"
+	return pluralize("checkpoint", count)
 }
 
 func reviewContextCommitMessages(ctx context.Context, repoRoot string, scopeBaseRef string, maxCommits int) ([]string, bool, error) {

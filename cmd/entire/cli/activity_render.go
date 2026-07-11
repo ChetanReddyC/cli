@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"golang.org/x/term"
 )
 
@@ -63,16 +64,16 @@ func newActivityStyles(w io.Writer) activityStyles {
 	if useColor {
 		s.bold = lipgloss.NewStyle().Bold(true)
 		s.dim = lipgloss.NewStyle().Faint(true)
-		s.label = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true)
+		s.label = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Bold(true)
 		s.value = lipgloss.NewStyle().Bold(true)
-		s.unit = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-		s.desc = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-		s.repoNm = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
-		s.commitH = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+		s.unit = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
+		s.desc = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
+		s.repoNm = lipgloss.NewStyle() // default fg: inverts with terminal theme
+		s.commitH = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
 		s.commitM = lipgloss.NewStyle().Bold(true)
-		s.add = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-		s.del = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-		s.muted = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+		s.add = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Success))
+		s.del = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Error))
+		s.muted = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted))
 	}
 
 	return s
@@ -95,12 +96,17 @@ func (s activityStyles) renderAgent(agentID, text string) string {
 
 type agentDisplay struct {
 	Label string
-	Color string // ANSI 256 color code
+	Color string // agent brand color (hex); lipgloss resolves to the terminal's profile
 	Char  rune   // block character for bar charts
 }
 
-// Agent colors match the dark-mode CSS variables from entire.io (Tailwind 400-level).
-// Lipgloss resolves hex to the best representation for the terminal's color profile.
+// Agent colors are the per-agent brand colors from entire.io (dark-mode CSS
+// variables, Tailwind 400-level). This is a deliberate exception to the CLI's
+// base16 palette: there are more agents than base16 has distinct hues, so
+// collapsing them onto ANSI slots makes neighboring agents indistinguishable
+// in bar charts and legends. We keep the hex values so each agent stays
+// recognizable; lipgloss resolves them to the best representation for the
+// terminal's color profile. The non-brand "unknown" fallback uses muted gray.
 var agentDisplayMap = map[string]agentDisplay{
 	"claude":   {Label: "Claude Code", Color: "#fb923c", Char: '▓'}, // orange-400
 	"gemini":   {Label: "Gemini", Color: "#60a5fa", Char: '▓'},      // blue-400
@@ -112,7 +118,7 @@ var agentDisplayMap = map[string]agentDisplay{
 	"cursor":   {Label: "Cursor", Color: "#38bdf8", Char: '▓'},      // sky-400
 	"droid":    {Label: "Droid", Color: "#f472b6", Char: '▓'},       // pink-400
 	"kiro":     {Label: "Kiro", Color: "#c084fc", Char: '▓'},        // purple-400
-	"unknown":  {Label: "Unknown", Color: "245", Char: '░'},
+	"unknown":  {Label: "Unknown", Color: palette.Muted, Char: '░'},
 }
 
 var agentOrder = []string{
@@ -120,7 +126,10 @@ var agentOrder = []string{
 	"copilot", "pi", "cursor", "droid", "kiro", "unknown",
 }
 
-func renderActivity(w io.Writer, sty activityStyles, stats contributionStats, repos []repoContribution, hourly []hourlyPoint, days []commitDay) {
+// renderActivityHeader renders the stat cards, contribution heatmap, and repo
+// chart — the sections common to both the sessions and commits views. The
+// caller renders the recent-list section (sessions or commits) after it.
+func renderActivityHeader(w io.Writer, sty activityStyles, stats contributionStats, repos []repoContribution, hourly []hourlyPoint) {
 	fmt.Fprintln(w)
 	renderStatCards(w, sty, stats)
 	fmt.Fprintln(w)
@@ -128,7 +137,6 @@ func renderActivity(w io.Writer, sty activityStyles, stats contributionStats, re
 	fmt.Fprintln(w)
 	renderRepoChart(w, sty, repos)
 	fmt.Fprintln(w)
-	renderCommitList(w, sty, days)
 }
 
 func renderStatCards(w io.Writer, sty activityStyles, stats contributionStats) {
@@ -320,181 +328,6 @@ func renderDotChart(w io.Writer, sty activityStyles, hourly []hourlyPoint, repos
 	}
 }
 
-// renderBrailleChart is an alternative contribution chart using Unicode braille
-// characters for higher resolution. Swap renderDotChart → renderBrailleChart in
-// renderContributionChart to enable it.
-var _ = renderBrailleChart // keep compiled while inactive
-
-func renderBrailleChart(w io.Writer, sty activityStyles, hourly []hourlyPoint, repos []repoContribution) {
-	// Agent breakdown header + total
-	agentTotals := make(map[string]int)
-	total := 0
-	for _, r := range repos {
-		total += r.Total
-		for agent, count := range r.Agents {
-			agentTotals[agent] += count
-		}
-	}
-
-	// Header line: CONTRIBUTIONS  N checkpoints
-	totalLabel := ""
-	if total > 0 {
-		totalLabel = sty.render(sty.muted, fmt.Sprintf("  %d checkpoints", total))
-	}
-	fmt.Fprintf(w, "%s%s\n", sty.render(sty.label, "CONTRIBUTIONS"), totalLabel)
-
-	if len(hourly) == 0 {
-		fmt.Fprintln(w, sty.render(sty.muted, "  No activity data"))
-		return
-	}
-
-	// Determine date range
-	now := time.Now().Local()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	numDays := 30
-
-	labelWidth := 3
-	chartCols := sty.width - labelWidth - 2
-	if chartCols < 20 {
-		chartCols = 20
-	}
-
-	// 6 braille rows × 4 dots = 24 hours
-	chartRows := 6
-	dotsX := chartCols * 2
-	dotsY := chartRows * 4
-
-	type dotInfo struct {
-		set     bool
-		agentID string
-		value   int
-	}
-	dotGrid := make([][]dotInfo, dotsY)
-	for i := range dotGrid {
-		dotGrid[i] = make([]dotInfo, dotsX)
-	}
-
-	for _, p := range hourly {
-		pt, err := time.ParseInLocation("2006-01-02", p.Date, time.Local)
-		if err != nil {
-			continue
-		}
-		dayIdx := int(today.Sub(pt).Hours() / 24)
-		dayFromStart := numDays - 1 - dayIdx
-		if dayFromStart < 0 || dayFromStart >= numDays {
-			continue
-		}
-
-		dx := int(float64(dayFromStart) / float64(numDays) * float64(dotsX))
-		if dx >= dotsX {
-			dx = dotsX - 1
-		}
-
-		dy := p.Hour
-		if dy >= dotsY {
-			dy = dotsY - 1
-		}
-
-		// Bubble radius scales with value
-		radius := 0
-		if p.Value >= 3 {
-			radius = 1
-		}
-		if p.Value >= 8 {
-			radius = 2
-		}
-
-		for oy := -radius; oy <= radius; oy++ {
-			for ox := -radius; ox <= radius; ox++ {
-				if ox*ox+oy*oy > radius*radius+1 {
-					continue
-				}
-				ny, nx := dy+oy, dx+ox
-				if ny >= 0 && ny < dotsY && nx >= 0 && nx < dotsX {
-					if p.Value > dotGrid[ny][nx].value {
-						dotGrid[ny][nx] = dotInfo{set: true, agentID: p.AgentID, value: p.Value}
-					}
-				}
-			}
-		}
-	}
-
-	// Date axis labels
-	fmt.Fprint(w, strings.Repeat(" ", labelWidth+1))
-	startDate := today.AddDate(0, 0, -(numDays - 1))
-	lastMonth := ""
-	for col := 0; col < chartCols; col++ {
-		dayFrac := float64(col) / float64(chartCols) * float64(numDays)
-		date := startDate.AddDate(0, 0, int(dayFrac))
-		month := date.Format("Jan")
-		if month != lastMonth {
-			fmt.Fprint(w, sty.render(sty.muted, month))
-			col += len(month) - 1
-			lastMonth = month
-		} else {
-			fmt.Fprint(w, " ")
-		}
-	}
-	fmt.Fprintln(w)
-
-	// Render braille grid
-	hourLabels := []string{" 0", " 4", " 8", "12", "16", "20"}
-
-	for cy := range chartRows {
-		fmt.Fprint(w, sty.render(sty.dim, hourLabels[cy])+" ")
-
-		for cx := range chartCols {
-			var brailleCode rune = 0x2800
-			dominantAgent := ""
-			maxVal := 0
-
-			// Braille dot layout: each char is 2 wide × 4 tall
-			//   dot1 dot4     bit0 bit3
-			//   dot2 dot5     bit1 bit4
-			//   dot3 dot6     bit2 bit5
-			//   dot7 dot8     bit6 bit7
-			dotBits := [8][2]int{
-				{0, 0}, {1, 0}, {2, 0}, {0, 1},
-				{1, 1}, {2, 1}, {3, 0}, {3, 1},
-			}
-
-			for bit, offset := range dotBits {
-				dy := cy*4 + offset[0]
-				dx := cx*2 + offset[1]
-				if dy < dotsY && dx < dotsX && dotGrid[dy][dx].set {
-					brailleCode |= 1 << bit
-					if dotGrid[dy][dx].value > maxVal {
-						maxVal = dotGrid[dy][dx].value
-						dominantAgent = dotGrid[dy][dx].agentID
-					}
-				}
-			}
-
-			if brailleCode == 0x2800 {
-				fmt.Fprint(w, " ")
-			} else {
-				fmt.Fprint(w, sty.renderAgent(dominantAgent, string(brailleCode)))
-			}
-		}
-		fmt.Fprintln(w)
-	}
-
-	// Agent legend
-	if total > 0 {
-		var parts []string
-		for _, id := range agentOrder {
-			count, ok := agentTotals[id]
-			if !ok || count == 0 {
-				continue
-			}
-			pct := float64(count) / float64(total) * 100
-			display := agentDisplayMap[id]
-			parts = append(parts, sty.renderAgent(id, fmt.Sprintf("● %s %d%%", display.Label, int(math.Round(pct)))))
-		}
-		fmt.Fprintln(w, strings.Join(parts, sty.render(sty.dim, "  ")))
-	}
-}
-
 func renderRepoChart(w io.Writer, sty activityStyles, repos []repoContribution) {
 	if len(repos) == 0 {
 		return
@@ -527,11 +360,9 @@ func renderRepoChart(w io.Writer, sty activityStyles, repos []repoContribution) 
 	}
 
 	for _, r := range display {
-		name := r.Repo
-		if len(name) > maxNameLen {
-			name = name[:maxNameLen-1] + "…"
-		}
-		name = fmt.Sprintf("%-*s", maxNameLen, name)
+		// padOrTruncate is rune-aware; truncating r.Repo with a byte slice
+		// could split a multi-byte rune and emit invalid UTF-8.
+		name := padOrTruncate(r.Repo, maxNameLen)
 
 		bar := renderAgentBar(sty, r.Agents, maxCount, barWidth)
 		count := fmt.Sprintf("%*d", countWidth, r.Total)
@@ -699,6 +530,116 @@ func renderCommitListN(w io.Writer, sty activityStyles, days []commitDay, maxDay
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+// sessionTitleMaxRunes caps the display-name *content* at 120 runes, matching
+// entire.io's Overview row (`displayName.slice(0, 120) + "…"`): the ellipsis is
+// appended as an overflow marker on top of the 120, so the rendered title can
+// be 121 runes — this is a content cap, not a hard total-length cap. On a real
+// terminal the width-based truncation below usually shortens it further first.
+const sessionTitleMaxRunes = 120
+
+func renderSessionList(w io.Writer, sty activityStyles, days []sessionDay) {
+	renderSessionListN(w, sty, days, 3)
+}
+
+// renderSessionListN renders the recent-session feed grouped by day (newest
+// first), mirroring the entire.io Overview list: a per-day header with a
+// session count, then one row per session. maxDays <= 0 renders every day.
+func renderSessionListN(w io.Writer, sty activityStyles, days []sessionDay, maxDays int) {
+	if len(days) == 0 {
+		return
+	}
+	if maxDays <= 0 || maxDays > len(days) {
+		maxDays = len(days)
+	}
+
+	for _, day := range days[:maxDays] {
+		displayDate := formatCommitDate(day.Date)
+		sessionWord := "sessions"
+		if len(day.Sessions) == 1 {
+			sessionWord = strings.TrimSuffix(sessionWord, "s")
+		}
+
+		fmt.Fprintf(w, "%s  %s\n",
+			sty.render(sty.bold, displayDate),
+			sty.render(sty.muted, fmt.Sprintf("%d %s", len(day.Sessions), sessionWord)))
+
+		for _, s := range day.Sessions {
+			renderSessionRow(w, sty, s)
+		}
+		fmt.Fprintln(w)
+	}
+}
+
+// renderSessionRow renders one session: title  repo  [public]  agent  …  model  checkpoints.
+// Left side is the session's display name, repo, an optional public tag, and
+// the agent badge; right side (right-aligned) is the friendly model label and
+// checkpoint count. Fields mirror the entire.io Overview row.
+func renderSessionRow(w io.Writer, sty activityStyles, s userSession) {
+	agentID := agentUnknown
+	if s.Agent != nil && *s.Agent != "" {
+		agentID = normalizeAgentString(*s.Agent)
+	}
+	agentLabel := agentDisplayMap[agentID].Label
+
+	title := strings.TrimSpace(s.DisplayName)
+	if title == "" {
+		title = "(untitled session)"
+	}
+	if runes := []rune(title); len(runes) > sessionTitleMaxRunes {
+		title = string(runes[:sessionTitleMaxRunes]) + "…"
+	}
+
+	model := ""
+	if s.Model != nil {
+		model = formatModel(*s.Model)
+	}
+
+	cpStr := fmt.Sprintf("%d checkpoints", s.CheckpointCount)
+	if s.CheckpointCount == 1 {
+		cpStr = "1 checkpoint"
+	}
+
+	// Right side: [model  ]checkpoints, right-aligned.
+	rightSide := sty.render(sty.muted, cpStr)
+	rightPlain := cpStr
+	if model != "" {
+		rightSide = sty.render(sty.muted, model) + sty.render(sty.dim, "  ") + rightSide
+		rightPlain = model + "  " + cpStr
+	}
+
+	// Public tag (rare from the entire-api cell, which reports isPublic=false).
+	publicRendered, publicPlain := "", ""
+	if s.IsPublic {
+		publicRendered = "  " + sty.render(sty.add, "public")
+		publicPlain = "  public"
+	}
+
+	buildLeft := func(t string) (rendered, plain string) {
+		rendered = sty.render(sty.commitM, t) + " " +
+			sty.render(sty.muted, s.RepoFullName) + publicRendered +
+			"  " + sty.renderAgent(agentID, agentLabel)
+		plain = t + " " + s.RepoFullName + publicPlain + "  " + agentLabel
+		return rendered, plain
+	}
+	left, leftPlain := buildLeft(title)
+
+	// Truncate the title if the row would exceed the terminal width.
+	maxTitle := sty.width - (lipgloss.Width(leftPlain) - lipgloss.Width(title)) - lipgloss.Width(rightPlain) - 2
+	if maxTitle < 10 {
+		maxTitle = 10
+	}
+	if lipgloss.Width(title) > maxTitle {
+		title = truncateDisplayWidth(title, maxTitle, "…")
+		left, leftPlain = buildLeft(title)
+	}
+
+	gap := sty.width - lipgloss.Width(leftPlain) - lipgloss.Width(rightPlain)
+	if gap < 2 {
+		gap = 2
+	}
+	fmt.Fprintf(w, "%s%s%s\n", left, strings.Repeat(" ", gap), rightSide)
 }
 
 func uniqueCommitAgents(c userCommit) []string {

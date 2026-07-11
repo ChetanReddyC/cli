@@ -12,9 +12,11 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/search"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -22,8 +24,14 @@ import (
 )
 
 var (
-	lookupCurrentToken = auth.LookupCurrentToken
-	nowUTC             = func() time.Time { return time.Now().UTC() }
+	// lookupResourceToken returns a bearer for the given data-API base URL.
+	// Production wiring goes through auth.ResolveDataAPIToken so the dispatch
+	// host's /.well-known/entire-api.json picks the matching login context
+	// (a host that doesn't advertise discovery is a surfaced error). Tests
+	// swap to a fixed-token closure.
+	lookupResourceToken = auth.ResolveDataAPIToken
+
+	nowUTC = func() time.Time { return time.Now().UTC() }
 )
 
 func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
@@ -124,10 +132,11 @@ func resolveRepoRoots(ctx context.Context, repoPaths []string) ([]string, error)
 }
 
 func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options, since, until time.Time) ([]candidate, error) {
-	repo, err := git.PlainOpenWithOptions(repoRoot, &git.PlainOpenOptions{DetectDotGit: true})
+	repo, err := gitrepo.OpenPath(repoRoot)
 	if err != nil {
 		return nil, fmt.Errorf("open repository %s: %w", repoRoot, err)
 	}
+	defer repo.Close()
 
 	repoFullName, err := resolveRepoFullName(ctx, repo)
 	if err != nil {
@@ -164,8 +173,15 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 		return nil, err
 	}
 
-	store := checkpoint.NewGitStore(repo)
-	infos, err := store.ListCommitted(ctx)
+	// repoRoot may be a different repo (--repo/RepoPaths) or the cwd may not be
+	// a repo at all, so scope checkpoint store construction to this repo.
+	repoCtx := settings.WithWorktreeRoot(ctx, repoRoot)
+	stores, err := checkpoint.Open(repoCtx, repo, checkpoint.OpenOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("open checkpoint store: %w", err)
+	}
+	store := stores.Persistent
+	infos, err := store.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list committed checkpoints: %w", err)
 	}
@@ -176,7 +192,7 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 			continue
 		}
 
-		summary, err := store.ReadCommitted(ctx, info.CheckpointID)
+		summary, err := store.Read(ctx, info.CheckpointID)
 		if err != nil {
 			logging.Warn(ctx, "failed to read committed checkpoint for dispatch", "checkpoint_id", info.CheckpointID.String(), "error", err)
 			continue
