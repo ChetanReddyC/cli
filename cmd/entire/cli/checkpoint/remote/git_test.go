@@ -3,13 +3,13 @@ package remote
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -324,6 +324,72 @@ func TestFetch_Shallow(t *testing.T) {
 		"Shallow=true should request --depth=1 and leave the repo shallow")
 }
 
+// TestFetch_Depth verifies that Depth is ref-scoped: it fully fetches (heals)
+// the named branch while leaving an independently-shallow branch shallow —
+// unlike Unshallow, which is repo-global.
+func TestFetch_Depth(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "bare.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	runIsolatedGit(ctx, t, "", "init", "--bare", bareDir)
+
+	testutil.InitRepo(t, seedDir)
+	runIsolatedGit(ctx, t, seedDir, "remote", "add", "origin", bareDir)
+	for _, c := range []string{"m1", "m2", "m3"} { // main: 3 commits
+		testutil.WriteFile(t, seedDir, "f.txt", c)
+		testutil.GitAdd(t, seedDir, "f.txt")
+		testutil.GitCommit(t, seedDir, c)
+	}
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, seedDir, "checkout", "--orphan", "meta")
+	runIsolatedGit(ctx, t, seedDir, "rm", "-rf", ".")
+	for _, c := range []string{"c1", "c2"} { // meta: 2 commits
+		testutil.WriteFile(t, seedDir, "g.txt", c)
+		testutil.GitAdd(t, seedDir, "g.txt")
+		testutil.GitCommit(t, seedDir, c)
+	}
+	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/meta")
+
+	// Shallow clone of main + shallow fetch of meta → both branches shallow.
+	cloneDir := filepath.Join(tmpDir, "clone")
+	runIsolatedGit(ctx, t, "", "clone", "--depth=1", "--single-branch", "--branch", "main", "file://"+bareDir, cloneDir)
+	runIsolatedGit(ctx, t, cloneDir, "fetch", "--depth=1", "origin", "+refs/heads/meta:refs/remotes/origin/meta")
+	require.True(t, isShallowRepository(ctx, cloneDir))
+	require.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/meta"))
+	require.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/main"))
+
+	out, err := Fetch(ctx, FetchOptions{
+		Remote:   "file://" + bareDir,
+		RefSpecs: []string{"+refs/heads/meta:refs/remotes/origin/meta"},
+		NoTags:   true,
+		Depth:    1_000_000_000,
+		Dir:      cloneDir,
+	})
+	require.NoError(t, err, "fetch output: %s", out)
+
+	assert.Equal(t, 2, revListCount(ctx, t, cloneDir, "refs/remotes/origin/meta"),
+		"Depth should fully fetch (heal) the named branch")
+	assert.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/main"),
+		"Depth is ref-scoped: an independently-shallow branch must stay shallow")
+	assert.True(t, isShallowRepository(ctx, cloneDir),
+		"repo stays shallow because main is still bounded")
+}
+
+func revListCount(ctx context.Context, t *testing.T, dir, ref string) int {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", "rev-list", "--count", ref)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	require.NoError(t, err)
+	return n
+}
+
 // setupShallowClone creates a bare origin, a seed repo with one commit pushed
 // to it, a shallow (--depth=1) clone, and then advances origin by one more
 // commit so that a subsequent fetch into the clone has work to do. Returns the
@@ -414,48 +480,6 @@ func TestAppendCheckpointTokenEnv(t *testing.T) {
 		assert.Contains(t, env, "GIT_CONFIG_COUNT=1")
 		assert.Contains(t, env, "GIT_CONFIG_KEY_0=http.extraHeader")
 	})
-}
-
-func TestCatFilesReadsBlobAndMissingSpec(t *testing.T) {
-	t.Parallel()
-
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-
-	blobHash := writeRemoteGitBlob(t, repoDir, "metadata")
-	missingHash := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-
-	results := CatFiles(context.Background(), CatFilesOptions{
-		Specs: []string{blobHash, missingHash},
-		Dir:   repoDir,
-	})
-
-	assert.Equal(t, []byte("metadata"), results[blobHash].Content)
-	assert.False(t, results[blobHash].Missing)
-	require.NoError(t, results[blobHash].Err)
-	assert.True(t, results[missingHash].Missing)
-	require.NoError(t, results[missingHash].Err)
-}
-
-func TestCatFilesErrorIncludesStderr(t *testing.T) {
-	t.Parallel()
-
-	err := catFilesError(errors.New("exit status 128"), "fatal: could not fetch blob\n")
-
-	assert.Contains(t, err.Error(), "fatal: could not fetch blob")
-}
-
-func writeRemoteGitBlob(t *testing.T, dir, content string) string {
-	t.Helper()
-
-	cmd := exec.CommandContext(t.Context(), "git", "hash-object", "-w", "--stdin")
-	cmd.Dir = dir
-	cmd.Stdin = strings.NewReader(content)
-	output, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git hash-object failed: %v", err)
-	}
-	return strings.TrimSpace(string(output))
 }
 
 func TestIsValidToken(t *testing.T) {

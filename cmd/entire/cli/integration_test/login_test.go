@@ -116,9 +116,8 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 		t.Fatalf("output missing login complete message (token save likely failed):\n%s", output)
 	}
 
-	// A --server login is recorded as a contexts.json context (the legacy
-	// keyring entry is only written for the default login server, whose key
-	// is the only one legacy readers consult).
+	// The login is recorded as a contexts.json context — the only
+	// credential store.
 	contextsPath := filepath.Join(proc.configDir, "contexts.json")
 	data, readErr := os.ReadFile(contextsPath)
 	if readErr != nil {
@@ -292,9 +291,10 @@ func startLoginProcess(t *testing.T, apiBaseURL string, extraEnv []string, args 
 	env := NewTestEnv(t)
 	configDir := filepath.Join(env.RepoDir, ".entire-test-config")
 
-	// ENTIRE_AUTH_BASE_URL is retired (commands reject it when set at all);
-	// --server is how a login targets the test server instead of the
-	// production default.
+	// --server pins the login at the in-process test server instead of the
+	// production default. The login lands in contexts.json + the file token
+	// store, both sandboxed below so the test never touches the developer's
+	// real config or OS keychain.
 	args = append(args, "--server", apiBaseURL)
 	cmd := execx.NonInteractive(context.Background(), getTestBinary(), args...)
 	cmd.Dir = env.RepoDir
@@ -303,10 +303,9 @@ func startLoginProcess(t *testing.T, apiBaseURL string, extraEnv []string, args 
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_API_BASE_URL="+apiBaseURL,
-		"ENTIRE_TEST_AUTH_STORE_FILE="+filepath.Join(env.RepoDir, ".entire-test-auth-store.json"),
-		// A --server login records its credential in contexts.json and the
-		// token store; point both at the test sandbox so the spawned binary
-		// can't touch the real ~/.config/entire or the OS keychain.
+		// The login records its credential in contexts.json and the token
+		// store; point both at the test sandbox so the spawned binary can't
+		// touch the real ~/.config/entire or the OS keychain.
 		"ENTIRE_CONFIG_DIR="+configDir,
 		"ENTIRE_TOKEN_STORE=file",
 		"ENTIRE_TOKEN_STORE_PATH="+filepath.Join(env.RepoDir, ".entire-test-tokens.json"),

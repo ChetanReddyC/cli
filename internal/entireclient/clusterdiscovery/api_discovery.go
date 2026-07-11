@@ -32,17 +32,17 @@ type APIResponse struct {
 // ErrDiscoveryUnavailable wraps every "the API didn't give us a usable
 // trust-root document" outcome: it doesn't serve /.well-known/entire-api.json
 // (404 — old deployment), is unreachable, answers 503 (unconfigured), or
-// returns a malformed/empty body. Callers match on it to fall back to
-// static token resolution so behaviour is never worse than before
-// discovery existed. Selection failures (no eligible / ambiguous
-// context) are NOT wrapped — those are real "log in / pick one" errors
-// the user must see.
+// returns a malformed/empty body. Callers match on it to surface a clear
+// "host does not advertise its trusted login servers" error — discovery is
+// the only path, so there is no static fallback. Selection failures (no
+// eligible / ambiguous context) are NOT wrapped — those are real "log in /
+// pick one" errors the user must see.
 var ErrDiscoveryUnavailable = errors.New("api discovery unavailable")
 
 // DiscoverAPI fetches and parses an API host's /.well-known/entire-api.json,
 // returning its trusted issuers. Every failure mode (transport, non-200,
 // decode, empty trusted_issuers) is folded under ErrDiscoveryUnavailable so the
-// caller has a single sentinel to fall back on.
+// caller has a single sentinel to match on.
 //
 // debugf is optional; nil suppresses debug output.
 func DiscoverAPI(ctx context.Context, apiHost string, c *http.Client, debugf DebugFunc) (*APIResponse, error) {
@@ -66,17 +66,21 @@ func DiscoverAPI(ctx context.Context, apiHost string, c *http.Client, debugf Deb
 // Shares the cache-then-discover logic with resolveClusterCores via
 // resolveCachedCores — the data-API trusted issuers ARE core URLs, so they
 // reuse the cores cache (different file). Cold failures stay folded under
-// ErrDiscoveryUnavailable (from DiscoverAPI) for the caller's static fallback.
+// ErrDiscoveryUnavailable (from DiscoverAPI) for the caller to surface.
 func resolveAPICores(ctx context.Context, cacheDir, apiHost string, httpClient *http.Client, debugf DebugFunc) ([]string, error) {
-	return resolveCachedCores(cacheDir, apiHost, "api host",
+	entry, err := resolveCachedCores(cacheDir, apiHost, "api host", false,
 		discovery.LoadAPICores, discovery.ModifyAPICores,
-		func() ([]string, error) {
+		func() (discovery.CoresEntry, error) {
 			body, err := DiscoverAPI(ctx, apiHost, httpClient, debugf)
 			if err != nil {
-				return nil, err
+				return discovery.CoresEntry{}, err
 			}
-			return body.TrustedIssuers, nil
+			return discovery.CoresEntry{CoreURLs: body.TrustedIssuers}, nil
 		}, debugf)
+	if err != nil {
+		return nil, err
+	}
+	return entry.CoreURLs, nil
 }
 
 // ResolveContextForAPI picks the local login context to authenticate data-API
@@ -93,9 +97,10 @@ func resolveAPICores(ctx context.Context, cacheDir, apiHost string, httpClient *
 //
 // When the API doesn't advertise discovery (404 / unreachable / 503 /
 // malformed) and no cache entry exists, the returned error wraps
-// ErrDiscoveryUnavailable so the caller falls back to static resolution. A
-// successful fetch whose context selection fails returns that selection error
-// unwrapped — the user must act on it.
+// ErrDiscoveryUnavailable; data-API callers surface it as a fatal "host does
+// not advertise its trusted login servers" error rather than guessing which
+// login servers to trust. A successful fetch whose context selection fails
+// returns that selection error unwrapped — the user must act on it.
 //
 // debugf is optional; nil suppresses debug output.
 func ResolveContextForAPI(ctx context.Context, configDir, cacheDir, apiHost string, httpClient *http.Client, debugf DebugFunc) (*contexts.Context, error) {

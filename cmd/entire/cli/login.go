@@ -142,10 +142,9 @@ func parseLoginServer(raw string) (string, error) {
 	return api.NormalizeOriginURL(raw), nil
 }
 
-// requireSecureLoginServer enforces TLS for the chosen login server.
-// Unlike requireSecureBaseURL it checks only the server being dialled —
-// login never touches the data API. --insecure-http-auth opts in to
-// http:// (and enables it process-wide for the token save path).
+// requireSecureLoginServer enforces TLS for the chosen login server — the
+// only host login dials. --insecure-http-auth opts in to http:// (and
+// enables it process-wide for the token save path).
 func requireSecureLoginServer(server string, insecureHTTPAuth bool) error {
 	if insecureHTTPAuth {
 		auth.EnableInsecureHTTP()
@@ -196,7 +195,7 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 		return fmt.Errorf("complete login: %w", err)
 	}
 
-	return persistLogin(outW, errW, client.BaseURL(), token, refreshToken)
+	return persistLogin(outW, client.BaseURL(), token, refreshToken)
 }
 
 // loginFlowFacts carries the environment facts that pick between the
@@ -313,43 +312,22 @@ func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuth
 		return fmt.Errorf("complete login: %w", err)
 	}
 
-	return persistLogin(outW, errW, baseURL, token, refreshToken)
+	return persistLogin(outW, baseURL, token, refreshToken)
 }
 
-// persistLogin validates the freshly-issued access token, saves it to the
-// keyring, and dual-writes the shared contexts.json credential model.
-// Shared by the device-code and browser flows.
-func persistLogin(outW, errW io.Writer, baseURL, token, refreshToken string) error {
+// persistLogin validates the freshly-issued access token and records it in
+// the shared contexts.json credential model. Shared by the device-code and
+// browser flows.
+func persistLogin(outW io.Writer, baseURL, token, refreshToken string) error {
 	if err := validateReceivedToken(token, baseURL, time.Now()); err != nil {
 		return fmt.Errorf("reject login token: %w", err)
 	}
 
-	// Every legacy-keyring read in the CLI keys by api.AuthBaseURL(),
-	// which is always the default origin now that ENTIRE_AUTH_BASE_URL is
-	// retired. A legacy entry saved under any other --server origin would
-	// be unreadable forever (and undeletable by logout, which deletes the
-	// default key) — so only write it when this login targeted that origin.
-	legacyReadable := baseURL == api.AuthBaseURL()
-	if legacyReadable {
-		// Login deliberately uses the legacy SaveToken (string, string)
-		// surface — we only have an access-token string at this point;
-		// neither flow's client returns a TokenSet here.
-		if err := auth.NewStore().SaveToken(baseURL, token); err != nil {
-			return fmt.Errorf("save auth token: %w", err)
-		}
-	}
-
-	// Dual-write the shared contexts.json credential model so the git
-	// remote helper (and entiredb's CLIs) can authenticate against any
-	// entitled cluster from this login. Best-effort only when the legacy
-	// entry above exists as the control-plane source of truth; for a
-	// non-default --server the context is the sole record of the login,
-	// so failing to write it means the login failed.
+	// Record the login in the shared contexts.json credential model — the
+	// single store every consumer (control plane, data API, git remote
+	// helper, entiredb's CLIs) resolves against.
 	if _, err := auth.RecordLoginContext(token, refreshToken, true); err != nil {
-		if !legacyReadable {
-			return fmt.Errorf("record login context: %w", err)
-		}
-		fmt.Fprintf(errW, "Warning: logged in, but could not record a shareable context (clone via entire:// may need a re-login): %v\n", err)
+		return fmt.Errorf("save login: %w", err)
 	}
 
 	fmt.Fprintln(outW, "✓ Login complete.")
@@ -363,20 +341,26 @@ func persistLogin(outW, errW io.Writer, baseURL, token, refreshToken string) err
 // a token from a different issuer than the one we asked, or one whose
 // claims are already-expired).
 //
-// Opaque (non-JWT) tokens are permitted — the AS may not issue JWTs at
-// all. Only when we can parse the token as a JWT do we cross-check the
-// claims. Unsigned (alg:none) JWTs are always rejected via
-// tokens.ErrUnsignedJWT; every other parse failure (3-segment-but-not-
-// base64, payload-not-JSON, header-not-JSON, etc.) is treated as opaque
-// and accepted, so a server issuing dot-bearing non-JWT bearer tokens
-// can still log in.
+// It also enforces what the contexts model needs up front:
+// RecordLoginContext — the sole persistence path — keys the context and
+// keychain slot on the token's iss and handle/sub claims, so a token
+// without parseable claims can never complete a login. Rejecting it here
+// names the requirement instead of surfacing a parse error from the save
+// step. Entire-core always issues claim-bearing JWTs; opaque-token-only
+// servers are not supported.
 func validateReceivedToken(rawToken, issuerURL string, now time.Time) error {
 	claims, err := tokens.ParseClaims(rawToken)
 	if errors.Is(err, tokens.ErrUnsignedJWT) {
 		return err //nolint:wrapcheck // sentinel surfaces verbatim for caller's errors.Is
 	}
 	if err != nil {
-		return nil //nolint:nilerr // any parse failure other than alg:none means the token isn't a JWT — opaque tokens are valid
+		return fmt.Errorf("login server issued a token without parseable JWT claims (claim-bearing JWTs are required): %w", err)
+	}
+	if claims.Issuer == "" {
+		return errors.New("token has no iss claim; cannot record a login context")
+	}
+	if claims.Handle == "" && claims.Subject == "" {
+		return errors.New("token has no handle or sub claim; cannot record a login context")
 	}
 
 	// iss check: the token must claim to come from the issuer we sent
@@ -398,12 +382,8 @@ func validateReceivedToken(rawToken, issuerURL string, now time.Time) error {
 
 // issMatches reports whether claimed equals expected after stripping path/
 // query/fragment via api.OriginOnly, so "https://issuer/" and "https://issuer"
-// match. Returns nil on match or when the iss claim is empty (some servers
-// omit it — the server still does the real check on every request).
+// match. The caller has already rejected an empty iss claim.
 func issMatches(claimed, expected string) error {
-	if claimed == "" {
-		return nil
-	}
 	normClaimed := api.OriginOnly(claimed)
 	normExpected := api.OriginOnly(expected)
 	if normClaimed != normExpected {

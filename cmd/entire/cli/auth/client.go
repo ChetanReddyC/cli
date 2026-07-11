@@ -37,10 +37,9 @@ type DeviceAuthPoll struct {
 	ErrorDescription string
 }
 
-// Client wraps a deviceflow.Client preconfigured for whichever provider
-// version is active. See CurrentProvider for the resolution rules
-// (ENTIRE_AUTH_PROVIDER_VERSION wins, then split-host auto-detect,
-// then v1 fallback).
+// Client wraps a deviceflow.Client and an authcode.Client preconfigured
+// for the entire-cli public client (see provider.go for the endpoint
+// wiring).
 type Client struct {
 	inner   *deviceflow.Client
 	browser *authcode.Client
@@ -58,7 +57,6 @@ type Client struct {
 // auth hosts on a private network (e.g. http://devbox.internal); the
 // CLI plumbs this from the --insecure-http-auth flag.
 func NewClient(server string, httpClient *http.Client, allowInsecureHTTP bool) *Client {
-	p := CurrentProvider()
 	issuer := api.NormalizeOriginURL(server)
 	var transport http.RoundTripper
 	if httpClient != nil {
@@ -74,21 +72,21 @@ func NewClient(server string, httpClient *http.Client, allowInsecureHTTP bool) *
 		inner: &deviceflow.Client{
 			Transport:         transport,
 			BaseURL:           issuer,
-			ClientID:          p.ClientID,
+			ClientID:          oauthClientID,
 			Scope:             scope,
-			UserAgent:         p.ClientID,
-			DeviceCodePath:    p.DeviceCodePath,
-			TokenPath:         p.TokenPath,
+			UserAgent:         oauthClientID,
+			DeviceCodePath:    oauthDeviceCodePath,
+			TokenPath:         oauthTokenPath,
 			AllowInsecureHTTP: allowHTTP,
 		},
 		browser: &authcode.Client{
 			Transport:         transport,
 			BaseURL:           issuer,
-			ClientID:          p.ClientID,
+			ClientID:          oauthClientID,
 			Scope:             scope,
-			UserAgent:         p.ClientID,
-			AuthorizePath:     p.AuthorizePath,
-			TokenPath:         p.TokenPath,
+			UserAgent:         oauthClientID,
+			AuthorizePath:     oauthAuthorizePath,
+			TokenPath:         oauthTokenPath,
 			AllowInsecureHTTP: allowHTTP,
 		},
 	}
@@ -233,9 +231,9 @@ func descriptionFromSentinelError(err error, code string) string {
 
 // secondsUntil computes seconds-until-expiry for a TokenSet with an
 // absolute ExpiresAt. Returns 0 when no expiry is set or when ExpiresAt
-// is already in the past (clock skew, scheduling delays) — historically
-// ExpiresIn was non-negative and downstream loggers / display code don't
-// expect to see a negative value.
+// is already in the past (clock skew, scheduling delays) — ExpiresIn is
+// contractually non-negative; downstream loggers and display code don't
+// expect a negative value.
 func secondsUntil(t *tokens.TokenSet) int {
 	if t.ExpiresAt.IsZero() {
 		return 0

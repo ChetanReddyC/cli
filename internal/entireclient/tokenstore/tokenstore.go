@@ -137,20 +137,29 @@ func Delete(service, user string) error {
 	return currentBackend().Delete(service, user)
 }
 
-// keyringStore delegates to the OS keyring.
+// keyringStore delegates to the OS keyring. Every call is bounded by
+// callKeyringWithTimeout: the underlying provider (Secret Service,
+// Keychain, Credential Manager) can block indefinitely when no daemon
+// is reachable, and an unbounded keyring call freezes the whole CLI.
 type keyringStore struct{}
 
 func (keyringStore) Get(service, user string) (string, error) {
-	//nolint:wrapcheck // thin wrapper, callers handle errors
-	return keyring.Get(service, user)
+	// keyring.ErrNotFound propagates unchanged; only a timeout wraps.
+	return callKeyringWithTimeout("get", func() (string, error) {
+		return keyring.Get(service, user)
+	})
 }
 
 func (keyringStore) Set(service, user, password string) error {
-	//nolint:wrapcheck // thin wrapper, callers handle errors
-	return keyring.Set(service, user, password)
+	_, err := callKeyringWithTimeout("set", func() (string, error) {
+		return "", keyring.Set(service, user, password)
+	})
+	return err
 }
 
 func (keyringStore) Delete(service, user string) error {
-	//nolint:wrapcheck // thin wrapper, callers handle errors
-	return keyring.Delete(service, user)
+	_, err := callKeyringWithTimeout("delete", func() (string, error) {
+		return "", keyring.Delete(service, user)
+	})
+	return err
 }

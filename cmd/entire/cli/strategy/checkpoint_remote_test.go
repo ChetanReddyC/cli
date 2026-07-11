@@ -11,81 +11,11 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestDeriveCheckpointURL(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name           string
-		pushRemoteURL  string
-		checkpointRepo string
-		want           string
-		wantErr        bool
-	}{
-		{
-			name:           "SSH push remote",
-			pushRemoteURL:  "git@github.com:org/main-repo.git",
-			checkpointRepo: "org/checkpoints",
-			want:           "git@github.com:org/checkpoints.git",
-		},
-		{
-			name:           "HTTPS push remote",
-			pushRemoteURL:  "https://github.com/org/main-repo.git",
-			checkpointRepo: "org/checkpoints",
-			want:           "https://github.com/org/checkpoints.git",
-		},
-		{
-			name:           "SSH protocol push remote",
-			pushRemoteURL:  "ssh://git@github.com/org/main-repo.git",
-			checkpointRepo: "org/checkpoints",
-			want:           "git@github.com:org/checkpoints.git",
-		},
-		{
-			name:           "different host",
-			pushRemoteURL:  "git@github.example.com:org/main-repo.git",
-			checkpointRepo: "org/checkpoints",
-			want:           "git@github.example.com:org/checkpoints.git",
-		},
-		{
-			name:           "HTTPS with non-standard port",
-			pushRemoteURL:  "https://git.example.com:8443/org/main-repo.git",
-			checkpointRepo: "org/checkpoints",
-			want:           "https://git.example.com:8443/org/checkpoints.git",
-		},
-		{
-			name:           "SSH protocol with non-standard port",
-			pushRemoteURL:  "ssh://git@git.example.com:2222/org/main-repo.git",
-			checkpointRepo: "org/checkpoints",
-			want:           "ssh://git@git.example.com:2222/org/checkpoints.git",
-		},
-		{
-			name:           "invalid push remote",
-			pushRemoteURL:  "not-a-url",
-			checkpointRepo: "org/checkpoints",
-			wantErr:        true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			config := &settings.CheckpointRemoteConfig{Provider: "github", Repo: tt.checkpointRepo}
-			got, err := remote.DeriveCheckpointURL(tt.pushRemoteURL, config)
-			if tt.wantErr {
-				assert.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
 
 func TestIsURL(t *testing.T) {
 	t.Parallel()
@@ -322,6 +252,12 @@ func TestResolvePushSettings_WithCheckpointRemote_HTTPS(t *testing.T) {
 		0o644,
 	))
 
+	// Seed the local v1 metadata branch so resolvePushSettings finds it and
+	// skips fetchMetadataBranchIfMissing. Without it the test fetches the
+	// resolved checkpoint URL from github.com for real — slow, flaky, and it
+	// triggers the OS keychain credential helper when GitHub returns 401.
+	runCheckpointRemoteGit(ctx, t, localDir, "branch", paths.MetadataBranchName)
+
 	t.Chdir(localDir)
 
 	ps := resolvePushSettings(ctx, "origin")
@@ -353,6 +289,12 @@ func TestResolvePushSettings_WithCheckpointRemote_SSH(t *testing.T) {
 		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
 		0o644,
 	))
+
+	// Seed the local v1 metadata branch so resolvePushSettings finds it and
+	// skips fetchMetadataBranchIfMissing. Without it the test fetches the
+	// resolved checkpoint URL from github.com for real — slow, flaky, and it
+	// triggers the OS keychain credential helper when GitHub returns 401.
+	runCheckpointRemoteGit(ctx, t, localDir, "branch", paths.MetadataBranchName)
 
 	t.Chdir(localDir)
 
@@ -417,6 +359,12 @@ func TestResolvePushSettings_CheckpointURLDoesNotAffectRemoteField(t *testing.T)
 		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
 		0o644,
 	))
+
+	// Seed the local v1 metadata branch so resolvePushSettings finds it and
+	// skips fetchMetadataBranchIfMissing. Without it the test fetches the
+	// resolved checkpoint URL from github.com for real — slow, flaky, and it
+	// triggers the OS keychain credential helper when GitHub returns 401.
+	runCheckpointRemoteGit(ctx, t, localDir, "branch", paths.MetadataBranchName)
 
 	t.Chdir(localDir)
 
@@ -660,12 +608,6 @@ func TestFetchMetadataBranch_UpdatesExistingLocalBranch(t *testing.T) {
 	testutil.WriteFile(t, localDir, "f.txt", "init")
 	testutil.GitAdd(t, localDir, "f.txt")
 	testutil.GitCommit(t, localDir, "init")
-	require.NoError(t, os.MkdirAll(filepath.Join(localDir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(localDir, ".entire", paths.SettingsFileName),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
-		0o644,
-	))
 	t.Chdir(localDir)
 	paths.ClearWorktreeRootCache()
 
@@ -708,8 +650,6 @@ func TestFetchMetadataBranch_UpdatesExistingLocalBranch(t *testing.T) {
 	hash2 := strings.TrimSpace(string(hash2Out))
 
 	assert.NotEqual(t, hash1, hash2, "FetchMetadataBranch should update existing local branch to new remote tip")
-	assert.Equal(t, hash2, checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataRefName),
-		"FetchMetadataBranch should mirror fetched v1 metadata to the v1.1 custom ref")
 }
 
 // TestFetchMetadataBranch_DoesNotRewindLocalAhead verifies that calling
