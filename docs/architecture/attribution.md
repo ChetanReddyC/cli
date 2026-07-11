@@ -64,7 +64,7 @@ baseline and excluded from the final human contribution counts.
 - `agent_removed` - agent-attributed deletions that remain deleted in the commit
 - `human_added` - user-side additions that are not paired with removals as modifications
 - `human_modified` - aggregate estimate calculated as the smaller of eligible user-side additions and removals; pairing is not tracked per hunk or file
-- `human_removed` - user-side removals that are not paired with additions as modifications
+- `human_removed` - estimated unpaired user-side removals captured between prompts or after the latest checkpoint in agent-touched files
 - `total_committed` - legacy additions-focused compatibility metric; not guaranteed to equal the commit's literal net line count
 - `total_lines_changed` - total changed lines used as the attribution denominator
 - `agent_percentage` - agent changed lines divided by total changed lines
