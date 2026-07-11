@@ -61,7 +61,7 @@ user-side changes.
 - `agent_lines` - agent-attributed added lines that remain in the commit
 - `agent_removed` - agent-attributed deletions that remain deleted in the commit
 - `human_added` - user-side additions that are not paired with removals as modifications
-- `human_modified` - estimated replacement-style user-side changes, calculated from paired additions and removals
+- `human_modified` - aggregate estimate calculated as the smaller of eligible user-side additions and removals; pairing is not tracked per hunk or file
 - `human_removed` - user-side removals that are not paired with additions as modifications
 - `total_committed` - legacy additions-focused compatibility metric; not guaranteed to equal the commit's literal net line count
 - `total_lines_changed` - total changed lines used as the attribution denominator
