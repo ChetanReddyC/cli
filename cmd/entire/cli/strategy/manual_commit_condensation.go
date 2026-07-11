@@ -1209,6 +1209,13 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 
 		state.StepCount = 0
 		state.CheckpointTokenUsage = nil
+		// Snapshot the cumulative subagent total at this reset so the next
+		// checkpoint's CheckpointTokenUsage.SubagentTokens can be rescoped to
+		// "since this condensation" instead of re-reporting everything counted
+		// so far (see accumulateTokenUsage).
+		if state.TokenUsage != nil {
+			state.SubagentTokensBaseline = state.TokenUsage.SubagentTokens
+		}
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.CheckpointTranscriptSize = int64(len(result.Transcript))
 		state.Phase = session.PhaseIdle
@@ -1328,6 +1335,13 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 
 		state.StepCount = 0
 		state.CheckpointTokenUsage = nil
+		// Snapshot the cumulative subagent total at this reset so the next
+		// checkpoint's CheckpointTokenUsage.SubagentTokens can be rescoped to
+		// "since this condensation" instead of re-reporting everything counted
+		// so far (see accumulateTokenUsage).
+		if state.TokenUsage != nil {
+			state.SubagentTokensBaseline = state.TokenUsage.SubagentTokens
+		}
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.LastCheckpointID = checkpointID
 		state.LastCheckpointCommitHash = state.BaseCommit

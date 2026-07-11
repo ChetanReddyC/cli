@@ -405,7 +405,17 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	}
 	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
 
-	// Calculate subagent token usage (skip when subagentsDir is empty to avoid reading from cwd)
+	// Calculate subagent token usage (skip when subagentsDir is empty to avoid reading from cwd).
+	// NOTE: each subagent transcript is re-read from line 0 on every call, so
+	// mainUsage.SubagentTokens below is a CUMULATIVE-since-session-start total,
+	// not a delta scoped to [startLine, end) like mainUsage's own fields.
+	// Callers that invoke this repeatedly across checkpoints/turns (accumulating
+	// a running total) MUST NOT sum SubagentTokens across calls or a subagent's
+	// full usage gets re-added every time it stays discoverable — replace the
+	// running total with the latest snapshot instead, and rescope any
+	// checkpoint-window delta by subtracting a previously captured baseline.
+	// See accumulateTokenUsage and SessionState.SubagentTokensBaseline in
+	// cmd/entire/cli/strategy for the caller-side fix.
 	if len(agentIDs) > 0 && subagentsDir != "" {
 		subagentUsage := &agent.TokenUsage{}
 		for agentID := range agentIDs {

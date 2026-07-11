@@ -283,6 +283,17 @@ type State struct {
 	// This is checkpoint-scoped; TokenUsage remains the session-wide total.
 	CheckpointTokenUsage *agent.TokenUsage `json:"checkpoint_token_usage,omitempty"`
 
+	// SubagentTokensBaseline is a snapshot of TokenUsage.SubagentTokens captured
+	// at the last condensation reset. Subagent token usage is always re-read
+	// from the start of each subagent transcript (agent IDs are discovered from
+	// the full main transcript so subagents spawned before the checkpoint
+	// window are still found), so it arrives as a cumulative-since-session-start
+	// total rather than a per-checkpoint delta. This baseline lets
+	// CheckpointTokenUsage.SubagentTokens be rescoped to "since last
+	// condensation" via SubtractTokenUsage instead of re-adding the same
+	// cumulative total on every checkpoint.
+	SubagentTokensBaseline *agent.TokenUsage `json:"subagent_tokens_baseline,omitempty"`
+
 	// SkillEvents records explicit native skill signals observed during this session.
 	// Stored as sidecar metadata so consumers can collapse skill-related transcript events
 	// without mutating the raw agent transcript.
