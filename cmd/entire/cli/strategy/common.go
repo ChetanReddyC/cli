@@ -53,6 +53,31 @@ var errStop = errors.New("stop iteration")
 
 var errNoMergeBase = errors.New("no merge base")
 
+// checkpointRemoteBootstrapContextKey gates whether EnsurePrimaryRef is
+// allowed to perform a network fetch against a configured checkpoint_remote
+// (see bootstrapPrimaryFromCheckpointRemote). Unset/false in ctx means "no".
+type checkpointRemoteBootstrapContextKey struct{}
+
+// WithCheckpointRemoteBootstrap marks ctx as permitting EnsurePrimaryRef to
+// fetch a missing primary metadata ref from a configured checkpoint_remote.
+// This must only be set on explicit, user-initiated setup flows (`entire
+// enable`, agent add/setup) — never on the per-turn hook hot path. EnsureSetup
+// runs synchronously on every TurnStart hook and hook execution has a hard
+// timeout; without this guard a slow/unreachable checkpoint remote would
+// repeat an expensive fetch on every turn instead of self-healing once via
+// the empty-orphan fallback.
+func WithCheckpointRemoteBootstrap(ctx context.Context) context.Context {
+	return context.WithValue(ctx, checkpointRemoteBootstrapContextKey{}, true)
+}
+
+// checkpointRemoteBootstrapAllowed reports whether ctx was marked via
+// WithCheckpointRemoteBootstrap.
+func checkpointRemoteBootstrapAllowed(ctx context.Context) bool {
+	v := ctx.Value(checkpointRemoteBootstrapContextKey{})
+	allowed, ok := v.(bool)
+	return ok && allowed
+}
+
 // IsEmptyRepository returns true if the repository has no commits yet.
 // After git-init, HEAD points to an unborn branch (e.g., refs/heads/main)
 // whose target does not yet exist. repo.Head() returns ErrReferenceNotFound
@@ -605,6 +630,15 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 // the caller creates the empty orphan: `entire enable` must never break on a
 // missing checkpoint remote, an unresolvable URL, or a network/auth error.
 func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Repository, primary plumbing.ReferenceName) bool {
+	if !checkpointRemoteBootstrapAllowed(ctx) {
+		// Not an explicit setup flow (e.g. the per-turn hook hot path via
+		// EnsureSetup). Never fetch here: hook execution has a hard timeout,
+		// and a slow/unreachable checkpoint remote must not stall every turn.
+		// Fall back to the empty orphan, which self-heals immediately.
+		logging.Debug(ctx, "checkpoint-remote: skipping bootstrap fetch outside explicit enable flow")
+		return false
+	}
+
 	worktreeRoot, err := getRepoPath(repo)
 	if err != nil {
 		logging.Debug(ctx, "checkpoint-remote: cannot resolve worktree root for enable bootstrap",

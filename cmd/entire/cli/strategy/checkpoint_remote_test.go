@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -924,7 +925,11 @@ func TestEnsurePrimaryRef_FetchesFromCheckpointRemoteInsteadOfOrphan(t *testing.
 	require.NoError(t, err)
 	defer repo.Close()
 
-	require.NoError(t, EnsurePrimaryRef(ctx, repo))
+	// Only an explicit setup flow (WithCheckpointRemoteBootstrap) is allowed
+	// to fetch from the checkpoint remote here — see
+	// TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapOutsideEnableFlow for
+	// the per-turn hot-path behavior.
+	require.NoError(t, EnsurePrimaryRef(WithCheckpointRemoteBootstrap(ctx), repo))
 
 	// The local metadata branch must now match the checkpoint remote's tip,
 	// not a fresh empty orphan.
@@ -936,6 +941,116 @@ func TestEnsurePrimaryRef_FetchesFromCheckpointRemoteInsteadOfOrphan(t *testing.
 	files := checkpointRemoteMetadataFiles(ctx, t, localDir)
 	assert.Contains(t, files, "aa/aaaaaaaaaa/"+paths.MetadataFileName,
 		"the bootstrapped branch should contain the checkpoint committed on the remote")
+}
+
+// TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapOutsideEnableFlow verifies
+// that EnsurePrimaryRef never fetches from a configured checkpoint_remote
+// unless the caller explicitly opts in via WithCheckpointRemoteBootstrap. This
+// models the per-turn hook hot path (EnsureSetup runs synchronously on every
+// TurnStart hook, which has a hard execution timeout): steady-state must stay
+// network-free even when a checkpoint_remote with real data is configured.
+func TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapOutsideEnableFlow(t *testing.T) {
+	ctx := context.Background()
+
+	// Checkpoint remote: a repo that already holds entire/checkpoints/v1 with a
+	// real (non-empty) commit — models the branch created on device A.
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	remoteDefaultBranch := checkpointRemoteCurrentBranch(ctx, t, remoteDir)
+
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "aaaaaaaaaaaa", "device-a")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", remoteDefaultBranch)
+
+	// Local repo: origin points at the main repo and a separate
+	// checkpoint_remote is configured; the local metadata branch does not exist.
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	runCheckpointRemoteGit(ctx, t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
+		0o644,
+	))
+
+	// Redirect the derived checkpoint_remote URL to the local file:// remote.
+	// If EnsurePrimaryRef were to fetch here, this hermetic redirect would let
+	// it succeed — so a passing test proves the fetch was skipped, not merely
+	// that it failed silently.
+	redirectGitURL(t, localDir, "git@github.com:org/checkpoints.git", "file://"+remoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	// No WithCheckpointRemoteBootstrap here — steady-state per-turn path.
+	require.NoError(t, EnsurePrimaryRef(ctx, repo))
+
+	// The local metadata branch must be a fresh empty orphan, not the fetched
+	// checkpoint remote data: the network fetch must never have happened.
+	files := checkpointRemoteMetadataFiles(ctx, t, localDir)
+	assert.NotContains(t, files, "aa/aaaaaaaaaa/"+paths.MetadataFileName,
+		"EnsurePrimaryRef must not fetch from checkpoint_remote outside an explicit enable flow")
+}
+
+// TestEnsurePrimaryRef_OfflineCheckpointRemoteFallsBackToOrphan verifies that
+// even in an explicit setup flow (WithCheckpointRemoteBootstrap), an
+// unreachable checkpoint_remote does not fail EnsurePrimaryRef or hang the
+// caller — it must fall back to creating the empty orphan, matching the
+// pre-existing offline/no-remote behavior.
+func TestEnsurePrimaryRef_OfflineCheckpointRemoteFallsBackToOrphan(t *testing.T) {
+	ctx := context.Background()
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	runCheckpointRemoteGit(ctx, t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
+		0o644,
+	))
+
+	// Redirect the derived checkpoint_remote URL to a nonexistent local path
+	// so the fetch fails fast (no network access, no hang) rather than
+	// exercising the real 30s timeout.
+	redirectGitURL(t, localDir, "git@github.com:org/checkpoints.git", "file:///nonexistent/checkpoints.git")
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	require.NoError(t, EnsurePrimaryRef(WithCheckpointRemoteBootstrap(ctx), repo),
+		"EnsurePrimaryRef must not fail when the checkpoint remote is unreachable")
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err, "empty orphan fallback must still be created")
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+	assert.Empty(t, tree.Entries, "expected empty orphan fallback when checkpoint remote is unreachable")
 }
 
 // redirectGitURL appends a git `url.<replacement>.insteadOf = <match>` rule to
