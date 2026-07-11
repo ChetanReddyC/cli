@@ -1373,17 +1373,24 @@ func setEnabledRaw(
 	return save(path, raw)
 }
 
-// saveEnabledState writes settings to the target file and also updates the
-// other settings file if it exists, preventing local/project from getting
-// out of sync on the enabled field.
+// saveEnabledState writes settings to the target file, and — when writing
+// project settings — also syncs just the "enabled" key into the local
+// settings file if it exists, so a local override can't leave the repo
+// looking disabled after project settings turn it on. It intentionally does
+// NOT write the full struct s into the other file: s is scoped to the target
+// file's own content (see setupAgentHooksNonInteractive), and writing it
+// wholesale into the other scope would overwrite that file's own fields
+// (local_dev, log_level, personal strategy_options, ...) with the target
+// scope's values — the same #1140 leak setEnabledRaw exists to avoid, just
+// in the other direction.
 func saveEnabledState(ctx context.Context, s *EntireSettings, useProjectSettings bool) error {
 	if useProjectSettings {
 		if err := SaveEntireSettings(ctx, s); err != nil {
 			return fmt.Errorf("failed to save settings: %w", err)
 		}
-		// Also update local if it exists, so it doesn't override
+		// Also sync just the enabled key to local if it exists, so it doesn't override.
 		if localExists(ctx) {
-			if err := SaveEntireSettingsLocal(ctx, s); err != nil {
+			if err := setEnabledRaw(ctx, settings.LoadLocalRaw, settings.SaveLocalRaw, s.Enabled); err != nil {
 				return fmt.Errorf("failed to save local settings: %w", err)
 			}
 		}
@@ -1724,8 +1731,20 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return fmt.Errorf("failed to setup .entire directory: %w", err)
 	}
 
-	// Load existing settings to preserve other options (like strategy_options.push)
-	settings, err := LoadEntireSettings(ctx)
+	// Resolve the target file up front so the load below is scoped to that
+	// file's own content rather than the merged view (see the comment above
+	// saveEnabledState for why: writing the merged struct back into a single
+	// scope leaks the other scope's fields into it, e.g. #1140).
+	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
+	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	if err != nil {
+		targetFileAbs = targetFile
+	}
+
+	// Load existing settings from the target file only, to preserve other
+	// options already set there (like strategy_options.push) without pulling
+	// in the other scope's overrides.
+	settings, err := settings.LoadFromFile(targetFileAbs)
 	if err != nil {
 		// If we can't load, start with defaults
 		settings = &EntireSettings{}
@@ -1757,7 +1776,6 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		settings.Telemetry = &f
 	}
 
-	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 	if err := saveEnabledState(ctx, settings, targetFile == EntireSettingsFile); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}

@@ -326,6 +326,88 @@ func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
 	}
 }
 
+// TestSetupAgentHooksNonInteractive_DoesNotLeakLocalOverridesIntoProject
+// covers finding 019f5185-5be: `entire enable --agent <name>` on an
+// already-configured repo used to load the merged settings view and write it
+// back wholesale to the project file, flattening settings.local.json-only
+// overrides (e.g. log_level) into the shared, committed settings.json — the
+// same #1140 leak fixed for the bare enable/disable path, just via a
+// different entry point.
+func TestSetupAgentHooksNonInteractive_DoesNotLeakLocalOverridesIntoProject(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeLocalSettings(t, `{"log_level": "debug"}`)
+	writeClaudeHooksFixture(t)
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, EnableOptions{}); err != nil {
+		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
+	}
+
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if projectS.LogLevel != "" {
+		t.Errorf("local-only log_level leaked into project settings: %q", projectS.LogLevel)
+	}
+	if !projectS.Enabled {
+		t.Error("expected project settings to remain enabled")
+	}
+
+	localS, err := settings.LoadFromFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to load local settings: %v", err)
+	}
+	if localS.LogLevel != "debug" {
+		t.Errorf("expected local log_level to be preserved, got %q", localS.LogLevel)
+	}
+}
+
+// TestSetupAgentHooksNonInteractive_LocalTarget_DoesNotLeakProjectFieldsIntoLocal
+// covers the mirror-image direction: writing to settings.local.json (--local)
+// must not flatten project-only fields into the local file either.
+func TestSetupAgentHooksNonInteractive_LocalTarget_DoesNotLeakProjectFieldsIntoLocal(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "log_level": "warn"}`)
+	writeClaudeHooksFixture(t)
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	opts := EnableOptions{UseLocalSettings: true}
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, opts); err != nil {
+		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
+	}
+
+	localS, err := settings.LoadFromFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to load local settings: %v", err)
+	}
+	if localS.LogLevel != "" {
+		t.Errorf("project-only log_level leaked into local settings: %q", localS.LogLevel)
+	}
+	if !localS.Enabled {
+		t.Error("expected local settings to be enabled")
+	}
+
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if projectS.LogLevel != "warn" {
+		t.Errorf("expected project log_level to be preserved, got %q", projectS.LogLevel)
+	}
+}
+
 func TestRunDisable(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, testSettingsEnabled)
