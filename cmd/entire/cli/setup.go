@@ -1314,7 +1314,15 @@ func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error 
 }
 
 func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
-	if err := setEnabledFlag(ctx, false, useProjectSettings); err != nil {
+	// Resolve scope the same way runEnableOnConfiguredRepo does: a bare
+	// `entire disable` (no --project) must flip whichever settings file
+	// already exists, not always default to settings.local.json. Without
+	// this, a repo with only a committed settings.json (no local file yet)
+	// would get a brand-new settings.local.json with enabled:false while the
+	// committed project file still shows enabled:true — the mirror image of
+	// the #1140 bug fixed for `entire enable`.
+	targetFile, _ := settingsTargetFile(ctx, false, useProjectSettings)
+	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
 		return err
 	}
 
@@ -1780,12 +1788,26 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
 
-	// Use settings values (merged from existing config + flags) for hook installation
-	// This ensures re-running `entire enable --agent X` without flags preserves existing settings
-	if _, err := strategy.InstallGitHook(ctx, true, settings.LocalDev, settings.AbsoluteGitHookPath); err != nil {
+	// Hook installation decisions need the merged view across both settings
+	// files, not just the single scope we wrote to above: local_dev and
+	// absolute_git_hook_path may be set only in settings.local.json while
+	// this enable resolves to settings.json (or vice versa). Using the
+	// target-scoped struct here would silently drop that override when
+	// regenerating the git hook script. This mirrors runEnableInteractive,
+	// which uses the merged view for the same two fields; only the *write*
+	// path (saveEnabledState above) needs to stay scoped to the target file
+	// (see the comment on saveEnabledState for why).
+	mergedSettings, err := LoadEntireSettings(ctx)
+	if err != nil {
+		mergedSettings = settings
+	}
+	hookLocalDev := mergedSettings.LocalDev || opts.LocalDev
+	hookAbsoluteGitHookPath := mergedSettings.AbsoluteGitHookPath || opts.AbsoluteGitHookPath
+
+	if _, err := strategy.InstallGitHook(ctx, true, hookLocalDev, hookAbsoluteGitHookPath); err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
-	strategy.CheckAndWarnHookManagers(ctx, w, settings.LocalDev, settings.AbsoluteGitHookPath)
+	strategy.CheckAndWarnHookManagers(ctx, w, hookLocalDev, hookAbsoluteGitHookPath)
 
 	if installedHooks == 0 {
 		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())

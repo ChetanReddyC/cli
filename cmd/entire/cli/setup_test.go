@@ -369,6 +369,61 @@ func TestSetupAgentHooksNonInteractive_DoesNotLeakLocalOverridesIntoProject(t *t
 	}
 }
 
+// TestSetupAgentHooksNonInteractive_UsesMergedViewForHookInstall covers the
+// finding at cmd/entire/cli/setup.go:1747: setupAgentHooksNonInteractive
+// loads settings.LoadFromFile(targetFileAbs), scoped to a single file, for
+// building the settings struct it writes. If local_dev is set only in
+// settings.local.json while this enable resolves (via --project) to
+// settings.json, the local_dev override must still be honored when
+// installing/regenerating the git hook script — otherwise it's silently
+// dropped and the hook reverts to the plain "entire" cmd prefix instead of
+// the local-dev "./scripts/entire-dev" one. Write scoping (no leaking
+// local_dev into the committed project file) must still hold.
+func TestSetupAgentHooksNonInteractive_UsesMergedViewForHookInstall(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeLocalSettings(t, `{"enabled": true, "local_dev": true}`)
+	writeClaudeHooksFixture(t)
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	opts := EnableOptions{UseProjectSettings: true}
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, opts); err != nil {
+		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
+	}
+
+	// The git hook script must reflect the merged local_dev override, even
+	// though the write resolved to the project file.
+	hooksDir, err := strategy.GetHooksDir(context.Background())
+	if err != nil {
+		t.Fatalf("GetHooksDir() error = %v", err)
+	}
+	hookContent, err := os.ReadFile(filepath.Join(hooksDir, "post-commit"))
+	if err != nil {
+		t.Fatalf("failed to read post-commit hook: %v", err)
+	}
+	if !strings.Contains(string(hookContent), "./scripts/entire-dev") {
+		t.Errorf("expected hook to use local-dev cmd prefix from the merged view, got: %s", hookContent)
+	}
+
+	// The write path must still stay scoped: local_dev must not leak into
+	// the committed project settings.json.
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if projectS.LocalDev {
+		t.Error("local-only local_dev override leaked into project settings")
+	}
+	if !projectS.Enabled {
+		t.Error("expected project settings to remain enabled")
+	}
+}
+
 // TestSetupAgentHooksNonInteractive_LocalTarget_DoesNotLeakProjectFieldsIntoLocal
 // covers the mirror-image direction: writing to settings.local.json (--local)
 // must not flatten project-only fields into the local file either.
@@ -551,10 +606,15 @@ func TestRunDisable_WithProjectFlag(t *testing.T) {
 	}
 }
 
-// TestRunDisable_CreatesLocalSettingsWhenMissing verifies that running
-// `entire disable` without --project creates settings.local.json when it
-// doesn't exist, rather than writing to settings.json.
-func TestRunDisable_CreatesLocalSettingsWhenMissing(t *testing.T) {
+// TestRunDisable_FlipsProjectSettingsWhenLocalMissing verifies that running
+// `entire disable` without --project, on a repo that only has a committed
+// settings.json (no settings.local.json yet), flips the enabled key directly
+// in settings.json rather than creating a brand-new settings.local.json with
+// enabled:false. This is the mirror image of the #1140 bug fixed for `entire
+// enable`: a bare disable must resolve to whichever settings file already
+// carries the state (settingsTargetFile), not unconditionally default to
+// local. Regression test for the finding at cmd/entire/cli/setup.go:1317.
+func TestRunDisable_FlipsProjectSettingsWhenLocalMissing(t *testing.T) {
 	setupTestDir(t)
 	// Only create project settings (no local settings)
 	writeSettings(t, testSettingsEnabled)
@@ -573,22 +633,72 @@ func TestRunDisable_CreatesLocalSettingsWhenMissing(t *testing.T) {
 		t.Error("Entire should be disabled after running disable command")
 	}
 
-	// Local settings file should be created with enabled:false
-	localContent, err := os.ReadFile(EntireSettingsLocalFile)
-	if err != nil {
-		t.Fatalf("Local settings file should have been created: %v", err)
-	}
-	if !strings.Contains(string(localContent), `"enabled":false`) && !strings.Contains(string(localContent), `"enabled": false`) {
-		t.Errorf("Local settings should have enabled:false, got: %s", localContent)
-	}
-
-	// Project settings should remain unchanged (still enabled)
+	// Project settings should be flipped directly.
 	projectContent, err := os.ReadFile(EntireSettingsFile)
 	if err != nil {
 		t.Fatalf("Failed to read project settings: %v", err)
 	}
-	if !strings.Contains(string(projectContent), `"enabled":true`) && !strings.Contains(string(projectContent), `"enabled": true`) {
-		t.Errorf("Project settings should still have enabled:true, got: %s", projectContent)
+	if !strings.Contains(string(projectContent), `"enabled":false`) && !strings.Contains(string(projectContent), `"enabled": false`) {
+		t.Errorf("Project settings should have enabled:false, got: %s", projectContent)
+	}
+
+	// No settings.local.json should have been created.
+	if _, err := os.Stat(EntireSettingsLocalFile); err == nil {
+		t.Error("settings.local.json should not be created when only project settings exist")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("unexpected error checking for local settings file: %v", err)
+	}
+}
+
+// TestRunDisable_BareCommand_FlipsCorrectFileWhenBothExist verifies that a
+// bare `entire disable` (no --project/--local), when both settings.json and
+// settings.local.json exist, flips the same file settingsTargetFile would
+// pick (project, since it's checked first) and does not leak fields between
+// scopes. Regression test for the finding at cmd/entire/cli/setup.go:1317.
+func TestRunDisable_BareCommand_FlipsCorrectFileWhenBothExist(t *testing.T) {
+	setupTestDir(t)
+	writeSettings(t, `{"enabled": true, "log_level": "warn"}`)
+	writeLocalSettings(t, `{"enabled": true, "local_dev": true}`)
+
+	var stdout bytes.Buffer
+	if err := runDisable(context.Background(), &stdout, false); err != nil {
+		t.Fatalf("runDisable() error = %v", err)
+	}
+
+	enabled, err := IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if enabled {
+		t.Error("Entire should be disabled after running disable command")
+	}
+
+	// Project settings should be flipped and keep its own fields.
+	projectContent, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to read project settings: %v", err)
+	}
+	if !strings.Contains(string(projectContent), `"enabled":false`) && !strings.Contains(string(projectContent), `"enabled": false`) {
+		t.Errorf("project settings should have enabled:false, got: %s", projectContent)
+	}
+	if !strings.Contains(string(projectContent), "log_level") {
+		t.Errorf("project settings should retain its own log_level field, got: %s", projectContent)
+	}
+	if strings.Contains(string(projectContent), "local_dev") {
+		t.Errorf("project settings must not leak local-only override local_dev, got: %s", projectContent)
+	}
+
+	// Local settings should also be synced to enabled:false (kept in sync,
+	// per setEnabledFlag's project-scope branch), but keep its own fields.
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), `"enabled":false`) && !strings.Contains(string(localContent), `"enabled": false`) {
+		t.Errorf("local settings should have enabled:false, got: %s", localContent)
+	}
+	if !strings.Contains(string(localContent), "local_dev") {
+		t.Errorf("local settings should retain its own local_dev field, got: %s", localContent)
 	}
 }
 
