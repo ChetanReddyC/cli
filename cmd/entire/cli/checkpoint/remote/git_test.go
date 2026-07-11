@@ -1090,40 +1090,109 @@ func TestStampNewlyCreatedRemote_StampsUnderCancelledContext(t *testing.T) {
 		"stamp must land even though the parent context is cancelled")
 }
 
+// isolatedSSHEnv returns a hermetic env slice for withBatchModeSSH tests: a
+// fresh HOME with no .gitconfig and system/global config lookups disabled, so
+// the effective ssh command resolution isn't polluted by the host machine's
+// real git config. extra entries (e.g. GIT_SSH_COMMAND, GIT_SSH, or a
+// GIT_CONFIG_GLOBAL pointing at a fixture config) are appended on top.
+func isolatedSSHEnv(t *testing.T, extra ...string) []string {
+	t.Helper()
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"GIT_CONFIG_NOSYSTEM=1",
+	}
+	return append(env, extra...)
+}
+
 func TestWithBatchModeSSH(t *testing.T) {
 	t.Parallel()
 
+	// gitConfigFile writes a minimal gitconfig with core.sshCommand set and
+	// returns a GIT_CONFIG_GLOBAL env entry pointing at it.
+	gitConfigFile := func(t *testing.T, sshCommand string) string {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "gitconfig")
+		content := fmt.Sprintf("[core]\n\tsshCommand = %s\n", sshCommand)
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		return "GIT_CONFIG_GLOBAL=" + path
+	}
+
 	tests := []struct {
 		name string
-		in   []string
+		in   func(t *testing.T) []string
 		want string
 	}{
 		{
-			name: "no existing GIT_SSH_COMMAND defaults to ssh",
-			in:   []string{"PATH=/usr/bin"},
+			name: "no existing GIT_SSH_COMMAND or config defaults to ssh",
+			in:   func(t *testing.T) []string { return isolatedSSHEnv(t) },
 			want: "ssh -o BatchMode=yes",
 		},
 		{
 			name: "preserves and extends a custom ssh command",
-			in:   []string{"GIT_SSH_COMMAND=ssh -i /home/me/.ssh/id"},
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh -i /home/me/.ssh/id")
+			},
 			want: "ssh -i /home/me/.ssh/id -o BatchMode=yes",
 		},
 		{
-			name: "idempotent when BatchMode already present",
-			in:   []string{"GIT_SSH_COMMAND=ssh -o BatchMode=yes"},
+			name: "GIT_SSH_COMMAND with explicit BatchMode=yes is left untouched",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+			},
 			want: "ssh -o BatchMode=yes",
 		},
 		{
+			name: "GIT_SSH_COMMAND with explicit BatchMode=no is respected, not overridden",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh -o BatchMode=no")
+			},
+			want: "ssh -o BatchMode=no",
+		},
+		{
 			name: "blank GIT_SSH_COMMAND falls back to ssh",
-			in:   []string{"GIT_SSH_COMMAND=   "},
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=   ")
+			},
 			want: "ssh -o BatchMode=yes",
+		},
+		{
+			name: "core.sshCommand git config is used as the base when env is unset",
+			in: func(t *testing.T) []string {
+				cfg := gitConfigFile(t, "ssh -i /home/me/.ssh/work_key")
+				return isolatedSSHEnv(t, cfg)
+			},
+			want: "ssh -i /home/me/.ssh/work_key -o BatchMode=yes",
+		},
+		{
+			name: "GIT_SSH_COMMAND env takes precedence over core.sshCommand config",
+			in: func(t *testing.T) []string {
+				cfg := gitConfigFile(t, "ssh -i /home/me/.ssh/work_key")
+				return isolatedSSHEnv(t, cfg, "GIT_SSH_COMMAND=ssh -i /home/me/.ssh/personal_key")
+			},
+			want: "ssh -i /home/me/.ssh/personal_key -o BatchMode=yes",
+		},
+		{
+			name: "GIT_SSH is used only when neither env GIT_SSH_COMMAND nor config are set",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH=/usr/local/bin/custom-ssh")
+			},
+			want: "/usr/local/bin/custom-ssh -o BatchMode=yes",
+		},
+		{
+			name: "unrelated substring containing BatchMode-like text does not count as explicit",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, `GIT_SSH_COMMAND=ssh -o ProxyCommand="connect -H proxy NoBatchModeHereEither"`)
+			},
+			want: `ssh -o ProxyCommand="connect -H proxy NoBatchModeHereEither" -o BatchMode=yes`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			out := withBatchModeSSH(tt.in)
+			out := withBatchModeSSH(context.Background(), tt.in(t))
 			got, ok := envToMap(out)["GIT_SSH_COMMAND"]
 			assert.True(t, ok, "GIT_SSH_COMMAND should be set")
 			assert.Equal(t, tt.want, got)
@@ -1134,7 +1203,9 @@ func TestWithBatchModeSSH(t *testing.T) {
 func TestWithBatchModeSSH_PreservesOtherVarsWithoutDuplicating(t *testing.T) {
 	t.Parallel()
 
-	out := withBatchModeSSH([]string{"PATH=/usr/bin", "HOME=/home/me", "GIT_SSH_COMMAND=ssh"})
+	env := isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh")
+	env = append(env, "SOME_OTHER_VAR=value")
+	out := withBatchModeSSH(context.Background(), env)
 
 	count := 0
 	for _, e := range out {
@@ -1145,8 +1216,7 @@ func TestWithBatchModeSSH_PreservesOtherVarsWithoutDuplicating(t *testing.T) {
 	assert.Equal(t, 1, count, "should not duplicate GIT_SSH_COMMAND")
 
 	m := envToMap(out)
-	assert.Equal(t, "/usr/bin", m["PATH"])
-	assert.Equal(t, "/home/me", m["HOME"])
+	assert.Equal(t, "value", m["SOME_OTHER_VAR"])
 	assert.Equal(t, "ssh -o BatchMode=yes", m["GIT_SSH_COMMAND"])
 }
 
@@ -1173,3 +1243,4 @@ func TestNewCommand_NonInteractiveSSH(t *testing.T) {
 		// BatchMode is injected and the process inherits the parent environment.
 		assert.Nil(t, cmd.Env, "unmarked command should not set a custom env")
 	})
+}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,24 +55,84 @@ func nonInteractiveSSHFromContext(ctx context.Context) bool {
 	return ok && v
 }
 
+// batchModeOptionRe matches an explicit BatchMode ssh option (e.g.
+// "-o BatchMode=yes" or "BatchMode=no"), case-insensitively. Anchored with \b
+// so it doesn't false-positive on unrelated text that merely contains
+// "BatchMode" as a substring of a longer token.
+var batchModeOptionRe = regexp.MustCompile(`(?i)\bBatchMode\s*=\s*\S+`)
+
+// hasExplicitBatchMode reports whether sshCmd already sets a BatchMode option,
+// with any value. A user-supplied BatchMode=no is a deliberate choice and must
+// be respected, not silently overridden to yes.
+func hasExplicitBatchMode(sshCmd string) bool {
+	return batchModeOptionRe.MatchString(sshCmd)
+}
+
+// envLookup returns the value of the last occurrence of key in env (matching
+// exec.Cmd's last-wins semantics for duplicate entries) and whether it was
+// found.
+func envLookup(env []string, key string) (string, bool) {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if v, ok := strings.CutPrefix(env[i], prefix); ok {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// gitConfigSSHCommand looks up core.sshCommand via `git config`, run with env
+// so the lookup honors any HOME/GIT_CONFIG_* overrides present in env (e.g. in
+// tests). Returns "" if unset or the lookup fails.
+func gitConfigSSHCommand(ctx context.Context, env []string) string {
+	cmd := exec.CommandContext(ctx, "git", "config", "--get", "core.sshCommand")
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// effectiveSSHCommand resolves the ssh invocation git itself would use, in
+// git's own precedence order: the GIT_SSH_COMMAND environment variable, then
+// the core.sshCommand git config value, then the GIT_SSH environment
+// variable, falling back to plain "ssh" when none are set.
+func effectiveSSHCommand(ctx context.Context, env []string) string {
+	if v, ok := envLookup(env, "GIT_SSH_COMMAND"); ok {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	if v := gitConfigSSHCommand(ctx, env); v != "" {
+		return v
+	}
+	if v, ok := envLookup(env, "GIT_SSH"); ok {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return "ssh"
+}
+
 // withBatchModeSSH returns env with GIT_SSH_COMMAND set so ssh runs with
-// BatchMode=yes. An existing GIT_SSH_COMMAND (from the environment or a caller's
-// custom ssh wrapper) is preserved and extended rather than replaced, and the
-// flag is only appended when absent so the result is idempotent.
-func withBatchModeSSH(env []string) []string {
+// BatchMode=yes. The base ssh invocation is resolved via effectiveSSHCommand
+// (env GIT_SSH_COMMAND > core.sshCommand > GIT_SSH > plain "ssh") so a custom
+// ssh command configured via core.sshCommand isn't silently discarded. The
+// flag is only appended when BatchMode isn't already explicitly set — an
+// existing BatchMode=no is a deliberate user choice and is left untouched —
+// so the result is idempotent.
+func withBatchModeSSH(ctx context.Context, env []string) []string {
 	const key = "GIT_SSH_COMMAND="
-	base := "ssh"
+	base := effectiveSSHCommand(ctx, env)
 	out := make([]string, 0, len(env)+1)
 	for _, e := range env {
-		if v, ok := strings.CutPrefix(e, key); ok {
-			if trimmed := strings.TrimSpace(v); trimmed != "" {
-				base = trimmed
-			}
+		if strings.HasPrefix(e, key) {
 			continue
 		}
 		out = append(out, e)
 	}
-	if !strings.Contains(base, "BatchMode") {
+	if !hasExplicitBatchMode(base) {
 		base += " -o BatchMode=yes"
 	}
 	return append(out, key+base)
@@ -87,7 +148,7 @@ func applyNonInteractiveSSH(ctx context.Context, cmd *exec.Cmd) {
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()
 	}
-	cmd.Env = withBatchModeSSH(cmd.Env)
+	cmd.Env = withBatchModeSSH(ctx, cmd.Env)
 }
 
 // FetchOptions configures a git fetch operation.
