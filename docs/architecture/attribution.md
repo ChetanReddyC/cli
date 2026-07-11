@@ -63,7 +63,7 @@ user-side changes.
 - `human_added` - user-side additions that are not paired with removals as modifications
 - `human_modified` - estimated replacement-style user-side changes, calculated from paired additions and removals
 - `human_removed` - user-side removals that are not paired with additions as modifications
-- `total_committed` - legacy net-additions metric
+- `total_committed` - legacy additions-focused compatibility metric; not guaranteed to equal the commit's literal net line count
 - `total_lines_changed` - total changed lines used as the attribution denominator
 - `agent_percentage` - agent changed lines divided by total changed lines
 
