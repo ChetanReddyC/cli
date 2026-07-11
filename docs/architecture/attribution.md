@@ -54,9 +54,11 @@ When the user commits, we calculate final attribution by:
 
 Attribution is calculated for commits associated with an Entire-tracked agent
 session/checkpoint. It does not track keystrokes or exact authorship. The
-metrics are inferred from line diffs and hook timing: changes detected before an
-agent turn starts, or after the latest checkpoint before commit, are treated as
-user-side changes.
+metrics are inferred from line diffs and hook timing. Changes made after a
+completed checkpoint and detected before the next agent turn, or after the
+latest checkpoint before commit, are treated as user-side changes. Changes
+already present before the first agent turn are treated as a pre-session
+baseline and excluded from the final human contribution counts.
 
 - `agent_lines` - agent-attributed added lines that remain in the commit
 - `agent_removed` - agent-attributed deletions that remain deleted in the commit
