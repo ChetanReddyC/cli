@@ -313,13 +313,25 @@ func (s *reftableStorer) IterReferences() (storer.ReferenceIter, error) {
 // success so callers can remove idempotently, matching go-git's semantics.
 func (s *reftableStorer) RemoveReference(name plumbing.ReferenceName) error {
 	// A symbolic ref must be deleted with symbolic-ref -d; update-ref -d on a
-	// symbolic ref would delete the ref it points at.
-	if target, _, err := s.runGit("symbolic-ref", "-q", "--end-of-options", name.String()); err == nil && target != "" {
+	// symbolic ref deletes the ref it points at instead (e.g. update-ref -d HEAD
+	// deletes the current branch). The symbolic-ref -q probe reports absence the
+	// same way as a lookup — exit non-zero with empty stderr — so classify its
+	// failure: only a genuine "not a symbolic ref / not found" may fall through
+	// to update-ref -d. A spawn/timeout/I-O failure must be surfaced rather than
+	// assumed non-symbolic, or a transient error would be routed into a
+	// destructive delete of the wrong ref.
+	target, probeStderr, probeErr := s.runGit("symbolic-ref", "-q", "--end-of-options", name.String())
+	switch {
+	case probeErr == nil && target != "":
 		if _, stderr, delErr := s.runGit("symbolic-ref", "-d", "--end-of-options", name.String()); delErr != nil {
 			return fmt.Errorf("reftable remove symbolic ref %s: %s: %w", name, strings.TrimSpace(string(stderr)), delErr)
 		}
 		return nil
+	case probeErr != nil && !refLookupAbsent(probeErr, probeStderr):
+		return fmt.Errorf("reftable probe symbolic ref %s: %s: %w", name, strings.TrimSpace(string(probeStderr)), probeErr)
 	}
+
+	// name is not a symbolic ref (or does not exist): delete it as a hash ref.
 	_, stderr, err := s.runGit("update-ref", "-d", "--end-of-options", name.String())
 	if err == nil {
 		return nil

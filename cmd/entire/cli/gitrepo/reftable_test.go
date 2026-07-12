@@ -188,6 +188,7 @@ func TestReftableStorer_RefNamesAreArgvNotShell(t *testing.T) {
 const (
 	gitSymbolicRef = "symbolic-ref"
 	gitRevParse    = "rev-parse"
+	gitUpdateRef   = "update-ref"
 )
 
 // realExitError returns a genuine *exec.ExitError (git ran and exited non-zero)
@@ -346,7 +347,7 @@ func TestRemoveReference_DeleteFailureNotSwallowed(t *testing.T) {
 			switch args[0] {
 			case gitSymbolicRef:
 				return "", nil, realExitError(t) // not symbolic -> update-ref -d path
-			case "update-ref":
+			case gitUpdateRef:
 				return "", updateRefStderr, updateRefErr
 			default:
 				return "", nil, nil
@@ -373,6 +374,96 @@ func TestRemoveReference_DeleteFailureNotSwallowed(t *testing.T) {
 	t.Run("timeout is an error", func(t *testing.T) {
 		t.Parallel()
 		require.Error(t, storerWith(nil, timeoutError()).RemoveReference(name))
+	})
+}
+
+// TestRemoveReference_SymbolicProbeFailureSurfaced verifies that the
+// symbolic-ref -q probe classifies its failure: a genuine "not a symbolic ref"
+// (exit non-zero, empty stderr) falls through to update-ref -d, but a transient
+// failure (timeout/spawn/I-O) is surfaced and never routed into update-ref -d.
+// Routing a transient failure into update-ref -d is destructive: on a symbolic
+// ref (e.g. HEAD) update-ref -d deletes the ref it points at, silently losing a
+// branch pointer.
+func TestRemoveReference_SymbolicProbeFailureSurfaced(t *testing.T) {
+	t.Parallel()
+	name := plumbing.ReferenceName("refs/entire/rm")
+
+	t.Run("transient probe failure is surfaced, never routed to update-ref -d", func(t *testing.T) {
+		t.Parallel()
+		updateRefCalled := false
+		s := &reftableStorer{gitDir: "unused", runGitFn: func(args ...string) (string, []byte, error) {
+			switch args[0] {
+			case gitSymbolicRef:
+				return "", nil, timeoutError()
+			case gitUpdateRef:
+				updateRefCalled = true
+				return "", nil, nil
+			default:
+				return "", nil, nil
+			}
+		}}
+		err := s.RemoveReference(name)
+		require.Error(t, err)
+		require.False(t, updateRefCalled,
+			"a transient symbolic-ref probe failure must not fall through to the destructive update-ref -d")
+	})
+
+	t.Run("fatal probe error with stderr is surfaced, not routed to update-ref -d", func(t *testing.T) {
+		t.Parallel()
+		updateRefCalled := false
+		s := &reftableStorer{gitDir: "unused", runGitFn: func(args ...string) (string, []byte, error) {
+			switch args[0] {
+			case gitSymbolicRef:
+				return "", []byte("fatal: unable to read reftable stack\n"), realExitError(t)
+			case gitUpdateRef:
+				updateRefCalled = true
+				return "", nil, nil
+			default:
+				return "", nil, nil
+			}
+		}}
+		require.Error(t, s.RemoveReference(name))
+		require.False(t, updateRefCalled)
+	})
+
+	t.Run("genuine not-symbolic falls through to update-ref -d", func(t *testing.T) {
+		t.Parallel()
+		updateRefCalled := false
+		s := &reftableStorer{gitDir: "unused", runGitFn: func(args ...string) (string, []byte, error) {
+			switch args[0] {
+			case gitSymbolicRef:
+				return "", nil, realExitError(t) // exit non-zero, empty stderr = not symbolic
+			case gitUpdateRef:
+				updateRefCalled = true
+				return "", nil, nil
+			default:
+				return "", nil, nil
+			}
+		}}
+		require.NoError(t, s.RemoveReference(name))
+		require.True(t, updateRefCalled, "a non-symbolic ref must be deleted via update-ref -d")
+	})
+
+	t.Run("symbolic ref is deleted via symbolic-ref -d, never update-ref -d", func(t *testing.T) {
+		t.Parallel()
+		symbolicDeleteCalled, updateRefCalled := false, false
+		s := &reftableStorer{gitDir: "unused", runGitFn: func(args ...string) (string, []byte, error) {
+			switch {
+			case args[0] == gitSymbolicRef && len(args) > 1 && args[1] == "-d":
+				symbolicDeleteCalled = true
+				return "", nil, nil
+			case args[0] == gitSymbolicRef: // the -q probe
+				return "refs/heads/main", nil, nil
+			case args[0] == "update-ref":
+				updateRefCalled = true
+				return "", nil, nil
+			default:
+				return "", nil, nil
+			}
+		}}
+		require.NoError(t, s.RemoveReference(name))
+		require.True(t, symbolicDeleteCalled, "a symbolic ref must be deleted with symbolic-ref -d")
+		require.False(t, updateRefCalled, "a symbolic ref must not be deleted with update-ref -d")
 	})
 }
 
