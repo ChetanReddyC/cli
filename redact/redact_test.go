@@ -334,6 +334,143 @@ func TestString_PatternDetection(t *testing.T) {
 	}
 }
 
+// supabaseSecretPrefix, supabasePersonalPrefix, and supabasePublishablePrefix
+// assemble the Supabase credential prefixes from fragments so a complete token
+// never appears verbatim in source. This mirrors openSSHPrivateKeyMarker above
+// and keeps secret scanners (including GitHub push protection) from flagging
+// synthetic test fixtures; the assembled runtime values exercise the redactor
+// exactly as a real token would.
+func supabaseSecretPrefix() string      { return "sb" + "_secret_" }
+func supabasePersonalPrefix() string    { return "sb" + "p_" }
+func supabasePublishablePrefix() string { return "sb" + "_publishable_" }
+
+// TestString_SupabaseProviderTokens covers issue #1716: Supabase sb_secret_
+// API keys and sbp_ personal access tokens are low-entropy and, captured in
+// isolation, are missed by the entropy layer (threshold 4.5) and by the
+// betterleaks Supabase rule (a composite rule that only fires when a
+// *.supabase.co URL is co-present). The deterministic provider-prefix layer
+// must catch them regardless of entropy or the surrounding variable name.
+func TestString_SupabaseProviderTokens(t *testing.T) {
+	t.Parallel()
+
+	secret := supabaseSecretPrefix() + "probe_20260710_7f91c2d8e4a6b3f0" // entropy 4.199
+	realSecret := supabaseSecretPrefix() + "9uM4GhB0STF5R4K3HxQtlg_bzWW6DRj"
+	sbpToken := supabasePersonalPrefix() + "test_probe_20260710_test_probe_2026071"
+
+	// Both probe values sit below the entropy threshold, proving entropy-only
+	// detection would miss them (the issue reports entropy 4.199 for sb_secret_).
+	for _, low := range []string{secret, sbpToken} {
+		if e := shannonEntropy(low); e > entropyThreshold {
+			t.Fatalf("value %q has entropy %.3f > %.1f; not a low-entropy regression case", low, e, entropyThreshold)
+		}
+	}
+
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "sb_secret_ standalone (issue #1716 repro value)",
+			input: secret,
+			want:  "REDACTED",
+		},
+		{
+			name:  "sb_secret_ at start of line",
+			input: secret + " is the service_role key",
+			want:  "REDACTED is the service_role key",
+		},
+		{
+			name:  "sb_secret_ at end of line",
+			input: "service_role key: " + secret,
+			want:  "service_role key: REDACTED",
+		},
+		{
+			// Canonical .env form. The surrounding quotes break the token so the
+			// entropy layer sees only the low-entropy secret and misses it,
+			// isolating the deterministic provider layer.
+			name:  "sb_secret_ in env-style double-quoted assignment",
+			input: `SUPABASE_SERVICE_ROLE_KEY="` + secret + `"`,
+			want:  `SUPABASE_SERVICE_ROLE_KEY="REDACTED"`,
+		},
+		{
+			name:  "sb_secret_ single-quoted value",
+			input: "key: '" + secret + "'",
+			want:  "key: 'REDACTED'",
+		},
+		{
+			name:  "sb_secret_ multiple occurrences",
+			input: secret + " then " + secret,
+			want:  "REDACTED then REDACTED",
+		},
+		{
+			name:  "sb_secret_ real-shaped mixed-case body",
+			input: `SUPABASE_SERVICE_ROLE_KEY="` + realSecret + `"`,
+			want:  `SUPABASE_SERVICE_ROLE_KEY="REDACTED"`,
+		},
+		{
+			name:  "sbp_ personal access token (low entropy, betterleaks misses)",
+			input: "SUPABASE_ACCESS_TOKEN=" + sbpToken,
+			want:  "SUPABASE_ACCESS_TOKEN=REDACTED",
+		},
+	})
+}
+
+// TestString_SupabaseProviderTokenOverRedactionGuards pins that the
+// deterministic provider layer does not over-redact. Publishable keys are
+// designed to be embedded in client code and are intentionally not targeted by
+// this layer (a low-entropy publishable value therefore passes through it; a
+// high-entropy real one would still be caught by the entropy layer). A bare
+// prefix or a prefix with a too-short body is not a credential.
+func TestString_SupabaseProviderTokenOverRedactionGuards(t *testing.T) {
+	t.Parallel()
+
+	publishable := supabasePublishablePrefix() + "probe_20260710_7f91c2d8e4a6b3f0"
+	shortSecret := supabaseSecretPrefix() + "short"
+	shortToken := supabasePersonalPrefix() + "short"
+
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			// Quoted so the entropy layer sees only the low-entropy publishable
+			// value (which it does not flag), proving the provider layer itself
+			// does not target publishable keys.
+			name:  "publishable key is not targeted by the provider layer",
+			input: `NEXT_PUBLIC_SUPABASE_KEY="` + publishable + `"`,
+			want:  `NEXT_PUBLIC_SUPABASE_KEY="` + publishable + `"`,
+		},
+		{
+			name:  "sb_secret_ with too-short body is preserved",
+			input: shortSecret,
+			want:  shortSecret,
+		},
+		{
+			name:  "sbp_ with too-short body is preserved",
+			input: shortToken,
+			want:  shortToken,
+		},
+		{
+			name:  "bare sb_secret_ prefix in prose is preserved",
+			input: "the " + supabaseSecretPrefix() + " prefix identifies Supabase secret keys",
+			want:  "the " + supabaseSecretPrefix() + " prefix identifies Supabase secret keys",
+		},
+	})
+}
+
+// TestJSONLContent_SupabaseSecretRedacted drives the secret through the
+// field-aware JSONL path used by checkpoint condensation, mirroring a Claude
+// Code transcript line where the secret lives in a message-content leaf.
+func TestJSONLContent_SupabaseSecretRedacted(t *testing.T) {
+	t.Parallel()
+	secret := supabaseSecretPrefix() + "probe_20260710_7f91c2d8e4a6b3f0"
+	line := `{"type":"user","message":{"role":"user","content":"the service_role key is ` + secret + ` now"}}`
+	got, err := JSONLContent(line)
+	if err != nil {
+		t.Fatalf("JSONLContent error: %v", err)
+	}
+	if strings.Contains(got, secret) {
+		t.Fatalf("secret survived JSONL redaction: %q", got)
+	}
+	if !strings.Contains(got, "REDACTED") {
+		t.Fatalf("expected REDACTED placeholder in %q", got)
+	}
+}
+
 func TestString_CredentialedURIs(t *testing.T) {
 	tests := []struct {
 		name  string
