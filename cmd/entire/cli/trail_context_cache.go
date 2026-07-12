@@ -341,10 +341,16 @@ func newRefreshTrailEnablementCmd() *cobra.Command {
 			// Detached child with discarded stdout/stderr: initialize file
 			// logging so a failing background refresh (the #450 unreachable-host
 			// symptom) is diagnosable in .entire/logs/entire.log rather than
-			// vanishing. Best-effort, mirroring the other hook-side commands.
-			logging.SetLogLevelGetter(GetLogLevel)
-			if err := logging.Init(ctx, ""); err == nil {
-				defer logging.Close()
+			// vanishing. Guard on WorktreeRoot first — matching resume/rewind/
+			// reset/explain — so a child whose worktree was removed or relocated
+			// between spawn and exec (or a manual invocation outside a repo)
+			// doesn't create a stray .entire/logs/ in an arbitrary directory;
+			// logging.Init falls back to cwd when WorktreeRoot fails.
+			if _, err := paths.WorktreeRoot(ctx); err == nil {
+				logging.SetLogLevelGetter(GetLogLevel)
+				if err := logging.Init(ctx, ""); err == nil {
+					defer logging.Close()
+				}
 			}
 			return runTrailEnablementRefresh(ctx)
 		},
