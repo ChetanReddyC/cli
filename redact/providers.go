@@ -37,9 +37,21 @@ import "regexp"
 // base64url, sbp_ tokens are lowercase). The {20,} floor comfortably
 // catches the current and plausibly-longer future formats while rejecting
 // short identifier-like collisions such as "sb_secret_short".
+//
+// The prefix is deliberately NOT preceded by a \b word boundary. \b requires
+// the character before the prefix to be a non-word char, so a secret glued to
+// a preceding word character — an underscore-joined name (FOO_sb_secret_…) or,
+// in the JSONL fall-back / raw redact.Bytes path, a JSON escape whose trailing
+// letter abuts the prefix (…line1\nsb_secret_…, where the byte before "sb" is
+// the literal 'n') — would slip past. Because these low-entropy secrets are
+// backed up by no other layer, missing them means the raw key reaches the
+// checkpoint blob. Dropping the anchor is redaction-completeness-safe: the
+// 10/4-char prefixes plus the {20,} floor make a legitimate mid-word collision
+// vanishingly unlikely, and any high-entropy incidental match would already be
+// caught by the entropy layer.
 var providerTokenPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\bsb_secret_[A-Za-z0-9_-]{20,}`),
-	regexp.MustCompile(`\bsbp_[a-z0-9_-]{20,}`),
+	regexp.MustCompile(`sb_secret_[A-Za-z0-9_-]{20,}`),
+	regexp.MustCompile(`sbp_[a-z0-9_-]{20,}`),
 }
 
 // detectProviderTokens returns tagged regions for every occurrence of a

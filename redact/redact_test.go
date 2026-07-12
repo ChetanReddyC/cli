@@ -471,6 +471,68 @@ func TestJSONLContent_SupabaseSecretRedacted(t *testing.T) {
 	}
 }
 
+// TestString_SupabaseProviderTokenBoundaries pins that the provider layer
+// redacts a Supabase secret even when the prefix abuts a preceding *word*
+// character. A \b anchor before the prefix only fires after a non-word
+// character, so a secret glued to a preceding letter/digit/underscore — an
+// underscore-joined name, or (in the raw redact.Bytes / JSONL fall-back path
+// that runs String on undecoded text) a JSON escape whose trailing letter sits
+// against the prefix, e.g. "…line1\nsb_secret_…" where the byte before "sb" is
+// the literal 'n' — would slip past. These bodies are deliberately low-entropy,
+// so no other layer backs the provider layer up: a miss reaches the blob raw.
+// Each case fails if the leading \b anchor is reintroduced.
+func TestString_SupabaseProviderTokenBoundaries(t *testing.T) {
+	t.Parallel()
+
+	secret := supabaseSecretPrefix() + "probe_20260710_7f91c2d8e4a6b3f0"
+	sbpToken := supabasePersonalPrefix() + "test_probe_20260710_test_probe_2026071"
+
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "sb_secret_ glued to a preceding word char",
+			input: "x" + secret,
+			want:  "xREDACTED",
+		},
+		{
+			// Raw-text fall-back shape: the transcript line failed to parse as
+			// JSON, so String runs on the undecoded bytes where "\n" is a literal
+			// backslash-n and the 'n' abuts the prefix.
+			name:  "sb_secret_ preceded by a literal JSON escape letter",
+			input: `first line\n` + secret,
+			want:  `first line\nREDACTED`,
+		},
+		{
+			name:  "sbp_ preceded by a literal JSON escape letter",
+			input: `first line\n` + sbpToken,
+			want:  `first line\nREDACTED`,
+		},
+	})
+}
+
+// TestJSONLContent_SupabaseSecretMalformedLineFallback drives the secret
+// through the JSONL fall-back branch (jsonlContentImpl calls the per-leaf
+// redactor on the raw line when json.Unmarshal fails), with the secret glued to
+// a literal "\n" escape so the byte before the prefix is a word char. This is
+// the realistic path by which a malformed/truncated transcript line could leak
+// a low-entropy Supabase secret; it must still be redacted.
+func TestJSONLContent_SupabaseSecretMalformedLineFallback(t *testing.T) {
+	t.Parallel()
+	secret := supabaseSecretPrefix() + "probe_20260710_7f91c2d8e4a6b3f0"
+	// Trailing garbage after the closing brace makes json.Unmarshal fail, forcing
+	// the raw-line fall-back; inside, "\n" is a literal backslash-n before "sb".
+	line := `{"content":"line1\n` + secret + `"} <-- truncated`
+	got, err := JSONLContent(line)
+	if err != nil {
+		t.Fatalf("JSONLContent error: %v", err)
+	}
+	if strings.Contains(got, secret) {
+		t.Fatalf("secret survived JSONL fall-back redaction: %q", got)
+	}
+	if !strings.Contains(got, "REDACTED") {
+		t.Fatalf("expected REDACTED placeholder in %q", got)
+	}
+}
+
 func TestString_CredentialedURIs(t *testing.T) {
 	tests := []struct {
 		name  string
