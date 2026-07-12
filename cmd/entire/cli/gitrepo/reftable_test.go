@@ -1,6 +1,9 @@
 package gitrepo
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -178,6 +181,199 @@ func TestReftableStorer_RefNamesAreArgvNotShell(t *testing.T) {
 	require.NoFileExists(t, marker, "ref name must not be evaluated by a shell on remove")
 	_, err = repo.Storer.Reference(injected)
 	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound)
+}
+
+// git subcommand names used by the runGitFn fakes below (named to satisfy
+// goconst, which flags the repeated literals across the injected switches).
+const (
+	gitSymbolicRef = "symbolic-ref"
+	gitRevParse    = "rev-parse"
+)
+
+// realExitError returns a genuine *exec.ExitError (git ran and exited non-zero)
+// so runGitFn injections can distinguish "git reported absence" from a spawn or
+// timeout failure that never produced an exit code.
+func realExitError(t *testing.T) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", "exit 1").Run() //nolint:noctx // test helper
+	var ee *exec.ExitError
+	require.ErrorAs(t, err, &ee)
+	return err
+}
+
+// timeoutError mimics the error execGit produces when its context deadline
+// fires and the git process is killed.
+func timeoutError() error {
+	return fmt.Errorf("git rev-parse timed out: %w", context.DeadlineExceeded)
+}
+
+// TestReference_ClassifiesLookupFailures verifies that Reference maps only a
+// genuine "git ran and the ref is absent" result to ErrReferenceNotFound, and
+// surfaces spawn/timeout/I-O failures instead. Reporting a transient git
+// failure as "ref not found" can make the strategy treat a live checkpoint ref
+// as absent (orphan reset, lost linkage), so this distinction is load-bearing.
+func TestReference_ClassifiesLookupFailures(t *testing.T) {
+	t.Parallel()
+	name := plumbing.ReferenceName("refs/entire/probe")
+
+	// symbolic-ref always fails "not symbolic" so every case exercises the
+	// rev-parse hash path, whose result is controlled per test.
+	storerWith := func(revParseOut string, revParseStderr []byte, revParseErr error) *reftableStorer {
+		return &reftableStorer{gitDir: "unused", runGitFn: func(args ...string) (string, []byte, error) {
+			switch args[0] {
+			case gitSymbolicRef:
+				return "", nil, realExitError(t)
+			case gitRevParse:
+				return revParseOut, revParseStderr, revParseErr
+			default:
+				return "", nil, nil
+			}
+		}}
+	}
+
+	t.Run("genuine absence maps to ErrReferenceNotFound", func(t *testing.T) {
+		t.Parallel()
+		_, err := storerWith("", nil, realExitError(t)).Reference(name)
+		require.ErrorIs(t, err, plumbing.ErrReferenceNotFound)
+	})
+
+	t.Run("timeout is surfaced, not absent", func(t *testing.T) {
+		t.Parallel()
+		_, err := storerWith("", nil, timeoutError()).Reference(name)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+	})
+
+	t.Run("spawn failure is surfaced, not absent", func(t *testing.T) {
+		t.Parallel()
+		spawn := &exec.Error{Name: "git", Err: errors.New("executable file not found in $PATH")}
+		_, err := storerWith("", nil, spawn).Reference(name)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+	})
+
+	t.Run("non-zero exit WITH stderr is surfaced, not absent", func(t *testing.T) {
+		t.Parallel()
+		_, err := storerWith("", []byte("fatal: unable to read reftable stack\n"), realExitError(t)).Reference(name)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+	})
+}
+
+// TestIterReferences_HEADFailureSurfaces verifies the HEAD-resolution path in
+// IterReferences surfaces a real git failure rather than silently dropping HEAD,
+// while still omitting a genuinely-absent HEAD and preserving detached HEAD.
+func TestIterReferences_HEADFailureSurfaces(t *testing.T) {
+	t.Parallel()
+
+	t.Run("git failure resolving HEAD is surfaced", func(t *testing.T) {
+		t.Parallel()
+		s := &reftableStorer{gitDir: "unused", runGitFn: func(args ...string) (string, []byte, error) {
+			switch args[0] {
+			case gitSymbolicRef, gitRevParse:
+				return "", nil, timeoutError()
+			default:
+				return "", nil, nil
+			}
+		}}
+		_, err := s.IterReferences()
+		require.Error(t, err)
+	})
+
+	t.Run("detached HEAD resolves to a hash reference", func(t *testing.T) {
+		t.Parallel()
+		hash := "20b4de1033d986a83837177f961c80bb799161e6"
+		s := &reftableStorer{gitDir: "unused", runGitFn: func(args ...string) (string, []byte, error) {
+			switch args[0] {
+			case gitSymbolicRef:
+				return "", nil, realExitError(t) // detached: not symbolic
+			case gitRevParse:
+				return hash, nil, nil
+			case "for-each-ref":
+				return "", nil, nil
+			default:
+				return "", nil, nil
+			}
+		}}
+		iter, err := s.IterReferences()
+		require.NoError(t, err)
+		var head *plumbing.Reference
+		require.NoError(t, iter.ForEach(func(r *plumbing.Reference) error {
+			if r.Name() == plumbing.HEAD {
+				head = r
+			}
+			return nil
+		}))
+		iter.Close()
+		require.NotNil(t, head, "detached HEAD must be present in iteration")
+		require.Equal(t, plumbing.NewHash(hash), head.Hash())
+	})
+
+	t.Run("genuinely absent HEAD is omitted without error", func(t *testing.T) {
+		t.Parallel()
+		s := &reftableStorer{gitDir: "unused", runGitFn: func(args ...string) (string, []byte, error) {
+			switch args[0] {
+			case gitSymbolicRef:
+				return "", nil, realExitError(t) // not symbolic
+			case gitRevParse:
+				return "", nil, realExitError(t) // absent: exited non-zero, silent
+			case "for-each-ref":
+				return "", nil, nil
+			default:
+				return "", nil, nil
+			}
+		}}
+		iter, err := s.IterReferences()
+		require.NoError(t, err)
+		count := 0
+		require.NoError(t, iter.ForEach(func(_ *plumbing.Reference) error { count++; return nil }))
+		iter.Close()
+		require.Equal(t, 0, count, "an unborn/absent HEAD must yield no references, not an error")
+	})
+}
+
+// TestRemoveReference_DeleteFailureNotSwallowed verifies that a failed deletion
+// is only treated as idempotent success when git ran and reported the ref
+// already absent (exit 0, or an explicit "does not exist"). A non-zero exit with
+// empty stderr — as produced by a killed/timed-out git — must surface as an
+// error, not a phantom successful deletion.
+func TestRemoveReference_DeleteFailureNotSwallowed(t *testing.T) {
+	t.Parallel()
+	name := plumbing.ReferenceName("refs/entire/rm")
+
+	storerWith := func(updateRefStderr []byte, updateRefErr error) *reftableStorer {
+		return &reftableStorer{gitDir: "unused", runGitFn: func(args ...string) (string, []byte, error) {
+			switch args[0] {
+			case gitSymbolicRef:
+				return "", nil, realExitError(t) // not symbolic -> update-ref -d path
+			case "update-ref":
+				return "", updateRefStderr, updateRefErr
+			default:
+				return "", nil, nil
+			}
+		}}
+	}
+
+	t.Run("exit 0 is idempotent success", func(t *testing.T) {
+		t.Parallel()
+		require.NoError(t, storerWith(nil, nil).RemoveReference(name))
+	})
+
+	t.Run("explicit does-not-exist is idempotent success", func(t *testing.T) {
+		t.Parallel()
+		require.NoError(t, storerWith([]byte("error: refs/entire/rm does not exist"), realExitError(t)).RemoveReference(name))
+	})
+
+	t.Run("non-zero exit with empty stderr is an error", func(t *testing.T) {
+		t.Parallel()
+		require.Error(t, storerWith(nil, realExitError(t)).RemoveReference(name),
+			"a delete failure with empty stderr must not be swallowed as success")
+	})
+
+	t.Run("timeout is an error", func(t *testing.T) {
+		t.Parallel()
+		require.Error(t, storerWith(nil, timeoutError()).RemoveReference(name))
+	})
 }
 
 // TestOpenPath_ReftableRepository verifies that a reftable repository, which

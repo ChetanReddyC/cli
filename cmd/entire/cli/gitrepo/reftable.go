@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -63,6 +64,12 @@ type reftableStorer struct {
 	*gitfilesystem.Storage
 
 	gitDir string
+
+	// runGitFn runs a git plumbing command and returns trimmed stdout, raw
+	// stderr, and the exec error. It is overridable in tests to simulate
+	// spawn/timeout/exit failures deterministically; in production it is nil and
+	// runGit dispatches to execGit.
+	runGitFn func(args ...string) (string, []byte, error)
 }
 
 var (
@@ -88,10 +95,18 @@ func (s *reftableStorer) SupportsExtension(name, _ string) bool {
 }
 
 // runGit runs a git plumbing command scoped to this repository's git dir and
-// returns trimmed stdout. Only ref plumbing (show-ref, for-each-ref,
-// symbolic-ref, update-ref, rev-parse) is used, none of which trigger git
-// hooks, so this cannot recurse back into entire.
+// returns trimmed stdout, raw stderr, and the exec error. Only ref plumbing
+// (for-each-ref, symbolic-ref, update-ref, rev-parse) is used, none of which
+// trigger git hooks, so this cannot recurse back into entire. Tests may inject
+// runGitFn to simulate failures; production dispatches to execGit.
 func (s *reftableStorer) runGit(args ...string) (string, []byte, error) {
+	if s.runGitFn != nil {
+		return s.runGitFn(args...)
+	}
+	return s.execGit(args...)
+}
+
+func (s *reftableStorer) execGit(args ...string) (string, []byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), reftableGitTimeout)
 	defer cancel()
 
@@ -103,7 +118,40 @@ func (s *reftableStorer) runGit(args ...string) (string, []byte, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	// On our timeout the process is killed and Run reports the kill as an
+	// *exec.ExitError, which would be indistinguishable from a genuine
+	// non-zero exit. Re-wrap with the context error so callers (refLookupAbsent)
+	// never mistake a wedged git for a definitive "ref not found".
+	if err != nil && ctx.Err() != nil {
+		err = fmt.Errorf("git %s timed out after %s: %w", strings.Join(args, " "), reftableGitTimeout, ctx.Err())
+	}
 	return strings.TrimRight(stdout.String(), "\n"), stderr.Bytes(), err
+}
+
+// refLookupAbsent reports whether a failed ref lookup (rev-parse --verify
+// --quiet, update-ref) means the reference is genuinely absent rather than a
+// failure to consult git at all. Only genuine absence may map to the
+// plumbing.ErrReferenceNotFound / idempotent-delete sentinels; a spawn failure,
+// timeout, or I/O error must be surfaced so a transient git failure is never
+// mistaken for a missing ref (which would let the strategy orphan a checkpoint
+// ref or drop a link).
+//
+// git ran and reported absence iff it exited non-zero AND stayed silent: under
+// --quiet a missing ref produces no error output, whereas a fatal/I/O failure
+// exits non-zero with a "fatal: ..." message, and a spawn failure or our
+// timeout is not an *exec.ExitError at all.
+func refLookupAbsent(err error, stderr []byte) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	return len(bytes.TrimSpace(stderr)) == 0
 }
 
 // SetReference stores a reference, dispatching to symbolic-ref for symbolic
@@ -179,9 +227,15 @@ func (s *reftableStorer) Reference(name plumbing.ReferenceName) (*plumbing.Refer
 
 	// Hash refs: rev-parse --verify resolves the ref to the object it points at.
 	// "^0" would peel tags; we want the ref's direct target, so verify the name
-	// as-is. A non-existent ref exits non-zero.
-	out, _, err := s.runGit("rev-parse", "--verify", "--quiet", "--end-of-options", name.String())
-	if err != nil || out == "" {
+	// as-is. A non-existent ref exits non-zero silently.
+	out, stderr, err := s.runGit("rev-parse", "--verify", "--quiet", "--end-of-options", name.String())
+	if err != nil {
+		if refLookupAbsent(err, stderr) {
+			return nil, plumbing.ErrReferenceNotFound
+		}
+		return nil, fmt.Errorf("reftable resolve ref %s: %s: %w", name, strings.TrimSpace(string(stderr)), err)
+	}
+	if out == "" {
 		return nil, plumbing.ErrReferenceNotFound
 	}
 	h := plumbing.NewHash(out)
@@ -197,12 +251,22 @@ func (s *reftableStorer) IterReferences() (storer.ReferenceIter, error) {
 	refs := make([]*plumbing.Reference, 0, 16)
 
 	// HEAD (symbolic on a branch, detached hash otherwise) is not emitted by
-	// for-each-ref, so resolve it explicitly first.
+	// for-each-ref, so resolve it explicitly first. A symbolic-ref failure just
+	// means HEAD is detached (or the probe could not run), so fall through to
+	// rev-parse and classify that result: surface a real git failure rather than
+	// silently dropping HEAD, but omit HEAD when it is genuinely absent (an
+	// unborn/empty repo), matching the filesystem storer.
 	if target, _, err := s.runGit("symbolic-ref", "-q", "--end-of-options", "HEAD"); err == nil && target != "" {
 		refs = append(refs, plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.ReferenceName(target)))
-	} else if out, _, err := s.runGit("rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD"); err == nil && out != "" {
-		if h := plumbing.NewHash(out); !h.IsZero() {
-			refs = append(refs, plumbing.NewHashReference(plumbing.HEAD, h))
+	} else {
+		out, stderr, headErr := s.runGit("rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD")
+		switch {
+		case headErr == nil && out != "":
+			if h := plumbing.NewHash(out); !h.IsZero() {
+				refs = append(refs, plumbing.NewHashReference(plumbing.HEAD, h))
+			}
+		case headErr != nil && !refLookupAbsent(headErr, stderr):
+			return nil, fmt.Errorf("reftable resolve HEAD: %s: %w", strings.TrimSpace(string(stderr)), headErr)
 		}
 	}
 
@@ -257,15 +321,19 @@ func (s *reftableStorer) RemoveReference(name plumbing.ReferenceName) error {
 		return nil
 	}
 	_, stderr, err := s.runGit("update-ref", "-d", "--end-of-options", name.String())
-	if err != nil {
-		msg := strings.ToLower(strings.TrimSpace(string(stderr)))
-		// Deleting an already-absent ref is not an error for our callers.
-		if msg == "" || strings.Contains(msg, "does not exist") || strings.Contains(msg, "not exist") {
-			return nil
-		}
-		return fmt.Errorf("reftable remove ref %s: %s: %w", name, strings.TrimSpace(string(stderr)), err)
+	if err == nil {
+		return nil
 	}
-	return nil
+	// git update-ref exits 0 when deleting an already-absent ref, so reaching
+	// here means the delete actually failed. Only an explicit "does not exist"
+	// is idempotent success; an empty stderr must NOT be swallowed, because a
+	// killed/timed-out git also produces no stderr and would otherwise be
+	// silently reported as a successful deletion.
+	msg := strings.ToLower(strings.TrimSpace(string(stderr)))
+	if strings.Contains(msg, "does not exist") || strings.Contains(msg, "not exist") {
+		return nil
+	}
+	return fmt.Errorf("reftable remove ref %s: %s: %w", name, strings.TrimSpace(string(stderr)), err)
 }
 
 // CountLooseRefs returns 0: reftable has no loose refs, and go-git only uses
