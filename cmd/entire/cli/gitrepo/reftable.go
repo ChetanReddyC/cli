@@ -112,7 +112,7 @@ func (s *reftableStorer) execGit(args ...string) (string, []byte, error) {
 
 	full := append([]string{"--git-dir", s.gitDir}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = gitPlumbingEnv()
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -126,6 +126,23 @@ func (s *reftableStorer) execGit(args ...string) (string, []byte, error) {
 		err = fmt.Errorf("git %s timed out after %s: %w", strings.Join(args, " "), reftableGitTimeout, ctx.Err())
 	}
 	return strings.TrimRight(stdout.String(), "\n"), stderr.Bytes(), err
+}
+
+// gitPlumbingEnv builds the environment for a reftable git plumbing command.
+// LC_ALL=C / LANG=C force untranslated (English) diagnostics so the stderr
+// classification (isRefCASConflict, and RemoveReference's idempotency check)
+// stays correct on a localized machine — git's error messages are i18n'd, and
+// matching translated text would silently misclassify CAS conflicts and delete
+// failures. GIT_TERMINAL_PROMPT=0 keeps git non-interactive. The forced values
+// are appended last so they override anything the caller's environment set
+// (os/exec keeps the last value for a duplicate key). Mirrors the sibling
+// shell-out in checkpoint/shadow_ref.go.
+func gitPlumbingEnv() []string {
+	return append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"LC_ALL=C",
+		"LANG=C",
+	)
 }
 
 // refLookupAbsent reports whether a failed ref lookup (rev-parse --verify
@@ -220,9 +237,18 @@ func isRefCASConflict(stderr []byte) bool {
 // (such as HEAD) so go-git can resolve them itself.
 func (s *reftableStorer) Reference(name plumbing.ReferenceName) (*plumbing.Reference, error) {
 	// Symbolic refs: symbolic-ref exits 0 and prints the target only for a
-	// genuine symbolic ref; -q suppresses the error for non-symbolic names.
-	if target, _, err := s.runGit("symbolic-ref", "-q", "--end-of-options", name.String()); err == nil && target != "" {
+	// genuine symbolic ref; -q makes it exit non-zero silently for a non-symbolic
+	// name. Classify the probe failure the same way as elsewhere: a genuine "not
+	// a symbolic ref" (exit non-zero, empty stderr) falls through to the hash
+	// lookup, but a spawn/timeout/I-O failure is surfaced rather than silently
+	// downgrading a symbolic ref (e.g. HEAD on a branch) to a Hash reference
+	// named "HEAD", which would make callers read the repo as detached.
+	target, symStderr, symErr := s.runGit("symbolic-ref", "-q", "--end-of-options", name.String())
+	switch {
+	case symErr == nil && target != "":
 		return plumbing.NewSymbolicReference(name, plumbing.ReferenceName(target)), nil
+	case symErr != nil && !refLookupAbsent(symErr, symStderr):
+		return nil, fmt.Errorf("reftable probe symbolic ref %s: %s: %w", name, strings.TrimSpace(string(symStderr)), symErr)
 	}
 
 	// Hash refs: rev-parse --verify resolves the ref to the object it points at.
@@ -251,14 +277,20 @@ func (s *reftableStorer) IterReferences() (storer.ReferenceIter, error) {
 	refs := make([]*plumbing.Reference, 0, 16)
 
 	// HEAD (symbolic on a branch, detached hash otherwise) is not emitted by
-	// for-each-ref, so resolve it explicitly first. A symbolic-ref failure just
-	// means HEAD is detached (or the probe could not run), so fall through to
-	// rev-parse and classify that result: surface a real git failure rather than
-	// silently dropping HEAD, but omit HEAD when it is genuinely absent (an
-	// unborn/empty repo), matching the filesystem storer.
-	if target, _, err := s.runGit("symbolic-ref", "-q", "--end-of-options", "HEAD"); err == nil && target != "" {
-		refs = append(refs, plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.ReferenceName(target)))
-	} else {
+	// for-each-ref, so resolve it explicitly first, classifying each probe:
+	// a genuine "not symbolic" (exit non-zero, empty stderr) means HEAD is
+	// detached, so resolve it as a hash; a spawn/timeout/I-O failure is surfaced
+	// rather than silently dropping HEAD or downgrading a symbolic HEAD to a
+	// hash; and a genuinely absent HEAD (unborn/empty repo) is omitted, matching
+	// the filesystem storer.
+	headTarget, headSymStderr, headSymErr := s.runGit("symbolic-ref", "-q", "--end-of-options", "HEAD")
+	switch {
+	case headSymErr == nil && headTarget != "":
+		refs = append(refs, plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.ReferenceName(headTarget)))
+	case headSymErr != nil && !refLookupAbsent(headSymErr, headSymStderr):
+		return nil, fmt.Errorf("reftable probe HEAD symbolic ref: %s: %w", strings.TrimSpace(string(headSymStderr)), headSymErr)
+	default:
+		// HEAD is detached or genuinely not symbolic: resolve it as a hash.
 		out, stderr, headErr := s.runGit("rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD")
 		switch {
 		case headErr == nil && out != "":

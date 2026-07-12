@@ -189,6 +189,11 @@ const (
 	gitSymbolicRef = "symbolic-ref"
 	gitRevParse    = "rev-parse"
 	gitUpdateRef   = "update-ref"
+	gitForEachRef  = "for-each-ref"
+
+	// testHeadHash is an arbitrary valid-looking SHA-1 used as a fixture in the
+	// runGitFn fakes below.
+	testHeadHash = "20b4de1033d986a83837177f961c80bb799161e6"
 )
 
 // realExitError returns a genuine *exec.ExitError (git ran and exited non-zero)
@@ -206,6 +211,53 @@ func realExitError(t *testing.T) error {
 // fires and the git process is killed.
 func timeoutError() error {
 	return fmt.Errorf("git rev-parse timed out: %w", context.DeadlineExceeded)
+}
+
+// lastEnvValue returns the last value for key in an environment slice, matching
+// os/exec's de-duplication (last value wins for a duplicate key).
+func lastEnvValue(env []string, key string) (string, bool) {
+	value, found := "", false
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			value, found = v, true
+		}
+	}
+	return value, found
+}
+
+// TestGitPlumbingEnv_ForcesCLocale verifies that reftable git plumbing always
+// runs under a C locale, so git's stderr is never translated and the
+// English-substring classification (isRefCASConflict, RemoveReference
+// idempotency) is correct even when the caller's environment is localized. The
+// forced values must win over any inherited LANG/LC_ALL/LC_MESSAGES.
+func TestGitPlumbingEnv_ForcesCLocale(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	t.Setenv("LANG", "de_DE.UTF-8")
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LC_MESSAGES", "fr_FR.UTF-8")
+
+	env := gitPlumbingEnv()
+	for key, want := range map[string]string{"LC_ALL": "C", "LANG": "C", "GIT_TERMINAL_PROMPT": "0"} {
+		got, found := lastEnvValue(env, key)
+		require.Truef(t, found, "%s must be set", key)
+		require.Equalf(t, want, got, "effective %s must be forced regardless of the caller's environment", key)
+	}
+}
+
+// TestRefLookupAbsent_IsLocaleIndependent verifies the absence classifier keys
+// on exit code + empty stderr, so it is correct in any locale: a translated,
+// non-empty diagnostic is still surfaced as a real error, not absence.
+func TestRefLookupAbsent_IsLocaleIndependent(t *testing.T) {
+	t.Parallel()
+	germanFatal := []byte("schwerwiegend: Referenz existiert nicht\n")
+	require.False(t, refLookupAbsent(realExitError(t), germanFatal),
+		"a non-empty (translated) diagnostic must be surfaced regardless of language")
+	require.True(t, refLookupAbsent(realExitError(t), nil),
+		"exit non-zero with empty stderr is absence in any locale")
+	require.True(t, refLookupAbsent(realExitError(t), []byte("   \n")),
+		"whitespace-only stderr counts as empty")
+	require.False(t, refLookupAbsent(timeoutError(), nil),
+		"a timeout is never absence")
 }
 
 // TestReference_ClassifiesLookupFailures verifies that Reference maps only a
@@ -259,6 +311,27 @@ func TestReference_ClassifiesLookupFailures(t *testing.T) {
 		require.Error(t, err)
 		require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
 	})
+
+	t.Run("transient symbolic-ref probe failure is surfaced, not downgraded to a hash", func(t *testing.T) {
+		t.Parallel()
+		revParseCalled := false
+		s := &reftableStorer{gitDir: "unused", runGitFn: func(args ...string) (string, []byte, error) {
+			switch args[0] {
+			case gitSymbolicRef:
+				return "", nil, timeoutError() // probe times out on a possibly-symbolic ref
+			case gitRevParse:
+				revParseCalled = true
+				return testHeadHash, nil, nil // would wrongly succeed
+			default:
+				return "", nil, nil
+			}
+		}}
+		_, err := s.Reference(plumbing.ReferenceName("HEAD"))
+		require.Error(t, err)
+		require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+		require.False(t, revParseCalled,
+			"a transient symbolic-ref probe failure must be surfaced, not silently downgraded via rev-parse")
+	})
 }
 
 // TestIterReferences_HEADFailureSurfaces verifies the HEAD-resolution path in
@@ -283,14 +356,14 @@ func TestIterReferences_HEADFailureSurfaces(t *testing.T) {
 
 	t.Run("detached HEAD resolves to a hash reference", func(t *testing.T) {
 		t.Parallel()
-		hash := "20b4de1033d986a83837177f961c80bb799161e6"
+		hash := testHeadHash
 		s := &reftableStorer{gitDir: "unused", runGitFn: func(args ...string) (string, []byte, error) {
 			switch args[0] {
 			case gitSymbolicRef:
 				return "", nil, realExitError(t) // detached: not symbolic
 			case gitRevParse:
 				return hash, nil, nil
-			case "for-each-ref":
+			case gitForEachRef:
 				return "", nil, nil
 			default:
 				return "", nil, nil
@@ -318,7 +391,7 @@ func TestIterReferences_HEADFailureSurfaces(t *testing.T) {
 				return "", nil, realExitError(t) // not symbolic
 			case gitRevParse:
 				return "", nil, realExitError(t) // absent: exited non-zero, silent
-			case "for-each-ref":
+			case gitForEachRef:
 				return "", nil, nil
 			default:
 				return "", nil, nil
@@ -330,6 +403,28 @@ func TestIterReferences_HEADFailureSurfaces(t *testing.T) {
 		require.NoError(t, iter.ForEach(func(_ *plumbing.Reference) error { count++; return nil }))
 		iter.Close()
 		require.Equal(t, 0, count, "an unborn/absent HEAD must yield no references, not an error")
+	})
+
+	t.Run("transient HEAD symbolic-ref probe failure is surfaced, not downgraded to a hash", func(t *testing.T) {
+		t.Parallel()
+		revParseCalled := false
+		s := &reftableStorer{gitDir: "unused", runGitFn: func(args ...string) (string, []byte, error) {
+			switch args[0] {
+			case gitSymbolicRef:
+				return "", nil, timeoutError() // HEAD probe times out on a branch
+			case gitRevParse:
+				revParseCalled = true
+				return testHeadHash, nil, nil // would wrongly succeed
+			case gitForEachRef:
+				return "", nil, nil
+			default:
+				return "", nil, nil
+			}
+		}}
+		_, err := s.IterReferences()
+		require.Error(t, err)
+		require.False(t, revParseCalled,
+			"a transient HEAD symbolic-ref probe failure must be surfaced, not downgraded to a hash HEAD")
 	})
 }
 
