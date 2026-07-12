@@ -3,8 +3,6 @@ package cli
 import (
 	"context"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2235,29 +2233,45 @@ func TestPromptWindowStaleHookDoesNotResetEarly(t *testing.T) {
 	}
 }
 
-// TestHandleLifecycleSessionStart_NoSynchronousNetworkDialForTrailEnablement
-// guards against #450 (SessionStart hooks stalling Claude Code startup):
-// the trails-enablement cache refresh must never dial the network from the
-// SessionStart hook itself. A slow/unreachable API host previously added up
-// to trailEnablementSessionStartRefreshTimeout (1s) of synchronous latency to
-// every session start once the hourly cache went stale.
+// TestHandleLifecycleSessionStart_NoSynchronousNetworkForTrailEnablement
+// guards against #450 (SessionStart hooks stalling Claude Code startup): the
+// trails-enablement cache refresh must be handed off to a detached subprocess,
+// never performed inline on the SessionStart hook path. A slow/unreachable API
+// host previously added up to trailEnablementSessionStartRefreshTimeout (1s) of
+// synchronous latency to every session start once the hourly cache went stale.
 //
-// The sentinel server responds slowly on purpose — if SessionStart ever dials
-// it directly (regressing to the old synchronous behavior), this test proves
-// it two ways: the sentinel is hit (dialed > 0) and/or the call takes far
-// longer than a bare in-process hook should.
-func TestHandleLifecycleSessionStart_NoSynchronousNetworkDialForTrailEnablement(t *testing.T) {
+// The deterministic guarantee is the spawn seam: SessionStart must invoke the
+// detached-refresh spawn exactly once and return without doing the network work
+// itself. As a production-shaped backstop the API base points at a blackholed
+// https host that accepts the TCP connection but never answers — so a
+// regression that dials inline both contacts that host (dialed > 0) and burns
+// the ~1s session-start budget instead of returning immediately. (Plain http
+// would be rejected by api.RequireSecureURL before any dial, so the host must
+// be https to actually exercise the synchronous-dial path.)
+func TestHandleLifecycleSessionStart_NoSynchronousNetworkForTrailEnablement(t *testing.T) {
 	setupStopTestRepo(t)
 	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
 
+	// Blackhole https host: accept connections but never complete the TLS
+	// handshake or respond, so an inline dial stalls until a timeout fires
+	// (mirrors the unreachable-host case that motivated #450) rather than
+	// failing fast.
 	var dialed int32
-	sentinel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(&dialed, 1)
-		time.Sleep(5 * time.Second)
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer sentinel.Close()
-	t.Setenv("ENTIRE_API_BASE_URL", sentinel.URL)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			atomic.AddInt32(&dialed, 1)
+			_ = conn // hold open; never respond
+		}
+	}()
+	t.Setenv("ENTIRE_API_BASE_URL", "https://"+ln.Addr().String())
 
 	var spawnCount int32
 	prevSpawn := trailRefreshSpawn
@@ -2277,18 +2291,21 @@ func TestHandleLifecycleSessionStart_NoSynchronousNetworkDialForTrailEnablement(
 	}
 
 	start := time.Now()
-	err := handleLifecycleSessionStart(context.Background(), ag, event)
+	err = handleLifecycleSessionStart(context.Background(), ag, event)
 	elapsed := time.Since(start)
 
 	require.NoError(t, err)
-	if elapsed > time.Second {
-		t.Fatalf("handleLifecycleSessionStart took %v; trails-enablement refresh must be detached, not synchronous (#450)", elapsed)
+	// Deterministic guarantee: the network-capable refresh is delegated to the
+	// detached spawn exactly once, never run inline.
+	if got := atomic.LoadInt32(&spawnCount); got != 1 {
+		t.Fatalf("expected exactly one detached trail-enablement refresh spawn, got %d", got)
 	}
-	if atomic.LoadInt32(&dialed) != 0 {
+	// Backstops: SessionStart neither contacted the API host nor blocked.
+	if got := atomic.LoadInt32(&dialed); got != 0 {
 		t.Fatalf("SessionStart dialed the trails-enablement API synchronously (#450 regression); the refresh must run out of process")
 	}
-	if atomic.LoadInt32(&spawnCount) != 1 {
-		t.Fatalf("expected exactly one detached trail-enablement refresh spawn, got %d", spawnCount)
+	if elapsed > time.Second {
+		t.Fatalf("handleLifecycleSessionStart took %v; trails-enablement refresh must be detached, not synchronous (#450)", elapsed)
 	}
 }
 
