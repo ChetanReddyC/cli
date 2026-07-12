@@ -16,9 +16,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+
+	"github.com/spf13/cobra"
 )
 
 const (
@@ -195,7 +198,40 @@ func saveTrailsEnabledForScope(ctx context.Context, scope trailEnablementScope, 
 	return nil
 }
 
+// refreshTrailsEnabledCacheIfStaleForScope refreshes the trails-enablement
+// cache when it's unknown/expired for scope. Callers on hot, latency-sensitive
+// paths (SessionStart) must not block on this: resolving the API token and
+// dialing TrailsEnabled can stall for seconds when the host is slow or
+// unreachable (VPN, firewall, offline — see #450). Instead of doing that
+// network work inline, hand it off to a detached `__refresh_trail_enablement`
+// subprocess and return immediately; a later SessionStart will observe the
+// freshly written cache once the subprocess completes. The "not supported"
+// case is answered locally (no network) since it's free.
 func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEnablementScope) error {
+	if cachedTrailsEnablementForScope(ctx, scope, time.Now()) != trailEnablementCacheUnknown {
+		return nil
+	}
+	if !scope.Supported {
+		return saveTrailsEnabledForScope(ctx, scope, false, time.Now())
+	}
+	spawnDetachedTrailEnablementRefresh(ctx)
+	return nil
+}
+
+// runTrailEnablementRefresh performs the actual (potentially slow) network
+// refresh. It is invoked from the detached `__refresh_trail_enablement`
+// subprocess spawned by refreshTrailsEnabledCacheIfStaleForScope, never
+// synchronously from a hook path.
+func runTrailEnablementRefresh(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, trailEnablementRefreshTimeout)
+	defer cancel()
+
+	scope, err := currentTrailEnablementScope(ctx)
+	if err != nil {
+		return nil
+	}
+	// Another process (e.g. a fast-following SessionStart, or a concurrent
+	// refresh already in flight) may have populated the cache first.
 	if cachedTrailsEnablementForScope(ctx, scope, time.Now()) != trailEnablementCacheUnknown {
 		return nil
 	}
@@ -204,10 +240,44 @@ func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEn
 	}
 	client, err := NewAuthenticatedAPIClient(ctx, false)
 	if err != nil {
-		return err
+		return nil
 	}
 	_, err = refreshTrailsEnabledCacheForScope(ctx, client, scope)
 	return err
+}
+
+// trailRefreshSpawn is the process-spawn seam used by
+// spawnDetachedTrailEnablementRefresh. Swapped in tests so they can assert
+// SessionStart never blocks on it without forking a real subprocess (a real
+// `go test` binary doesn't understand `__refresh_trail_enablement` as an
+// argument). Production code always uses spawnDetachedTrailRefreshProcess.
+var trailRefreshSpawn = spawnDetachedTrailRefreshProcess
+
+// spawnDetachedTrailEnablementRefresh starts a detached child process that
+// runs runTrailEnablementRefresh in the background. Best-effort: if the
+// worktree root can't be resolved or the subprocess can't be spawned, the
+// cache simply stays unknown and the next SessionStart tries again.
+func spawnDetachedTrailEnablementRefresh(ctx context.Context) {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	trailRefreshSpawn(worktreeRoot)
+}
+
+// newRefreshTrailEnablementCmd creates the hidden command that performs the
+// (potentially slow) trails-enablement network refresh out of band. It is
+// invoked by spawnDetachedTrailEnablementRefresh from a detached subprocess
+// and should not be called directly.
+func newRefreshTrailEnablementCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "__refresh_trail_enablement",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runTrailEnablementRefresh(cmd.Context())
+		},
+	}
 }
 
 func refreshTrailsEnabledCache(ctx context.Context, client *api.Client) (bool, error) {

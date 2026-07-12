@@ -2,10 +2,14 @@ package cli
 
 import (
 	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2228,5 +2232,100 @@ func TestPromptWindowStaleHookDoesNotResetEarly(t *testing.T) {
 	}
 	if got := writeCheckpoint(s); got != 3 {
 		t.Fatalf("back-to-back checkpoint B after stale hook = %d, want 3", got)
+	}
+}
+
+// TestHandleLifecycleSessionStart_NoSynchronousNetworkDialForTrailEnablement
+// guards against #450 (SessionStart hooks stalling Claude Code startup):
+// the trails-enablement cache refresh must never dial the network from the
+// SessionStart hook itself. A slow/unreachable API host previously added up
+// to trailEnablementSessionStartRefreshTimeout (1s) of synchronous latency to
+// every session start once the hourly cache went stale.
+//
+// The sentinel server responds slowly on purpose — if SessionStart ever dials
+// it directly (regressing to the old synchronous behavior), this test proves
+// it two ways: the sentinel is hit (dialed > 0) and/or the call takes far
+// longer than a bare in-process hook should.
+func TestHandleLifecycleSessionStart_NoSynchronousNetworkDialForTrailEnablement(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	var dialed int32
+	sentinel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&dialed, 1)
+		time.Sleep(5 * time.Second)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer sentinel.Close()
+	t.Setenv("ENTIRE_API_BASE_URL", sentinel.URL)
+
+	var spawnCount int32
+	prevSpawn := trailRefreshSpawn
+	trailRefreshSpawn = func(worktreeRoot string) {
+		atomic.AddInt32(&spawnCount, 1)
+		if worktreeRoot == "" {
+			t.Error("expected non-empty worktree root passed to trail refresh spawn")
+		}
+	}
+	t.Cleanup(func() { trailRefreshSpawn = prevSpawn })
+
+	ag := newMockHookResponseAgent()
+	event := &agent.Event{
+		Type:      agent.SessionStart,
+		SessionID: "test-no-sync-trail-dial",
+		Timestamp: time.Now(),
+	}
+
+	start := time.Now()
+	err := handleLifecycleSessionStart(context.Background(), ag, event)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	if elapsed > time.Second {
+		t.Fatalf("handleLifecycleSessionStart took %v; trails-enablement refresh must be detached, not synchronous (#450)", elapsed)
+	}
+	if atomic.LoadInt32(&dialed) != 0 {
+		t.Fatalf("SessionStart dialed the trails-enablement API synchronously (#450 regression); the refresh must run out of process")
+	}
+	if atomic.LoadInt32(&spawnCount) != 1 {
+		t.Fatalf("expected exactly one detached trail-enablement refresh spawn, got %d", spawnCount)
+	}
+}
+
+// TestRunTrailEnablementRefresh_BoundedByTimeoutAgainstUnresponsiveHost
+// verifies the deferred work spawned for #450 still completes (or at least
+// gives up) within its own bounded timeout when the API host never
+// responds — the network work that used to block SessionStart must still
+// happen, just out of the hook's critical path, and it must not hang forever.
+func TestRunTrailEnablementRefresh_BoundedByTimeoutAgainstUnresponsiveHost(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			// Accept the connection but never write anything back (no TLS
+			// handshake, no HTTP response) — simulates a blackholed/firewalled
+			// host, which is what triggered the original 1s stall per call.
+			_ = conn
+		}
+	}()
+	t.Setenv("ENTIRE_API_BASE_URL", "https://"+ln.Addr().String())
+
+	start := time.Now()
+	refreshErr := runTrailEnablementRefresh(context.Background())
+	elapsed := time.Since(start)
+
+	// Best-effort: network failure must not surface as a hard error.
+	require.NoError(t, refreshErr)
+	if elapsed > trailEnablementRefreshTimeout+2*time.Second {
+		t.Fatalf("runTrailEnablementRefresh took %v, expected to give up within roughly %v", elapsed, trailEnablementRefreshTimeout)
 	}
 }

@@ -140,6 +140,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newRunnerCmd()) // 'runner' (setup/tune runners); hidden during maturation
 	cmd.AddCommand(newSendAnalyticsCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
+	cmd.AddCommand(newRefreshTrailEnablementCmd())
 
 	cmd.SetVersionTemplate(versionString())
 
