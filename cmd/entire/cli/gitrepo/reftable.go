@@ -113,12 +113,12 @@ func (s *reftableStorer) SetReference(ref *plumbing.Reference) error {
 		return nil
 	}
 	if ref.Type() == plumbing.SymbolicReference {
-		if _, stderr, err := s.runGit("symbolic-ref", ref.Name().String(), ref.Target().String()); err != nil {
+		if _, stderr, err := s.runGit("symbolic-ref", "--end-of-options", ref.Name().String(), ref.Target().String()); err != nil {
 			return fmt.Errorf("reftable set symbolic ref %s: %s: %w", ref.Name(), strings.TrimSpace(string(stderr)), err)
 		}
 		return nil
 	}
-	if _, stderr, err := s.runGit("update-ref", ref.Name().String(), ref.Hash().String()); err != nil {
+	if _, stderr, err := s.runGit("update-ref", "--end-of-options", ref.Name().String(), ref.Hash().String()); err != nil {
 		return fmt.Errorf("reftable set ref %s: %s: %w", ref.Name(), strings.TrimSpace(string(stderr)), err)
 	}
 	return nil
@@ -126,7 +126,15 @@ func (s *reftableStorer) SetReference(ref *plumbing.Reference) error {
 
 // CheckAndSetReference performs a compare-and-swap update. When old is non-nil
 // the update is conditioned on the current value, mirroring go-git's atomic
-// semantics; a mismatch is reported as storage.ErrReferenceHasChanged.
+// semantics; a genuine mismatch is reported as storage.ErrReferenceHasChanged.
+//
+// Only a real compare-and-swap conflict maps to that sentinel. Callers such as
+// strategy.atomicSetV1Ref treat ErrReferenceHasChanged as "another worktree
+// advanced the ref" and abort the push as a concurrency event, while wrapping
+// every other error as a genuine failure. Mapping an unrelated failure (bad
+// object, invalid ref name, lock contention, timeout, git spawn failure) to the
+// conflict sentinel would misreport a storage error as a benign race, so those
+// are surfaced as themselves.
 func (s *reftableStorer) CheckAndSetReference(newRef, old *plumbing.Reference) error {
 	if newRef == nil {
 		return nil
@@ -138,12 +146,26 @@ func (s *reftableStorer) CheckAndSetReference(newRef, old *plumbing.Reference) e
 	if old == nil {
 		return s.SetReference(newRef)
 	}
-	if _, _, err := s.runGit("update-ref", newRef.Name().String(), newRef.Hash().String(), old.Hash().String()); err != nil {
-		// git update-ref fails when the stored value differs from the expected
-		// old value; surface the sentinel go-git callers check for.
+	_, stderr, err := s.runGit("update-ref", "--end-of-options", newRef.Name().String(), newRef.Hash().String(), old.Hash().String())
+	if err == nil {
+		return nil
+	}
+	if isRefCASConflict(stderr) {
 		return gogitstorage.ErrReferenceHasChanged
 	}
-	return nil
+	return fmt.Errorf("reftable CAS ref %s: %s: %w", newRef.Name(), strings.TrimSpace(string(stderr)), err)
+}
+
+// isRefCASConflict reports whether git update-ref stderr indicates a
+// compare-and-swap conflict: the stored value was not the expected old value
+// ("... is at X but expected Y"), or a create-if-absent update found the ref
+// already present ("reference already exists"). These are the only failures
+// that mean the reference changed concurrently. Object/name/lock/spawn errors
+// carry different messages and must not be misclassified as conflicts.
+func isRefCASConflict(stderr []byte) bool {
+	msg := strings.ToLower(string(stderr))
+	return strings.Contains(msg, "but expected") ||
+		strings.Contains(msg, "reference already exists")
 }
 
 // Reference returns the reference with the given name, preserving symbolic refs
@@ -151,14 +173,14 @@ func (s *reftableStorer) CheckAndSetReference(newRef, old *plumbing.Reference) e
 func (s *reftableStorer) Reference(name plumbing.ReferenceName) (*plumbing.Reference, error) {
 	// Symbolic refs: symbolic-ref exits 0 and prints the target only for a
 	// genuine symbolic ref; -q suppresses the error for non-symbolic names.
-	if target, _, err := s.runGit("symbolic-ref", "-q", name.String()); err == nil && target != "" {
+	if target, _, err := s.runGit("symbolic-ref", "-q", "--end-of-options", name.String()); err == nil && target != "" {
 		return plumbing.NewSymbolicReference(name, plumbing.ReferenceName(target)), nil
 	}
 
 	// Hash refs: rev-parse --verify resolves the ref to the object it points at.
 	// "^0" would peel tags; we want the ref's direct target, so verify the name
 	// as-is. A non-existent ref exits non-zero.
-	out, _, err := s.runGit("rev-parse", "--verify", "--quiet", name.String())
+	out, _, err := s.runGit("rev-parse", "--verify", "--quiet", "--end-of-options", name.String())
 	if err != nil || out == "" {
 		return nil, plumbing.ErrReferenceNotFound
 	}
@@ -176,9 +198,9 @@ func (s *reftableStorer) IterReferences() (storer.ReferenceIter, error) {
 
 	// HEAD (symbolic on a branch, detached hash otherwise) is not emitted by
 	// for-each-ref, so resolve it explicitly first.
-	if target, _, err := s.runGit("symbolic-ref", "-q", "HEAD"); err == nil && target != "" {
+	if target, _, err := s.runGit("symbolic-ref", "-q", "--end-of-options", "HEAD"); err == nil && target != "" {
 		refs = append(refs, plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.ReferenceName(target)))
-	} else if out, _, err := s.runGit("rev-parse", "--verify", "--quiet", "HEAD"); err == nil && out != "" {
+	} else if out, _, err := s.runGit("rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD"); err == nil && out != "" {
 		if h := plumbing.NewHash(out); !h.IsZero() {
 			refs = append(refs, plumbing.NewHashReference(plumbing.HEAD, h))
 		}
@@ -228,13 +250,13 @@ func (s *reftableStorer) IterReferences() (storer.ReferenceIter, error) {
 func (s *reftableStorer) RemoveReference(name plumbing.ReferenceName) error {
 	// A symbolic ref must be deleted with symbolic-ref -d; update-ref -d on a
 	// symbolic ref would delete the ref it points at.
-	if target, _, err := s.runGit("symbolic-ref", "-q", name.String()); err == nil && target != "" {
-		if _, stderr, delErr := s.runGit("symbolic-ref", "-d", name.String()); delErr != nil {
+	if target, _, err := s.runGit("symbolic-ref", "-q", "--end-of-options", name.String()); err == nil && target != "" {
+		if _, stderr, delErr := s.runGit("symbolic-ref", "-d", "--end-of-options", name.String()); delErr != nil {
 			return fmt.Errorf("reftable remove symbolic ref %s: %s: %w", name, strings.TrimSpace(string(stderr)), delErr)
 		}
 		return nil
 	}
-	_, stderr, err := s.runGit("update-ref", "-d", name.String())
+	_, stderr, err := s.runGit("update-ref", "-d", "--end-of-options", name.String())
 	if err != nil {
 		msg := strings.ToLower(strings.TrimSpace(string(stderr)))
 		// Deleting an already-absent ref is not an error for our callers.
