@@ -361,6 +361,46 @@ func TestExecuteAgentHookStopReturnsFastWhenSettingsCorrupted(t *testing.T) {
 		"stop hook took %s against a corrupted settings file; want a fast short-circuit, not the transcript-flush-sentinel timeout path", elapsed)
 }
 
+// TestExecuteAgentHookCapturesWhenEnabledViaLocalSettingsOnly guards against a
+// regression in the #524 fix: `entire enable --local` writes only
+// .entire/settings.local.json and never creates the base .entire/settings.json
+// (see determineSettingsTarget in setup.go). The disabled-hook gate must
+// recognize that local-only enablement — gating on the base file alone
+// (settings.IsSetUp) would silently no-op every agent hook for that repo and
+// drop all checkpoint capture. Asserted via the same "session was claimed"
+// signal (the .agent hint StoreAgentTypeHint writes during SessionStart
+// dispatch) the short-circuit tests above assert the *absence* of.
+func TestExecuteAgentHookCapturesWhenEnabledViaLocalSettingsOnly(t *testing.T) {
+	setupStopTestRepo(t)
+	repoRoot := mustGetwd(t)
+
+	entireDir := filepath.Join(repoRoot, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o750))
+	// Local-only enablement: settings.local.json present, base settings.json absent.
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(`{"enabled":true}`), 0o600))
+	require.NoFileExists(t, filepath.Join(entireDir, "settings.json"))
+
+	transcriptPath := filepath.Join(repoRoot, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"content":"hi"}}`+"\n"), 0o600))
+
+	sessionID := "local-only-session-start"
+	payload, err := json.Marshal(map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+	})
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, false))
+
+	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
+	require.FileExists(t, hintPath, "SessionStart must dispatch and claim the session when Entire is enabled via settings.local.json only")
+}
+
 func TestAgentHookPolicyFailsWhenRepoCannotOpen(t *testing.T) {
 	_, err := agentHookPolicy(context.Background(), filepath.Join(t.TempDir(), "missing"))
 
