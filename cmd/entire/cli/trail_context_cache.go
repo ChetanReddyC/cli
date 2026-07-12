@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -226,8 +227,15 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, trailEnablementRefreshTimeout)
 	defer cancel()
 
+	// This runs detached with stdout/stderr discarded, so log at debug to the
+	// repo's .entire/logs/entire.log (initialized by newRefreshTrailEnablementCmd).
+	// Without this, an unreachable/failing host — the exact #450 symptom — would
+	// leave the background refresh silently failing with no diagnostic trail.
+	logCtx := logging.WithComponent(ctx, "trail-refresh")
+
 	scope, err := currentTrailEnablementScope(ctx)
 	if err != nil {
+		logging.Debug(logCtx, "trails enablement refresh skipped: scope unresolved", "error", err.Error())
 		return nil
 	}
 	// Another process (e.g. a fast-following SessionStart, or a concurrent
@@ -240,10 +248,15 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 	}
 	client, err := NewAuthenticatedAPIClient(ctx, false)
 	if err != nil {
+		logging.Debug(logCtx, "trails enablement refresh skipped: authenticated client unavailable", "error", err.Error())
 		return nil
 	}
-	_, err = refreshTrailsEnabledCacheForScope(ctx, client, scope)
-	return err
+	if _, err := refreshTrailsEnabledCacheForScope(ctx, client, scope); err != nil {
+		logging.Debug(logCtx, "trails enablement refresh failed", "error", err.Error())
+		return err
+	}
+	logging.Debug(logCtx, "trails enablement refresh completed", "enabled_repo_key", scope.RepoKey)
+	return nil
 }
 
 // trailRefreshSpawn is the process-spawn seam used by
@@ -253,16 +266,65 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 // argument). Production code always uses spawnDetachedTrailRefreshProcess.
 var trailRefreshSpawn = spawnDetachedTrailRefreshProcess
 
+// trailRefreshSpawnThrottle bounds how often SessionStart forks a detached
+// refresh child for a given repo. When the API host is unreachable the refresh
+// never writes the cache, so cachedTrailsEnablementForScope stays unknown and
+// the hourly TTL never starts — without this guard every SessionStart (and
+// every concurrent worktree) would fork a fresh child that re-opens the repo,
+// re-resolves auth, and re-dials the dead host. Tying the window to the child's
+// own timeout collapses a burst of hooks to roughly one child per window while
+// still retrying promptly once the host recovers.
+const trailRefreshSpawnThrottle = trailEnablementRefreshTimeout
+
 // spawnDetachedTrailEnablementRefresh starts a detached child process that
 // runs runTrailEnablementRefresh in the background. Best-effort: if the
 // worktree root can't be resolved or the subprocess can't be spawned, the
-// cache simply stays unknown and the next SessionStart tries again.
+// cache simply stays unknown and the next SessionStart tries again. A recent
+// spawn for the same repo short-circuits so a burst of hooks doesn't fork a
+// herd of redundant refresh children (see trailRefreshRecentlySpawned).
 func spawnDetachedTrailEnablementRefresh(ctx context.Context) {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return
 	}
+	if commonDir, err := session.GetGitCommonDir(ctx); err == nil &&
+		trailRefreshRecentlySpawned(commonDir, time.Now()) {
+		return
+	}
 	trailRefreshSpawn(worktreeRoot)
+}
+
+// trailRefreshRecentlySpawned reports whether a detached refresh was spawned for
+// this repo within trailRefreshSpawnThrottle and, when it wasn't, records now as
+// the most recent spawn. The read-and-record is serialized with a flock keyed to
+// the shared git-common-dir (so every worktree of the repo agrees), collapsing a
+// burst of concurrent SessionStart hooks to a single child rather than one per
+// hook. Best-effort: any error resolving, locking, or writing the marker falls
+// through to spawning — never worse than before this guard existed.
+func trailRefreshRecentlySpawned(commonDir string, now time.Time) bool {
+	dir := filepath.Join(commonDir, "entire")
+	// Create the directory before acquiring the lock: flock.Acquire opens the
+	// lock file, which fails if its parent doesn't exist yet (mirrors
+	// ModifyClonePreferences, which MkdirAlls before locking).
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return false
+	}
+	markerPath := filepath.Join(dir, "trail-refresh-spawn")
+	release, err := flock.Acquire(markerPath + ".lock")
+	if err != nil {
+		return false
+	}
+	defer release()
+
+	if data, readErr := os.ReadFile(markerPath); readErr == nil { //nolint:gosec // markerPath is derived from the trusted git-common-dir, not user input
+		if last, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); parseErr == nil &&
+			now.After(last) && now.Sub(last) < trailRefreshSpawnThrottle {
+			return true
+		}
+	}
+	//nolint:errcheck // best-effort marker; a failed write just means the next hook re-spawns
+	_ = os.WriteFile(markerPath, []byte(now.UTC().Format(time.RFC3339Nano)), 0o600)
+	return false
 }
 
 // newRefreshTrailEnablementCmd creates the hidden command that performs the
@@ -275,7 +337,16 @@ func newRefreshTrailEnablementCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runTrailEnablementRefresh(cmd.Context())
+			ctx := cmd.Context()
+			// Detached child with discarded stdout/stderr: initialize file
+			// logging so a failing background refresh (the #450 unreachable-host
+			// symptom) is diagnosable in .entire/logs/entire.log rather than
+			// vanishing. Best-effort, mirroring the other hook-side commands.
+			logging.SetLogLevelGetter(GetLogLevel)
+			if err := logging.Init(ctx, ""); err == nil {
+				defer logging.Close()
+			}
+			return runTrailEnablementRefresh(ctx)
 		},
 	}
 }

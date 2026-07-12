@@ -2346,3 +2346,65 @@ func TestRunTrailEnablementRefresh_BoundedByTimeoutAgainstUnresponsiveHost(t *te
 		t.Fatalf("runTrailEnablementRefresh took %v, expected to give up within roughly %v", elapsed, trailEnablementRefreshTimeout)
 	}
 }
+
+// TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile guards the #450
+// diagnosability fix: the detached __refresh_trail_enablement child runs with
+// stdout/stderr discarded, so a failing background refresh must still leave a
+// trail in .entire/logs/entire.log instead of vanishing. The command runs in a
+// repo with no origin remote, so the scope resolves-and-fails locally (no
+// network) and that failure has to be logged to the repo's log file.
+func TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile(t *testing.T) {
+	setupStopTestRepo(t)
+	t.Setenv("ENTIRE_LOG_LEVEL", "debug")
+
+	cmd := newRefreshTrailEnablementCmd()
+	cmd.SetArgs([]string{})
+	require.NoError(t, cmd.ExecuteContext(context.Background()))
+
+	root, err := paths.WorktreeRoot(context.Background())
+	require.NoError(t, err)
+	logData, err := os.ReadFile(filepath.Join(root, ".entire", "logs", "entire.log"))
+	require.NoError(t, err)
+	require.Contains(t, string(logData), "trails enablement refresh skipped: scope unresolved",
+		"background refresh failure must be diagnosable in .entire/logs/entire.log (#450)")
+}
+
+// TestTrailRefreshRecentlySpawned_ThrottlesWithinWindow verifies the spawn-side
+// guard (#450 follow-up): within trailRefreshSpawnThrottle of a recorded spawn,
+// further spawns are suppressed; once the window passes a fresh spawn is allowed
+// and re-recorded. Without this, an unreachable host — which never writes the
+// cache, so the hourly TTL never starts — would fork a refresh child on every
+// SessionStart.
+func TestTrailRefreshRecentlySpawned_ThrottlesWithinWindow(t *testing.T) {
+	commonDir := t.TempDir()
+	now := time.Now()
+
+	require.False(t, trailRefreshRecentlySpawned(commonDir, now),
+		"first call records the spawn and is not throttled")
+	require.True(t, trailRefreshRecentlySpawned(commonDir, now.Add(time.Second)),
+		"a second attempt within the window is throttled")
+	require.False(t, trailRefreshRecentlySpawned(commonDir, now.Add(trailRefreshSpawnThrottle)),
+		"at the window boundary the spawn is allowed and re-recorded")
+	require.True(t, trailRefreshRecentlySpawned(commonDir, now.Add(trailRefreshSpawnThrottle+time.Second)),
+		"an attempt within the window of the re-recorded spawn is throttled")
+}
+
+// TestSpawnDetachedTrailEnablementRefresh_CollapsesBurst verifies the throttle is
+// actually wired into the spawn path: a burst of SessionStart-driven attempts for
+// the same repo forks a single child, not one per hook (#450 follow-up).
+func TestSpawnDetachedTrailEnablementRefresh_CollapsesBurst(t *testing.T) {
+	setupStopTestRepo(t)
+
+	var spawnCount int32
+	prevSpawn := trailRefreshSpawn
+	trailRefreshSpawn = func(string) { atomic.AddInt32(&spawnCount, 1) }
+	t.Cleanup(func() { trailRefreshSpawn = prevSpawn })
+
+	spawnDetachedTrailEnablementRefresh(context.Background())
+	spawnDetachedTrailEnablementRefresh(context.Background())
+	spawnDetachedTrailEnablementRefresh(context.Background())
+
+	if got := atomic.LoadInt32(&spawnCount); got != 1 {
+		t.Fatalf("expected the burst to collapse to a single detached spawn, got %d", got)
+	}
+}
