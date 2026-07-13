@@ -189,6 +189,14 @@ func ReadAndParseHookInput[T any](stdin io.Reader) (*T, error) {
 // (e.g. key-name fallbacks, or forwarding the bytes to a subprocess) use this
 // directly, while the common case uses ReadAndParseHookInput.
 func ReadHookInputRaw(stdin io.Reader) (json.RawMessage, error) {
+	return ReadHookInputRawLimited(stdin, -1)
+}
+
+// ReadHookInputRawLimited is ReadHookInputRaw with a ceiling of limit bytes on
+// the JSON value (limit < 0 means unlimited). It is used at the external/plugin
+// boundary to bound an untrusted payload — without reintroducing the EOF-wait
+// hang, since the streaming decoder still returns on the first complete value.
+func ReadHookInputRawLimited(stdin io.Reader, limit int64) (json.RawMessage, error) {
 	// If stdin is an interactive terminal there is no payload coming at all: the
 	// command was run by hand, or the agent left the console attached instead of
 	// wiring up a pipe. Decoding would block waiting for input that never comes,
@@ -197,8 +205,12 @@ func ReadHookInputRaw(stdin io.Reader) (json.RawMessage, error) {
 		return nil, errors.New("empty hook input")
 	}
 
+	r := stdin
+	if limit >= 0 {
+		r = io.LimitReader(stdin, limit)
+	}
 	var raw json.RawMessage
-	if err := json.NewDecoder(stdin).Decode(&raw); err != nil {
+	if err := json.NewDecoder(r).Decode(&raw); err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil, errors.New("empty hook input")
 		}

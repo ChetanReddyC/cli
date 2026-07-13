@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -233,19 +232,16 @@ func (e *Agent) HookNames() []string {
 
 func (e *Agent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	const maxParseHookBytes = 10 * 1024 * 1024 // 10 MB
-	// Bail out promptly on an interactive terminal — no payload is coming, and
-	// io.ReadAll would otherwise block forever (issue #1398). We keep io.ReadAll
-	// for the piped case because the external "parse-hook" contract forwards the
-	// raw stdin bytes verbatim (which may be empty or non-JSON), so unlike the
-	// built-in agents we can't stream-decode a single JSON value here.
-	if agent.StdinLooksInteractive(stdin) {
-		return nil, errors.New("parse-hook: no hook input on stdin")
-	}
-	data, err := io.ReadAll(io.LimitReader(stdin, maxParseHookBytes))
+	// Stream a single (size-bounded) JSON value rather than io.ReadAll, so the
+	// hook never blocks waiting for stdin EOF that some agents don't send on
+	// Windows/Git Bash (issue #1398). The external "parse-hook" contract receives
+	// the host's hook payload — which is JSON — and we forward its raw bytes
+	// verbatim to the subprocess, so a plain byte copy is preserved.
+	raw, err := agent.ReadHookInputRawLimited(stdin, maxParseHookBytes)
 	if err != nil {
 		return nil, fmt.Errorf("parse-hook: read stdin: %w", err)
 	}
-	stdout, err := e.run(ctx, data, "parse-hook", "--hook", hookName)
+	stdout, err := e.run(ctx, raw, "parse-hook", "--hook", hookName)
 	if err != nil {
 		return nil, fmt.Errorf("parse-hook: %w", err)
 	}

@@ -53,6 +53,49 @@ func TestReadAndParseHookInput_ReturnsBeforeEOF(t *testing.T) {
 	}
 }
 
+// TestReadHookInputRawLimited_ReturnsBeforeEOF is the external-agent analogue of
+// TestReadAndParseHookInput_ReturnsBeforeEOF: the size-bounded raw reader must
+// also return on the first complete JSON value without waiting for stdin close
+// (issue #1398).
+func TestReadHookInputRawLimited_ReturnsBeforeEOF(t *testing.T) {
+	t.Parallel()
+
+	pr, pw := io.Pipe()
+	go func() {
+		if _, err := pw.Write([]byte(`{"session_file":"/t.jsonl"}`)); err != nil {
+			_ = pw.CloseWithError(err)
+		}
+		// No Close(): the write end stays open, so EOF never arrives.
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := ReadHookInputRawLimited(pr, 10*1024*1024)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ReadHookInputRawLimited blocked waiting for EOF — regression of #1398")
+	}
+}
+
+// TestReadHookInputRawLimited_RejectsOversized proves the byte ceiling turns an
+// over-limit payload into an error rather than an unbounded read.
+func TestReadHookInputRawLimited_RejectsOversized(t *testing.T) {
+	t.Parallel()
+
+	big := `{"k":"` + strings.Repeat("x", 512) + `"}`
+	_, err := ReadHookInputRawLimited(strings.NewReader(big), 64)
+	if err == nil {
+		t.Fatal("expected error for payload exceeding the limit, got nil")
+	}
+}
+
 func TestReadAndParseHookInput_EmptyInputEOF(t *testing.T) {
 	t.Parallel()
 
