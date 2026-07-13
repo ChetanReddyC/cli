@@ -42,9 +42,13 @@ type GitHubBootstrapOptions struct {
 	// still created, but nothing is pushed.
 	SkipInitialCommit bool
 	// Yes accepts all defaults without prompting: init repo, create GitHub
-	// repo under the user's account (private), default commit message.
-	// Explicit flags (--no-github, --repo-owner, etc.) take precedence.
+	// repo under the user's account (private), default commit message, and
+	// push. Explicit flags (--no-github, --repo-owner, etc.) take precedence.
 	Yes bool
+	// Push opts into pushing the initial commit to the created GitHub remote
+	// without prompting. Pushing is otherwise an explicit, separate opt-in
+	// (interactive "yes" or --yes). Implies creating the remote.
+	Push bool
 }
 
 // bootstrapRunner executes external commands. Tests override this to avoid
@@ -161,33 +165,35 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 	paths.ClearWorktreeRootCache()
 	fmt.Fprintln(w, "  ✓ Initialized empty git repository")
 
-	// Step 3: decide whether to create a GitHub repo. If gh is missing or the
-	// user passed --no-github, we skip that branch but still bootstrap the
-	// local repo.
-	useGitHub := !opts.NoGitHub
-	if useGitHub {
-		if !ghAvailable(ctx, runner) {
-			fmt.Fprintln(errW, "gh CLI not found. Install it from https://cli.github.com/ and run `gh auth login` to add a GitHub remote.")
-			fmt.Fprintln(errW, "Continuing with local initialization only.")
-			useGitHub = false
-		} else if !ghAuthenticated(ctx, runner) {
-			fmt.Fprintln(errW, "gh CLI is not authenticated. Run `gh auth login` to add a GitHub remote.")
-			fmt.Fprintln(errW, "Continuing with local initialization only.")
-			useGitHub = false
-		}
-	}
-
-	// Step 3b: ask a simple yes/no before diving into owner/name/visibility
-	// prompts. Skip the confirm when any gh-specific flag is set (the flag
-	// implies intent) or when we're non-interactive (keep the documented
-	// happy path: default to yes).
-	if useGitHub && !opts.Yes && !ghFlagsProvided(opts) && interactive.CanPromptInteractively() {
-		confirmed, err := confirmCreateGitHubRepo(cwd)
-		if err != nil {
-			return nil, err
-		}
-		if !confirmed {
-			useGitHub = false
+	// Step 3: decide whether to create a GitHub repo. Creating a remote is an
+	// explicit opt-in: it happens only on an explicit signal (repo flags,
+	// --push, or --yes) or an interactive "yes". A non-interactive run with no
+	// such signal stays local-only — we never create a repo on the user's
+	// behalf. --no-github always wins.
+	useGitHub := false
+	if !opts.NoGitHub {
+		explicit := ghCreateRequested(opts)
+		// Only probe gh (and warn about a missing/unauthenticated CLI) when the
+		// user actually wants a GitHub repo — explicitly, or via the confirm
+		// prompt we're about to show interactively.
+		if explicit || interactive.CanPromptInteractively() {
+			switch {
+			case !ghAvailable(ctx, runner):
+				fmt.Fprintln(errW, "gh CLI not found. Install it from https://cli.github.com/ and run `gh auth login` to add a GitHub remote.")
+				fmt.Fprintln(errW, "Continuing with local initialization only.")
+			case !ghAuthenticated(ctx, runner):
+				fmt.Fprintln(errW, "gh CLI is not authenticated. Run `gh auth login` to add a GitHub remote.")
+				fmt.Fprintln(errW, "Continuing with local initialization only.")
+			case explicit:
+				useGitHub = true
+			default:
+				// Interactive with no explicit signal: prompt, defaulting to No.
+				confirmed, err := confirmCreateGitHubRepo(cwd)
+				if err != nil {
+					return nil, err
+				}
+				useGitHub = confirmed
+			}
 		}
 	}
 
@@ -220,19 +226,23 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 		}
 	}
 
-	// Step 6: separate guard for the push. Pushing publishes the directory's
-	// contents to the remote — a distinct outward-facing action from creating
-	// the repo — so confirm it on its own and default to No. Only relevant
-	// when we'll create a GitHub repo and have a commit to push. Gated like
-	// the create confirm: explicit flags / --yes / non-interactive keep the
-	// documented happy path (push).
-	push := useGitHub && commit
-	if push && !opts.Yes && !ghFlagsProvided(opts) && interactive.CanPromptInteractively() {
-		confirmed, err := confirmPushToRemote(fullName)
-		if err != nil {
-			return nil, err
+	// Step 6: pushing is also an explicit opt-in, separate from creating the
+	// repo. Publishing the directory's contents is a distinct outward-facing
+	// action, so it happens only on an explicit signal (--push or --yes) or an
+	// interactive "yes". Otherwise the repo is created but left unpushed. Only
+	// relevant when we'll create a GitHub repo and have a commit to push.
+	push := false
+	if useGitHub && commit {
+		switch {
+		case opts.Yes || opts.Push:
+			push = true
+		case interactive.CanPromptInteractively():
+			confirmed, err := confirmPushToRemote(fullName)
+			if err != nil {
+				return nil, err
+			}
+			push = confirmed
 		}
-		push = confirmed
 	}
 
 	return &bootstrapState{
@@ -330,6 +340,14 @@ func runGitHubBootstrapFinalize(ctx context.Context, w io.Writer, s *bootstrapSt
 // the "create on GitHub?" confirm prompt in that case.
 func ghFlagsProvided(opts GitHubBootstrapOptions) bool {
 	return opts.RepoName != "" || opts.RepoOwner != "" || opts.RepoVisibility != ""
+}
+
+// ghCreateRequested reports whether the caller has explicitly opted into
+// creating a GitHub repo without an interactive prompt: --yes, --push (which
+// needs a remote to push to), or any repo-targeting flag. When false and the
+// session is non-interactive, the bootstrap stays local-only.
+func ghCreateRequested(opts GitHubBootstrapOptions) bool {
+	return opts.Yes || opts.Push || ghFlagsProvided(opts)
 }
 
 // confirmCreateGitHubRepo asks the user whether they want to also create

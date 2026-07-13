@@ -385,7 +385,9 @@ func TestRunGitHubBootstrap_GhMissingFallsBackToLocal(t *testing.T) {
 	r.set("git", []string{"add", "-A"}, "", nil)
 	r.set("git", []string{"status", "--porcelain"}, "", nil)
 
-	opts := GitHubBootstrapOptions{InitRepo: true}
+	// A repo flag is an explicit GitHub request, so gh is probed; since it's
+	// missing we warn and fall back to local-only.
+	opts := GitHubBootstrapOptions{InitRepo: true, RepoName: "wanted"}
 	var errBuf bytes.Buffer
 	err := runGitHubBootstrapWith(context.Background(), io.Discard, &errBuf, opts, r)
 	if err != nil {
@@ -425,6 +427,7 @@ func TestRunGitHubBootstrap_FullNonInteractive(t *testing.T) {
 		RepoName:             "my-new",
 		RepoVisibility:       "private",
 		InitialCommitMessage: "Seed",
+		Push:                 true,
 	}
 	err := runGitHubBootstrapWith(context.Background(), io.Discard, io.Discard, opts, r)
 	if err != nil {
@@ -588,30 +591,79 @@ func TestGhFlagsProvided(t *testing.T) {
 	}
 }
 
-// TestRunGitHubBootstrap_NonInteractive_NoFlagsDefaultsToGitHub confirms the
-// non-interactive happy path still creates a GitHub repo when the user
-// didn't set any explicit flag (the confirm prompt is only interactive).
-func TestRunGitHubBootstrap_NonInteractive_NoFlagsDefaultsToGitHub(t *testing.T) {
+// TestRunGitHubBootstrap_NonInteractive_NoFlagsStaysLocal confirms that a
+// non-interactive bootstrap with no explicit GitHub signal stays local-only:
+// it does not probe gh, create a repo, or push. Creating and pushing are
+// explicit opt-ins (--repo-*, --push, --yes, or an interactive "yes").
+func TestRunGitHubBootstrap_NonInteractive_NoFlagsStaysLocal(t *testing.T) {
 	dir := t.TempDir()
 	restoreCwd(t, dir)
 
 	r := newFakeRunner()
 	r.setIdentityConfigured()
-	r.set("gh", []string{"--version"}, "gh", nil)
-	r.set("gh", []string{"auth", "status"}, "ok", nil)
-	r.set("gh", []string{"api", "user", "--jq", ".login"}, "octocat\n", nil)
-	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "", nil)
-	// Default folder slug derived from t.TempDir().
-	suggested := slugifyRepoName(filepath.Base(dir))
-	r.set("gh", []string{"repo", "view", "octocat/" + suggested, "--json", "name"}, "", errors.New("not found"))
 	r.set("git", []string{"init"}, "", nil)
 
 	state, err := runGitHubBootstrapInitWith(context.Background(), io.Discard, io.Discard, GitHubBootstrapOptions{InitRepo: true}, r)
 	if err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
-	if !state.useGitHub {
-		t.Fatal("non-interactive bootstrap should default to using GitHub")
+	if state.useGitHub {
+		t.Fatal("non-interactive bootstrap with no explicit signal must stay local-only")
+	}
+	if state.push {
+		t.Fatal("push must be false when staying local-only")
+	}
+	// gh must never be probed when no GitHub repo was requested.
+	if r.hasCall(func(c fakeCall) bool { return c.name == "gh" }) {
+		t.Fatal("must not invoke gh when no GitHub repo was requested")
+	}
+}
+
+// TestRunGitHubBootstrap_RepoFlagsCreateButDoNotPush confirms that repo flags
+// opt into creating the GitHub repo but NOT into pushing. Non-interactively,
+// the repo is created and origin configured, but nothing is pushed unless
+// --push or --yes is also given; the user is told how to publish manually.
+func TestRunGitHubBootstrap_RepoFlagsCreateButDoNotPush(t *testing.T) {
+	dir := t.TempDir()
+	restoreCwd(t, dir)
+
+	r := newFakeRunner()
+	r.setIdentityConfigured()
+	r.set("gh", []string{"--version"}, "gh 2.81.0", nil)
+	r.set("gh", []string{"auth", "status"}, "Logged in", nil)
+	r.set("gh", []string{"api", "user", "--jq", ".login"}, "octocat\n", nil)
+	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "", nil)
+	r.set("gh", []string{"repo", "view", "octocat/create-only", "--json", "name"}, "", errors.New("not found"))
+	r.set("git", []string{"init"}, "", nil)
+	r.set("git", []string{"add", "-A"}, "", nil)
+	r.set("git", []string{"status", "--porcelain"}, " M f\n", nil)
+	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "Seed"}, "", nil)
+	r.set("gh", []string{
+		"repo", "create", "octocat/create-only",
+		"--private",
+		"--source=.",
+		"--remote=origin",
+	}, "", nil)
+
+	opts := GitHubBootstrapOptions{
+		InitRepo:             true,
+		RepoName:             "create-only",
+		RepoVisibility:       "private",
+		InitialCommitMessage: "Seed",
+	}
+	var out bytes.Buffer
+	if err := runGitHubBootstrapWith(context.Background(), &out, io.Discard, opts, r); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	if !r.hasCall(argsMatch("gh", []string{"repo", "create"})) {
+		t.Fatal("expected gh repo create when repo flags are given")
+	}
+	if r.hasCall(argsMatch("git", []string{"push"})) {
+		t.Fatal("must not push without --push or --yes")
+	}
+	if !strings.Contains(out.String(), "Skipped push") {
+		t.Fatalf("expected 'Skipped push' guidance, got: %s", out.String())
 	}
 }
 
@@ -648,6 +700,7 @@ func TestRunGitHubBootstrap_InitBeforeFinalize(t *testing.T) {
 		RepoName:             "phased",
 		RepoVisibility:       "private",
 		InitialCommitMessage: "First",
+		Push:                 true,
 	}
 
 	// Phase 1: init. This must NOT call git add/commit/ gh repo create.
@@ -973,6 +1026,23 @@ func TestErrSentinels_DistinctPrePostInit(t *testing.T) {
 	t.Parallel()
 	if errors.Is(errBootstrapDeclined, errBootstrapInterrupted) {
 		t.Fatal("errBootstrapDeclined and errBootstrapInterrupted must not match as the same sentinel")
+	}
+}
+
+func TestEnableCmd_PushNoGitHubMutuallyExclusive(t *testing.T) {
+	setupTestRepo(t)
+
+	cmd := newEnableCmd()
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--push", "--no-github"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when both --push and --no-github are set")
+	}
+	if !strings.Contains(err.Error(), "push") || !strings.Contains(err.Error(), "no-github") {
+		t.Fatalf("expected error to mention both flags, got: %v", err)
 	}
 }
 
