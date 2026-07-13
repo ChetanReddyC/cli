@@ -423,15 +423,12 @@ func TestNewEntireAPICellClient_TargetRoutesToRepoCell(t *testing.T) {
 	}
 }
 
-// TestJurisdictionToken_StoredContext exercises the exported token-only path off
-// a stored login context: it must return the exchanged identity token and mint
-// it with scope=openid, the jurisdiction audience, and the login JWT as
-// subject_token. Not parallel: manipulates env + token store.
 // TestJurisdictionToken_StoredContext proves the stored path mints from the
 // ACTIVE login context (like plain `entire auth token`), deriving the
 // environment from that context's core rather than the data host. No
 // ENTIRE_API_BASE_URL is set, so the default (entire.io) data host must NOT
-// influence the result — only the active context does.
+// influence the result — only the active context does. Not parallel: manipulates
+// env + token store.
 func TestJurisdictionToken_StoredContext(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
@@ -447,10 +444,7 @@ func TestJurisdictionToken_StoredContext(t *testing.T) {
 	if err := tokenstore.Set(svc, "me", tokenstore.EncodeTokenWithExpiration(loginJWT, 7200)); err != nil {
 		t.Fatalf("seed token: %v", err)
 	}
-	ctxObj := &contexts.Context{Name: "me@entire", CoreURL: core, Handle: "me", KeychainService: svc}
-	if err := contexts.Save(configDir, &contexts.File{CurrentContext: ctxObj.Name, Contexts: []*contexts.Context{ctxObj}}); err != nil {
-		t.Fatalf("save contexts: %v", err)
-	}
+	writeActiveContext(t, configDir, "me@entire", core, "me", svc)
 
 	ct := &captureTransport{token: "cell-identity-token"}
 	t.Cleanup(SetCellExchangeTransportForTest(t, ct))
