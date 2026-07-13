@@ -382,9 +382,10 @@ func TestString_SupabaseProviderTokens(t *testing.T) {
 			want:  "service_role key: REDACTED",
 		},
 		{
-			// Canonical .env form. The surrounding quotes break the token so the
-			// entropy layer sees only the low-entropy secret and misses it,
-			// isolating the deterministic provider layer.
+			// Canonical .env form. The chosen token value is low-entropy
+			// (quoting has no effect on secretPattern matching), so the
+			// entropy layer misses it, isolating the deterministic provider
+			// layer.
 			name:  "sb_secret_ in env-style double-quoted assignment",
 			input: `SUPABASE_SERVICE_ROLE_KEY="` + secret + `"`,
 			want:  `SUPABASE_SERVICE_ROLE_KEY="REDACTED"`,
@@ -427,9 +428,10 @@ func TestString_SupabaseProviderTokenOverRedactionGuards(t *testing.T) {
 
 	assertStringRedactionCases(t, []stringRedactionCase{
 		{
-			// Quoted so the entropy layer sees only the low-entropy publishable
-			// value (which it does not flag), proving the provider layer itself
-			// does not target publishable keys.
+			// The publishable fixture is low-entropy (quoting has no effect on
+			// secretPattern matching), so the entropy layer does not flag it,
+			// proving the provider layer itself does not target publishable
+			// keys.
 			name:  "publishable key is not targeted by the provider layer",
 			input: `NEXT_PUBLIC_SUPABASE_KEY="` + publishable + `"`,
 			want:  `NEXT_PUBLIC_SUPABASE_KEY="` + publishable + `"`,

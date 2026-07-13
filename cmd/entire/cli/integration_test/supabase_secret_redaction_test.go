@@ -23,10 +23,11 @@ import (
 //     methodology),
 //   - a sb_publishable_ key (public by design) is NOT over-redacted.
 //
-// Every sb_secret_ occurrence is placed so the surrounding token is
-// low-entropy (quoted or in prose), which the entropy layer (threshold 4.5)
-// and the composite betterleaks Supabase rule both miss — so redaction here is
-// attributable to the deterministic provider-prefix layer added for this fix.
+// Every sb_secret_ occurrence uses a low-entropy synthetic token, which the
+// entropy layer (threshold 4.5) misses regardless of quoting or surrounding
+// prose, and no *.supabase.co URL is co-present, so the composite betterleaks
+// Supabase rule does not fire either — so redaction here is attributable to
+// the deterministic provider-prefix layer added for this fix.
 func TestSupabaseSecretRedaction_FullHookFlow(t *testing.T) {
 	// Hook subprocesses share settings/env; do not run in parallel.
 	// The sb_secret_ / sb_publishable_ prefixes are assembled from fragments so
