@@ -3,11 +3,11 @@ package settings
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // Regression for #1123: `entire enable --local` writes only
@@ -16,11 +16,7 @@ import (
 // no-op'd. It must recognize a local-only setup.
 func TestIsSetUpAndEnabled_LocalSettingsOnly(t *testing.T) {
 	root := t.TempDir()
-	cmd := exec.CommandContext(context.Background(), "git", "init")
-	cmd.Dir = root
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
+	testutil.InitRepo(t, root)
 	entireDir := filepath.Join(root, ".entire")
 	if err := os.MkdirAll(entireDir, 0o755); err != nil {
 		t.Fatal(err)
