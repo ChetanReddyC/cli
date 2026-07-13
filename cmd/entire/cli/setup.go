@@ -1119,11 +1119,12 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 		printEnabledStatus(ctx, w)
 		return nil
 	}
-	// Enable in the same file the setup flow just wrote to. Without this, a plain
-	// `entire enable` (no --project/--local) resolves the strategy write to the
-	// existing project settings.json but wrote the enabled flag to
+	// Enable in the same settings target scope resolved by settingsTargetFile,
+	// which is also what strategy/checkpoint-backend updates above use. Without
+	// this, a plain `entire enable` (no --project/--local) resolved the strategy
+	// write to the existing project settings.json but wrote the enabled flag to
 	// settings.local.json, leaving the project file the user disabled still
-	// enabled=false (#1140). settingsTargetFile picks the correct scope.
+	// enabled=false (#1140).
 	targetFile, _ := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 	return runEnable(ctx, w, targetFile == settings.EntireSettingsFile)
 }
