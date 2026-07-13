@@ -63,6 +63,49 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, agent.WrapProductionSilentHookCommand("entire hooks cursor subagent-stop"))
 }
 
+// TestInstallHooks_WindowsProbeSuccessKeepsShWrappers verifies that on a
+// Windows host where a POSIX sh is runnable, Cursor keeps the sh-based wrappers
+// (parity with non-Windows). Mutates the shared probe, so no t.Parallel().
+func TestInstallHooks_WindowsProbeSuccessKeepsShWrappers(t *testing.T) {
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
+		return true // sh works
+	}))
+
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &CursorAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	hooksFile := readHooksFile(t, tempDir)
+	assertEntryCommand(t, hooksFile.Hooks.SessionStart, agent.WrapProductionSilentHookCommand("entire hooks cursor session-start"))
+	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapProductionSilentHookCommand("entire hooks cursor stop"))
+}
+
+// TestInstallHooks_WindowsProbeFailureUsesCmdWrappers verifies that on a Windows
+// host with no runnable POSIX sh, Cursor installs the native cmd.exe wrappers so
+// hooks actually fire (issue #1424). Mutates the shared probe, so no t.Parallel().
+func TestInstallHooks_WindowsProbeFailureUsesCmdWrappers(t *testing.T) {
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
+		return false // no working sh
+	}))
+
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &CursorAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	hooksFile := readHooksFile(t, tempDir)
+	assertEntryCommand(t, hooksFile.Hooks.SessionStart, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor session-start"))
+	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor stop"))
+	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor subagent-stop"))
+}
+
 func TestInstallHooks_Idempotent(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)

@@ -130,13 +130,21 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, localDev bool, force boo
 	subagentStartCmd := cmdPrefix + HookNameSubagentStart
 	subagentEndCmd := cmdPrefix + HookNameSubagentStop
 	if !localDev {
-		sessionStartCmd = agent.WrapProductionSilentHookCommand(sessionStartCmd)
-		sessionEndCmd = agent.WrapProductionSilentHookCommand(sessionEndCmd)
-		beforeSubmitPromptCmd = agent.WrapProductionSilentHookCommand(beforeSubmitPromptCmd)
-		stopCmd = agent.WrapProductionSilentHookCommand(stopCmd)
-		preCompactCmd = agent.WrapProductionSilentHookCommand(preCompactCmd)
-		subagentStartCmd = agent.WrapProductionSilentHookCommand(subagentStartCmd)
-		subagentEndCmd = agent.WrapProductionSilentHookCommand(subagentEndCmd)
+		// Cursor spawns hook commands through the native OS shell (cmd.exe on
+		// Windows), so a `sh -c '…'` wrapper silently fails to launch on a
+		// Windows host without a working POSIX sh — no hook fires and, because
+		// this is the *silent* wrapper, no error surfaces (issue #1424).
+		// UseWindowsProductionHooks probes for a runnable sh and only swaps in
+		// the native cmd.exe wrapper when one is absent, so this is a no-op on
+		// hosts (incl. all non-Windows) where the sh wrapper already works.
+		useWindowsHooks := agent.UseWindowsProductionHooks(ctx, localDev)
+		sessionStartCmd = agent.WrapProductionSilentHookCommandForOS(sessionStartCmd, useWindowsHooks)
+		sessionEndCmd = agent.WrapProductionSilentHookCommandForOS(sessionEndCmd, useWindowsHooks)
+		beforeSubmitPromptCmd = agent.WrapProductionSilentHookCommandForOS(beforeSubmitPromptCmd, useWindowsHooks)
+		stopCmd = agent.WrapProductionSilentHookCommandForOS(stopCmd, useWindowsHooks)
+		preCompactCmd = agent.WrapProductionSilentHookCommandForOS(preCompactCmd, useWindowsHooks)
+		subagentStartCmd = agent.WrapProductionSilentHookCommandForOS(subagentStartCmd, useWindowsHooks)
+		subagentEndCmd = agent.WrapProductionSilentHookCommandForOS(subagentEndCmd, useWindowsHooks)
 	}
 
 	count := 0
