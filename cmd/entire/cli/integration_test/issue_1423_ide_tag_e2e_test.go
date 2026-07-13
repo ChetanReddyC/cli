@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -18,7 +17,6 @@ import (
 func TestIssue1423_IDEContextTagStrippedFromSessionPrompt(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
-	defer env.Cleanup()
 
 	env.InitRepo()
 	env.WriteFile("README.md", "# Test")
@@ -37,10 +35,8 @@ func TestIssue1423_IDEContextTagStrippedFromSessionPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session state: %v", err)
 	}
-	if strings.Contains(state.LastPrompt, "ide_opened_file") {
-		t.Fatalf("IDE context tag leaked into the session prompt/title: %q (#1423)", state.LastPrompt)
-	}
-	if !strings.Contains(state.LastPrompt, "rewrite these docs as one plan") {
-		t.Fatalf("user's actual prompt was lost: %q", state.LastPrompt)
+	const want = "rewrite these docs as one plan"
+	if state.LastPrompt != want {
+		t.Fatalf("session prompt/title not fully sanitized: got %q, want %q (#1423)", state.LastPrompt, want)
 	}
 }
