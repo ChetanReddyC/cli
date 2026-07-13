@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -76,7 +78,8 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	case opts.Unshallow && isShallowRepository(ctx, opts.Dir):
 		args = append(args, "--unshallow")
 	}
-	if !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx) {
+	filtered := !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx)
+	if filtered {
 		args = append(args, "--filter=blob:none")
 	}
 	args = append(args, opts.Remote)
@@ -91,7 +94,57 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	if err != nil {
 		return out, fmt.Errorf("git fetch: %w", err)
 	}
+	if filtered && IsURL(opts.Remote) {
+		markPromisorEntrySkipped(ctx, opts.Dir, opts.Remote)
+	}
 	return out, nil
+}
+
+// markPromisorEntrySkipped excludes the URL-keyed config section that git
+// creates for a filtered URL fetch (remote.<url>.promisor=true) from
+// `git fetch --all` and `git remote update`. Git needs the promisor entry to
+// lazy-fetch filtered-out objects later, but the entry also makes the URL show
+// up as a fetchable remote, so without this every checkpoint URL ever fetched
+// from lingers as a phantom remote that bulk fetches keep dialing.
+// Best-effort: the fetch already succeeded, so failures only log.
+func markPromisorEntrySkipped(ctx context.Context, dir, url string) {
+	if !gitConfigBool(ctx, dir, "remote."+url+".promisor") {
+		// Git didn't record a promisor entry for this URL; don't invent a
+		// config section that wouldn't otherwise exist.
+		return
+	}
+	if gitConfigBool(ctx, dir, "remote."+url+".skipFetchAll") {
+		return
+	}
+	for _, key := range []string{"skipFetchAll", "skipDefaultUpdate"} {
+		cmd := exec.CommandContext(ctx, "git", "config", "--local", "remote."+url+"."+key, "true")
+		if dir != "" {
+			cmd.Dir = dir
+		}
+		if out, cfgErr := cmd.CombinedOutput(); cfgErr != nil {
+			logging.Warn(ctx, "failed to mark promisor config entry as skipped for bulk fetches",
+				slog.String("url", RedactURL(url)),
+				slog.String("key", key),
+				slog.String("output", strings.TrimSpace(string(out))),
+				slog.String("error", cfgErr.Error()),
+			)
+			return
+		}
+	}
+}
+
+// gitConfigBool reads a local git config key and reports whether it is set to
+// a true value. Missing keys and read errors report false.
+func gitConfigBool(ctx context.Context, dir, key string) bool {
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get", "--type=bool", key)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "true"
 }
 
 // FetchBlobs fetches specific objects (typically blobs) by hash from a remote.
