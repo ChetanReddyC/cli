@@ -95,7 +95,14 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 		return out, fmt.Errorf("git fetch: %w", err)
 	}
 	if filtered && IsURL(opts.Remote) {
-		markPromisorEntrySkipped(ctx, opts.Dir, opts.Remote)
+		// Stamp the URL git actually fetched from: with a checkpoint token set,
+		// newCommand rewrites SSH targets to HTTPS, and git records the
+		// promisor entry under the rewritten URL.
+		target := opts.Remote
+		if token := strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)); token != "" && isValidToken(token) {
+			target, _ = resolveTargetForTokenAuth(ctx, target)
+		}
+		markPromisorEntrySkipped(ctx, opts.Dir, target)
 	}
 	return out, nil
 }
@@ -113,19 +120,26 @@ func markPromisorEntrySkipped(ctx context.Context, dir, url string) {
 		// config section that wouldn't otherwise exist.
 		return
 	}
-	if gitConfigBool(ctx, dir, "remote."+url+".skipFetchAll") {
-		return
-	}
 	for _, key := range []string{"skipFetchAll", "skipDefaultUpdate"} {
-		cmd := exec.CommandContext(ctx, "git", "config", "--local", "remote."+url+"."+key, "true")
+		fullKey := "remote." + url + "." + key
+		if gitConfigBool(ctx, dir, fullKey) {
+			// Checked per key so a partially-stamped entry (e.g. an earlier
+			// run failing between the two writes) still gets completed.
+			continue
+		}
+		cmd := exec.CommandContext(ctx, "git", "config", "--local", fullKey, "true")
 		if dir != "" {
 			cmd.Dir = dir
 		}
 		if out, cfgErr := cmd.CombinedOutput(); cfgErr != nil {
+			redactedURL := RedactURL(url)
+			// The output can echo the key, which embeds the URL — and a URL
+			// can carry credentials. Redact before logging.
+			msg := strings.TrimSpace(strings.ReplaceAll(string(out), url, redactedURL))
 			logging.Warn(ctx, "failed to mark promisor config entry as skipped for bulk fetches",
-				slog.String("url", RedactURL(url)),
+				slog.String("url", redactedURL),
 				slog.String("key", key),
-				slog.String("output", strings.TrimSpace(string(out))),
+				slog.String("output", msg),
 				slog.String("error", cfgErr.Error()),
 			)
 			return

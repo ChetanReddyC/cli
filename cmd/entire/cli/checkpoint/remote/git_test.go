@@ -903,3 +903,24 @@ func TestFetch_UnfilteredFetchDoesNotCreateConfigSection(t *testing.T) {
 	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"))
 	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipDefaultUpdate"))
 }
+
+// TestMarkPromisorEntrySkipped_CompletesPartialStamp verifies the keys are
+// checked independently: an entry with skipFetchAll already set (e.g. an
+// earlier run failing between the two writes) still gets skipDefaultUpdate.
+func TestMarkPromisorEntrySkipped_CompletesPartialStamp(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	const url = "https://example.com/org/checkpoints.git"
+	runIsolatedGit(ctx, t, repoDir, "config", "--local", "remote."+url+".promisor", "true")
+	runIsolatedGit(ctx, t, repoDir, "config", "--local", "remote."+url+".skipFetchAll", "true")
+
+	markPromisorEntrySkipped(ctx, repoDir, url)
+
+	assert.True(t, gitConfigBool(ctx, repoDir, "remote."+url+".skipFetchAll"))
+	assert.True(t, gitConfigBool(ctx, repoDir, "remote."+url+".skipDefaultUpdate"),
+		"partially-stamped entry should be completed")
+}
