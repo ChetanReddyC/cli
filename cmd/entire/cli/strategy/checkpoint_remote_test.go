@@ -943,6 +943,79 @@ func TestEnsurePrimaryRef_FetchesFromCheckpointRemoteInsteadOfOrphan(t *testing.
 		"the bootstrapped branch should contain the checkpoint committed on the remote")
 }
 
+// TestEnsurePrimaryRef_ReplacesExistingEmptyOrphanFromCheckpointRemote verifies
+// that a *pre-existing* local empty orphan (the exact shape a pre-#1374
+// `entire enable` left behind) is still healed on a later run of an explicit
+// setup flow, not just the "local ref missing entirely" case. Origin does not
+// track Primary here (checkpoint_remote strategy), so remoteRef is nil and the
+// only recovery path is fetching from the configured checkpoint_remote.
+func TestEnsurePrimaryRef_ReplacesExistingEmptyOrphanFromCheckpointRemote(t *testing.T) {
+	ctx := context.Background()
+
+	// Checkpoint remote: a repo that already holds entire/checkpoints/v1 with a
+	// real (non-empty) commit — models the branch created on device A.
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	remoteDefaultBranch := checkpointRemoteCurrentBranch(ctx, t, remoteDir)
+
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "aaaaaaaaaaaa", "device-a")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", remoteDefaultBranch)
+	remoteTip := checkpointRemoteRevParse(ctx, t, remoteDir, paths.MetadataBranchName)
+
+	// Local repo (device B): origin points at the main repo and a separate
+	// checkpoint_remote is configured. Unlike the "missing ref" test above, this
+	// device already has a local empty orphan on entire/checkpoints/v1 — the
+	// state left behind by the pre-#1374 `entire enable` before this fix existed.
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	runCheckpointRemoteGit(ctx, t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, localDir, "rm", "-rf", ".")
+	runCheckpointRemoteGit(ctx, t, localDir, "commit", "--allow-empty", "-m", "Initialize metadata ref")
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", remoteDefaultBranch)
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
+		0o644,
+	))
+
+	// The SSH origin + github checkpoint_remote resolves (via remote.FetchURL)
+	// to git@github.com:org/checkpoints.git. Redirect that derived URL to the
+	// local file:// remote so the real fetch path runs hermetically.
+	redirectGitURL(t, localDir, "git@github.com:org/checkpoints.git", "file://"+remoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	// Re-running `entire enable` (explicit setup flow) after upgrading past
+	// #1374 must still recover the real branch, even though a local ref already
+	// exists — it must not return early just because localRef was found.
+	require.NoError(t, EnsurePrimaryRef(WithCheckpointRemoteBootstrap(ctx), repo))
+
+	localTip := checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName)
+	assert.Equal(t, remoteTip, localTip,
+		"EnsurePrimaryRef must heal a pre-existing empty orphan by fetching from checkpoint_remote")
+
+	files := checkpointRemoteMetadataFiles(ctx, t, localDir)
+	assert.Contains(t, files, "aa/aaaaaaaaaa/"+paths.MetadataFileName,
+		"the healed branch should contain the checkpoint committed on the remote")
+}
+
 // TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapOutsideEnableFlow verifies
 // that EnsurePrimaryRef never fetches from a configured checkpoint_remote
 // unless the caller explicitly opts in via WithCheckpointRemoteBootstrap. This
@@ -1058,7 +1131,7 @@ func TestEnsurePrimaryRef_OfflineCheckpointRemoteFallsBackToOrphan(t *testing.T)
 // rewritten to replacementURL. This lets tests point a derived remote URL at a
 // local file:// repository with no network access. Repo-local config is honored
 // regardless of the ambient GIT_CONFIG_* environment.
-func redirectGitURL(t *testing.T, repoDir, matchURL, replacementURL string) {
+func redirectGitURL(t *testing.T, repoDir, matchURL, replacementURL string) { //nolint:unparam // matchURL happens to be the same derived checkpoint_remote URL across current callers; kept parameterized for test clarity and future callers with a different remote shape
 	t.Helper()
 	configPath := filepath.Join(repoDir, ".git", "config")
 	f, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0o600)

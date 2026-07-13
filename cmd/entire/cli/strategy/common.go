@@ -532,6 +532,21 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 					"remote_hash", remoteRef.Hash().String()[:7],
 				)
 			}
+			return nil
+		}
+		if remoteRef == nil {
+			// Origin doesn't track Primary (e.g. checkpoint_remote strategy). A
+			// local empty orphan here is the exact shape a pre-fix `entire enable`
+			// used to leave behind (#1374): re-running enable after upgrading must
+			// still recover the real branch from checkpoint_remote instead of
+			// silently keeping the empty orphan forever.
+			isEmpty, checkErr := isEmptyMetadataBranch(repo, localRef)
+			if checkErr != nil {
+				return fmt.Errorf("failed to check metadata ref contents: %w", checkErr)
+			}
+			if isEmpty && bootstrapPrimaryFromCheckpointRemote(ctx, repo, refs.Primary) {
+				fmt.Fprintf(os.Stderr, "✓ Updated local ref '%s' from checkpoint remote\n", primaryName)
+			}
 		}
 		return nil
 	}
