@@ -395,6 +395,10 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	// Calculate token usage from parsed transcript
 	mainUsage := CalculateTokenUsage(parsed)
 
+	if subagentsDir == "" {
+		return mainUsage, nil
+	}
+
 	// Extract spawned agent IDs from the FULL transcript (startLine=0), not the
 	// sliced portion. A subagent spawned before this checkpoint's startLine can
 	// keep writing to its transcript in later turns; scanning only the slice
@@ -405,7 +409,7 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	}
 	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
 
-	// Calculate subagent token usage (skip when subagentsDir is empty to avoid reading from cwd).
+	// Calculate subagent token usage.
 	// NOTE: each subagent transcript is re-read from line 0 on every call, so
 	// mainUsage.SubagentTokens below is a CUMULATIVE-since-session-start total,
 	// not a delta scoped to [startLine, end) like mainUsage's own fields.
@@ -416,7 +420,7 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	// checkpoint-window delta by subtracting a previously captured baseline.
 	// See accumulateTokenUsage and SessionState.SubagentTokensBaseline in
 	// cmd/entire/cli/strategy for the caller-side fix.
-	if len(agentIDs) > 0 && subagentsDir != "" {
+	if len(agentIDs) > 0 {
 		subagentUsage := &agent.TokenUsage{}
 		for agentID := range agentIDs {
 			agentPath := filepath.Join(subagentsDir, fmt.Sprintf("agent-%s.jsonl", agentID))
@@ -466,6 +470,10 @@ func (c *ClaudeCodeAgent) ExtractAllModifiedFiles(transcriptData []byte, startLi
 		}
 	}
 
+	if subagentsDir == "" {
+		return files, nil
+	}
+
 	// Find spawned subagents from the FULL transcript (startLine=0): a subagent
 	// spawned before this checkpoint's startLine may keep modifying files in
 	// later turns, and scanning only the slice would miss it (#329). Main-agent
@@ -475,9 +483,6 @@ func (c *ClaudeCodeAgent) ExtractAllModifiedFiles(transcriptData []byte, startLi
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
 	}
 	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
-	if subagentsDir == "" {
-		return files, nil
-	}
 	for agentID := range agentIDs {
 		agentPath := filepath.Join(subagentsDir, fmt.Sprintf("agent-%s.jsonl", agentID))
 		agentLines, agentErr := transcript.ParseFromFileAtLine(agentPath, 0)

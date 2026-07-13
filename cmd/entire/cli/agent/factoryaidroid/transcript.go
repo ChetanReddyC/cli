@@ -366,6 +366,10 @@ func CalculateTotalTokenUsageFromBytes(data []byte, startLine int, subagentsDir 
 
 	mainUsage := CalculateTokenUsage(parsed)
 
+	if subagentsDir == "" {
+		return mainUsage, nil
+	}
+
 	// Extract spawned agent IDs from the FULL transcript (startLine=0): a
 	// subagent spawned before this checkpoint's startLine can keep writing to
 	// its transcript, so scanning only the slice would undercount it (#329).
@@ -383,7 +387,7 @@ func CalculateTotalTokenUsageFromBytes(data []byte, startLine int, subagentsDir 
 	// delta by subtracting a previously captured baseline. See
 	// accumulateTokenUsage and SessionState.SubagentTokensBaseline in
 	// cmd/entire/cli/strategy for the caller-side fix (shared with Claude Code).
-	if len(agentIDs) > 0 && subagentsDir != "" {
+	if len(agentIDs) > 0 {
 		subagentUsage := &agent.TokenUsage{}
 		for agentID := range agentIDs {
 			agentPath := filepath.Join(subagentsDir, fmt.Sprintf("agent-%s.jsonl", agentID))
@@ -425,6 +429,10 @@ func ExtractAllModifiedFilesFromBytes(data []byte, startLine int, subagentsDir s
 		fileSet[f] = true
 	}
 
+	if subagentsDir == "" {
+		return files, nil
+	}
+
 	// Find spawned subagents from the FULL transcript (startLine=0): a subagent
 	// spawned before this checkpoint's startLine may keep modifying files in
 	// later turns, and scanning only the slice would miss it (#329). Main-agent
@@ -434,9 +442,6 @@ func ExtractAllModifiedFilesFromBytes(data []byte, startLine int, subagentsDir s
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
 	}
 	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
-	if subagentsDir == "" {
-		return files, nil
-	}
 	for agentID := range agentIDs {
 		agentPath := filepath.Join(subagentsDir, fmt.Sprintf("agent-%s.jsonl", agentID))
 		agentLines, _, agentErr := ParseDroidTranscript(agentPath, 0)
