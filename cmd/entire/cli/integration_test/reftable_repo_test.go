@@ -3,11 +3,13 @@
 package integration
 
 import (
+	"context"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -158,10 +160,12 @@ func TestReftableRepository_LinkedWorktree(t *testing.T) {
 }
 
 // runCLIIn runs the built entire binary in an arbitrary directory (e.g. a linked
-// worktree) with the same isolated environment RunCLI uses.
+// worktree) with the same isolated environment RunCLI uses, detached from any
+// controlling TTY (matching TestEnv.RunCLIWithError) so an interactive prompt
+// path can't hang the test.
 func runCLIIn(t *testing.T, env *TestEnv, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command(getTestBinary(), args...) //nolint:noctx // test helper
+	cmd := execx.NonInteractive(context.Background(), getTestBinary(), args...)
 	cmd.Dir = dir
 	cmd.Env = env.cliEnv()
 	out, err := cmd.CombinedOutput()
