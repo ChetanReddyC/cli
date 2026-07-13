@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
@@ -2322,12 +2325,14 @@ func TestRunTrailEnablementRefresh_BoundedByTimeoutAgainstUnresponsiveHost(t *te
 	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer ln.Close()
+	var accepted int32
 	go func() {
 		for {
 			conn, acceptErr := ln.Accept()
 			if acceptErr != nil {
 				return
 			}
+			atomic.AddInt32(&accepted, 1)
 			// Accept the connection but never write anything back (no TLS
 			// handshake, no HTTP response) — simulates a blackholed/firewalled
 			// host, which is what triggered the original 1s stall per call.
@@ -2345,6 +2350,42 @@ func TestRunTrailEnablementRefresh_BoundedByTimeoutAgainstUnresponsiveHost(t *te
 	if elapsed > trailEnablementRefreshTimeout+2*time.Second {
 		t.Fatalf("runTrailEnablementRefresh took %v, expected to give up within roughly %v", elapsed, trailEnablementRefreshTimeout)
 	}
+	// Prove the test actually exercised the network path rather than passing
+	// via an early return (e.g. scope resolution or auth failing before any
+	// dial): the blackholed listener must have accepted at least one
+	// connection attempt.
+	if got := atomic.LoadInt32(&accepted); got == 0 {
+		t.Fatalf("expected at least one dial attempt against the unresponsive host, got %d", got)
+	}
+}
+
+// TestNewRefreshTrailEnablementCmd_APIFailureExitsZero guards against the
+// detached __refresh_trail_enablement subprocess exiting non-zero on a
+// transient network/API failure. The refresh is best-effort cache warming
+// with stdout/stderr discarded (see newRefreshTrailEnablementCmd) — there is
+// no one watching the exit code, so a failing TrailsEnabled call must be
+// logged (already covered by TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile-
+// style tests) and swallowed, never propagated as a command error, mirroring
+// __send_analytics.
+func TestNewRefreshTrailEnablementCmd_APIFailureExitsZero(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	prevClient := trailRefreshAPIClient
+	trailRefreshAPIClient = func(context.Context, bool) (*api.Client, error) {
+		return api.NewClientWithBaseURL("test-token", srv.URL), nil
+	}
+	t.Cleanup(func() { trailRefreshAPIClient = prevClient })
+
+	cmd := newRefreshTrailEnablementCmd()
+	cmd.SetArgs([]string{})
+	require.NoError(t, cmd.ExecuteContext(context.Background()),
+		"detached refresh command must exit 0 even when the API call fails (best-effort cache warming)")
 }
 
 // TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile guards the #450

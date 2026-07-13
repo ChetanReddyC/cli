@@ -223,6 +223,13 @@ func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEn
 // refresh. It is invoked from the detached `__refresh_trail_enablement`
 // subprocess spawned by refreshTrailsEnabledCacheIfStaleForScope, never
 // synchronously from a hook path.
+// trailRefreshAPIClient is the authenticated-client seam used by
+// runTrailEnablementRefresh, swapped in tests so they can force the
+// refreshTrailsEnabledCacheForScope error branch (e.g. a broken API host)
+// without a real login context. Production code always uses
+// NewAuthenticatedAPIClient.
+var trailRefreshAPIClient = NewAuthenticatedAPIClient
+
 func runTrailEnablementRefresh(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, trailEnablementRefreshTimeout)
 	defer cancel()
@@ -244,16 +251,25 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 		return nil
 	}
 	if !scope.Supported {
-		return saveTrailsEnabledForScope(ctx, scope, false, time.Now())
+		if err := saveTrailsEnabledForScope(ctx, scope, false, time.Now()); err != nil {
+			logging.Debug(logCtx, "trails enablement refresh failed to save unsupported scope", "error", err.Error())
+		}
+		return nil
 	}
-	client, err := NewAuthenticatedAPIClient(ctx, false)
+	client, err := trailRefreshAPIClient(ctx, false)
 	if err != nil {
 		logging.Debug(logCtx, "trails enablement refresh skipped: authenticated client unavailable", "error", err.Error())
 		return nil
 	}
+	// Best-effort: this runs from the detached __refresh_trail_enablement
+	// subprocess (stdout/stderr discarded, see newRefreshTrailEnablementCmd),
+	// so a transient network/API failure here must not surface as a non-zero
+	// process exit — there's no one watching it and no user-visible benefit,
+	// only a spurious failure signal. The failure is still diagnosable via the
+	// debug log above.
 	if _, err := refreshTrailsEnabledCacheForScope(ctx, client, scope); err != nil {
 		logging.Debug(logCtx, "trails enablement refresh failed", "error", err.Error())
-		return err
+		return nil
 	}
 	logging.Debug(logCtx, "trails enablement refresh completed", "enabled_repo_key", scope.RepoKey)
 	return nil
