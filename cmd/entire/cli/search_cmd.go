@@ -515,7 +515,7 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 	reposCtx, reposCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer reposCancel()
 
-	repoIndex, err := coreClient.ListRepos(reposCtx)
+	repoIndex, err := coreClient.ListRepos(reposCtx, coreapi.ListReposParams{})
 	if err != nil {
 		return nil, fmt.Errorf("listing repos for cell discovery: %w", err)
 	}
@@ -707,30 +707,57 @@ func mergeSearchResults(ctx context.Context, limit int, results []cellCallResult
 	}
 	merged.Results = deduped
 
-	// Deduplicate RepoStats by repo name, summing match/file counts.
-	repoStatsMap := make(map[string]*codesearch.RepoStats, len(merged.RepoStats))
+	// Deduplicate RepoStats by repo name. A repo that appears in more than one
+	// cell is a mirror placement returning the SAME content (this PR fans out
+	// across placements, so e.g. a US-homed repo with an EU mirror is now
+	// searched in both cells) — not additional matches. Keep one representative
+	// entry per repo (the max of each count; mirror copies are identical, max
+	// only guards against minor per-cell skew) instead of summing, and record
+	// the duplicated portion so the aggregate stats can drop the double-count.
+	type repoStatAcc struct {
+		idx                    int
+		sumMatches, maxMatches int
+		sumFiles, maxFiles     int
+		cellCount              int
+	}
+	accByRepo := make(map[string]*repoStatAcc, len(merged.RepoStats))
 	var dedupedStats []codesearch.RepoStats
 	for _, rs := range merged.RepoStats {
-		if existing, ok := repoStatsMap[rs.Repo]; ok {
-			existing.MatchCount += rs.MatchCount
-			existing.FileCount += rs.FileCount
-		} else {
-			entry := rs // copy
-			repoStatsMap[rs.Repo] = &entry
-			dedupedStats = append(dedupedStats, entry)
+		acc, ok := accByRepo[rs.Repo]
+		if !ok {
+			acc = &repoStatAcc{idx: len(dedupedStats)}
+			accByRepo[rs.Repo] = acc
+			dedupedStats = append(dedupedStats, codesearch.RepoStats{Repo: rs.Repo})
 		}
+		acc.cellCount++
+		acc.sumMatches += rs.MatchCount
+		acc.sumFiles += rs.FileCount
+		acc.maxMatches = max(acc.maxMatches, rs.MatchCount)
+		acc.maxFiles = max(acc.maxFiles, rs.FileCount)
 	}
-	// Write back merged values.
-	for i := range dedupedStats {
-		if m, ok := repoStatsMap[dedupedStats[i].Repo]; ok {
-			dedupedStats[i] = *m
-		}
+	var overcountMatches, overcountFiles, overcountRepos int
+	for _, acc := range accByRepo {
+		dedupedStats[acc.idx].MatchCount = acc.maxMatches
+		dedupedStats[acc.idx].FileCount = acc.maxFiles
+		overcountMatches += acc.sumMatches - acc.maxMatches
+		overcountFiles += acc.sumFiles - acc.maxFiles
+		overcountRepos += acc.cellCount - 1
 	}
 	merged.RepoStats = dedupedStats
 
-	// Stats are preserved as the sum of per-cell peregrine stats — they
-	// reflect the true totals (including zero-match repos and per-cell
-	// truncation), not just the deduped result slice.
+	// The per-cell Stats were summed above, so a mirrored repo's matches were
+	// counted once per cell. Subtract the duplicated copies identified via
+	// RepoStats so the totals reflect distinct content, not the same content
+	// seen from every mirror cell. This preserves per-cell truncation (the
+	// base is peregrine's own totals; we only remove the provable duplicate
+	// portion) and zero-match repos (they contribute 0 to the subtraction).
+	// A repo with matches but no RepoStats row, or a zero-match mirror repo,
+	// can't be de-duplicated from the response and keeps its summed
+	// contribution — a mild over-count, far less misleading than reporting
+	// every mirrored match twice. Clamp at zero against inconsistent input.
+	merged.Stats.TotalMatches = max(0, merged.Stats.TotalMatches-overcountMatches)
+	merged.Stats.TotalFiles = max(0, merged.Stats.TotalFiles-overcountFiles)
+	merged.Stats.ReposSearched = max(0, merged.Stats.ReposSearched-overcountRepos)
 
 	// Cap to the caller's requested limit.
 	if limit > 0 && len(merged.Results) > limit {

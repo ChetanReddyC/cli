@@ -379,8 +379,9 @@ func serveMirrorList(t *testing.T, mirrors []coreapi.Mirror, available []coreapi
 }
 
 // execMirrorList runs `list` under a parent that carries the control-plane
-// persistent flags (--json lives there, not on the list command itself), so
-// tests can exercise --json and the client-side --repo/--sort together.
+// persistent flags (--insecure-http-auth); --json is a local flag on the list
+// command itself, so tests can exercise --json and the client-side --name/--sort
+// together.
 func execMirrorList(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	parent := &cobra.Command{Use: "mirror"}
@@ -512,7 +513,7 @@ func requireOrder(t *testing.T, s string, needles ...string) {
 	}
 }
 
-// TestRepoMirrorList_FilterSort pins the client-side --repo filter and --sort
+// TestRepoMirrorList_FilterSort pins the client-side --name filter and --sort
 // applied to `repo mirror list` before rendering (server handles
 // owner/provider/cluster), so they shape both the table and --json output and
 // work under --show-available.
@@ -525,19 +526,19 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		{Owner: "other", Repo: "api", ClusterHost: "eu-west-1.entire.io"},
 	}
 
-	t.Run("--repo narrows the table by repo-name substring", func(t *testing.T) {
+	t.Run("--name narrows the table by owner/repo substring", func(t *testing.T) {
 		serveMirrorList(t, mirrors, nil)
-		stdout, _ := runMirrorList(t, "--repo", "cli")
+		stdout, _ := runMirrorList(t, "--name", "cli")
 		require.Contains(t, stdout, "acme/cli")
 		require.NotContains(t, stdout, "acme/web")
 		require.NotContains(t, stdout, "other/api")
 	})
 
-	t.Run("--repo matches the owner/repo form shown in the REPO column", func(t *testing.T) {
-		// A value copied straight from the displayed REPO column must match the
+	t.Run("--name matches the owner/repo form shown in the NAME column", func(t *testing.T) {
+		// A value copied straight from the displayed NAME column must match the
 		// row it came from; filtering on the bare repo name would drop it.
 		serveMirrorList(t, mirrors, nil)
-		stdout, _ := runMirrorList(t, "--repo", "acme/web")
+		stdout, _ := runMirrorList(t, "--name", "acme/web")
 		require.Contains(t, stdout, "acme/web")
 		require.NotContains(t, stdout, "acme/cli")
 		require.NotContains(t, stdout, "other/api")
@@ -550,20 +551,30 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		requireOrder(t, stdout, "acme/cli", "acme/web", "other/api")
 	})
 
-	t.Run("--sort -repo reverses the order", func(t *testing.T) {
+	t.Run("--sort -name reverses the order", func(t *testing.T) {
 		serveMirrorList(t, mirrors, nil)
-		stdout, _ := runMirrorList(t, "--sort", "-repo")
+		stdout, _ := runMirrorList(t, "--sort", "-name")
 		requireOrder(t, stdout, "other/api", "acme/web", "acme/cli")
 	})
 
-	t.Run("--repo applies to --json and keeps [] not null", func(t *testing.T) {
+	t.Run("--sort name resolves the NAME column by its key", func(t *testing.T) {
+		// The NAME header carries an inline "(owner/repo)" display hint, but the
+		// sort key is the plain "name" — --sort matches on key, not header.
 		serveMirrorList(t, mirrors, nil)
-		stdout, _ := runMirrorList(t, "--repo", "cli", "--json")
+		stdout, _ := runMirrorList(t, "--sort", "name")
+		requireOrder(t, stdout, "acme/cli", "acme/web", "other/api")
+	})
+
+	t.Run("--name applies to --json and keeps [] not null", func(t *testing.T) {
+		serveMirrorList(t, mirrors, nil)
+		// The JSON keys come from the raw coreapi model, unaffected by the NAME
+		// column/flag rename — the wire field stays "repo".
+		stdout, _ := runMirrorList(t, "--name", "cli", "--json")
 		require.Contains(t, stdout, `"repo": "cli"`)
 		require.NotContains(t, stdout, `"repo": "web"`)
 
 		serveMirrorList(t, mirrors, nil)
-		stdout, _ = runMirrorList(t, "--repo", "zzz", "--json")
+		stdout, _ = runMirrorList(t, "--name", "zzz", "--json")
 		require.Contains(t, stdout, "[]")
 		require.NotContains(t, stdout, "null")
 	})
@@ -590,11 +601,11 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		)
 	})
 
-	t.Run("explicit --sort repo keeps the cluster tiebreak (matches default)", func(t *testing.T) {
+	t.Run("explicit --sort name keeps the cluster tiebreak (matches default)", func(t *testing.T) {
 		// A repo on two clusters plus a lexically-earlier repo. Explicit
-		// `--sort repo` must order like the default: owner/repo ascending, and
+		// `--sort name` must order like the default: owner/repo ascending, and
 		// within the duplicate tie, cluster ascending (aws before eu). Guards
-		// against `--sort repo` regressing to a plain single-key sort that would
+		// against `--sort name` regressing to a plain single-key sort that would
 		// drop the tiebreak.
 		dupes := []coreapi.Mirror{
 			{Owner: "acme", Repo: "web", ClusterHost: "eu-west-1.entire.io"},
@@ -602,7 +613,7 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 			{Owner: "acme", Repo: "api", ClusterHost: "aws-us-east-2.entire.io"},
 		}
 		serveMirrorList(t, dupes, nil)
-		stdout, _ := runMirrorList(t, "--sort", "repo")
+		stdout, _ := runMirrorList(t, "--sort", "name")
 		// acme/api before acme/web, and within the acme/web tie aws before eu.
 		requireOrder(t, stdout,
 			"entire://aws-us-east-2.entire.io/gh/acme/api",
@@ -610,17 +621,17 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 			"entire://eu-west-1.entire.io/gh/acme/web",
 		)
 
-		// -repo reverses the whole ordering, tiebreak included.
+		// -name reverses the whole ordering, tiebreak included.
 		serveMirrorList(t, dupes, nil)
-		stdout, _ = runMirrorList(t, "--sort", "-repo")
+		stdout, _ = runMirrorList(t, "--sort", "-name")
 		requireOrder(t, stdout,
 			"entire://eu-west-1.entire.io/gh/acme/web",
 			"entire://aws-us-east-2.entire.io/gh/acme/web",
 		)
 	})
 
-	t.Run("--repo/--sort apply under --show-available", func(t *testing.T) {
-		// --repo cli keeps two rows (so --sort is observable) and drops the
+	t.Run("--name/--sort apply under --show-available", func(t *testing.T) {
+		// --name cli keeps two rows (so --sort is observable) and drops the
 		// third, so the filter and the sort are both exercised: `access` orders
 		// read before write, i.e. cli-web before cli-api.
 		serveMirrorList(t, nil, []coreapi.AvailableMirror{
@@ -628,13 +639,13 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 			{Owner: "acme", Repo: "cli-web", Access: "read", Status: "available"},
 			{Owner: "other", Repo: "srv", Access: "read", Status: "available"},
 		})
-		stdout, _ := runMirrorList(t, "--show-available", "--repo", "cli", "--sort", "access")
-		require.NotContains(t, stdout, "other/srv", "--repo cli must drop the non-matching row")
+		stdout, _ := runMirrorList(t, "--show-available", "--name", "cli", "--sort", "access")
+		require.NotContains(t, stdout, "other/srv", "--name cli must drop the non-matching row")
 		requireOrder(t, stdout, "acme/cli-web", "acme/cli-api")
 	})
 
 	t.Run("--sort private breaks ties deterministically by owner/repo then cluster", func(t *testing.T) {
-		// A non-repo column sort: all rows share the same private value, so the
+		// A non-name column sort: all rows share the same private value, so the
 		// order must fall back to the owner/repo + cluster tiebreak rather than
 		// the eu-first order the server delivered.
 		dupes := []coreapi.Mirror{
@@ -655,7 +666,7 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 
 	t.Run("--sort with leading whitespace parses direction like the trimmed spec", func(t *testing.T) {
 		serveMirrorList(t, mirrors, nil)
-		stdout, _ := runMirrorList(t, "--sort", " -repo")
+		stdout, _ := runMirrorList(t, "--sort", " -name")
 		requireOrder(t, stdout, "other/api", "acme/web", "acme/cli")
 	})
 }
@@ -845,6 +856,115 @@ func TestResolveMirrorRef(t *testing.T) {
 		if n := calls.Load(); n != 0 {
 			t.Errorf("unparseable ref made %d HTTP calls, want 0", n)
 		}
+	})
+}
+
+// TestRepoMirrorGet_Routing pins which core `mirror get <ref>` dials. A clone
+// URL names its cluster, so it must be resolved on the core fronting that
+// cluster (clusterCoreClient), not the active context — the original bug:
+// `mirror get entire://<cluster>/…` for a cluster in a federation other than
+// the active login failed with "no mirror matching" until the user switched
+// contexts. A ULID carries no cluster coordinate and stays on the active
+// context; an unparseable ref must error before dialing anything.
+//
+// Not parallel: swaps the package-level activeCoreClient/clusterCoreClient
+// seams.
+func TestRepoMirrorGet_Routing(t *testing.T) {
+	const mirrorULID = "0123456789ABCDEFGHJKMNPQRS"
+	const clusterHost = "eukanuba.partial.to"
+	const cloneURL = "entire://" + clusterHost + "/gh/entirehq/librarian"
+
+	// mirrorServer answers both the list (clone-URL resolution) and the
+	// GetMirror-by-ULID calls for the librarian mirror.
+	mirrorServer := func(t *testing.T) *httptest.Server {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case mirrorsAPIPath:
+				assert.NoError(t, printJSON(w, &coreapi.ListMirrorsOutputBody{Mirrors: []coreapi.Mirror{
+					{MirrorId: mirrorULID, Owner: "entirehq", Repo: "librarian", ClusterHost: clusterHost},
+				}}))
+			case mirrorsAPIPath + "/" + mirrorULID:
+				assert.NoError(t, printJSON(w, &coreapi.Mirror{
+					MirrorId: mirrorULID, Owner: "entirehq", Repo: "librarian", ClusterHost: clusterHost,
+					IsPrivate: coreapi.NewOptBool(true),
+				}))
+			default:
+				t.Errorf("unexpected request path %q", r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	seamActive := func(t *testing.T, fn func(context.Context) (*coreapi.Client, error)) {
+		t.Helper()
+		prev := activeCoreClient
+		activeCoreClient = fn
+		t.Cleanup(func() { activeCoreClient = prev })
+	}
+	seamCluster := func(t *testing.T, fn func(context.Context, string) (*coreapi.Client, error)) {
+		t.Helper()
+		prev := clusterCoreClient
+		clusterCoreClient = fn
+		t.Cleanup(func() { clusterCoreClient = prev })
+	}
+	runGet := func(t *testing.T, ref string) (string, error) {
+		t.Helper()
+		cmd := newRepoCmd()
+		var out, errW bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errW)
+		cmd.SetArgs([]string{"mirror", "get", ref})
+		err := cmd.ExecuteContext(t.Context())
+		return out.String(), err
+	}
+
+	t.Run("clone URL dials the cluster's core, not the active context", func(t *testing.T) {
+		srv := mirrorServer(t)
+		seamActive(t, func(context.Context) (*coreapi.Client, error) {
+			t.Error("clone-URL get dialed the active context's core")
+			return nil, errors.New("wrong core")
+		})
+		var gotHost string
+		seamCluster(t, func(_ context.Context, host string) (*coreapi.Client, error) {
+			gotHost = host
+			return coreapi.NewWithBearer(srv.URL, "tok")
+		})
+		out, err := runGet(t, cloneURL)
+		require.NoError(t, err)
+		require.Equal(t, clusterHost, gotHost, "must resolve on the clone URL's cluster")
+		require.Contains(t, out, "entirehq/librarian")
+		require.Contains(t, out, cloneURL)
+	})
+
+	t.Run("ULID dials the active context", func(t *testing.T) {
+		srv := mirrorServer(t)
+		seamActive(t, func(context.Context) (*coreapi.Client, error) {
+			return coreapi.NewWithBearer(srv.URL, "tok")
+		})
+		seamCluster(t, func(_ context.Context, host string) (*coreapi.Client, error) {
+			t.Errorf("ULID get dialed cluster core %q; a ULID has no cluster coordinate", host)
+			return nil, errors.New("wrong core")
+		})
+		out, err := runGet(t, mirrorULID)
+		require.NoError(t, err)
+		require.Contains(t, out, "entirehq/librarian")
+	})
+
+	t.Run("unparseable ref errors before dialing any core", func(t *testing.T) {
+		seamActive(t, func(context.Context) (*coreapi.Client, error) {
+			t.Error("unparseable ref dialed the active context's core")
+			return nil, errors.New("no dial expected")
+		})
+		seamCluster(t, func(context.Context, string) (*coreapi.Client, error) {
+			t.Error("unparseable ref dialed a cluster core")
+			return nil, errors.New("no dial expected")
+		})
+		_, err := runGet(t, "not-a-url")
+		require.Error(t, err)
+		require.ErrorContains(t, err, "pass a mirror ULID or a clone URL")
 	})
 }
 
@@ -1134,10 +1254,10 @@ func TestSortMirrors(t *testing.T) {
 		}, mirrorRepoHosts(m))
 	})
 
-	t.Run("-repo reverses the whole ordering, tiebreak included", func(t *testing.T) {
+	t.Run("-name reverses the whole ordering, tiebreak included", func(t *testing.T) {
 		t.Parallel()
 		m := base()
-		require.NoError(t, sortMirrors(m, "-repo"))
+		require.NoError(t, sortMirrors(m, "-name"))
 		require.Equal(t, []string{
 			"acme/web@eu-west-1.entire.io",
 			"acme/web@aws-us-east-2.entire.io",
@@ -1145,7 +1265,7 @@ func TestSortMirrors(t *testing.T) {
 		}, mirrorRepoHosts(m))
 	})
 
-	t.Run("non-repo column sorts keep the owner/repo+cluster tiebreak", func(t *testing.T) {
+	t.Run("non-name column sorts keep the owner/repo+cluster tiebreak", func(t *testing.T) {
 		t.Parallel()
 		// All three sort keys collide on "private" once acme/api and the aws web
 		// mirror are both public; the deterministic order must fall back to
@@ -1164,7 +1284,7 @@ func TestSortMirrors(t *testing.T) {
 	t.Run("whitespace spec parses direction from the trimmed spec", func(t *testing.T) {
 		t.Parallel()
 		m := base()
-		require.NoError(t, sortMirrors(m, " -repo"))
+		require.NoError(t, sortMirrors(m, " -name"))
 		require.Equal(t, []string{
 			"acme/web@eu-west-1.entire.io",
 			"acme/web@aws-us-east-2.entire.io",
@@ -1177,7 +1297,7 @@ func TestSortMirrors(t *testing.T) {
 		err := sortMirrors(base(), "nope")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "unknown sort column")
-		require.Contains(t, err.Error(), "repo")
+		require.Contains(t, err.Error(), "name")
 	})
 }
 
@@ -1210,7 +1330,7 @@ func TestSortAvailable(t *testing.T) {
 	t.Run("whitespace spec parses direction from the trimmed spec", func(t *testing.T) {
 		t.Parallel()
 		a := base()
-		require.NoError(t, sortAvailable(a, " -repo"))
+		require.NoError(t, sortAvailable(a, " -name"))
 		require.Equal(t, []string{"acme/web", "acme/cli", "acme/api"}, repos(a))
 	})
 
