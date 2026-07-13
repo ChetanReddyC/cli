@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -232,6 +233,14 @@ func (e *Agent) HookNames() []string {
 
 func (e *Agent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	const maxParseHookBytes = 10 * 1024 * 1024 // 10 MB
+	// Bail out promptly on an interactive terminal — no payload is coming, and
+	// io.ReadAll would otherwise block forever (issue #1398). We keep io.ReadAll
+	// for the piped case because the external "parse-hook" contract forwards the
+	// raw stdin bytes verbatim (which may be empty or non-JSON), so unlike the
+	// built-in agents we can't stream-decode a single JSON value here.
+	if agent.StdinLooksInteractive(stdin) {
+		return nil, errors.New("parse-hook: no hook input on stdin")
+	}
 	data, err := io.ReadAll(io.LimitReader(stdin, maxParseHookBytes))
 	if err != nil {
 		return nil, fmt.Errorf("parse-hook: read stdin: %w", err)

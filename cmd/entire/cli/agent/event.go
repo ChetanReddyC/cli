@@ -172,20 +172,45 @@ type Event struct {
 // json.Decoder returns as soon as one complete JSON value has been read,
 // independent of when — or whether — stdin is closed.
 func ReadAndParseHookInput[T any](stdin io.Reader) (*T, error) {
+	raw, err := ReadHookInputRaw(stdin)
+	if err != nil {
+		return nil, err
+	}
+	var result T
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse hook input: %w", err)
+	}
+	return &result, nil
+}
+
+// ReadHookInputRaw returns the raw bytes of a single JSON hook payload read from
+// stdin, without waiting for EOF. It is the shared primitive behind every
+// agent's hook-input read (issue #1398); callers that need custom parsing
+// (e.g. key-name fallbacks, or forwarding the bytes to a subprocess) use this
+// directly, while the common case uses ReadAndParseHookInput.
+func ReadHookInputRaw(stdin io.Reader) (json.RawMessage, error) {
 	// If stdin is an interactive terminal there is no payload coming at all: the
 	// command was run by hand, or the agent left the console attached instead of
 	// wiring up a pipe. Decoding would block waiting for input that never comes,
-	// so treat it as empty and return promptly (also issue #1398).
-	if f, ok := stdin.(*os.File); ok && term.IsTerminal(int(f.Fd())) { //nolint:gosec // G115: uintptr->int is safe for fd
+	// so treat it as empty and return promptly.
+	if StdinLooksInteractive(stdin) {
 		return nil, errors.New("empty hook input")
 	}
 
-	var result T
-	if err := json.NewDecoder(stdin).Decode(&result); err != nil {
+	var raw json.RawMessage
+	if err := json.NewDecoder(stdin).Decode(&raw); err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil, errors.New("empty hook input")
 		}
 		return nil, fmt.Errorf("failed to parse hook input: %w", err)
 	}
-	return &result, nil
+	return raw, nil
+}
+
+// StdinLooksInteractive reports whether r is an interactive terminal, i.e. no
+// piped hook payload is on its way. Hook readers use it to bail out promptly
+// instead of blocking on a read that will never complete (issue #1398).
+func StdinLooksInteractive(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd())) //nolint:gosec // G115: uintptr->int is safe for fd
 }
