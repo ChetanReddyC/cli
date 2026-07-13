@@ -320,7 +320,7 @@ func deriveCheckpointURLFromInfo(info *Info, config *settings.CheckpointRemoteCo
 		}
 		return fmt.Sprintf("entire://%s/%s/%s", info.HostPort(), info.Forge, config.Repo), nil
 	default:
-		return "", fmt.Errorf("unsupported protocol %q in origin remote", info.Protocol)
+		return "", fmt.Errorf("unsupported protocol %q in remote URL", info.Protocol)
 	}
 }
 
