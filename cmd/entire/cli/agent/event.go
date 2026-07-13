@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // EventType represents a normalized lifecycle event from any agent.
@@ -157,18 +160,31 @@ type Event struct {
 	Metadata map[string]string
 }
 
-// ReadAndParseHookInput reads all bytes from stdin and unmarshals JSON into the given type.
-// This is a shared helper for agent ParseHookEvent implementations.
+// ReadAndParseHookInput decodes a single JSON hook payload from stdin into the
+// given type. This is a shared helper for agent ParseHookEvent implementations.
+//
+// It deliberately does NOT use io.ReadAll, which waits for stdin to reach EOF.
+// Agents drive hooks by piping a JSON payload to the hook process, but some
+// keep the write end of that pipe open for the hook's lifetime rather than
+// closing it after writing — notably on Windows/Git Bash, where a full payload
+// arrives but EOF never does. io.ReadAll then blocked indefinitely and the hook
+// (e.g. gemini session-start) hung forever (issue #1398). A streaming
+// json.Decoder returns as soon as one complete JSON value has been read,
+// independent of when — or whether — stdin is closed.
 func ReadAndParseHookInput[T any](stdin io.Reader) (*T, error) {
-	data, err := io.ReadAll(stdin)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read hook input: %w", err)
-	}
-	if len(data) == 0 {
+	// If stdin is an interactive terminal there is no payload coming at all: the
+	// command was run by hand, or the agent left the console attached instead of
+	// wiring up a pipe. Decoding would block waiting for input that never comes,
+	// so treat it as empty and return promptly (also issue #1398).
+	if f, ok := stdin.(*os.File); ok && term.IsTerminal(int(f.Fd())) { //nolint:gosec // G115: uintptr->int is safe for fd
 		return nil, errors.New("empty hook input")
 	}
+
 	var result T
-	if err := json.Unmarshal(data, &result); err != nil {
+	if err := json.NewDecoder(stdin).Decode(&result); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, errors.New("empty hook input")
+		}
 		return nil, fmt.Errorf("failed to parse hook input: %w", err)
 	}
 	return &result, nil
