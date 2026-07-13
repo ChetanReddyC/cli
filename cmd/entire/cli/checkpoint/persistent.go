@@ -2466,7 +2466,7 @@ func SignCommitBestEffort(ctx context.Context, commit *object.Commit) {
 	}
 	defer r.Close()
 
-	sig, err := signer.Sign(r)
+	sig, err := signer.Sign(ctx, r)
 	if err != nil {
 		logging.Warn(ctx, "failed to sign commit", slog.String("error", err.Error()))
 		return
