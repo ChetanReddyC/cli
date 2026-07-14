@@ -1388,18 +1388,26 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 	return nil
 }
 
-// setEnabledFlag flips only the "enabled" key in the target settings file's
-// raw JSON, and also updates the other scope's file if it exists, so
-// local/project can't get out of sync. Unlike saveEnabledState, this operates
-// on each file's own raw content rather than the LoadEntireSettings merged
-// view: that view flattens settings.local.json overrides (local_dev,
-// log_level, personal strategy_options/checkpoint_remote, ...) on top of
-// settings.json, so writing the merged struct back through SaveEntireSettings
-// would leak a developer's local-only overrides into the shared, committed
-// project file whenever a bare `entire enable`/`entire disable` resolves to
-// settings.json (#1140). Merge semantics still apply everywhere enable/
-// disable *read* current state (e.g. IsEnabled); only the write path needs to
-// stay scoped to the target file.
+// setEnabledFlag flips only the "enabled" key in the target scope's settings
+// file, and — when writing the project scope — also syncs that one key into
+// settings.local.json if it exists. The sync is one-directional (project ->
+// local) because settings.local.json overrides settings.json in the merged
+// view, so a stale local "enabled": false would otherwise keep the repo
+// disabled after a project-scope re-enable.
+//
+// This is the canonical explanation of the merged-vs-scoped write rule that the
+// whole enable/disable surface follows; other sites point here.
+//
+// The write path stays scoped to a single file's own raw JSON on purpose.
+// Enable/disable *read* current state through the LoadEntireSettings merged
+// view (e.g. IsEnabled), which flattens settings.local.json overrides
+// (local_dev, log_level, personal strategy_options/checkpoint_remote, ...) on
+// top of settings.json. Writing that merged struct back into one file would
+// leak a developer's local-only overrides into the shared, committed project
+// file whenever a write resolves to settings.json (#1140). setEnabledRaw
+// therefore edits only the "enabled" key in each file's own content; its
+// sibling saveEnabledState applies the same rule to a caller-provided,
+// already-target-scoped struct.
 func setEnabledFlag(ctx context.Context, enabled, useProjectSettings bool) error {
 	if useProjectSettings {
 		if err := setEnabledRaw(ctx, settings.LoadProjectRaw, settings.SaveProjectRaw, enabled); err != nil {
@@ -1439,16 +1447,13 @@ func setEnabledRaw(
 	return save(path, raw)
 }
 
-// saveEnabledState writes settings to the target file, and — when writing
-// project settings — also syncs just the "enabled" key into the local
-// settings file if it exists, so a local override can't leave the repo
-// looking disabled after project settings turn it on. It intentionally does
-// NOT write the full struct s into the other file: s is scoped to the target
-// file's own content (see setupAgentHooksNonInteractive), and writing it
-// wholesale into the other scope would overwrite that file's own fields
-// (local_dev, log_level, personal strategy_options, ...) with the target
-// scope's values — the same #1140 leak setEnabledRaw exists to avoid, just
-// in the other direction.
+// saveEnabledState writes the caller-provided, already-target-scoped struct s
+// to the target file, then applies the same one-directional project -> local
+// sync of the "enabled" key as setEnabledFlag (see that function for the full
+// merged-vs-scoped rationale). s must already be scoped to the target file's
+// own content: it is intentionally NOT written into the other scope, which
+// would overwrite that file's own fields (local_dev, log_level, personal
+// strategy_options, ...) — the #1140 leak, in the other direction.
 func saveEnabledState(ctx context.Context, s *EntireSettings, useProjectSettings bool) error {
 	if useProjectSettings {
 		if err := SaveEntireSettings(ctx, s); err != nil {
@@ -1798,9 +1803,9 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	}
 
 	// Resolve the target file up front so the load below is scoped to that
-	// file's own content rather than the merged view (see the comment above
-	// saveEnabledState for why: writing the merged struct back into a single
-	// scope leaks the other scope's fields into it, e.g. #1140).
+	// file's own content rather than the merged view (see setEnabledFlag for
+	// why: writing the merged struct back into a single scope leaks the other
+	// scope's fields into it, e.g. #1140).
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
 	if err != nil {
@@ -1861,8 +1866,8 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	// target-scoped struct here would silently drop that override when
 	// regenerating the git hook script. This mirrors runEnableInteractive,
 	// which uses the merged view for the same two fields; only the *write*
-	// path (saveEnabledState above) needs to stay scoped to the target file
-	// (see the comment on saveEnabledState for why).
+	// path (saveEnabledState above) stays scoped to the target file (see
+	// setEnabledFlag for why).
 	mergedSettings, err := LoadEntireSettings(ctx)
 	if err != nil {
 		logging.Warn(ctx, "could not load merged settings for hook installation; proceeding with target-scoped settings only, so local overrides (e.g. local_dev, absolute_git_hook_path) may not be applied to the generated git hook", "error", err)

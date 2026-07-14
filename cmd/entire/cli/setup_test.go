@@ -491,13 +491,13 @@ func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
 	}
 }
 
-// TestSetupAgentHooksNonInteractive_DoesNotLeakLocalOverridesIntoProject
-// covers finding 019f5185-5be: `entire enable --agent <name>` on an
-// already-configured repo used to load the merged settings view and write it
-// back wholesale to the project file, flattening settings.local.json-only
+// TestSetupAgentHooksNonInteractive_DoesNotLeakLocalOverridesIntoProject:
+// `entire enable --agent <name>` on an already-configured repo used to load the
+// merged settings view (LoadEntireSettings) and write it back wholesale to the
+// project file via saveEnabledState, flattening settings.local.json-only
 // overrides (e.g. log_level) into the shared, committed settings.json — the
-// same #1140 leak fixed for the bare enable/disable path, just via a
-// different entry point.
+// same #1140 leak fixed for the bare enable/disable path, just via a different
+// entry point (setupAgentHooksNonInteractive).
 func TestSetupAgentHooksNonInteractive_DoesNotLeakLocalOverridesIntoProject(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
@@ -534,10 +534,9 @@ func TestSetupAgentHooksNonInteractive_DoesNotLeakLocalOverridesIntoProject(t *t
 	}
 }
 
-// TestSetupAgentHooksNonInteractive_UsesMergedViewForHookInstall covers the
-// finding at cmd/entire/cli/setup.go:1747: setupAgentHooksNonInteractive
-// loads settings.LoadFromFile(targetFileAbs), scoped to a single file, for
-// building the settings struct it writes. If local_dev is set only in
+// TestSetupAgentHooksNonInteractive_UsesMergedViewForHookInstall:
+// setupAgentHooksNonInteractive loads settings.LoadFromFile scoped to a single
+// file for building the settings struct it writes. If local_dev is set only in
 // settings.local.json while this enable resolves (via --project) to
 // settings.json, the local_dev override must still be honored when
 // installing/regenerating the git hook script — otherwise it's silently
@@ -586,6 +585,66 @@ func TestSetupAgentHooksNonInteractive_UsesMergedViewForHookInstall(t *testing.T
 	}
 	if !projectS.Enabled {
 		t.Error("expected project settings to remain enabled")
+	}
+}
+
+// TestSetupAgentHooksNonInteractive_UsesMergedAbsoluteHookPathForHookInstall is
+// the absolute_git_hook_path counterpart of the local_dev merged-view test:
+// with absolute_git_hook_path set only in settings.local.json while the enable
+// resolves (via --project) to settings.json, the generated hook must embed the
+// absolute binary path from the merged view — not fall back to the bare
+// "entire" prefix the target-scoped struct alone would yield. Guards against a
+// mutation reverting hookAbsoluteGitHookPath to the scoped struct.
+func TestSetupAgentHooksNonInteractive_UsesMergedAbsoluteHookPathForHookInstall(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	// absolute_git_hook_path only in the local override; no local_dev, which
+	// would otherwise take precedence in hookCmdPrefix.
+	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
+	writeClaudeHooksFixture(t)
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	opts := EnableOptions{UseProjectSettings: true}
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, opts); err != nil {
+		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
+	}
+
+	// The hook must embed the resolved absolute executable path (what
+	// absolute_git_hook_path produces), proving the merged override was honored.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		t.Fatalf("EvalSymlinks() error = %v", err)
+	}
+
+	hooksDir, err := strategy.GetHooksDir(context.Background())
+	if err != nil {
+		t.Fatalf("GetHooksDir() error = %v", err)
+	}
+	hookContent, err := os.ReadFile(filepath.Join(hooksDir, "post-commit"))
+	if err != nil {
+		t.Fatalf("failed to read post-commit hook: %v", err)
+	}
+	if !strings.Contains(string(hookContent), resolved) {
+		t.Errorf("expected hook to embed absolute binary path %q from the merged view, got: %s", resolved, hookContent)
+	}
+
+	// The write path must still stay scoped: absolute_git_hook_path must not
+	// leak into the committed project settings.json.
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if projectS.AbsoluteGitHookPath {
+		t.Error("local-only absolute_git_hook_path override leaked into project settings")
 	}
 }
 
