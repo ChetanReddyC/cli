@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -210,6 +211,39 @@ func TestWriteCodeSearchText_GroupsByFile(t *testing.T) {
 	}
 	if aIdx, bIdx := strings.Index(output, "r:a.go"), strings.Index(output, "r:b.go"); aIdx > bIdx {
 		t.Errorf("expected a.go header before b.go:\n%s", output)
+	}
+}
+
+func TestWriteCodeSearchText_CapsFilesAndMatchesPerFile(t *testing.T) {
+	t.Parallel()
+
+	var results []codesearch.Result
+	// First file has 5 matches — 2 over the per-file cap.
+	for line := 1; line <= maxCodeSearchFileMatches+2; line++ {
+		results = append(results, codesearch.Result{Repo: "r", Path: "hot.go", Line: line, ContextLine: "x"})
+	}
+	// More files than the file cap.
+	for f := 0; f < maxCodeSearchFiles+3; f++ {
+		results = append(results, codesearch.Result{Repo: "r", Path: fmt.Sprintf("f%02d.go", f), Line: 1, ContextLine: "y"})
+	}
+	resp := &codesearch.SearchResponse{
+		Stats:   codesearch.Stats{TotalMatches: len(results), TotalFiles: maxCodeSearchFiles + 4, ReposSearched: 1},
+		Results: results,
+	}
+
+	var buf bytes.Buffer
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf))
+	output := buf.String()
+
+	if got := strings.Count(output, "r:"); got != maxCodeSearchFiles {
+		t.Errorf("expected %d file headers, got %d:\n%s", maxCodeSearchFiles, got, output)
+	}
+	if !strings.Contains(output, "+ 2 matches") {
+		t.Errorf("expected '+ 2 matches' overflow for hot.go:\n%s", output)
+	}
+	// hot.go shows only the per-file cap: lines 1..3, not 4/5.
+	if strings.Contains(output, fmt.Sprintf("  %d: x", maxCodeSearchFileMatches+1)) {
+		t.Errorf("expected at most %d matches for hot.go:\n%s", maxCodeSearchFileMatches, output)
 	}
 }
 

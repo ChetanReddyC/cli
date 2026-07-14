@@ -125,6 +125,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 					query:         codeQuery,
 					repoFilters:   codeRepos,
 					limit:         limitFlag,
+					limitExplicit: cmd.Flags().Changed("limit"),
 					caseSensitive: caseSensitive,
 					jsonOutput:    jsonOutput,
 					insecureHTTP:  insecureHTTPAuth,
@@ -375,6 +376,7 @@ type codeSearchOpts struct {
 	repoFilters     []string
 	resolvedRepoIDs []string // ULIDs resolved from repoFilters via repo index
 	limit           int
+	limitExplicit   bool // user passed --limit; don't override for text display
 	caseSensitive   bool
 	jsonOutput      bool
 	insecureHTTP    bool
@@ -476,6 +478,14 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 	}
 
 	w := cmd.OutOrStdout()
+	textOutput := !opts.jsonOutput && interactive.IsTerminalWriter(w)
+
+	// Text output shows up to maxCodeSearchFiles files with a few matches
+	// each, so fetch a deeper result set than the default --limit (which is
+	// tuned for flat JSON output) unless the user asked for a specific limit.
+	if textOutput && !opts.limitExplicit {
+		opts.limit = codeSearchTextFetchLimit
+	}
 
 	// Always fan out via searchAllCells — it fetches the repo index,
 	// resolves slugs to ULIDs, and handles single- vs multi-jurisdiction.
@@ -484,8 +494,7 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 		return err
 	}
 
-	isTerminal := interactive.IsTerminalWriter(w)
-	if opts.jsonOutput || !isTerminal {
+	if !textOutput {
 		return writeCodeSearchJSON(w, resp)
 	}
 
@@ -803,6 +812,15 @@ func writeCodeSearchJSON(w io.Writer, resp *codesearch.SearchResponse) error {
 // with an ellipsis so that JSONL/minified files don't blow up the terminal.
 const maxContextLineLen = 200
 
+// Text output display caps: show breadth (files) over depth (in-file matches).
+// The fetch limit leaves headroom beyond files×matches so per-file overflow
+// ("+ N matches") counts have data to count.
+const (
+	maxCodeSearchFiles       = 10  // files shown in text output
+	maxCodeSearchFileMatches = 3   // matches shown per file
+	codeSearchTextFetchLimit = 100 // results fetched for text display
+)
+
 // writeCodeSearchText renders code search results grouped by file (ripgrep
 // style): a colored "repo:path" header per file, indented line-numbered
 // matches beneath it, and a dimmed stats footer. Colors are applied only when
@@ -837,12 +855,17 @@ func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse, styles st
 		groups[i].results = append(groups[i].results, r)
 	}
 
+	shown := 0
 	for gi, g := range groups {
-		if gi > 0 {
-			fmt.Fprintln(w)
+		if gi == maxCodeSearchFiles {
+			break
 		}
+		fmt.Fprintln(w)
 		fmt.Fprintln(w, styles.render(styles.cyan, g.key))
-		for _, r := range g.results {
+		for mi, r := range g.results {
+			if mi == maxCodeSearchFileMatches {
+				break
+			}
 			line := r.ContextLine
 			runes := []rune(line)
 			if len(runes) > maxContextLineLen {
@@ -850,10 +873,19 @@ func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse, styles st
 			}
 			lineNo := styles.render(styles.dim, fmt.Sprintf("%d:", r.Line))
 			fmt.Fprintf(w, "  %s %s\n", lineNo, highlightCodeMatches(line, resp.Query, styles))
+			shown++
+		}
+		// ponytail: overflow counts only what this page fetched (peregrine
+		// has no per-file totals); a hot file shows "+ 97 matches" at most.
+		if extra := len(g.results) - maxCodeSearchFileMatches; extra > 0 {
+			label := "matches"
+			if extra == 1 {
+				label = "match"
+			}
+			fmt.Fprintln(w, styles.render(styles.dim, fmt.Sprintf("  + %d %s", extra, label)))
 		}
 	}
 
-	shown := len(resp.Results)
 	var summary string
 	if resp.Stats.TotalMatches > shown {
 		summary = fmt.Sprintf("Showing %d of %d matches across %d files in %d repos (%.0fms)",
