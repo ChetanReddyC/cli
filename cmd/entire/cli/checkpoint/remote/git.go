@@ -96,9 +96,9 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	// (remote.<url>.*) so it can lazy-fetch filtered-out objects later. That
 	// section also turns the URL into a phantom remote that `git fetch --all`
 	// and `git remote update` keep dialing. When this fetch is the one creating
-	// the section, stamp skipFetchAll/skipDefaultUpdate so bulk fetches skip our
-	// adhoc remote. Remotes that already existed are left untouched so we never
-	// rewrite the user's config.
+	// the section, stamp skipFetchAll so bulk fetches skip our adhoc remote.
+	// Remotes that already existed are left untouched so we never rewrite the
+	// user's config.
 	var stampURL string
 	var stampCandidate, existedBefore bool
 	if filtered && IsURL(opts.Remote) {
@@ -149,32 +149,28 @@ func stampNewlyCreatedRemote(ctx context.Context, dir, url string) {
 	}
 }
 
-// markRemoteSkipped stamps skipFetchAll/skipDefaultUpdate on a URL-keyed remote
-// section so `git fetch --all` and `git remote update` skip it. Called only for
-// remotes this fetch just created, so an adhoc checkpoint URL never lingers as a
-// phantom remote that bulk fetches keep dialing.
+// markRemoteSkipped stamps skipFetchAll on a URL-keyed remote section so
+// `git fetch --all` and `git remote update` skip it. Called only for remotes
+// this fetch just created, so an adhoc checkpoint URL never lingers as a phantom
+// remote that bulk fetches keep dialing.
 // Best-effort: the git config write is not worth failing the fetch over, so
 // failures only log.
 func markRemoteSkipped(ctx context.Context, dir, url string) {
-	for _, key := range []string{"skipFetchAll", "skipDefaultUpdate"} {
-		fullKey := "remote." + url + "." + key
-		cmd := exec.CommandContext(ctx, "git", "config", "--local", fullKey, "true")
-		if dir != "" {
-			cmd.Dir = dir
-		}
-		if out, cfgErr := cmd.CombinedOutput(); cfgErr != nil {
-			redactedURL := RedactURL(url)
-			// The output can echo the key, which embeds the URL — and a URL
-			// can carry credentials. Redact before logging.
-			msg := strings.TrimSpace(strings.ReplaceAll(string(out), url, redactedURL))
-			logging.Warn(ctx, "failed to mark remote config entry as skipped for bulk fetches",
-				slog.String("url", redactedURL),
-				slog.String("key", key),
-				slog.String("output", msg),
-				slog.String("error", cfgErr.Error()),
-			)
-			return
-		}
+	fullKey := "remote." + url + ".skipFetchAll"
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", fullKey, "true")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if out, cfgErr := cmd.CombinedOutput(); cfgErr != nil {
+		redactedURL := RedactURL(url)
+		// The output can echo the key, which embeds the URL — and a URL can
+		// carry credentials. Redact before logging.
+		msg := strings.TrimSpace(strings.ReplaceAll(string(out), url, redactedURL))
+		logging.Warn(ctx, "failed to mark remote config entry as skipped for bulk fetches",
+			slog.String("url", redactedURL),
+			slog.String("output", msg),
+			slog.String("error", cfgErr.Error()),
+		)
 	}
 }
 

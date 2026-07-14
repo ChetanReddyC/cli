@@ -864,8 +864,6 @@ func TestFetch_FilteredURLFetchMarksNewRemoteSkipped(t *testing.T) {
 
 	assert.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"),
 		"URL-keyed promisor entry should be excluded from git fetch --all")
-	assert.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipDefaultUpdate"),
-		"URL-keyed promisor entry should be excluded from git remote update")
 
 	// git fetch --all must no longer dial the phantom entry: with the
 	// checkpoint repo gone, --all only succeeds if the URL-keyed entry is
@@ -922,8 +920,6 @@ func TestFetch_FailedFilteredFetchStillStampsNewRemote(t *testing.T) {
 		"git records the promisor section even when the fetch fails")
 	assert.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"),
 		"a phantom remote left by a failed fetch must still be stamped")
-	assert.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipDefaultUpdate"),
-		"a phantom remote left by a failed fetch must still be stamped")
 }
 
 // TestFetch_UnfilteredFetchDoesNotCreateConfigSection verifies the stamp is
@@ -967,7 +963,6 @@ func TestFetch_UnfilteredFetchDoesNotCreateConfigSection(t *testing.T) {
 
 	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".promisor"))
 	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"))
-	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipDefaultUpdate"))
 }
 
 // TestFetch_ExistingURLRemoteNotReStamped verifies we only stamp remotes we
@@ -1021,12 +1016,10 @@ func TestFetch_ExistingURLRemoteNotReStamped(t *testing.T) {
 
 	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"),
 		"a remote that already existed must not be stamped")
-	assert.False(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipDefaultUpdate"),
-		"a remote that already existed must not be stamped")
 }
 
-// TestMarkRemoteSkipped_SetsBothKeys verifies the helper stamps both skip keys.
-func TestMarkRemoteSkipped_SetsBothKeys(t *testing.T) {
+// TestMarkRemoteSkipped_SetsSkipFetchAll verifies the helper stamps skipFetchAll.
+func TestMarkRemoteSkipped_SetsSkipFetchAll(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
@@ -1037,7 +1030,6 @@ func TestMarkRemoteSkipped_SetsBothKeys(t *testing.T) {
 	markRemoteSkipped(ctx, repoDir, url)
 
 	assert.True(t, gitConfigBool(ctx, repoDir, "remote."+url+".skipFetchAll"))
-	assert.True(t, gitConfigBool(ctx, repoDir, "remote."+url+".skipDefaultUpdate"))
 }
 
 // TestGitRemoteSectionExists reports true only once a remote.<url>.* key is set.
@@ -1095,7 +1087,5 @@ func TestStampNewlyCreatedRemote_StampsUnderCancelledContext(t *testing.T) {
 	stampNewlyCreatedRemote(ctx, repoDir, url)
 
 	assert.True(t, gitConfigBool(context.Background(), repoDir, "remote."+url+".skipFetchAll"),
-		"stamp must land even though the parent context is cancelled")
-	assert.True(t, gitConfigBool(context.Background(), repoDir, "remote."+url+".skipDefaultUpdate"),
 		"stamp must land even though the parent context is cancelled")
 }
