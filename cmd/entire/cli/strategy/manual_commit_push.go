@@ -194,7 +194,15 @@ func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool
 		return true
 	}
 
-	targets, err := checkpointremote.PushTargetsInDir(ctx, dir, ps.remote)
+	// The hook ctx carries no deadline, and this probe runs synchronously before
+	// the user's actual git push starts — an unbounded ls-remote against a
+	// stalled remote would block the whole push. Bound the probe; a timeout
+	// flows into the fail-closed paths below (defer metadata, let the user's
+	// push proceed).
+	probeCtx, cancel := context.WithTimeout(ctx, pushBootstrapProbeTimeout)
+	defer cancel()
+
+	targets, err := checkpointremote.PushTargetsInDir(probeCtx, dir, ps.remote)
 	if err != nil {
 		// Fail closed for checkpoint publication: the user's git push continues
 		// normally, while a later push can publish the pending metadata once the
@@ -221,7 +229,7 @@ func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool
 	}
 
 	for _, target := range targets {
-		out, lsErr := checkpointremote.LsRemoteInDir(ctx, dir, target, "refs/heads/*")
+		out, lsErr := checkpointremote.LsRemoteInDir(probeCtx, dir, target, "refs/heads/*")
 		if lsErr != nil {
 			// Fail closed for checkpoint publication: the user's git push continues
 			// normally, while a later push can publish the pending metadata once the
@@ -267,6 +275,13 @@ func pushTargetsFingerprint(targets []string) string {
 // interval while keeping the window small in which a remote that was emptied or
 // recreated under the same URL could wrongly skip the guard.
 const pushBootstrapTTL = time.Hour
+
+// pushBootstrapProbeTimeout bounds the empty-remote probe (push-target
+// resolution plus one ls-remote per target). The hook ctx has no deadline of
+// its own, and the probe runs synchronously before the user's git push starts,
+// so without a bound a stalled remote would block the push indefinitely.
+// Matches the 10s used by the other small remote reads in this package.
+const pushBootstrapProbeTimeout = 10 * time.Second
 
 // pushBootstrapMarkerPath is the repo-level file recording that every resolved
 // push target has been observed to carry at least one branch. It lives under
