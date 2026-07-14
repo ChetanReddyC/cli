@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -31,9 +32,10 @@ const (
 type CleanupType string
 
 const (
-	CleanupTypeShadowBranch CleanupType = "shadow-branch"
-	CleanupTypeSessionState CleanupType = "session-state"
-	CleanupTypeCheckpoint   CleanupType = "checkpoint"
+	CleanupTypeShadowBranch  CleanupType = "shadow-branch"
+	CleanupTypeSessionState  CleanupType = "session-state"
+	CleanupTypeCheckpoint    CleanupType = "checkpoint"
+	CleanupTypePushBootstrap CleanupType = "push-bootstrap"
 )
 
 // CleanupItem represents an item that can be cleaned up.
@@ -45,12 +47,14 @@ type CleanupItem struct {
 
 // CleanupResult contains the results of a cleanup operation.
 type CleanupResult struct {
-	ShadowBranches    []string // Deleted shadow branches
-	SessionStates     []string // Deleted session state files
-	Checkpoints       []string // Deleted checkpoint metadata
-	FailedBranches    []string // Shadow branches that failed to delete
-	FailedStates      []string // Session states that failed to delete
-	FailedCheckpoints []string // Checkpoints that failed to delete
+	ShadowBranches      []string // Deleted shadow branches
+	SessionStates       []string // Deleted session state files
+	Checkpoints         []string // Deleted checkpoint metadata
+	PushBootstrap       []string // Deleted push-bootstrap markers
+	FailedBranches      []string // Shadow branches that failed to delete
+	FailedStates        []string // Session states that failed to delete
+	FailedCheckpoints   []string // Checkpoints that failed to delete
+	FailedPushBootstrap []string // Push-bootstrap markers that failed to delete
 }
 
 // shadowBranchPattern matches shadow branch names in both old and new formats:
@@ -532,6 +536,17 @@ func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 		})
 	}
 
+	// Push-bootstrap marker (empty-remote guard cache), when present.
+	if dir, err := pushBootstrapDir(ctx); err == nil {
+		if _, statErr := os.Stat(dir); statErr == nil {
+			cleanupItems = append(cleanupItems, CleanupItem{
+				Type:   CleanupTypePushBootstrap,
+				ID:     pushBootstrapDirName,
+				Reason: "clean all",
+			})
+		}
+	}
+
 	return cleanupItems, nil
 }
 
@@ -549,6 +564,7 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 
 	// Group items by type
 	var branches, states, checkpoints []string
+	pushBootstrap := false
 	for _, item := range items {
 		switch item.Type {
 		case CleanupTypeShadowBranch:
@@ -557,6 +573,8 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 			states = append(states, item.ID)
 		case CleanupTypeCheckpoint:
 			checkpoints = append(checkpoints, item.ID)
+		case CleanupTypePushBootstrap:
+			pushBootstrap = true
 		}
 	}
 
@@ -641,9 +659,30 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 		}
 	}
 
+	// Delete the push-bootstrap marker directory.
+	if pushBootstrap {
+		if dir, err := pushBootstrapDir(ctx); err == nil {
+			if rmErr := os.RemoveAll(dir); rmErr != nil {
+				result.FailedPushBootstrap = append(result.FailedPushBootstrap, pushBootstrapDirName)
+				logging.Warn(logCtx, "failed to delete push-bootstrap marker",
+					slog.String("type", string(CleanupTypePushBootstrap)),
+					slog.String("id", pushBootstrapDirName),
+					slog.String("error", rmErr.Error()),
+				)
+			} else {
+				result.PushBootstrap = append(result.PushBootstrap, pushBootstrapDirName)
+				logging.Info(logCtx, "deleted push-bootstrap marker",
+					slog.String("type", string(CleanupTypePushBootstrap)),
+					slog.String("id", pushBootstrapDirName),
+					slog.String("reason", reasonMap[pushBootstrapDirName]),
+				)
+			}
+		}
+	}
+
 	// Log summary
-	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints)
-	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints)
+	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(result.PushBootstrap)
+	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(result.FailedPushBootstrap)
 	if totalDeleted > 0 || totalFailed > 0 {
 		logging.Info(logCtx, "cleanup completed",
 			slog.Int("deleted_branches", len(result.ShadowBranches)),

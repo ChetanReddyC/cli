@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -246,7 +247,10 @@ func LsRemoteInDir(ctx context.Context, dir, remote string, patterns ...string) 
 // can contain more than one destination. URLs and local paths are already
 // concrete push targets and are returned unchanged.
 func PushTargetsInDir(ctx context.Context, dir, target string) ([]string, error) {
-	if target == "" || IsURL(target) || isLocalPath(target) {
+	if target == "" {
+		return nil, errors.New("push target must not be empty")
+	}
+	if isConcretePushTarget(target) {
 		return []string{target}, nil
 	}
 
@@ -262,14 +266,33 @@ func PushTargetsInDir(ctx context.Context, dir, target string) ([]string, error)
 
 	var targets []string
 	for _, line := range strings.Split(string(out), "\n") {
-		if target := strings.TrimSpace(line); target != "" {
-			targets = append(targets, target)
+		if pushURL := strings.TrimSpace(line); pushURL != "" {
+			targets = append(targets, pushURL)
 		}
 	}
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("git remote get-url --push: no push target for %q", target)
 	}
 	return targets, nil
+}
+
+// isConcretePushTarget reports whether target is already a concrete push
+// endpoint (a URL or local path) rather than a git remote NAME whose pushurl
+// must be resolved. It deliberately does not reuse IsURL's '@' heuristic, which
+// misclassifies a remote name that merely contains '@' (e.g. "build@ci") as a
+// URL and would skip pushurl resolution for it. Following git's own transport
+// detection, an scp-like SSH target has a colon before any slash
+// ("[user@]host:path"); a bare remote name has neither a scheme nor such a
+// colon.
+func isConcretePushTarget(target string) bool {
+	if strings.Contains(target, "://") || isLocalPath(target) {
+		return true
+	}
+	// scp-like SSH URL: a colon appears before any slash.
+	if i := strings.IndexAny(target, ":/"); i >= 0 && target[i] == ':' {
+		return true
+	}
+	return false
 }
 
 func lsRemote(ctx context.Context, dir, remote string, patterns ...string) ([]byte, error) {

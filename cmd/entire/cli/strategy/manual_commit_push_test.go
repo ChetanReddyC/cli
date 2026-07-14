@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -71,8 +72,9 @@ func TestDeferCheckpointPushOnEmptyRemote_BootstrapMarkerSkipsNetwork(t *testing
 	// the remote could have been emptied/recreated since, so it is re-probed
 	// (and defers on the unreachable remote). Backdate the file past the TTL.
 	writePushBootstrapMarker(ctx, pushTargetsFingerprint(targets))
-	markerPath, err := pushBootstrapMarkerPath(ctx)
+	markerDir, err := pushBootstrapDir(ctx)
 	require.NoError(t, err)
+	markerPath := filepath.Join(markerDir, pushBootstrapMarkerFileName)
 	stale := time.Now().Add(-pushBootstrapTTL - time.Minute)
 	require.NoError(t, os.Chtimes(markerPath, stale, stale))
 	require.True(t, deferCheckpointPushOnEmptyRemote(ctx, ps),

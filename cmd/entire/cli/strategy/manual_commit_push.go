@@ -236,7 +236,7 @@ func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool
 			// remote is reachable and has a branch.
 			logging.Warn(ctx, "checkpoint push deferred: could not inspect remote branches",
 				slog.String("remote", ps.remote),
-				slog.String("target", target),
+				slog.String("target", checkpointremote.RedactURL(target)),
 				slog.String("error", lsErr.Error()),
 			)
 			return true
@@ -248,7 +248,7 @@ func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool
 		if strings.TrimSpace(string(out)) == "" {
 			logging.Info(ctx, "checkpoint push deferred until the remote has a branch",
 				slog.String("remote", ps.remote),
-				slog.String("target", target),
+				slog.String("target", checkpointremote.RedactURL(target)),
 			)
 			return true
 		}
@@ -283,31 +283,50 @@ const pushBootstrapTTL = time.Hour
 // Matches the 10s used by the other small remote reads in this package.
 const pushBootstrapProbeTimeout = 10 * time.Second
 
-// pushBootstrapMarkerPath is the repo-level file recording that every resolved
-// push target has been observed to carry at least one branch. It lives under
-// the git common dir (shared across worktrees) rather than in .git/config so it
-// never pollutes the user's git configuration.
-func pushBootstrapMarkerPath(ctx context.Context) (string, error) {
+// Bootstrap-marker storage records that every resolved push target has been
+// observed to carry at least one branch. It lives under the git common dir
+// (shared across worktrees) rather than in .git/config so it never pollutes the
+// user's git configuration, and follows the sibling ".git/entire-<thing>/"
+// convention used by session state, routing its file access through os.Root the
+// same way. It is registered for `entire clean` (see cleanup.go).
+const (
+	pushBootstrapDirName        = "entire-push-bootstrap"
+	pushBootstrapMarkerFileName = "fingerprint"
+)
+
+// pushBootstrapDir returns the directory that holds the bootstrap marker.
+func pushBootstrapDir(ctx context.Context) (string, error) {
 	commonDir, err := GetGitCommonDir(ctx)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(commonDir, "entire", "checkpoint-push-bootstrap"), nil
+	return filepath.Join(commonDir, pushBootstrapDirName), nil
 }
 
 // readPushBootstrapMarker returns the stored fingerprint and whether it is still
 // fresh (written within pushBootstrapTTL). A stale, absent, or unreadable marker
-// reports fresh=false so the caller re-probes the remote.
+// reports fresh=false so the caller re-probes the remote. Content and mtime come
+// from a single open file handle.
 func readPushBootstrapMarker(ctx context.Context) (fingerprint string, fresh bool) {
-	path, err := pushBootstrapMarkerPath(ctx)
+	dir, err := pushBootstrapDir(ctx)
 	if err != nil {
 		return "", false
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // path is git common dir + constant, not user input
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return "", false
 	}
-	info, err := os.Stat(path)
+	defer func() { _ = root.Close() }()
+	f, err := root.Open(pushBootstrapMarkerFileName)
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return "", false
+	}
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return "", false
 	}
@@ -318,20 +337,28 @@ func readPushBootstrapMarker(ctx context.Context) (fingerprint string, fresh boo
 // means the next push re-runs the (correct) network probe, so it warns rather
 // than surfacing an error into the push path.
 func writePushBootstrapMarker(ctx context.Context, fingerprint string) {
-	path, err := pushBootstrapMarkerPath(ctx)
+	dir, err := pushBootstrapDir(ctx)
 	if err != nil {
-		logging.Warn(ctx, "failed to resolve checkpoint push bootstrap marker path",
+		logging.Warn(ctx, "failed to resolve checkpoint push bootstrap marker dir",
 			slog.String("error", err.Error()),
 		)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		logging.Warn(ctx, "failed to create checkpoint push bootstrap marker dir",
 			slog.String("error", err.Error()),
 		)
 		return
 	}
-	if err := os.WriteFile(path, []byte(fingerprint+"\n"), 0o600); err != nil {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		logging.Warn(ctx, "failed to open checkpoint push bootstrap marker dir",
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	defer func() { _ = root.Close() }()
+	if err := root.WriteFile(pushBootstrapMarkerFileName, []byte(fingerprint+"\n"), 0o600); err != nil {
 		logging.Warn(ctx, "failed to persist checkpoint push bootstrap marker",
 			slog.String("error", err.Error()),
 		)
