@@ -545,6 +545,47 @@ func TestSetupAgentHooksNonInteractive_LocalTarget_DoesNotLeakProjectFieldsIntoL
 	}
 }
 
+// TestSetupAgentHooksNonInteractive_RefusesToClobberUnparseableSettings covers
+// the finding that `entire enable --agent` silently wiped a corrupt or
+// newer-versioned target settings file to defaults. settings.LoadFromFile
+// errors on invalid JSON AND on any unknown key (DisallowUnknownFields); the
+// old catch replaced the struct with defaults and wrote it back, so a
+// settings.json with strategy_options/log_level/one-unknown-key became exactly
+// {"enabled": true}. Now it refuses and leaves the file untouched.
+func TestSetupAgentHooksNonInteractive_RefusesToClobberUnparseableSettings(t *testing.T) {
+	setupTestRepo(t)
+	// A settings.json a newer CLI could write: valid JSON, real content, plus a
+	// key this build doesn't recognize (rejected by DisallowUnknownFields).
+	original := `{"enabled": false, "log_level": "debug", "totally_unknown_future_key": 42}`
+	writeSettings(t, original)
+	writeClaudeHooksFixture(t)
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, EnableOptions{}); err == nil {
+		t.Fatal("expected setupAgentHooksNonInteractive to refuse on an unparseable settings file, got nil error")
+	}
+
+	// The file must be left as-is, not wiped to {"enabled": true}.
+	got, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to read project settings: %v", err)
+	}
+	if !strings.Contains(string(got), "totally_unknown_future_key") {
+		t.Errorf("unknown key must survive (file must not be clobbered), got: %s", got)
+	}
+	if !strings.Contains(string(got), "log_level") {
+		t.Errorf("log_level must survive (file must not be clobbered), got: %s", got)
+	}
+	if strings.Contains(string(got), `"enabled": true`) || strings.Contains(string(got), `"enabled":true`) {
+		t.Errorf("enabled must not have been flipped/rewritten, got: %s", got)
+	}
+}
+
 func TestRunDisable(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, testSettingsEnabled)

@@ -1809,29 +1809,37 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	// Load existing settings from the target file only, to preserve other
 	// options already set there (like strategy_options.push) without pulling
-	// in the other scope's overrides.
-	settings, err := settings.LoadFromFile(targetFileAbs)
+	// in the other scope's overrides. The local var is named targetSettings so
+	// it does not shadow the settings package for the rest of the function.
+	//
+	// On a parse/validation failure we refuse rather than start from defaults:
+	// the previous behavior silently replaced a settings.json holding real
+	// content (strategy_options, log_level, and — under DisallowUnknownFields —
+	// any key written by a newer CLI) with a bare {"enabled": true}, destroying
+	// the user's config. A missing file is NOT an error here (LoadFromFile
+	// returns defaults for it), so first-time enable still works. This mirrors
+	// updateStrategyOptions, which already refuses on an unparseable target file.
+	targetSettings, err := settings.LoadFromFile(targetFileAbs)
 	if err != nil {
-		// If we can't load, start with defaults
-		settings = &EntireSettings{}
+		return fmt.Errorf("refusing to enable: %s could not be parsed (invalid JSON, or written by a newer entire version); fix or remove it, or upgrade the CLI, then retry: %w", configDisplay, err)
 	}
-	settings.Enabled = true
+	targetSettings.Enabled = true
 	if opts.LocalDev {
-		settings.LocalDev = true
+		targetSettings.LocalDev = true
 	}
 	if opts.AbsoluteGitHookPath {
-		settings.AbsoluteGitHookPath = true
+		targetSettings.AbsoluteGitHookPath = true
 	}
 
 	// Auto-enable external_agents setting if the agent is external.
 	if external.IsExternal(ag) {
-		settings.ExternalAgents = true
+		targetSettings.ExternalAgents = true
 	}
 
-	opts.applyStrategyOptions(settings)
+	opts.applyStrategyOptions(targetSettings)
 
 	// Apply an explicit --checkpoint-backend (no prompt on this non-interactive path).
-	if err := applyCheckpointBackendFlag(settings, opts.CheckpointBackend); err != nil {
+	if err := applyCheckpointBackendFlag(targetSettings, opts.CheckpointBackend); err != nil {
 		return err
 	}
 
@@ -1839,10 +1847,10 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	// Note: if telemetry is nil (not configured), it defaults to disabled
 	if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 		f := false
-		settings.Telemetry = &f
+		targetSettings.Telemetry = &f
 	}
 
-	if err := saveEnabledState(ctx, settings, targetFile == EntireSettingsFile); err != nil {
+	if err := saveEnabledState(ctx, targetSettings, targetFile == EntireSettingsFile); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
 
@@ -1857,7 +1865,8 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	// (see the comment on saveEnabledState for why).
 	mergedSettings, err := LoadEntireSettings(ctx)
 	if err != nil {
-		mergedSettings = settings
+		logging.Warn(ctx, "could not load merged settings for hook installation; proceeding with target-scoped settings only, so local overrides (e.g. local_dev, absolute_git_hook_path) may not be applied to the generated git hook", "error", err)
+		mergedSettings = targetSettings
 	}
 	hookLocalDev := mergedSettings.LocalDev || opts.LocalDev
 	hookAbsoluteGitHookPath := mergedSettings.AbsoluteGitHookPath || opts.AbsoluteGitHookPath
