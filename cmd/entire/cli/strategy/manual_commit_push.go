@@ -2,11 +2,15 @@ package strategy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	git "github.com/go-git/go-git/v6"
@@ -201,6 +205,16 @@ func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool
 		return true
 	}
 
+	// The empty-remote hazard exists only during the first-push window. Once
+	// every push target has been observed with at least one branch we record a
+	// fingerprint of that target set locally, so subsequent pushes short-circuit
+	// here instead of paying an ls-remote network round trip on every push
+	// forever. The fingerprint self-invalidates if the push URLs change.
+	fingerprint := pushTargetsFingerprint(targets)
+	if readPushBootstrapMarker(ctx) == fingerprint {
+		return false
+	}
+
 	for _, target := range targets {
 		out, lsErr := checkpointremote.LsRemoteInDir(ctx, dir, target, "refs/heads/*")
 		if lsErr != nil {
@@ -227,7 +241,70 @@ func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool
 		}
 	}
 
+	// Every push target now has a branch; remember it so the network probe above
+	// is skipped on future pushes for this target set.
+	writePushBootstrapMarker(ctx, fingerprint)
 	return false
+}
+
+// pushTargetsFingerprint returns a stable, order-independent digest of the push
+// targets. Hashing keeps the stored value bounded and avoids writing a push URL
+// (which can embed credentials) verbatim to the marker.
+func pushTargetsFingerprint(targets []string) string {
+	sorted := append([]string(nil), targets...)
+	sort.Strings(sorted)
+	sum := sha256.Sum256([]byte(strings.Join(sorted, "\n")))
+	return hex.EncodeToString(sum[:])
+}
+
+// pushBootstrapMarkerPath is the repo-level file recording that every resolved
+// push target has been observed to carry at least one branch. It lives under
+// the git common dir (shared across worktrees) rather than in .git/config so it
+// never pollutes the user's git configuration.
+func pushBootstrapMarkerPath(ctx context.Context) (string, error) {
+	commonDir, err := GetGitCommonDir(ctx)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(commonDir, "entire", "checkpoint-push-bootstrap"), nil
+}
+
+// readPushBootstrapMarker returns the stored fingerprint, or "" if the marker is
+// absent or unreadable.
+func readPushBootstrapMarker(ctx context.Context) string {
+	path, err := pushBootstrapMarkerPath(ctx)
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // path is git common dir + constant, not user input
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// writePushBootstrapMarker records fingerprint. Best-effort: a failure only
+// means the next push re-runs the (correct) network probe, so it warns rather
+// than surfacing an error into the push path.
+func writePushBootstrapMarker(ctx context.Context, fingerprint string) {
+	path, err := pushBootstrapMarkerPath(ctx)
+	if err != nil {
+		logging.Warn(ctx, "failed to resolve checkpoint push bootstrap marker path",
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		logging.Warn(ctx, "failed to create checkpoint push bootstrap marker dir",
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	if err := os.WriteFile(path, []byte(fingerprint+"\n"), 0o600); err != nil {
+		logging.Warn(ctx, "failed to persist checkpoint push bootstrap marker",
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // prePushCheckpointRefs drains the per-checkpoint push queue and batch-pushes the
