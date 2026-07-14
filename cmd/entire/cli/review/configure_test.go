@@ -88,6 +88,26 @@ func TestApplyLegacyReviewProfileFallback_RepairsGeneratedCodexSkill(t *testing.
 	}
 }
 
+func TestConfirmReReviewOrProceed_NonInteractiveDoesNotPrompt(t *testing.T) {
+	t.Parallel()
+
+	out := &bytes.Buffer{}
+	proceed, err := confirmReReviewOrProceed(context.Background(), out, Deps{
+		HeadHasReviewCheckpoint: func(context.Context) (bool, string) {
+			return true, "existing review"
+		},
+	}, false)
+	if err != nil {
+		t.Fatalf("confirmReReviewOrProceed: %v", err)
+	}
+	if !proceed {
+		t.Fatal("non-interactive re-review should proceed")
+	}
+	if !strings.Contains(out.String(), "already reviewed") {
+		t.Fatalf("missing non-interactive re-review note: %q", out.String())
+	}
+}
+
 func TestReviewInteractivityHardDisabled(t *testing.T) {
 	t.Parallel()
 

@@ -977,12 +977,12 @@ func nonLaunchableEligibleNames(profile settings.ReviewProfileConfig, eligible [
 // (true, nil). In a non-interactive context it cannot prompt, so it proceeds
 // (the user explicitly invoked `entire review`) after printing a note rather
 // than blocking on a confirm form that would error out.
-func confirmReReviewOrProceed(ctx context.Context, out io.Writer, deps Deps) (bool, error) {
+func confirmReReviewOrProceed(ctx context.Context, out io.Writer, deps Deps, canPrompt bool) (bool, error) {
 	reviewed, meta := deps.HeadHasReviewCheckpoint(ctx)
 	if !reviewed {
 		return true, nil
 	}
-	if !interactive.CanPromptInteractively() {
+	if !canPrompt {
 		fmt.Fprintf(out, "Note: HEAD was already reviewed (%s); re-running.\n", meta)
 		return true, nil
 	}
@@ -1044,7 +1044,8 @@ func runSingleAgentPath(
 	}
 
 	// 4. Re-run guard: check if HEAD's checkpoint already has a review.
-	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps); guardErr != nil {
+	canPrompt := reviewCommandIsInteractive(cmd)
+	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps, canPrompt); guardErr != nil {
 		fmt.Fprintln(out, "prompt cancelled")
 		return silentErr(guardErr)
 	} else if !proceed {
@@ -1098,7 +1099,6 @@ func runSingleAgentPath(
 	defer cancelRun()
 
 	runCfg.EnrichSummary = reviewSummaryTokenEnricher(worktreeRoot, headSHA)
-	canPrompt := reviewCommandIsInteractive(cmd)
 	sinks := composeSingleAgentSinks(singleAgentSinkInputs{
 		out:       out,
 		isTTY:     canPrompt,
@@ -1188,7 +1188,8 @@ func runMultiAgentPath(
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
 
-	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps); guardErr != nil {
+	canPrompt := reviewCommandIsInteractive(cmd)
+	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps, canPrompt); guardErr != nil {
 		fmt.Fprintln(out, "prompt cancelled")
 		return deps.NewSilentError(guardErr)
 	} else if !proceed {
@@ -1270,7 +1271,7 @@ func runMultiAgentPath(
 	masterLabel := judgeLabel(judge)
 	sinks := composeMultiAgentSinks(multiAgentSinkInputs{
 		out:               out,
-		isTTY:             reviewCommandIsInteractive(cmd),
+		isTTY:             canPrompt,
 		agentNames:        agentNames,
 		cancelRun:         cancelRun,
 		runContext:        runCtx,
