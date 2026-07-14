@@ -373,6 +373,15 @@ func CalculateTotalTokenUsageFromBytes(data []byte, startLine int, subagentsDir 
 	// Extract spawned agent IDs from the FULL transcript (startLine=0): a
 	// subagent spawned before this checkpoint's startLine can keep writing to
 	// its transcript, so scanning only the slice would undercount it (#329).
+	//
+	// PERF (considered, retained deliberately): this re-parses the full
+	// transcript in addition to the sliced parse above — two JSONL parses per
+	// call, growing with session length. A single-pass version was rejected:
+	// the Droid parser drops non-message / malformed lines, so a parsed-entry
+	// index does not map to a raw line number and naively slicing the full parse
+	// at startLine would misattribute main-agent usage; doing it safely would
+	// mean threading raw-line numbers through the shared parser. The common
+	// no-subagent case already avoids this via the subagentsDir == "" guard.
 	fullParsed, _, err := ParseDroidTranscriptFromBytes(data, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
@@ -437,6 +446,10 @@ func ExtractAllModifiedFilesFromBytes(data []byte, startLine int, subagentsDir s
 	// spawned before this checkpoint's startLine may keep modifying files in
 	// later turns, and scanning only the slice would miss it (#329). Main-agent
 	// file extraction above stays scoped to the slice.
+	//
+	// PERF: the second full-transcript parse is retained deliberately for the
+	// same reasons documented on CalculateTotalTokenUsageFromBytes above; the
+	// common no-subagent case is short-circuited by the subagentsDir == "" guard.
 	fullParsed, _, err := ParseDroidTranscriptFromBytes(data, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)

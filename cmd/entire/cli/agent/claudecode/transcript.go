@@ -403,6 +403,18 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	// sliced portion. A subagent spawned before this checkpoint's startLine can
 	// keep writing to its transcript in later turns; scanning only the slice
 	// would miss it and undercount subagent token usage (#329).
+	//
+	// PERF (considered, retained deliberately): this re-parses the full
+	// transcript in addition to the sliced parse above — two JSONL parses per
+	// call, growing with session length. A single-pass version was rejected as
+	// not worth the risk: ParseFromBytes silently drops malformed lines, so a
+	// parsed-entry index does not correspond to a raw line number and naively
+	// slicing the full parse at startLine would misattribute main-agent usage;
+	// doing it safely would mean threading raw-line numbers through the shared
+	// transcript parser used by every agent. A cheap line scan for the Task
+	// marker instead of a full parse would duplicate ExtractSpawnedAgentIDs'
+	// nested tool_result decoding. The common no-subagent case already avoids
+	// this cost entirely via the subagentsDir == "" short-circuit above.
 	fullParsed, err := transcript.ParseFromBytes(transcriptData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
@@ -478,6 +490,10 @@ func (c *ClaudeCodeAgent) ExtractAllModifiedFiles(transcriptData []byte, startLi
 	// spawned before this checkpoint's startLine may keep modifying files in
 	// later turns, and scanning only the slice would miss it (#329). Main-agent
 	// file extraction above stays scoped to the slice.
+	//
+	// PERF: the second full-transcript parse is retained deliberately for the
+	// same reasons documented on CalculateTotalTokenUsage above; the common
+	// no-subagent case is short-circuited by the subagentsDir == "" guard.
 	fullParsed, err := transcript.ParseFromBytes(transcriptData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
