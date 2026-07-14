@@ -89,19 +89,20 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	// (remote.<url>.*) so it can lazy-fetch filtered-out objects later. That
 	// section also turns the URL into a phantom remote that `git fetch --all`
 	// and `git remote update` keep dialing. When this fetch is the one creating
-	// the section (it did not exist beforehand), stamp skipFetchAll/
-	// skipDefaultUpdate so bulk fetches skip our adhoc remote. Remotes that
-	// already existed are left untouched so we never rewrite the user's config.
+	// the section, stamp skipFetchAll/skipDefaultUpdate so bulk fetches skip our
+	// adhoc remote. Remotes that already existed are left untouched so we never
+	// rewrite the user's config.
 	var stampURL string
-	var stampNewRemote bool
+	var stampCandidate, existedBefore bool
 	if filtered && IsURL(opts.Remote) {
+		stampCandidate = true
 		stampURL = opts.Remote
 		if token := strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)); token != "" && isValidToken(token) {
 			// With a checkpoint token, newCommand rewrites SSH targets to HTTPS
 			// and git records the section under the rewritten URL.
 			stampURL, _ = resolveTargetForTokenAuth(ctx, stampURL)
 		}
-		stampNewRemote = !gitRemoteSectionExists(ctx, opts.Dir, stampURL)
+		existedBefore = gitRemoteSectionExists(ctx, opts.Dir, stampURL)
 	}
 
 	cmd := newCommand(ctx, args...)
@@ -110,11 +111,20 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	}
 	disableTerminalPrompt(cmd)
 	out, err := cmd.CombinedOutput()
+
+	// Stamp whenever this fetch newly created the section — even on a fetch
+	// error. Git writes remote.<url>.promisor eagerly during connection setup,
+	// so a failed filtered fetch still leaves the phantom remote behind; if we
+	// only stamped on success it would linger unstamped forever (the section
+	// then exists on the next attempt, so it never looks "new" again). Checking
+	// existence after the fetch keeps us from inventing a section when the fetch
+	// died before git wrote anything.
+	if stampCandidate && !existedBefore && gitRemoteSectionExists(ctx, opts.Dir, stampURL) {
+		markRemoteSkipped(ctx, opts.Dir, stampURL)
+	}
+
 	if err != nil {
 		return out, fmt.Errorf("git fetch: %w", err)
-	}
-	if stampNewRemote {
-		markRemoteSkipped(ctx, opts.Dir, stampURL)
 	}
 	return out, nil
 }
@@ -123,7 +133,8 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 // section so `git fetch --all` and `git remote update` skip it. Called only for
 // remotes this fetch just created, so an adhoc checkpoint URL never lingers as a
 // phantom remote that bulk fetches keep dialing.
-// Best-effort: the fetch already succeeded, so failures only log.
+// Best-effort: the git config write is not worth failing the fetch over, so
+// failures only log.
 func markRemoteSkipped(ctx context.Context, dir, url string) {
 	for _, key := range []string{"skipFetchAll", "skipDefaultUpdate"} {
 		fullKey := "remote." + url + "." + key

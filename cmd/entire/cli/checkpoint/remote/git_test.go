@@ -874,6 +874,58 @@ func TestFetch_FilteredURLFetchMarksNewRemoteSkipped(t *testing.T) {
 	runIsolatedGit(ctx, t, cloneDir, "fetch", "--all", "--no-auto-gc")
 }
 
+// TestFetch_FailedFilteredFetchStillStampsNewRemote guards the resume
+// regression: git writes remote.<url>.promisor eagerly during connection
+// setup, so a filtered fetch that then fails (e.g. a missing ref) still leaves
+// the phantom remote behind. The stamp must land anyway — otherwise the section
+// exists on the next attempt, never looks new again, and lingers unstamped.
+func TestFetch_FailedFilteredFetchStillStampsNewRemote(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	originBare := filepath.Join(tmpDir, "origin.git")
+	checkpointBare := filepath.Join(tmpDir, "checkpoints.git")
+	seedDir := filepath.Join(tmpDir, "seed")
+	cloneDir := filepath.Join(tmpDir, "clone")
+
+	testutil.InitRepo(t, seedDir)
+	testutil.WriteFile(t, seedDir, "f.txt", "init")
+	testutil.GitAdd(t, seedDir, "f.txt")
+	testutil.GitCommit(t, seedDir, "init")
+
+	runIsolatedGit(ctx, t, "", "init", "--bare", originBare)
+	runIsolatedGit(ctx, t, "", "init", "--bare", checkpointBare)
+	runIsolatedGit(ctx, t, checkpointBare, "config", "uploadpack.allowFilter", "true")
+	runIsolatedGit(ctx, t, seedDir, "push", originBare, "HEAD:refs/heads/main")
+	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
+
+	testutil.WriteFile(
+		t,
+		cloneDir,
+		".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"filtered_fetches": true}}`,
+	)
+	t.Chdir(cloneDir)
+
+	fetchURL := "file://" + checkpointBare
+	// Fetch a ref that does not exist on the checkpoint remote: the command
+	// fails, but git has already recorded the URL-keyed promisor section.
+	_, err := Fetch(ctx, FetchOptions{
+		Remote:   fetchURL,
+		RefSpecs: []string{"+refs/heads/does-not-exist:refs/entire-fetch-tmp/x"},
+		NoTags:   true,
+		Dir:      cloneDir,
+	})
+	require.Error(t, err, "fetch of a missing ref should fail")
+
+	require.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".promisor"),
+		"git records the promisor section even when the fetch fails")
+	assert.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipFetchAll"),
+		"a phantom remote left by a failed fetch must still be stamped")
+	assert.True(t, gitConfigBool(ctx, cloneDir, "remote."+fetchURL+".skipDefaultUpdate"),
+		"a phantom remote left by a failed fetch must still be stamped")
+}
+
 // TestFetch_UnfilteredFetchDoesNotCreateConfigSection verifies the stamp is
 // gated on a filtered fetch: a plain (unfiltered) URL fetch records no
 // URL-keyed section, so we must not invent a remote.<url> config section.
