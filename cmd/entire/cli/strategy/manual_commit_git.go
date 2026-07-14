@@ -394,9 +394,7 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
 	state.CheckpointTokenUsage = nil
-	if state.TokenUsage != nil {
-		state.SubagentTokensBaseline = state.TokenUsage.SubagentTokens
-	}
+	state.RebaselineSubagentTokens()
 }
 
 // deleteShadowBranch deletes a shadow branch by name.

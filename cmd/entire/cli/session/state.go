@@ -455,6 +455,21 @@ func (s *State) ClearLegacyTranscriptOffsets() {
 	s.TranscriptLinesAtStart = 0
 }
 
+// RebaselineSubagentTokens snapshots the current cumulative subagent total
+// (TokenUsage.SubagentTokens) into SubagentTokensBaseline so the next checkpoint
+// window's CheckpointTokenUsage.SubagentTokens is rescoped to "since this
+// re-baseline" rather than re-reporting the full cumulative subagent total.
+//
+// The invariant is: every site that starts a fresh checkpoint window by clearing
+// CheckpointTokenUsage MUST also re-baseline. Callers: the condensation reset
+// helper (resetCheckpointWindow) and cross-repo session adoption, which likewise
+// opens a fresh target-local window. Sharing this here keeps the two in step.
+func (s *State) RebaselineSubagentTokens() {
+	if s.TokenUsage != nil {
+		s.SubagentTokensBaseline = s.TokenUsage.SubagentTokens
+	}
+}
+
 // RealignAttributionBase sets AttributionBaseCommit to newBase and clears any
 // bookkeeping whose meaning depends on attribution being diverged from the
 // shadow-branch base. Call this every time a code path intentionally brings
