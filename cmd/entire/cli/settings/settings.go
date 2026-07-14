@@ -630,6 +630,13 @@ func saveRaw(path, label string, raw map[string]json.RawMessage) error {
 	if err != nil {
 		return fmt.Errorf("marshal %s settings: %w", label, err)
 	}
+	// Ensure the parent directory exists, mirroring the struct save path
+	// (saveToFile). Without this, the raw save path fails in a repo that has
+	// never created .entire/ — e.g. a bare `entire disable` in a fresh repo,
+	// which resolves to a raw flip before any directory is created.
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("creating %s settings directory: %w", label, err)
+	}
 	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
 		return fmt.Errorf("writing %s settings: %w", label, err)
 	}
