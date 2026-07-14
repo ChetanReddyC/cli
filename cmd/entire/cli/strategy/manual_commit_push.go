@@ -288,9 +288,12 @@ const pushBootstrapProbeTimeout = 10 * time.Second
 // (shared across worktrees) rather than in .git/config so it never pollutes the
 // user's git configuration, and follows the sibling ".git/entire-<thing>/"
 // convention used by session state, routing its file access through os.Root the
-// same way. It is registered for `entire clean` (see cleanup.go).
+// same way. Like entire-session-locks (another sibling cache), it is swept on
+// `entire disable` rather than enrolled in `entire clean`'s session-data GC.
 const (
-	pushBootstrapDirName        = "entire-push-bootstrap"
+	// PushBootstrapDirName is exported so the disable/uninstall teardown can
+	// sweep this marker directory alongside the other sibling state dirs.
+	PushBootstrapDirName        = "entire-push-bootstrap"
 	pushBootstrapMarkerFileName = "fingerprint"
 )
 
@@ -300,7 +303,7 @@ func pushBootstrapDir(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(commonDir, pushBootstrapDirName), nil
+	return filepath.Join(commonDir, PushBootstrapDirName), nil
 }
 
 // readPushBootstrapMarker returns the stored fingerprint and whether it is still

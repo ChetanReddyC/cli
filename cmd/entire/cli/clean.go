@@ -317,7 +317,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	}
 
 	// Group items by type for display
-	var branches, states, checkpoints, pushBootstrap []strategy.CleanupItem
+	var branches, states, checkpoints []strategy.CleanupItem
 	for _, item := range items {
 		switch item.Type {
 		case strategy.CleanupTypeShadowBranch:
@@ -326,8 +326,6 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 			states = append(states, item)
 		case strategy.CleanupTypeCheckpoint:
 			checkpoints = append(checkpoints, item)
-		case strategy.CleanupTypePushBootstrap:
-			pushBootstrap = append(pushBootstrap, item)
 		}
 	}
 
@@ -339,7 +337,6 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printSection(w, "Shadow branches", cleanupItemIDs(branches))
 		printSection(w, "Session states", cleanupItemIDs(states))
 		printSection(w, "Checkpoint metadata", cleanupItemIDs(checkpoints))
-		printSection(w, "Push-bootstrap marker", cleanupItemIDs(pushBootstrap))
 		printSection(w, "Temp files", tempFiles)
 
 		if dryRun {
@@ -377,8 +374,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	deletedTempFiles, failedTempFiles := deleteTempFiles(ctx, tempFiles)
 
 	// Report results
-	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(result.PushBootstrap) + len(deletedTempFiles)
-	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(result.FailedPushBootstrap) + len(failedTempFiles)
+	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(deletedTempFiles)
+	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(failedTempFiles)
 
 	if totalDeleted > 0 {
 		fmt.Fprintf(w, "✓ Deleted %d %s:\n", totalDeleted, itemWord(totalDeleted))
@@ -386,7 +383,6 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printResultSection(w, "Shadow branches", result.ShadowBranches)
 		printResultSection(w, "Session states", result.SessionStates)
 		printResultSection(w, "Checkpoints", result.Checkpoints)
-		printResultSection(w, "Push-bootstrap marker", result.PushBootstrap)
 
 		printResultSection(w, "Temp files", deletedTempFiles)
 	}
@@ -397,7 +393,6 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printResultSection(errW, "Shadow branches", result.FailedBranches)
 		printResultSection(errW, "Session states", result.FailedStates)
 		printResultSection(errW, "Checkpoints", result.FailedCheckpoints)
-		printResultSection(errW, "Push-bootstrap marker", result.FailedPushBootstrap)
 
 		if len(failedTempFiles) > 0 {
 			fmt.Fprintf(errW, "\nTemp files:\n")
