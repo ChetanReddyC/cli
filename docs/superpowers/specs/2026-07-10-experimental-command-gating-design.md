@@ -121,17 +121,26 @@ keep the diff focused on registration sites.
 
 ### Build gating
 
-- Dev — `go build ./cmd/entire`, `go run`, mise: no ldflags → `Visible="true"`
-  → experimental visible and grouped.
-- Release — both GoReleaser configs, `entire` binary only (not
-  `git-remote-entire`), add to the `ldflags` list:
-  ```
-  -X github.com/entireio/cli/cmd/entire/cli/experimental.Visible=false
-  ```
-  - `.goreleaser.yaml` (prod `entire` build) — stamped.
-  - `.goreleaser.nonprod.yaml` — **not stamped**: it builds only the
-    `git-remote-entire` helper, never the `entire` binary, so there is nothing
-    to gate there. (The earlier "hide in nonprod too" decision is moot.)
+Stable releases and nightly builds run through the **same** `.goreleaser.yaml`
+(via `release.yml`); they differ only by git tag — stable is `vX.Y.Z`, nightly
+is `vX.Y.Z-nightly.*` (a prerelease). Local builds carry no ldflags at all.
+
+| Build | Tag | `.Prerelease` | Stamp | Result |
+|-------|-----|---------------|-------|--------|
+| Local (`go build`/`go run`/mise) | — | — | none (default) | visible |
+| Nightly | `vX.Y.Z-nightly.*` | non-empty | `Visible=true` | visible |
+| Stable | `vX.Y.Z` | empty | `Visible=false` | hidden |
+
+The `entire` build's `ldflags` in `.goreleaser.yaml` gets a GoReleaser template
+that keys off `.Prerelease`:
+
+```
+-X github.com/entireio/cli/cmd/entire/cli/experimental.Visible={{ if .Prerelease }}true{{ else }}false{{ end }}
+```
+
+`.goreleaser.nonprod.yaml` is **not** stamped: it builds only the
+`git-remote-entire` helper, never the `entire` binary, so there is nothing to
+gate there.
 
 ### mise convenience task
 
