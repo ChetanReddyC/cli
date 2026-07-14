@@ -1116,22 +1116,58 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 		}
 	}
 
+	// Resolve the target scope first, then decide whether there is anything to
+	// do. Enable writes to the scope resolved by settingsTargetFile, which is
+	// also what strategy/checkpoint-backend updates above use. Without this, a
+	// plain `entire enable` (no --project/--local) resolved the strategy write
+	// to the existing project settings.json but wrote the enabled flag to
+	// settings.local.json, leaving the project file the user disabled still
+	// enabled=false (#1140).
+	targetFile, _ := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
+	useProject := targetFile == settings.EntireSettingsFile
+
+	// The merged view can report enabled while the resolved target file is
+	// itself still disabled — exactly the legacy #1140 split state a pre-fix
+	// binary left on disk (committed settings.json enabled:false masked by
+	// settings.local.json enabled:true, which wins in the merge). In that case
+	// the early "already enabled" return would never flip the target file, even
+	// with an explicit --project, so `enable` could not recover the state #1140
+	// reports. Only short-circuit when the merged view is enabled AND the target
+	// file is not itself explicitly disabled.
 	enabled, err := IsEnabled(ctx)
-	if err == nil && enabled {
+	if err == nil && enabled && !scopeExplicitlyDisabled(ctx, useProject) {
 		if !usedSetupFlow {
 			fmt.Fprintln(w, "Entire is already enabled.")
 		}
 		printEnabledStatus(ctx, w)
 		return nil
 	}
-	// Enable in the same settings target scope resolved by settingsTargetFile,
-	// which is also what strategy/checkpoint-backend updates above use. Without
-	// this, a plain `entire enable` (no --project/--local) resolved the strategy
-	// write to the existing project settings.json but wrote the enabled flag to
-	// settings.local.json, leaving the project file the user disabled still
-	// enabled=false (#1140).
-	targetFile, _ := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	return runEnable(ctx, w, targetFile == settings.EntireSettingsFile)
+	return runEnable(ctx, w, useProject)
+}
+
+// scopeExplicitlyDisabled reports whether the settings file for the given scope
+// exists and carries an explicit "enabled": false. A missing file or a missing
+// "enabled" key returns false: those default to enabled, so there is nothing to
+// recover. Used to detect the legacy #1140 split state where the merged view is
+// enabled but the target file the user cares about is still disabled.
+func scopeExplicitlyDisabled(ctx context.Context, useProject bool) bool {
+	load := settings.LoadLocalRaw
+	if useProject {
+		load = settings.LoadProjectRaw
+	}
+	_, raw, _, err := load(ctx)
+	if err != nil {
+		return false
+	}
+	value, ok := raw["enabled"]
+	if !ok {
+		return false
+	}
+	var enabled bool
+	if err := json.Unmarshal(value, &enabled); err != nil {
+		return false
+	}
+	return !enabled
 }
 
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {

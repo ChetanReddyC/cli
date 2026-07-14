@@ -225,6 +225,88 @@ func TestRunEnable_AlreadyEnabled(t *testing.T) {
 	}
 }
 
+// TestRunEnableOnConfiguredRepo_RecoversLegacySplitState covers issue #1140
+// step 4: recovering the split state a pre-fix binary left on disk — committed
+// settings.json enabled:false, settings.local.json enabled:true. The local
+// override wins in the merged view, so IsEnabled reports true; a bare early
+// return on the merged view would leave the committed project file disabled
+// forever, even with an explicit --project. runEnableOnConfiguredRepo must
+// detect that the target scope is itself disabled and flip it.
+func TestRunEnableOnConfiguredRepo_RecoversLegacySplitState(t *testing.T) {
+	setupTestRepo(t)
+	// Legacy #1140 split state.
+	writeSettings(t, testSettingsDisabled)
+	writeLocalSettings(t, `{"enabled": true}`)
+
+	// Sanity: the merged view already reports enabled (local override wins).
+	enabled, err := IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if !enabled {
+		t.Fatal("precondition: merged view should report enabled (local override wins)")
+	}
+
+	cmd := newEnableCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := runEnableOnConfiguredRepo(context.Background(), cmd, EnableOptions{UseProjectSettings: true}); err != nil {
+		t.Fatalf("runEnableOnConfiguredRepo(--project) error = %v", err)
+	}
+
+	// The committed project file must now be enabled — the state #1140 could
+	// not recover before this fix.
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if !projectS.Enabled {
+		t.Error("committed settings.json should be enabled:true after enable --project recovered the split state")
+	}
+}
+
+// TestRunEnableOnConfiguredRepo_BareEnable_RecoversLegacySplitState verifies the
+// same recovery happens for a bare `entire enable` (no --project), which
+// resolves to the committed settings.json via settingsTargetFile.
+func TestRunEnableOnConfiguredRepo_BareEnable_RecoversLegacySplitState(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsDisabled)
+	writeLocalSettings(t, `{"enabled": true}`)
+
+	cmd := newEnableCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := runEnableOnConfiguredRepo(context.Background(), cmd, EnableOptions{}); err != nil {
+		t.Fatalf("runEnableOnConfiguredRepo() error = %v", err)
+	}
+
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if !projectS.Enabled {
+		t.Error("committed settings.json should be enabled:true after a bare enable recovered the split state")
+	}
+}
+
+// TestRunEnableOnConfiguredRepo_AlreadyEnabled_NoSplit verifies the early
+// return still fires (nothing to flip, "already enabled") when the merged view
+// AND the resolved target scope agree that Entire is enabled.
+func TestRunEnableOnConfiguredRepo_AlreadyEnabled_NoSplit(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newEnableCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := runEnableOnConfiguredRepo(context.Background(), cmd, EnableOptions{}); err != nil {
+		t.Fatalf("runEnableOnConfiguredRepo() error = %v", err)
+	}
+	if !strings.Contains(buf.String(), "already enabled") {
+		t.Errorf("expected 'already enabled' output when nothing to recover, got: %s", buf.String())
+	}
+}
+
 // TestRunEnable_ProjectFlag_ClearsLocalDisable verifies that `entire enable --project`
 // after `entire disable` (which writes to local) actually re-enables by updating both files.
 func TestRunEnable_ProjectFlag_ClearsLocalDisable(t *testing.T) {
