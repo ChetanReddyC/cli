@@ -867,13 +867,17 @@ func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse, styles st
 			if mi == maxCodeSearchFileMatches {
 				break
 			}
+			// Truncate before highlighting but append the ellipsis after,
+			// so the non-ASCII "…" doesn't disable case-insensitive
+			// highlighting (isASCII) for the rest of the line.
 			line := r.ContextLine
-			runes := []rune(line)
-			if len(runes) > maxContextLineLen {
-				line = string(runes[:maxContextLineLen]) + "…"
+			ellipsis := ""
+			if runes := []rune(line); len(runes) > maxContextLineLen {
+				line = string(runes[:maxContextLineLen])
+				ellipsis = "…"
 			}
 			lineNo := styles.render(styles.dim, fmt.Sprintf("%d:", r.Line))
-			fmt.Fprintf(w, "  %s %s\n", lineNo, highlightCodeMatches(line, resp.Query, styles, caseSensitive))
+			fmt.Fprintf(w, "  %s %s%s\n", lineNo, highlightCodeMatches(line, resp.Query, styles, caseSensitive), ellipsis)
 			shown++
 		}
 		// ponytail: overflow counts only what this page fetched (peregrine

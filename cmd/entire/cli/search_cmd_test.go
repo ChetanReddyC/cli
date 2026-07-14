@@ -339,6 +339,30 @@ func TestWriteCodeSearchText_TruncatesLongLines(t *testing.T) {
 	}
 }
 
+func TestWriteCodeSearchText_HighlightsTruncatedLines(t *testing.T) {
+	t.Parallel()
+
+	// The appended "…" is non-ASCII; it must not disable case-insensitive
+	// highlighting for an otherwise ASCII line.
+	longLine := "FooBar " + strings.Repeat("x", 300)
+	resp := &codesearch.SearchResponse{
+		Query:   "foobar",
+		Stats:   codesearch.Stats{TotalMatches: 1, TotalFiles: 1, ReposSearched: 1, DurationMs: 1},
+		Results: []codesearch.Result{{Repo: "r", Path: "f.go", Line: 1, ContextLine: longLine}},
+	}
+
+	var buf bytes.Buffer
+	writeCodeSearchText(&buf, resp, statusStyles{colorEnabled: true}, false)
+
+	output := buf.String()
+	if !strings.Contains(output, "…") {
+		t.Errorf("expected truncated line to end with ellipsis:\n%s", output)
+	}
+	if !strings.Contains(output, "\x1b[") {
+		t.Errorf("expected case-insensitive highlight on truncated line:\n%s", output)
+	}
+}
+
 func TestWriteCodeSearchText_Empty(t *testing.T) {
 	t.Parallel()
 
