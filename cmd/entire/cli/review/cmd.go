@@ -277,14 +277,26 @@ type reviewConfigureOptions struct {
 // Bubble Tea to accept keypresses. A controlling /dev/tty alone is insufficient
 // because the command may still have piped stdin.
 func reviewCommandIsInteractive(cmd *cobra.Command) bool {
-	testTTY := os.Getenv(interactive.EnvTestTTY)
-	ci := os.Getenv("CI")
-	hardDisabled := (testTTY != "" && testTTY != "1") || (ci != "" && ci != "false")
+	hardDisabled := reviewInteractivityHardDisabled(
+		os.Getenv(interactive.EnvTestTTY),
+		os.Getenv("CI"),
+		interactive.UnderTest(),
+	)
 	return reviewTTYIsInteractive(
 		interactive.IsTerminalReader(cmd.InOrStdin()),
 		interactive.IsTerminalWriter(cmd.OutOrStdout()),
 		hardDisabled,
 	)
+}
+
+func reviewInteractivityHardDisabled(testTTY, ci string, underTest bool) bool {
+	// Match CanPromptInteractively's precedence: ENTIRE_TEST_TTY=1 may opt an
+	// in-process test into interaction, while tests without that explicit
+	// override must never read from a developer's real terminal.
+	if testTTY != "" {
+		return testTTY != "1"
+	}
+	return underTest || (ci != "" && ci != "false")
 }
 
 func reviewTTYIsInteractive(stdinTTY, stdoutTTY, hardDisabled bool) bool {
