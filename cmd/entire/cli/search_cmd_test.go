@@ -167,14 +167,72 @@ func TestWriteCodeSearchText(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeCodeSearchText(&buf, resp)
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf))
 
 	output := buf.String()
-	if !strings.Contains(output, "entireio/cli:main.go:10: func main() {") {
+	if !strings.Contains(output, "entireio/cli:main.go\n") {
+		t.Errorf("output missing file header:\n%s", output)
+	}
+	if !strings.Contains(output, "  10: func main() {") {
 		t.Errorf("output missing first result:\n%s", output)
+	}
+	if !strings.Contains(output, "  42: \tfmt.Println(\"hello\")") {
+		t.Errorf("output missing second result:\n%s", output)
 	}
 	if !strings.Contains(output, "2 matches across 1 files") {
 		t.Errorf("output missing summary line:\n%s", output)
+	}
+	if strings.Contains(output, "\x1b[") {
+		t.Errorf("expected no ANSI codes for non-terminal writer:\n%s", output)
+	}
+}
+
+func TestWriteCodeSearchText_GroupsByFile(t *testing.T) {
+	t.Parallel()
+
+	// Interleaved files (score-sorted input) should collapse into one header
+	// per file, in first-appearance order.
+	resp := &codesearch.SearchResponse{
+		Stats: codesearch.Stats{TotalMatches: 3, TotalFiles: 2, ReposSearched: 1, DurationMs: 1},
+		Results: []codesearch.Result{
+			{Repo: "r", Path: "a.go", Line: 1, ContextLine: "one"},
+			{Repo: "r", Path: "b.go", Line: 2, ContextLine: "two"},
+			{Repo: "r", Path: "a.go", Line: 3, ContextLine: "three"},
+		},
+	}
+
+	var buf bytes.Buffer
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf))
+
+	output := buf.String()
+	if got := strings.Count(output, "r:a.go\n"); got != 1 {
+		t.Errorf("expected exactly 1 header for a.go, got %d:\n%s", got, output)
+	}
+	if aIdx, bIdx := strings.Index(output, "r:a.go"), strings.Index(output, "r:b.go"); aIdx > bIdx {
+		t.Errorf("expected a.go header before b.go:\n%s", output)
+	}
+}
+
+func TestHighlightCodeMatches(t *testing.T) {
+	t.Parallel()
+
+	styles := statusStyles{colorEnabled: true}
+
+	out := highlightCodeMatches("func HandleRequest(w)", "handlerequest", styles)
+	if !strings.Contains(out, "\x1b[") {
+		t.Errorf("expected ANSI codes in highlighted output, got %q", out)
+	}
+	if !strings.HasPrefix(out, "func ") || !strings.HasSuffix(out, "(w)") {
+		t.Errorf("expected unmatched text preserved around highlight, got %q", out)
+	}
+
+	if out := highlightCodeMatches("no match here", "zzz", styles); out != "no match here" {
+		t.Errorf("expected unchanged line when no match, got %q", out)
+	}
+
+	plain := statusStyles{colorEnabled: false}
+	if out := highlightCodeMatches("func main()", "main", plain); out != "func main()" {
+		t.Errorf("expected unchanged line when color disabled, got %q", out)
 	}
 }
 
@@ -218,7 +276,7 @@ func TestWriteCodeSearchText_TruncatesLongLines(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeCodeSearchText(&buf, resp)
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf))
 
 	output := buf.String()
 	if strings.Contains(output, longLine) {
@@ -242,7 +300,7 @@ func TestWriteCodeSearchText_Empty(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeCodeSearchText(&buf, resp)
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf))
 
 	if !strings.Contains(buf.String(), "No code search results found") {
 		t.Errorf("expected empty results message, got:\n%s", buf.String())

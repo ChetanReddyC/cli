@@ -489,7 +489,7 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 		return writeCodeSearchJSON(w, resp)
 	}
 
-	writeCodeSearchText(w, resp)
+	writeCodeSearchText(w, resp, newStatusStyles(w))
 	return nil
 }
 
@@ -803,8 +803,11 @@ func writeCodeSearchJSON(w io.Writer, resp *codesearch.SearchResponse) error {
 // with an ellipsis so that JSONL/minified files don't blow up the terminal.
 const maxContextLineLen = 200
 
-// writeCodeSearchText renders code search results in grep-style format.
-func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse) {
+// writeCodeSearchText renders code search results grouped by file (ripgrep
+// style): a colored "repo:path" header per file, indented line-numbered
+// matches beneath it, and a dimmed stats footer. Colors are applied only when
+// the writer supports them (styles.colorEnabled); piped output stays plain.
+func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse, styles statusStyles) {
 	if len(resp.Results) == 0 {
 		if len(resp.FailedJurisdictions) > 0 {
 			fmt.Fprintf(w, "No code search results found (some regions failed: %s)\n",
@@ -814,26 +817,90 @@ func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse) {
 		}
 		return
 	}
-	for _, r := range resp.Results {
-		line := r.ContextLine
-		runes := []rune(line)
-		if len(runes) > maxContextLineLen {
-			line = string(runes[:maxContextLineLen]) + "…"
-		}
-		fmt.Fprintf(w, "%s:%s:%d: %s\n", r.Repo, r.Path, r.Line, line)
+
+	// Group results by repo:path, preserving first-appearance order so the
+	// best-scored file stays on top (results arrive globally score-sorted).
+	type fileGroup struct {
+		key     string
+		results []codesearch.Result
 	}
+	var groups []fileGroup
+	idx := make(map[string]int, len(resp.Results))
+	for _, r := range resp.Results {
+		key := r.Repo + ":" + r.Path
+		i, ok := idx[key]
+		if !ok {
+			i = len(groups)
+			idx[key] = i
+			groups = append(groups, fileGroup{key: key})
+		}
+		groups[i].results = append(groups[i].results, r)
+	}
+
+	for gi, g := range groups {
+		if gi > 0 {
+			fmt.Fprintln(w)
+		}
+		fmt.Fprintln(w, styles.render(styles.cyan, g.key))
+		for _, r := range g.results {
+			line := r.ContextLine
+			runes := []rune(line)
+			if len(runes) > maxContextLineLen {
+				line = string(runes[:maxContextLineLen]) + "…"
+			}
+			lineNo := styles.render(styles.dim, fmt.Sprintf("%d:", r.Line))
+			fmt.Fprintf(w, "  %s %s\n", lineNo, highlightCodeMatches(line, resp.Query, styles))
+		}
+	}
+
 	shown := len(resp.Results)
+	var summary string
 	if resp.Stats.TotalMatches > shown {
-		fmt.Fprintf(w, "\nShowing %d of %d matches across %d files in %d repos (%.0fms)\n",
+		summary = fmt.Sprintf("Showing %d of %d matches across %d files in %d repos (%.0fms)",
 			shown, resp.Stats.TotalMatches, resp.Stats.TotalFiles, resp.Stats.ReposSearched, resp.Stats.DurationMs)
 	} else {
-		fmt.Fprintf(w, "\n%d matches across %d files in %d repos (%.0fms)\n",
+		summary = fmt.Sprintf("%d matches across %d files in %d repos (%.0fms)",
 			resp.Stats.TotalMatches, resp.Stats.TotalFiles, resp.Stats.ReposSearched, resp.Stats.DurationMs)
 	}
+	fmt.Fprintf(w, "\n%s\n", styles.render(styles.dim, summary))
 	if len(resp.FailedJurisdictions) > 0 {
-		fmt.Fprintf(w, "Warning: results may be incomplete (failed jurisdictions: %s)\n",
+		warning := fmt.Sprintf("Warning: results may be incomplete (failed jurisdictions: %s)",
 			strings.Join(resp.FailedJurisdictions, ", "))
+		fmt.Fprintln(w, styles.render(styles.yellow, warning))
 	}
+}
+
+// highlightCodeMatches bold-red highlights occurrences of query in line
+// (grep convention). Matching is case-insensitive when lowercasing doesn't
+// change byte lengths (it can for some Unicode); otherwise it falls back to
+// exact matching so byte offsets stay aligned. Returns line unchanged when
+// color is disabled or there's nothing to highlight.
+func highlightCodeMatches(line, query string, styles statusStyles) string {
+	if !styles.colorEnabled || query == "" {
+		return line
+	}
+	haystack, needle := line, query
+	if l, q := strings.ToLower(line), strings.ToLower(query); len(l) == len(line) && len(q) == len(query) {
+		haystack, needle = l, q
+	}
+	matchStyle := styles.red.Bold(true)
+	var b strings.Builder
+	i := 0
+	for {
+		j := strings.Index(haystack[i:], needle)
+		if j < 0 {
+			break
+		}
+		j += i
+		b.WriteString(line[i:j])
+		b.WriteString(matchStyle.Render(line[j : j+len(needle)]))
+		i = j + len(needle)
+	}
+	if i == 0 {
+		return line // no matches; skip the builder copy
+	}
+	b.WriteString(line[i:])
+	return b.String()
 }
 
 // writeSearchJSON writes client-side paginated search results as JSON.
