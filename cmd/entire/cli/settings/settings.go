@@ -1313,8 +1313,8 @@ func IsSetUpAny(ctx context.Context) bool {
 // Setup is detected from either .entire/settings.json or
 // .entire/settings.local.json (IsSetUpAny), because `entire enable --local`
 // writes only the local file; checking settings.json alone made hooks silently
-// no-op for local-only setups (#1123). Load() merges both files, so the
-// enabled value is correct regardless of which file is present.
+// no-op for local-only setups. Load() merges both files, so the enabled value
+// is correct regardless of which file is present.
 // Use this for hooks that should be no-ops when Entire is not active.
 func IsSetUpAndEnabled(ctx context.Context) bool {
 	if !IsSetUpAny(ctx) {
