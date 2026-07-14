@@ -4,19 +4,15 @@ import "regexp"
 
 // Provider-specific deterministic secret patterns.
 //
-// These catch credential formats whose Shannon entropy can fall below the
-// entropyThreshold (4.5) and whose surrounding variable name is not
-// password-shaped, so none of the entropy, credentialed-URI,
-// connection-string, or credential-key/value layers reliably flag them.
-// The betterleaks layer also misses them in isolation: its Supabase
+// Detection here is purely prefix + length based: it never depends on
+// entropy or the surrounding key name, so it catches low-entropy
+// credential formats the other secret layers don't reliably flag.
+//
+// The betterleaks layer misses these in isolation: its Supabase
 // secret-key rule is a *composite* rule (RequiredRules:
 // supabase-project-url) that only fires when a matching "*.supabase.co"
 // URL is present in the same content, plus an entropy filter. A secret
 // captured on its own therefore passes straight through.
-//
-// Detection here is purely prefix + length based: it never depends on
-// entropy or the surrounding key name, matching the deterministic
-// behaviour requested in issue #1716.
 //
 // Supabase (https://supabase.com/docs/guides/getting-started/api-keys):
 //   - sb_secret_...      secret API key (replaces the legacy service_role
@@ -38,6 +34,16 @@ import "regexp"
 // catches the current and plausibly-longer future formats while rejecting
 // short identifier-like collisions such as "sb_secret_short".
 //
+// Known false-positive class: because the body charset includes `_` and
+// the {20,} length check is open-ended, sufficiently long snake_case
+// identifiers that merely start with a provider prefix are redacted even
+// though they aren't secrets — e.g. `sb_secret_key_rotation_handler`, or
+// mid-word inside a longer identifier like `libsbp_something_long`. This is
+// accepted: over-redaction is the safe direction here (see
+// TestString_SupabaseProviderTokenLongIdentifierOverRedaction), and adding
+// anchors or capping the body length to eliminate it would reopen the
+// low-entropy under-redaction gap below.
+//
 // The prefix is deliberately NOT preceded by a \b word boundary. \b requires
 // the character before the prefix to be a non-word char, so a secret glued to
 // a preceding word character — an underscore-joined name (FOO_sb_secret_…) or,
@@ -45,10 +51,10 @@ import "regexp"
 // letter abuts the prefix (…line1\nsb_secret_…, where the byte before "sb" is
 // the literal 'n') — would slip past. Because these low-entropy secrets are
 // backed up by no other layer, missing them means the raw key reaches the
-// checkpoint blob. Dropping the anchor is redaction-completeness-safe: the
-// 10/4-char prefixes plus the {20,} floor make a legitimate mid-word collision
-// vanishingly unlikely, and any high-entropy incidental match would already be
-// caught by the entropy layer.
+// checkpoint blob. Dropping the anchor is redaction-completeness-safe: any
+// high-entropy incidental match would already be caught by the entropy layer,
+// and a mid-word identifier collision (documented above) only ever
+// over-redacts, never under-redacts.
 var providerTokenPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`sb_secret_[A-Za-z0-9_-]{20,}`),
 	regexp.MustCompile(`sbp_[a-z0-9_-]{20,}`),

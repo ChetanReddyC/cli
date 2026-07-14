@@ -454,6 +454,33 @@ func TestString_SupabaseProviderTokenOverRedactionGuards(t *testing.T) {
 	})
 }
 
+// TestString_SupabaseProviderTokenLongIdentifierOverRedaction documents a
+// known, accepted false-positive class: because the body charset includes
+// underscore and the length check is {20,} with no upper bound, sufficiently
+// long snake_case identifiers that merely start with a provider prefix are
+// redacted even though they are not secrets — including mid-word, since the
+// prefix is deliberately not anchored (see the package comment in
+// providers.go). This is intentional: over-redaction is the safe direction,
+// and reintroducing a \b anchor or a body-length cap to "fix" this would
+// reopen the low-entropy under-redaction gap the provider layer exists to
+// close. This test pins the tradeoff so it isn't silently reversed.
+func TestString_SupabaseProviderTokenLongIdentifierOverRedaction(t *testing.T) {
+	t.Parallel()
+
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "long snake_case identifier starting with sb_secret_ is over-redacted",
+			input: "func " + supabaseSecretPrefix() + "key_rotation_handler() {}",
+			want:  "func REDACTED() {}",
+		},
+		{
+			name:  "sbp_ mid-word inside a longer identifier is over-redacted",
+			input: "call lib" + supabasePersonalPrefix() + "something_long_enough_value()",
+			want:  "call libREDACTED()",
+		},
+	})
+}
+
 // TestJSONLContent_SupabaseSecretRedacted drives the secret through the
 // field-aware JSONL path used by checkpoint condensation, mirroring a Claude
 // Code transcript line where the secret lives in a message-content leaf.
