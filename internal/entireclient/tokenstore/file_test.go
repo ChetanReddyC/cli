@@ -398,3 +398,14 @@ func TestFileBackendPath_DefaultsToConfigDirTokensJSON(t *testing.T) {
 		t.Fatalf("FileBackendPath() = %q, want %q", got, want)
 	}
 }
+
+// The warning's production destination is stderr. Pinned because every other
+// warning test swaps the writer via captureLoosePermsWarnings — without this,
+// changing the default to io.Discard would silently delete the feature in
+// production while the whole suite stays green (verified by mutation).
+// Not parallel: reads the package-global writer that other tests swap.
+func TestLoosePermsWarnWriter_DefaultsToStderr(t *testing.T) {
+	if loosePermsWarnW != os.Stderr {
+		t.Fatalf("loosePermsWarnW default = %T, want os.Stderr", loosePermsWarnW)
+	}
+}

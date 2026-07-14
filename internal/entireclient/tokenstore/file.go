@@ -30,9 +30,11 @@ type fileStore struct {
 	path string
 	mu   sync.Mutex
 	// warnedLoosePerms dedupes the loose-permissions warning to once per
-	// store instance. Like the rest of the store's state it relies on mu,
-	// which every production caller of load (Get/Set/Delete) holds; tests
-	// that call load directly are single-goroutine.
+	// store instance — effectively once per CLI invocation, since
+	// currentBackend caches a single fileStore for the process. Like the
+	// rest of the store's state it relies on mu, which every production
+	// caller of load (Get/Set/Delete) holds; tests that call load directly
+	// are single-goroutine.
 	warnedLoosePerms bool
 }
 
