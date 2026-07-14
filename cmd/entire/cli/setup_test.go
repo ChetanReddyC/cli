@@ -307,34 +307,34 @@ func TestRunEnableOnConfiguredRepo_AlreadyEnabled_NoSplit(t *testing.T) {
 	}
 }
 
-// TestRunEnable_ProjectFlag_ClearsLocalDisable verifies that `entire enable --project`
-// after `entire disable` (which writes to local) actually re-enables by updating both files.
+// TestRunEnable_ProjectFlag_ClearsLocalDisable verifies that `entire enable
+// --project` clears a real local disable override. The precondition is seeded
+// directly (settings.local.json enabled:false with a local-only field) rather
+// than through runDisable, so the "local override wins and must be cleared"
+// scenario is genuinely exercised — the local-sync in setEnabledFlag's project
+// branch is what makes the re-enable stick.
 func TestRunEnable_ProjectFlag_ClearsLocalDisable(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, testSettingsEnabled)
+	// A real local disable override with a local-only field to prove the sync
+	// touches only the enabled key.
+	writeLocalSettings(t, `{"enabled": false, "local_dev": true}`)
 
-	// Simulate `entire disable` (writes enabled:false to local)
-	var buf bytes.Buffer
-	if err := runDisable(context.Background(), &buf, false); err != nil {
-		t.Fatalf("runDisable() error = %v", err)
-	}
-
-	// Verify it's disabled
+	// Precondition: the local override wins, so the merged view is disabled.
 	enabled, err := IsEnabled(context.Background())
 	if err != nil {
 		t.Fatalf("IsEnabled() error = %v", err)
 	}
 	if enabled {
-		t.Fatal("Expected disabled after runDisable")
+		t.Fatal("precondition: local override should make the merged view disabled")
 	}
 
-	// Now re-enable with --project flag
-	buf.Reset()
+	var buf bytes.Buffer
 	if err := runEnable(context.Background(), &buf, true); err != nil {
 		t.Fatalf("runEnable(project=true) error = %v", err)
 	}
 
-	// Must actually be enabled — local override must not win
+	// Must actually be enabled — the local override must have been cleared.
 	enabled, err = IsEnabled(context.Background())
 	if err != nil {
 		t.Fatalf("IsEnabled() error = %v", err)
@@ -342,24 +342,35 @@ func TestRunEnable_ProjectFlag_ClearsLocalDisable(t *testing.T) {
 	if !enabled {
 		t.Error("Expected enabled after runEnable --project, but IsEnabled() returned false (local override not cleared)")
 	}
+
+	// The local file's enabled key was synced to true, and its local-only
+	// field survived.
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), `"enabled":true`) && !strings.Contains(string(localContent), `"enabled": true`) {
+		t.Errorf("local override should be synced to enabled:true, got: %s", localContent)
+	}
+	if !strings.Contains(string(localContent), "local_dev") {
+		t.Errorf("local-only field local_dev should be retained, got: %s", localContent)
+	}
 }
 
-// TestRunEnable_DefaultFlag_ClearsLocalDisable verifies that `entire enable`
-// (default, no --project) after `entire disable` actually re-enables.
-func TestRunEnable_DefaultFlag_ClearsLocalDisable(t *testing.T) {
+// TestRunEnable_ProjectScope_ClearsExplicitLocalDisable seeds both files
+// disabled (committed settings.json enabled:false AND settings.local.json
+// enabled:false with local_dev) and asserts that a project-scope enable flips
+// both and retains the local-only field. This is the mutation-sensitive test
+// for setEnabledFlag's project-branch local sync: skipping the sync leaves the
+// local override at enabled:false, which would win and keep IsEnabled false.
+func TestRunEnable_ProjectScope_ClearsExplicitLocalDisable(t *testing.T) {
 	setupTestDir(t)
-	writeSettings(t, testSettingsEnabled)
+	writeSettings(t, testSettingsDisabled)
+	writeLocalSettings(t, `{"enabled": false, "local_dev": true}`)
 
-	// Simulate `entire disable` (writes enabled:false to local)
 	var buf bytes.Buffer
-	if err := runDisable(context.Background(), &buf, false); err != nil {
-		t.Fatalf("runDisable() error = %v", err)
-	}
-
-	// Now re-enable with default (no --project)
-	buf.Reset()
-	if err := runEnable(context.Background(), &buf, false); err != nil {
-		t.Fatalf("runEnable(project=false) error = %v", err)
+	if err := runEnable(context.Background(), &buf, true); err != nil {
+		t.Fatalf("runEnable(project=true) error = %v", err)
 	}
 
 	enabled, err := IsEnabled(context.Background())
@@ -367,26 +378,85 @@ func TestRunEnable_DefaultFlag_ClearsLocalDisable(t *testing.T) {
 		t.Fatalf("IsEnabled() error = %v", err)
 	}
 	if !enabled {
-		t.Error("Expected enabled after runEnable, but IsEnabled() returned false")
+		t.Error("Expected enabled after runEnable --project (local override must be synced to enabled:true)")
+	}
+
+	projectContent, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to read project settings: %v", err)
+	}
+	if !strings.Contains(string(projectContent), `"enabled":true`) && !strings.Contains(string(projectContent), `"enabled": true`) {
+		t.Errorf("committed project settings should be enabled:true, got: %s", projectContent)
+	}
+
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), `"enabled":true`) && !strings.Contains(string(localContent), `"enabled": true`) {
+		t.Errorf("local override should be synced to enabled:true, got: %s", localContent)
+	}
+	if !strings.Contains(string(localContent), "local_dev") {
+		t.Errorf("local-only field local_dev should be retained, got: %s", localContent)
 	}
 }
 
-func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
-	setupTestRepo(t)
+// TestRunEnable_DefaultFlag_ClearsLocalDisable verifies that `entire enable`
+// (default/local scope) clears an explicitly-seeded local disable override.
+func TestRunEnable_DefaultFlag_ClearsLocalDisable(t *testing.T) {
+	setupTestDir(t)
 	writeSettings(t, testSettingsEnabled)
-	writeClaudeHooksFixture(t)
+	writeLocalSettings(t, `{"enabled": false, "local_dev": true}`)
 
-	var buf bytes.Buffer
-	if err := runDisable(context.Background(), &buf, false); err != nil {
-		t.Fatalf("runDisable() error = %v", err)
-	}
-
+	// Precondition: local override wins → disabled.
 	enabled, err := IsEnabled(context.Background())
 	if err != nil {
 		t.Fatalf("IsEnabled() error = %v", err)
 	}
 	if enabled {
-		t.Fatal("expected disabled after runDisable")
+		t.Fatal("precondition: local override should make the merged view disabled")
+	}
+
+	var buf bytes.Buffer
+	if err := runEnable(context.Background(), &buf, false); err != nil {
+		t.Fatalf("runEnable(project=false) error = %v", err)
+	}
+
+	enabled, err = IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if !enabled {
+		t.Error("Expected enabled after runEnable, but IsEnabled() returned false")
+	}
+
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), "local_dev") {
+		t.Errorf("local-only field local_dev should be retained, got: %s", localContent)
+	}
+}
+
+// TestSetupAgentHooksNonInteractive_ClearsLocalDisable verifies that a
+// project-scope `enable --agent` clears a real local disable override. The
+// precondition is seeded directly (settings.local.json enabled:false) rather
+// than via runDisable, and the assertion checks the local override was actually
+// synced — otherwise "ClearsLocalDisable" would assert nothing.
+func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeLocalSettings(t, `{"enabled": false, "local_dev": true}`)
+	writeClaudeHooksFixture(t)
+
+	// Precondition: local override wins → disabled.
+	enabled, err := IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if enabled {
+		t.Fatal("precondition: local override should make the merged view disabled")
 	}
 
 	ag, err := agent.Get(types.AgentName("claude-code"))
@@ -394,8 +464,10 @@ func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
 		t.Fatalf("agent.Get(claude-code) error = %v", err)
 	}
 
-	buf.Reset()
-	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, EnableOptions{}); err != nil {
+	var buf bytes.Buffer
+	// UseProjectSettings so the enable resolves to the committed file and its
+	// project branch syncs the local override.
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, EnableOptions{UseProjectSettings: true}); err != nil {
 		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
 	}
 
@@ -404,7 +476,18 @@ func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
 		t.Fatalf("IsEnabled() error = %v", err)
 	}
 	if !enabled {
-		t.Fatal("expected enabled after setupAgentHooksNonInteractive")
+		t.Fatal("expected enabled after setupAgentHooksNonInteractive (local override must be cleared)")
+	}
+
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), `"enabled":true`) && !strings.Contains(string(localContent), `"enabled": true`) {
+		t.Errorf("local override should be synced to enabled:true, got: %s", localContent)
+	}
+	if !strings.Contains(string(localContent), "local_dev") {
+		t.Errorf("local-only field local_dev should be retained, got: %s", localContent)
 	}
 }
 
