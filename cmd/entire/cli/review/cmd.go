@@ -273,8 +273,9 @@ type reviewConfigureOptions struct {
 // reviewCommandIsInteractive treats a real terminal on both stdin and stdout
 // as authoritative for this explicitly user-invoked command. This avoids
 // suppressing the review wizard when a normal shell inherits an agent sentinel
-// or GIT_TERMINAL_PROMPT=0. The fallback preserves controlling-TTY detection
-// for callers whose stdio is not wired directly to the terminal.
+// or GIT_TERMINAL_PROMPT=0, while requiring the exact stdin consumed by huh and
+// Bubble Tea to accept keypresses. A controlling /dev/tty alone is insufficient
+// because the command may still have piped stdin.
 func reviewCommandIsInteractive(cmd *cobra.Command) bool {
 	testTTY := os.Getenv(interactive.EnvTestTTY)
 	ci := os.Getenv("CI")
@@ -282,13 +283,12 @@ func reviewCommandIsInteractive(cmd *cobra.Command) bool {
 	return reviewTTYIsInteractive(
 		interactive.IsTerminalReader(cmd.InOrStdin()),
 		interactive.IsTerminalWriter(cmd.OutOrStdout()),
-		interactive.CanPromptInteractively(),
 		hardDisabled,
 	)
 }
 
-func reviewTTYIsInteractive(stdinTTY, stdoutTTY, canPrompt, hardDisabled bool) bool {
-	return !hardDisabled && stdoutTTY && (stdinTTY || canPrompt)
+func reviewTTYIsInteractive(stdinTTY, stdoutTTY, hardDisabled bool) bool {
+	return !hardDisabled && stdinTTY && stdoutTTY
 }
 
 func (o reviewConfigureOptions) scripted() bool {
