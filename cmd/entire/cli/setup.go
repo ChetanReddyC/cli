@@ -2303,9 +2303,6 @@ func removeAllSessionStates(ctx context.Context) (int, error) {
 	// failing here doesn't undo the state-file removal.
 	if commonDir, cdErr := strategy.GetGitCommonDir(ctx); cdErr == nil {
 		_ = os.RemoveAll(filepath.Join(commonDir, "entire-session-locks"))
-		// The empty-remote push-bootstrap marker is a sibling non-session-data
-		// cache; sweep it too so disable leaves no Entire state behind.
-		_ = os.RemoveAll(filepath.Join(commonDir, strategy.PushBootstrapDirName))
 	}
 
 	return count, nil

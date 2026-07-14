@@ -2,25 +2,19 @@ package strategy
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
-	"sort"
+	"os/exec"
 	"strings"
-	"time"
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
@@ -65,17 +59,21 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	if ps.pushDisabled {
 		return nil
 	}
-	deferAutomaticCheckpointPush := protectFirstUserBranch && deferCheckpointPushOnEmptyRemote(ctx, ps)
 
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
-	// instead of the single v1 branch. (A configured git-branch mirror's v1 ref
-	// is not pushed here yet — mirror push for downgrade safety is a later step.)
+	// instead of the single v1 branch. Those refs live under refs/entire/, not
+	// refs/heads/, so a forge can never pick them as a repository's default
+	// branch — the empty-remote guard below is unnecessary for this backend.
+	// (A configured git-branch mirror's v1 ref is not pushed here yet — mirror
+	// push for downgrade safety is a later step.)
 	if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: a bad checkpoints block already surfaces via Open; default to no refs push
-		if deferAutomaticCheckpointPush {
-			return nil
-		}
 		return s.prePushCheckpointRefs(ctx, ps)
 	}
+
+	// git-branch primary: entire/checkpoints/v1 is a real refs/heads branch, so
+	// on an otherwise-empty remote a forge like GitHub would select it as the
+	// default. Defer publication until the user's own branch exists there.
+	deferAutomaticCheckpointPush := protectFirstUserBranch && deferCheckpointPushOnEmptyRemote(ctx, ps)
 
 	refs := checkpoint.ResolveRefs(ctx)
 	repo, repoErr := OpenRepository(ctx)
@@ -142,7 +140,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	if deferAutomaticCheckpointPush {
 		// Do this only after OPF has had a chance to rewrite v1: the outer
 		// user push may explicitly include the metadata branch.
-		logging.Info(ctx, "automatic checkpoint push deferred until a normal remote branch exists",
+		logging.Info(ctx, "automatic checkpoint push deferred until the remote has a branch",
 			slog.String("remote", ps.remote),
 		)
 		return nil
@@ -164,208 +162,48 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	return nil
 }
 
-// deferCheckpointPushOnEmptyRemote keeps Entire's metadata from becoming the
-// first branch on a repository. Hosting providers such as GitHub make the first
-// branch a repository's default, so a pre-push hook must not independently
-// publish checkpoint metadata to a remote that has no branches yet: the user's
-// own branch, pushed by the same git invocation right after this hook, must be
-// the one to land first.
+// deferCheckpointPushOnEmptyRemote reports whether publication of the git-branch
+// v1 metadata should be held back because the push remote may be brand new.
 //
-// The guard triggers only for a genuinely empty push target (no refs/heads/*).
-// Once any branch exists there — including a checkpoint branch already present
-// from an earlier push or a separate setup — our push can no longer be the one
-// that establishes the default branch, so deferring would only block legitimate
-// checkpoint syncs (e.g. a non-fast-forward v1 update) without preventing any
-// harm.
+// Hosting providers such as GitHub make the first branch pushed to an empty
+// repository its default, so the pre-push hook must not publish
+// entire/checkpoints/v1 ahead of the user's own first branch. The check is
+// purely local: if a remote-tracking ref for this remote already exists
+// (refs/remotes/<remote>/*), the remote has been fetched from or pushed to
+// before and therefore already has at least one branch, so publishing cannot
+// make our metadata the default. Otherwise defer — git records a
+// remote-tracking ref after the first successful push, so the deferred metadata
+// publishes on the next push.
 //
-// A separate checkpoint remote is intentionally exempt: it is a dedicated
-// metadata store, rather than the repository the user is pushing to.
+// It deliberately performs no ls-remote/fetch. A network round trip on the
+// pre-push path can trigger an SSH security-key touch prompt (and doing so per
+// push URL would multiply those prompts), which is a poor pre-push UX. This is
+// also why it uses only the remote git handed the hook rather than resolving
+// every configured push URL.
+//
+// A separate checkpoint remote is exempt: it is a dedicated metadata store, not
+// the repository the user pushes to.
 func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool {
 	if ps.hasCheckpointURL() {
 		return false
 	}
+	return !remoteHasTrackingRefs(ctx, ps.remote)
+}
 
-	dir, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		logging.Warn(ctx, "checkpoint push deferred: could not resolve worktree root",
-			slog.String("remote", ps.remote),
-			slog.String("error", err.Error()),
-		)
-		return true
-	}
-
-	// The hook ctx carries no deadline, and this probe runs synchronously before
-	// the user's actual git push starts — an unbounded ls-remote against a
-	// stalled remote would block the whole push. Bound the probe; a timeout
-	// flows into the fail-closed paths below (defer metadata, let the user's
-	// push proceed).
-	probeCtx, cancel := context.WithTimeout(ctx, pushBootstrapProbeTimeout)
-	defer cancel()
-
-	targets, err := checkpointremote.PushTargetsInDir(probeCtx, dir, ps.remote)
-	if err != nil {
-		// Fail closed for checkpoint publication: the user's git push continues
-		// normally, while a later push can publish the pending metadata once the
-		// remote is reachable and has a branch.
-		logging.Warn(ctx, "checkpoint push deferred: could not inspect remote branches",
-			slog.String("remote", ps.remote),
-			slog.String("error", err.Error()),
-		)
-		return true
-	}
-
-	// The empty-remote hazard exists only during the first-push window. Once
-	// every push target has been observed with at least one branch we record a
-	// fingerprint of that target set locally, so subsequent pushes short-circuit
-	// here instead of paying an ls-remote network round trip on every push. The
-	// marker self-invalidates if the push URLs change, and — because a remote can
-	// later be force-emptied or recreated empty under the same URL — it is only
-	// trusted for pushBootstrapTTL before the remote is re-probed. That bounds
-	// both the network cost (at most one probe per TTL) and the window in which a
-	// re-emptied remote could wrongly skip the guard.
-	fingerprint := pushTargetsFingerprint(targets)
-	if stored, fresh := readPushBootstrapMarker(ctx); fresh && stored == fingerprint {
+// remoteHasTrackingRefs reports whether any refs/remotes/<remote>/* ref exists
+// locally. Its presence means the remote has been fetched from or pushed to
+// before and so already has at least one branch. Local-only and best-effort:
+// any error is treated as "no tracking refs" so the caller fails safe (defers).
+func remoteHasTrackingRefs(ctx context.Context, remote string) bool {
+	if remote == "" {
 		return false
 	}
-
-	for _, target := range targets {
-		out, lsErr := checkpointremote.LsRemoteInDir(probeCtx, dir, target, "refs/heads/*")
-		if lsErr != nil {
-			// Fail closed for checkpoint publication: the user's git push continues
-			// normally, while a later push can publish the pending metadata once the
-			// remote is reachable and has a branch.
-			logging.Warn(ctx, "checkpoint push deferred: could not inspect remote branches",
-				slog.String("remote", ps.remote),
-				slog.String("target", checkpointremote.RedactURL(target)),
-				slog.String("error", lsErr.Error()),
-			)
-			return true
-		}
-
-		// A truly empty target (no heads) is the only case our metadata push
-		// could make the repository's default branch. Any existing head means
-		// it is safe to publish now.
-		if strings.TrimSpace(string(out)) == "" {
-			logging.Info(ctx, "checkpoint push deferred until the remote has a branch",
-				slog.String("remote", ps.remote),
-				slog.String("target", checkpointremote.RedactURL(target)),
-			)
-			return true
-		}
-	}
-
-	// Every push target now has a branch; remember it so the network probe above
-	// is skipped on future pushes for this target set.
-	writePushBootstrapMarker(ctx, fingerprint)
-	return false
-}
-
-// pushTargetsFingerprint returns a stable, order-independent digest of the push
-// targets. Hashing keeps the stored value bounded and avoids writing a push URL
-// (which can embed credentials) verbatim to the marker.
-func pushTargetsFingerprint(targets []string) string {
-	sorted := append([]string(nil), targets...)
-	sort.Strings(sorted)
-	sum := sha256.Sum256([]byte(strings.Join(sorted, "\n")))
-	return hex.EncodeToString(sum[:])
-}
-
-// pushBootstrapTTL bounds how long a recorded bootstrap observation is trusted
-// before the remote is re-probed. It caps the network cost at one ls-remote per
-// interval while keeping the window small in which a remote that was emptied or
-// recreated under the same URL could wrongly skip the guard.
-const pushBootstrapTTL = time.Hour
-
-// pushBootstrapProbeTimeout bounds the empty-remote probe (push-target
-// resolution plus one ls-remote per target). The hook ctx has no deadline of
-// its own, and the probe runs synchronously before the user's git push starts,
-// so without a bound a stalled remote would block the push indefinitely.
-// Matches the 10s used by the other small remote reads in this package.
-const pushBootstrapProbeTimeout = 10 * time.Second
-
-// Bootstrap-marker storage records that every resolved push target has been
-// observed to carry at least one branch. It lives under the git common dir
-// (shared across worktrees) rather than in .git/config so it never pollutes the
-// user's git configuration, and follows the sibling ".git/entire-<thing>/"
-// convention used by session state, routing its file access through os.Root the
-// same way. Like entire-session-locks (another sibling cache), it is swept on
-// `entire disable` rather than enrolled in `entire clean`'s session-data GC.
-const (
-	// PushBootstrapDirName is exported so the disable/uninstall teardown can
-	// sweep this marker directory alongside the other sibling state dirs.
-	PushBootstrapDirName        = "entire-push-bootstrap"
-	pushBootstrapMarkerFileName = "fingerprint"
-)
-
-// pushBootstrapDir returns the directory that holds the bootstrap marker.
-func pushBootstrapDir(ctx context.Context) (string, error) {
-	commonDir, err := GetGitCommonDir(ctx)
+	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--count=1", "refs/remotes/"+remote+"/")
+	out, err := cmd.Output()
 	if err != nil {
-		return "", err
+		return false
 	}
-	return filepath.Join(commonDir, PushBootstrapDirName), nil
-}
-
-// readPushBootstrapMarker returns the stored fingerprint and whether it is still
-// fresh (written within pushBootstrapTTL). A stale, absent, or unreadable marker
-// reports fresh=false so the caller re-probes the remote. Content and mtime come
-// from a single open file handle.
-func readPushBootstrapMarker(ctx context.Context) (fingerprint string, fresh bool) {
-	dir, err := pushBootstrapDir(ctx)
-	if err != nil {
-		return "", false
-	}
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return "", false
-	}
-	defer func() { _ = root.Close() }()
-	f, err := root.Open(pushBootstrapMarkerFileName)
-	if err != nil {
-		return "", false
-	}
-	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
-	if err != nil {
-		return "", false
-	}
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return "", false
-	}
-	return strings.TrimSpace(string(data)), time.Since(info.ModTime()) < pushBootstrapTTL
-}
-
-// writePushBootstrapMarker records fingerprint. Best-effort: a failure only
-// means the next push re-runs the (correct) network probe, so it warns rather
-// than surfacing an error into the push path.
-func writePushBootstrapMarker(ctx context.Context, fingerprint string) {
-	dir, err := pushBootstrapDir(ctx)
-	if err != nil {
-		logging.Warn(ctx, "failed to resolve checkpoint push bootstrap marker dir",
-			slog.String("error", err.Error()),
-		)
-		return
-	}
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		logging.Warn(ctx, "failed to create checkpoint push bootstrap marker dir",
-			slog.String("error", err.Error()),
-		)
-		return
-	}
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		logging.Warn(ctx, "failed to open checkpoint push bootstrap marker dir",
-			slog.String("error", err.Error()),
-		)
-		return
-	}
-	defer func() { _ = root.Close() }()
-	if err := root.WriteFile(pushBootstrapMarkerFileName, []byte(fingerprint+"\n"), 0o600); err != nil {
-		logging.Warn(ctx, "failed to persist checkpoint push bootstrap marker",
-			slog.String("error", err.Error()),
-		)
-	}
+	return strings.TrimSpace(string(out)) != ""
 }
 
 // prePushCheckpointRefs drains the per-checkpoint push queue and batch-pushes the

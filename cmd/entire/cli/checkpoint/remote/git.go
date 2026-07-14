@@ -3,7 +3,6 @@ package remote
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -240,59 +239,6 @@ func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) 
 // LsRemoteInDir is like LsRemote but runs in a specific directory.
 func LsRemoteInDir(ctx context.Context, dir, remote string, patterns ...string) ([]byte, error) {
 	return lsRemote(ctx, dir, remote, patterns...)
-}
-
-// PushTargetsInDir resolves the endpoint or endpoints Git will use for a push.
-// A named remote may configure pushurl, which differs from its fetch URL and
-// can contain more than one destination. URLs and local paths are already
-// concrete push targets and are returned unchanged.
-func PushTargetsInDir(ctx context.Context, dir, target string) ([]string, error) {
-	if target == "" {
-		return nil, errors.New("push target must not be empty")
-	}
-	if isConcretePushTarget(target) {
-		return []string{target}, nil
-	}
-
-	cmd := newCommand(ctx, "remote", "get-url", "--push", "--all", target)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	disableTerminalPrompt(cmd)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("git remote get-url --push: %w", err)
-	}
-
-	var targets []string
-	for _, line := range strings.Split(string(out), "\n") {
-		if pushURL := strings.TrimSpace(line); pushURL != "" {
-			targets = append(targets, pushURL)
-		}
-	}
-	if len(targets) == 0 {
-		return nil, fmt.Errorf("git remote get-url --push: no push target for %q", target)
-	}
-	return targets, nil
-}
-
-// isConcretePushTarget reports whether target is already a concrete push
-// endpoint (a URL or local path) rather than a git remote NAME whose pushurl
-// must be resolved. It deliberately does not reuse IsURL's '@' heuristic, which
-// misclassifies a remote name that merely contains '@' (e.g. "build@ci") as a
-// URL and would skip pushurl resolution for it. Following git's own transport
-// detection, an scp-like SSH target has a colon before any slash
-// ("[user@]host:path"); a bare remote name has neither a scheme nor such a
-// colon.
-func isConcretePushTarget(target string) bool {
-	if strings.Contains(target, "://") || isLocalPath(target) {
-		return true
-	}
-	// scp-like SSH URL: a colon appears before any slash.
-	if i := strings.IndexAny(target, ":/"); i >= 0 && target[i] == ':' {
-		return true
-	}
-	return false
 }
 
 func lsRemote(ctx context.Context, dir, remote string, patterns ...string) ([]byte, error) {

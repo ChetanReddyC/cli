@@ -756,39 +756,6 @@ func TestIsURL(t *testing.T) {
 	}
 }
 
-func TestIsConcretePushTarget(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		val  string
-		want bool
-	}{
-		{"remote name", "origin", false},
-		{"remote name with @ (no colon)", "build@ci", false}, // must resolve pushurl, not be treated as a URL
-		{"HTTPS URL", "https://github.com/org/repo.git", true},
-		{"SSH protocol URL", "ssh://git@github.com:22/org/repo.git", true},
-		{"scp SSH with user", "git@github.com:org/repo.git", true},
-		{"scp SSH without user", "github.com:org/repo.git", true},
-		{"absolute path", "/tmp/repo.git", true},
-		{"relative path", "./repo.git", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, isConcretePushTarget(tt.val))
-		})
-	}
-}
-
-func TestPushTargetsInDir_EmptyTargetErrors(t *testing.T) {
-	t.Parallel()
-
-	_, err := PushTargetsInDir(context.Background(), "", "")
-	require.Error(t, err)
-}
-
 func TestIsLocalPath(t *testing.T) {
 	t.Parallel()
 

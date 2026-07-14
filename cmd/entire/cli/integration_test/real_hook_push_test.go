@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"os/exec"
 	"testing"
 )
 
@@ -45,11 +44,14 @@ func TestGitPushWithHooks_SyncsCheckpointsToRemote(t *testing.T) {
 	})
 }
 
-// TestGitPushWithHooks_DefersCheckpointsUntilFirstUserBranchExists ensures a
-// repository's first remote branch is the user's branch, not Entire metadata.
-// On a hosting provider that assigns the first branch as default, publishing
-// checkpoints in this hook invocation would expose entire/checkpoints/v1 as
-// the repository default branch.
+// TestGitPushWithHooks_DefersCheckpointsUntilFirstUserBranchExists ensures the
+// user's own branch — not Entire metadata — is the first ref on a fresh remote.
+//
+// On the git-branch backend, entire/checkpoints/v1 is a real branch a forge
+// could pick as the repository default, so its push is deferred until the
+// user's branch has landed. On the git-refs backend, checkpoints live under
+// refs/entire/*, which a forge cannot select as a default branch, so there is
+// no hazard and they publish on the first push.
 func TestGitPushWithHooks_DefersCheckpointsUntilFirstUserBranchExists(t *testing.T) {
 	t.Parallel()
 
@@ -64,113 +66,32 @@ func TestGitPushWithHooks_DefersCheckpointsUntilFirstUserBranchExists(t *testing
 			t.Fatal("should have a checkpoint ID after condensation")
 		}
 
-		// The first normal branch push must complete, but must not publish
-		// checkpoint metadata to an otherwise empty remote.
+		// The first push must land the user's branch on the empty remote.
 		env.GitPushWithHooks("origin", "HEAD")
 		if !env.BranchExistsOnRemote(bareDir, branch) {
 			t.Fatalf("[%s] first user branch %q should be on remote", backend, branch)
 		}
-		if env.CheckpointsPresentOnRemote(bareDir) {
-			t.Fatalf("[%s] checkpoints must be deferred until after the first user branch push", backend)
+
+		if backend == StoreGitRefs {
+			// refs/entire/* can't become a default branch → no deferral.
+			if !env.CheckpointExistsOnRemote(bareDir, checkpointID) {
+				t.Fatalf("[git-refs] checkpoint %s should publish on the first push (no default-branch hazard)", checkpointID)
+			}
+			return
 		}
 
-		// A later normal push may publish the deferred checkpoint metadata.
+		// git-branch: the v1 branch must be withheld until the user branch exists.
+		if env.CheckpointsPresentOnRemote(bareDir) {
+			t.Fatalf("[git-branch] checkpoints must be deferred until after the first user branch push")
+		}
+
+		// The first push created a remote-tracking ref, so a later push publishes.
 		env.WriteFile("later.go", "package later")
 		env.GitAdd("later.go")
 		env.GitCommit("Later user commit")
 		env.GitPushWithHooks("origin", "HEAD")
 		if !env.CheckpointExistsOnRemote(bareDir, checkpointID) {
-			t.Fatalf("[%s] deferred checkpoint %s should be published on a later push", backend, checkpointID)
-		}
-	})
-}
-
-func TestGitPushWithHooks_DefersCheckpointsUntilPushURLHasUserBranch(t *testing.T) {
-	t.Parallel()
-
-	ForEachBackend(t, func(t *testing.T, backend string) {
-		env := NewFeatureBranchEnv(t)
-		env.CheckpointStore = backend
-
-		// origin's fetch URL already has the user branch, but pushes are routed
-		// to a different empty repository. The guard must inspect the latter.
-		_ = env.SetupBareRemote()
-		pushTarget := env.SetupEmptyNamedBareRemote("push-target")
-		cmd := exec.CommandContext(t.Context(), "git", "remote", "set-url", "--push", "origin", pushTarget)
-		cmd.Dir = env.RepoDir
-		cmd.Env = env.cliEnv()
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("set origin pushurl: %v\n%s", err, output)
-		}
-		env.setGitConfigBaseline()
-
-		checkpointID := createCheckpointedCommit(t, env, "Add auth module", "auth.go", "package auth", "Add auth module")
-		env.GitPushWithHooks("origin", "HEAD")
-		if env.CheckpointsPresentOnRemote(pushTarget) {
-			t.Fatalf("[%s] checkpoints must be deferred on the empty pushurl target", backend)
-		}
-
-		env.WriteFile("later.go", "package later")
-		env.GitAdd("later.go")
-		env.GitCommit("Later user commit")
-		env.GitPushWithHooks("origin", "HEAD")
-		if !env.CheckpointExistsOnRemote(pushTarget, checkpointID) {
-			t.Fatalf("[%s] deferred checkpoint %s should be published to pushurl on a later push", backend, checkpointID)
-		}
-	})
-}
-
-// TestGitPushWithHooks_DefersCheckpointsWhenAnyPushURLTargetIsEmpty covers a
-// remote configured with multiple push destinations. `git push` writes to all
-// of them, so as long as any one destination is still empty, publishing
-// checkpoints could make entire/checkpoints/v1 its first (default) branch. The
-// guard must defer until every push target has a branch.
-func TestGitPushWithHooks_DefersCheckpointsWhenAnyPushURLTargetIsEmpty(t *testing.T) {
-	t.Parallel()
-
-	ForEachBackend(t, func(t *testing.T, backend string) {
-		env := NewFeatureBranchEnv(t)
-		env.CheckpointStore = backend
-
-		// origin fetches from its own bare, but pushes fan out to two targets:
-		// one that already has the user branch, and one that is still empty.
-		_ = env.SetupBareRemote()
-		populated := env.SetupNamedBareRemote("populated")
-		empty := env.SetupEmptyNamedBareRemote("empty")
-		for i, url := range []string{populated, empty} {
-			args := []string{"remote", "set-url", "--push", "origin", url}
-			if i > 0 {
-				args = []string{"remote", "set-url", "--push", "--add", "origin", url}
-			}
-			cmd := exec.CommandContext(t.Context(), "git", args...)
-			cmd.Dir = env.RepoDir
-			cmd.Env = env.cliEnv()
-			if output, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("set origin pushurl %q: %v\n%s", url, err, output)
-			}
-		}
-		env.setGitConfigBaseline()
-
-		checkpointID := createCheckpointedCommit(t, env, "Add auth module", "auth.go", "package auth", "Add auth module")
-
-		// The empty push target must force deferral even though the other target
-		// already has a branch.
-		env.GitPushWithHooks("origin", "HEAD")
-		if env.CheckpointsPresentOnRemote(empty) {
-			t.Fatalf("[%s] checkpoints must be deferred while a push target is empty", backend)
-		}
-		if env.CheckpointsPresentOnRemote(populated) {
-			t.Fatalf("[%s] checkpoints must be deferred on every target while any push target is empty", backend)
-		}
-
-		// The first push gave the previously-empty target the user branch, so a
-		// later push may publish to both.
-		env.WriteFile("later.go", "package later")
-		env.GitAdd("later.go")
-		env.GitCommit("Later user commit")
-		env.GitPushWithHooks("origin", "HEAD")
-		if !env.CheckpointExistsOnRemote(empty, checkpointID) {
-			t.Fatalf("[%s] deferred checkpoint %s should be published once every target has a branch", backend, checkpointID)
+			t.Fatalf("[git-branch] deferred checkpoint %s should be published on a later push", checkpointID)
 		}
 	})
 }
