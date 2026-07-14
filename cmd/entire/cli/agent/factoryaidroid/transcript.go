@@ -387,15 +387,10 @@ func CalculateTotalTokenUsageFromBytes(data []byte, startLine int, subagentsDir 
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
 	}
 	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
-	// NOTE: each subagent transcript is re-read from line 0 on every call
-	// below, so mainUsage.SubagentTokens ends up CUMULATIVE-since-session-start
-	// rather than a delta scoped to [startLine, end) like mainUsage's own
-	// fields. Callers that invoke this repeatedly across checkpoints/turns
-	// MUST NOT sum SubagentTokens across calls — replace the running total
-	// with the latest snapshot instead, and rescope any checkpoint-window
-	// delta by subtracting a previously captured baseline. See
-	// accumulateTokenUsage and SessionState.SubagentTokensBaseline in
-	// cmd/entire/cli/strategy for the caller-side fix (shared with Claude Code).
+	// This re-reads each subagent transcript from line 0 on every call below, so
+	// mainUsage.SubagentTokens ends up cumulative-since-session-start — see the
+	// CalculateTotalTokenUsage interface contract in cmd/entire/cli/agent for how
+	// callers must accumulate it (shared with Claude Code).
 	if len(agentIDs) > 0 {
 		subagentUsage := &agent.TokenUsage{}
 		for agentID := range agentIDs {
