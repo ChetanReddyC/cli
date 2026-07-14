@@ -940,7 +940,7 @@ func highlightCodeMatches(line, query string, styles statusStyles, caseSensitive
 
 // isASCII reports whether s contains only ASCII bytes.
 func isASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] >= utf8.RuneSelf {
 			return false
 		}

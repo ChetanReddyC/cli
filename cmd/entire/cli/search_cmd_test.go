@@ -223,7 +223,7 @@ func TestWriteCodeSearchText_CapsFilesAndMatchesPerFile(t *testing.T) {
 		results = append(results, codesearch.Result{Repo: "r", Path: "hot.go", Line: line, ContextLine: "x"})
 	}
 	// More files than the file cap.
-	for f := 0; f < maxCodeSearchFiles+3; f++ {
+	for f := range maxCodeSearchFiles + 3 {
 		results = append(results, codesearch.Result{Repo: "r", Path: fmt.Sprintf("f%02d.go", f), Line: 1, ContextLine: "y"})
 	}
 	resp := &codesearch.SearchResponse{
