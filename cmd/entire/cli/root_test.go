@@ -256,6 +256,75 @@ func TestCheckpointPolicyCommandIsHiddenDuringDevelopment(t *testing.T) {
 	}
 }
 
+func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
+	t.Parallel()
+
+	// Commands intentionally left out of any group; cobra renders them
+	// under "Additional Commands".
+	ungrouped := map[string]bool{
+		"version":    true,
+		"labs":       true,
+		"agent-help": true,
+		"help":       true,
+		"completion": true,
+	}
+
+	wantGroups := map[string]string{
+		"enable":     groupSetup,
+		"disable":    groupSetup,
+		"configure":  groupSetup,
+		"agent":      groupSetup,
+		"plugin":     groupSetup,
+		"status":     groupSetup,
+		"doctor":     groupSetup,
+		"clean":      groupSetup,
+		"session":    groupSessions,
+		"checkpoint": groupSessions,
+		"recap":      groupSessions,
+		"activity":   groupSessions,
+		"dispatch":   groupSessions,
+		"login":      groupAccount,
+		"logout":     groupAccount,
+		"auth":       groupAccount,
+		"org":        groupControlPlane,
+		"project":    groupControlPlane,
+		"repo":       groupControlPlane,
+		"grant":      groupControlPlane,
+		"api":        groupControlPlane,
+	}
+
+	root := NewRootCmd()
+
+	registered := make(map[string]bool)
+	for _, g := range root.Groups() {
+		registered[g.ID] = true
+	}
+
+	for _, c := range root.Commands() {
+		if c.Hidden || c.Deprecated != "" {
+			continue
+		}
+		name := c.Name()
+		if ungrouped[name] {
+			if c.GroupID != "" {
+				t.Errorf("%q should stay ungrouped, got GroupID %q", name, c.GroupID)
+			}
+			continue
+		}
+		want, ok := wantGroups[name]
+		if !ok {
+			t.Errorf("visible command %q missing from group table; assign it a group or add it to the ungrouped allowlist", name)
+			continue
+		}
+		if c.GroupID != want {
+			t.Errorf("%q GroupID = %q, want %q", name, c.GroupID, want)
+		}
+		if !registered[want] {
+			t.Errorf("group %q used by %q is not registered on root (cobra panics at Execute)", want, name)
+		}
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
