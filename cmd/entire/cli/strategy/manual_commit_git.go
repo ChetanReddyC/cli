@@ -134,9 +134,21 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			// subtracting the baseline captured at the last reset, otherwise the
 			// full cumulative subagent total would be reported again at every
 			// checkpoint instead of just this checkpoint's share.
+			//
+			// Derive the checkpoint delta FRESH each call from the session-wide
+			// cumulative (state.TokenUsage.SubagentTokens) minus the baseline —
+			// do NOT mutate CheckpointTokenUsage.SubagentTokens in place. A later
+			// step in the same window can carry step.TokenUsage != nil but
+			// SubagentTokens == nil (the subagent transcript was cleaned up, so
+			// CalculateTotalTokenUsage returned APICallCount==0 and left it nil);
+			// accumulateTokenUsage then leaves CheckpointTokenUsage.SubagentTokens
+			// at its already-rescoped value, and re-subtracting the baseline from
+			// that would double-subtract and (via clampSubtract) shrink or zero a
+			// real subagent total. Recomputing from the session-wide cumulative
+			// is idempotent regardless of whether this step carried a snapshot.
 			if state.CheckpointTokenUsage != nil {
 				state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
-					state.CheckpointTokenUsage.SubagentTokens, state.SubagentTokensBaseline)
+					state.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)
 			}
 		}
 
@@ -368,6 +380,23 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 	}
 
 	return existing
+}
+
+// resetCheckpointWindow resets the per-checkpoint accumulation window after a
+// condensation reset. It zeroes the step count, clears the checkpoint-scoped
+// token usage, and snapshots the cumulative subagent total into
+// SubagentTokensBaseline so the next window's CheckpointTokenUsage.SubagentTokens
+// can be rescoped to "since this condensation" rather than re-reporting the full
+// cumulative subagent total (see accumulateTokenUsage and the SaveStep rescoping
+// in this file, plus SessionState.SubagentTokensBaseline). Shared by all three
+// condensation reset sites (CondenseSessionByID, CondenseAndMarkFullyCondensed,
+// condenseAndUpdateState) so the baseline capture cannot drift between them.
+func resetCheckpointWindow(state *SessionState) {
+	state.StepCount = 0
+	state.CheckpointTokenUsage = nil
+	if state.TokenUsage != nil {
+		state.SubagentTokensBaseline = state.TokenUsage.SubagentTokens
+	}
 }
 
 // deleteShadowBranch deletes a shadow branch by name.

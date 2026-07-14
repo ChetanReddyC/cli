@@ -1407,15 +1407,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	newHead := head.Hash().String()
 	state.BaseCommit = newHead
 	state.RealignAttributionBase(newHead)
-	state.StepCount = 0
-	state.CheckpointTokenUsage = nil
-	// Snapshot the cumulative subagent total at this reset so the next
-	// checkpoint's CheckpointTokenUsage.SubagentTokens can be rescoped to
-	// "since this condensation" instead of re-reporting everything counted
-	// so far (see accumulateTokenUsage in manual_commit_git.go).
-	if state.TokenUsage != nil {
-		state.SubagentTokensBaseline = state.TokenUsage.SubagentTokens
-	}
+	resetCheckpointWindow(state)
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
 	state.CheckpointTranscriptSize = int64(len(result.Transcript))
 
