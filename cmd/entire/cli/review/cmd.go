@@ -270,12 +270,10 @@ type reviewConfigureOptions struct {
 	Slots  []string // reviewer slots as "agent[=model]" entries (--set-slot)
 }
 
-// reviewCommandIsInteractive treats a real terminal on both stdin and stdout
-// as authoritative for this explicitly user-invoked command. This avoids
-// suppressing the review wizard when a normal shell inherits an agent sentinel
-// or GIT_TERMINAL_PROMPT=0, while requiring the exact stdin consumed by huh and
-// Bubble Tea to accept keypresses. A controlling /dev/tty alone is insufficient
-// because the command may still have piped stdin.
+// reviewCommandIsInteractive requires the exact stdin consumed by huh and
+// Bubble Tea, plus stdout, to be terminals. CanPromptInteractively adds the
+// independent policy gate for tests, CI, and agent subprocess sentinels; a
+// controlling /dev/tty alone is insufficient because stdin may still be piped.
 func reviewCommandIsInteractive(cmd *cobra.Command) bool {
 	hardDisabled := reviewInteractivityHardDisabled(
 		os.Getenv(interactive.EnvTestTTY),
@@ -285,6 +283,7 @@ func reviewCommandIsInteractive(cmd *cobra.Command) bool {
 	return reviewTTYIsInteractive(
 		interactive.IsTerminalReader(cmd.InOrStdin()),
 		interactive.IsTerminalWriter(cmd.OutOrStdout()),
+		interactive.CanPromptInteractively(),
 		hardDisabled,
 	)
 }
@@ -299,8 +298,11 @@ func reviewInteractivityHardDisabled(testTTY, ci string, underTest bool) bool {
 	return underTest || (ci != "" && ci != "false")
 }
 
-func reviewTTYIsInteractive(stdinTTY, stdoutTTY, hardDisabled bool) bool {
-	return !hardDisabled && stdinTTY && stdoutTTY
+func reviewTTYIsInteractive(stdinTTY, stdoutTTY, canPrompt, hardDisabled bool) bool {
+	// Real stdio terminals are necessary but not sufficient: agent shells can
+	// allocate a PTY while advertising that no human is available through the
+	// sentinels enforced by CanPromptInteractively.
+	return !hardDisabled && stdinTTY && stdoutTTY && canPrompt
 }
 
 func (o reviewConfigureOptions) scripted() bool {

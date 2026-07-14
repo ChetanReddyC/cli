@@ -122,20 +122,22 @@ func TestReviewTTYIsInteractive(t *testing.T) {
 		name         string
 		stdinTTY     bool
 		stdoutTTY    bool
+		canPrompt    bool
 		hardDisabled bool
 		want         bool
 	}{
-		{name: "direct terminal overrides inherited sentinel", stdinTTY: true, stdoutTTY: true, want: true},
-		{name: "controlling terminal does not override piped stdin", stdinTTY: false, stdoutTTY: true, want: false},
-		{name: "captured stdout", stdinTTY: true, stdoutTTY: false, want: false},
-		{name: "agent with piped stdin", stdinTTY: false, stdoutTTY: true, want: false},
-		{name: "explicitly forced non-interactive", stdinTTY: true, stdoutTTY: true, hardDisabled: true, want: false},
+		{name: "direct human terminal", stdinTTY: true, stdoutTTY: true, canPrompt: true, want: true},
+		{name: "agent sentinel overrides real PTY", stdinTTY: true, stdoutTTY: true, canPrompt: false, want: false},
+		{name: "controlling terminal does not override piped stdin", stdinTTY: false, stdoutTTY: true, canPrompt: true, want: false},
+		{name: "captured stdout", stdinTTY: true, stdoutTTY: false, canPrompt: true, want: false},
+		{name: "agent with piped stdin", stdinTTY: false, stdoutTTY: true, canPrompt: false, want: false},
+		{name: "explicitly forced non-interactive", stdinTTY: true, stdoutTTY: true, canPrompt: true, hardDisabled: true, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := reviewTTYIsInteractive(tt.stdinTTY, tt.stdoutTTY, tt.hardDisabled); got != tt.want {
-				t.Fatalf("reviewTTYIsInteractive(%v, %v, %v) = %v, want %v", tt.stdinTTY, tt.stdoutTTY, tt.hardDisabled, got, tt.want)
+			if got := reviewTTYIsInteractive(tt.stdinTTY, tt.stdoutTTY, tt.canPrompt, tt.hardDisabled); got != tt.want {
+				t.Fatalf("reviewTTYIsInteractive(%v, %v, %v, %v) = %v, want %v", tt.stdinTTY, tt.stdoutTTY, tt.canPrompt, tt.hardDisabled, got, tt.want)
 			}
 		})
 	}
