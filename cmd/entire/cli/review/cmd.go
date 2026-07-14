@@ -210,7 +210,7 @@ To tag an already-finished session as a review, use
 				}, deps)
 			}
 			if edit {
-				if !interactive.IsTerminalWriter(cmd.OutOrStdout()) || !interactive.CanPromptInteractively() {
+				if !reviewCommandIsInteractive(cmd) {
 					err := errors.New("--edit requires an interactive terminal")
 					cmd.SilenceUsage = true
 					fmt.Fprintln(cmd.ErrOrStderr(), "--edit requires an interactive terminal.")
@@ -268,6 +268,27 @@ type reviewConfigureOptions struct {
 	Task   string   // profile task text (--set-task)
 	Models []string // per-reviewer "agent=model" entries (--set-model)
 	Slots  []string // reviewer slots as "agent[=model]" entries (--set-slot)
+}
+
+// reviewCommandIsInteractive treats a real terminal on both stdin and stdout
+// as authoritative for this explicitly user-invoked command. This avoids
+// suppressing the review wizard when a normal shell inherits an agent sentinel
+// or GIT_TERMINAL_PROMPT=0. The fallback preserves controlling-TTY detection
+// for callers whose stdio is not wired directly to the terminal.
+func reviewCommandIsInteractive(cmd *cobra.Command) bool {
+	testTTY := os.Getenv(interactive.EnvTestTTY)
+	ci := os.Getenv("CI")
+	hardDisabled := (testTTY != "" && testTTY != "1") || (ci != "" && ci != "false")
+	return reviewTTYIsInteractive(
+		interactive.IsTerminalReader(cmd.InOrStdin()),
+		interactive.IsTerminalWriter(cmd.OutOrStdout()),
+		interactive.CanPromptInteractively(),
+		hardDisabled,
+	)
+}
+
+func reviewTTYIsInteractive(stdinTTY, stdoutTTY, canPrompt, hardDisabled bool) bool {
+	return !hardDisabled && stdoutTTY && (stdinTTY || canPrompt)
 }
 
 func (o reviewConfigureOptions) scripted() bool {
@@ -329,7 +350,7 @@ func runReviewConfigure(ctx context.Context, cmd *cobra.Command, profileOverride
 	// duplicate the catalog here. Pass the raw --profile value (empty when not
 	// given) so the guided setup runs the "what kind of review?" type picker
 	// instead of being silently defaulted to the general profile.
-	if interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively() {
+	if reviewCommandIsInteractive(cmd) {
 		name, profile, setupErr := RunReviewGuidedSetup(ctx, out, installed, deps.ReviewerFor, strings.TrimSpace(profileOverride), false, s)
 		if setupErr != nil {
 			return handlePickerError(cmd, silentErr, setupErr)
@@ -755,7 +776,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	applyLegacyReviewProfileFallback(s)
 
 	profileOverride = strings.TrimSpace(profileOverride)
-	interactiveTTY := interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively()
+	interactiveTTY := reviewCommandIsInteractive(cmd)
 
 	// Bare `entire review` never auto-runs a profile. Without a TTY we cannot
 	// prompt, so list the profiles (or point at setup) and require an explicit
@@ -784,7 +805,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 		// Non-interactive first run writes the shared project settings; interactive
 		// setup asks the user where to save below.
 		saveScope := reviewScopeProject
-		guidedSetup := interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively()
+		guidedSetup := interactiveTTY
 		if guidedSetup {
 			var setupErr error
 			profileForSetup, profile, setupErr = RunReviewGuidedSetup(ctx, out, installed, deps.ReviewerFor, profileForSetup, true, s)
@@ -1063,10 +1084,10 @@ func runSingleAgentPath(
 	defer cancelRun()
 
 	runCfg.EnrichSummary = reviewSummaryTokenEnricher(worktreeRoot, headSHA)
-	canPrompt := interactive.CanPromptInteractively()
+	canPrompt := reviewCommandIsInteractive(cmd)
 	sinks := composeSingleAgentSinks(singleAgentSinkInputs{
 		out:       out,
-		isTTY:     interactive.IsTerminalWriter(out) && canPrompt,
+		isTTY:     canPrompt,
 		canPrompt: canPrompt,
 		agentName: displayName,
 		cancelRun: cancelRun,
@@ -1235,7 +1256,7 @@ func runMultiAgentPath(
 	masterLabel := judgeLabel(judge)
 	sinks := composeMultiAgentSinks(multiAgentSinkInputs{
 		out:               out,
-		isTTY:             interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively(),
+		isTTY:             reviewCommandIsInteractive(cmd),
 		agentNames:        agentNames,
 		cancelRun:         cancelRun,
 		runContext:        runCtx,
@@ -1309,11 +1330,10 @@ func handlePickerError(cmd *cobra.Command, silentErr func(error) error, pickErr 
 // instead of monkey-patching interactive helpers at run time.
 //
 // isTTY here means "the TUI sink is safe to compose" — production callers
-// AND IsTerminalWriter(out) with CanPromptInteractively() before passing
-// it in, since the TUI both writes ANSI to stdout AND reads keypresses
-// from stdin. A terminal-stdout-but-non-interactive-stdin scenario (an
-// agent host like Claude Code invoking `entire review`) must NOT use the
-// TUI — its dismissal loop would block forever.
+// use reviewCommandIsInteractive before passing it in, since the TUI both
+// writes ANSI to stdout and reads keypresses from stdin. A terminal stdout
+// with non-interactive stdin must not use the TUI; its dismissal loop would
+// block forever.
 type multiAgentSinkInputs struct {
 	out               io.Writer
 	isTTY             bool

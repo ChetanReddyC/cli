@@ -43,6 +43,78 @@ func configureTestDeps(adapter ...string) Deps {
 	}
 }
 
+func TestDefaultReviewAgentConfig_CodexIsPromptOnly(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultReviewAgentConfig(DefaultProfileName, tAgentCodex)
+	if len(cfg.Skills) != 0 {
+		t.Fatalf("Codex default skills = %v, want none", cfg.Skills)
+	}
+	if cfg.Prompt != defaultAgentReviewPrompt {
+		t.Fatalf("Codex default prompt = %q, want %q", cfg.Prompt, defaultAgentReviewPrompt)
+	}
+}
+
+func TestApplyLegacyReviewProfileFallback_RepairsGeneratedCodexSkill(t *testing.T) {
+	t.Parallel()
+
+	s := &settings.EntireSettings{ReviewProfiles: map[string]settings.ReviewProfileConfig{
+		DefaultProfileName: {Agents: map[string]settings.ReviewConfig{
+			tAgentCodex: {Skills: []string{"/review"}},
+			"codex-opus": {
+				Agent:  tAgentCodex,
+				Model:  "o3",
+				Skills: []string{"/review"},
+			},
+			"codex-custom": {
+				Agent:  tAgentCodex,
+				Skills: []string{"$security-audit"},
+			},
+		}},
+	}}
+	applyLegacyReviewProfileFallback(s)
+
+	got := s.ReviewProfiles[DefaultProfileName].Agents[tAgentCodex]
+	if len(got.Skills) != 0 || got.Prompt != defaultAgentReviewPrompt {
+		t.Fatalf("repaired Codex config = %+v, want prompt-only default", got)
+	}
+	alias := s.ReviewProfiles[DefaultProfileName].Agents["codex-opus"]
+	if len(alias.Skills) != 0 || alias.Prompt != defaultAgentReviewPrompt || alias.Model != "o3" {
+		t.Fatalf("repaired aliased Codex config = %+v", alias)
+	}
+	custom := s.ReviewProfiles[DefaultProfileName].Agents["codex-custom"]
+	if len(custom.Skills) != 1 || custom.Skills[0] != "$security-audit" {
+		t.Fatalf("custom Codex config changed: %+v", custom)
+	}
+}
+
+func TestReviewTTYIsInteractive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		stdinTTY     bool
+		stdoutTTY    bool
+		canPrompt    bool
+		hardDisabled bool
+		want         bool
+	}{
+		{name: "direct terminal overrides inherited sentinel", stdinTTY: true, stdoutTTY: true, canPrompt: false, want: true},
+		{name: "controlling terminal fallback", stdinTTY: false, stdoutTTY: true, canPrompt: true, want: true},
+		{name: "captured stdout", stdinTTY: true, stdoutTTY: false, canPrompt: true, want: false},
+		{name: "agent with piped stdin", stdinTTY: false, stdoutTTY: true, canPrompt: false, want: false},
+		{name: "explicitly forced non-interactive", stdinTTY: true, stdoutTTY: true, hardDisabled: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := reviewTTYIsInteractive(tt.stdinTTY, tt.stdoutTTY, tt.canPrompt, tt.hardDisabled); got != tt.want {
+				t.Fatalf("reviewTTYIsInteractive(%v, %v, %v, %v) = %v, want %v", tt.stdinTTY, tt.stdoutTTY, tt.canPrompt, tt.hardDisabled, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildConfiguredProfile_FromFlags(t *testing.T) {
 	t.Parallel()
 	deps := configureTestDeps("claude-code", "codex")
