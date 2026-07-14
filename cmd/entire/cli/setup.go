@@ -1046,6 +1046,7 @@ func cleanRemoteURLForReport(rawURL string) (string, error) {
 }
 
 func newDisableCmd() *cobra.Command {
+	var useLocalSettings bool
 	var useProjectSettings bool
 	var uninstall bool
 	var force bool
@@ -1069,10 +1070,14 @@ To completely remove Entire integrations from this repository, use --uninstall:
 			if uninstall {
 				return runUninstall(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), force)
 			}
+			if err := validateSetupFlags(useLocalSettings, useProjectSettings); err != nil {
+				return err
+			}
 			return runDisable(ctx, cmd.OutOrStdout(), useProjectSettings)
 		},
 	}
 
+	cmd.Flags().BoolVar(&useLocalSettings, "local", false, "Update .entire/settings.local.json (the default) instead of .entire/settings.json")
 	cmd.Flags().BoolVar(&useProjectSettings, "project", false, "Update .entire/settings.json instead of .entire/settings.local.json")
 	cmd.Flags().BoolVar(&uninstall, "uninstall", false, "Completely remove Entire from this repository")
 	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt (use with --uninstall)")
@@ -1301,9 +1306,10 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
 }
 
-// runEnable sets the enabled flag in settings.
-// Writes to the target file (local by default, project with --project),
-// and also updates the other file if it exists, so they can't get out of sync.
+// runEnable flips the enabled flag to true in the scope chosen by the caller
+// (see setEnabledFlag). Callers resolve the scope: runEnableOnConfiguredRepo
+// uses settingsTargetFile so a bare `entire enable` targets the committed
+// settings.json when present and can recover a repo disabled there (#1140).
 func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
 	if err := setEnabledFlag(ctx, true, useProjectSettings); err != nil {
 		return err
@@ -1314,20 +1320,35 @@ func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error 
 	return nil
 }
 
+// runDisable flips the enabled flag to false in the resolved settings scope.
+//
+// Scope resolution is deliberately asymmetric with enable because
+// settings.local.json overrides settings.json in the merged view:
+//   - bare `entire disable` (and --local) writes settings.local.json — the
+//     minimal, always-effective way to silence Entire on one machine without
+//     editing committed team config;
+//   - --project writes the committed settings.json (and setEnabledFlag also
+//     syncs the local file if present, so a stale local override can't leave
+//     the repo enabled).
+//
+// This restores origin/main's default (bare disable -> local) and matches the
+// --project flag's help text. Enable, by contrast, must reach the committed
+// file to recover a project the user disabled there, so it resolves via
+// settingsTargetFile (see runEnableOnConfiguredRepo). --local is accepted for
+// symmetry with enable; for disable it is the same as the bare default.
 func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
-	// Resolve scope the same way runEnableOnConfiguredRepo does: a bare
-	// `entire disable` (no --project) must flip whichever settings file
-	// already exists, not always default to settings.local.json. Without
-	// this, a repo with only a committed settings.json (no local file yet)
-	// would get a brand-new settings.local.json with enabled:false while the
-	// committed project file still shows enabled:true — the mirror image of
-	// the #1140 bug fixed for `entire enable`.
-	targetFile, _ := settingsTargetFile(ctx, false, useProjectSettings)
+	targetFile := settings.EntireSettingsLocalFile
+	configDisplay := configDisplayLocal
+	if useProjectSettings {
+		targetFile = settings.EntireSettingsFile
+		configDisplay = configDisplayProject
+	}
+
 	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
 		return err
 	}
 
-	fmt.Fprintln(w, "Entire is now disabled.")
+	fmt.Fprintf(w, "Entire is now disabled (%s).\n", configDisplay)
 	return nil
 }
 
