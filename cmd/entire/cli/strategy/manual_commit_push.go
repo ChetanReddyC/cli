@@ -60,7 +60,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	if ps.pushDisabled {
 		return nil
 	}
-	deferAutomaticCheckpointPush := protectFirstUserBranch && deferCheckpointPushUntilNormalBranch(ctx, ps)
+	deferAutomaticCheckpointPush := protectFirstUserBranch && deferCheckpointPushOnEmptyRemote(ctx, ps)
 
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
 	// instead of the single v1 branch. (A configured git-branch mirror's v1 ref
@@ -159,14 +159,23 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	return nil
 }
 
-// deferCheckpointPushUntilNormalBranch keeps Entire's metadata from becoming
-// the first branch on a repository. Hosting providers such as GitHub can make
-// the first branch their default, so a pre-push hook must not independently
-// publish checkpoint metadata before the user's first normal branch lands.
+// deferCheckpointPushOnEmptyRemote keeps Entire's metadata from becoming the
+// first branch on a repository. Hosting providers such as GitHub make the first
+// branch a repository's default, so a pre-push hook must not independently
+// publish checkpoint metadata to a remote that has no branches yet: the user's
+// own branch, pushed by the same git invocation right after this hook, must be
+// the one to land first.
+//
+// The guard triggers only for a genuinely empty push target (no refs/heads/*).
+// Once any branch exists there — including a checkpoint branch already present
+// from an earlier push or a separate setup — our push can no longer be the one
+// that establishes the default branch, so deferring would only block legitimate
+// checkpoint syncs (e.g. a non-fast-forward v1 update) without preventing any
+// harm.
 //
 // A separate checkpoint remote is intentionally exempt: it is a dedicated
 // metadata store, rather than the repository the user is pushing to.
-func deferCheckpointPushUntilNormalBranch(ctx context.Context, ps pushSettings) bool {
+func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool {
 	if ps.hasCheckpointURL() {
 		return false
 	}
@@ -184,7 +193,7 @@ func deferCheckpointPushUntilNormalBranch(ctx context.Context, ps pushSettings) 
 	if err != nil {
 		// Fail closed for checkpoint publication: the user's git push continues
 		// normally, while a later push can publish the pending metadata once the
-		// remote is reachable and has a normal branch.
+		// remote is reachable and has a branch.
 		logging.Warn(ctx, "checkpoint push deferred: could not inspect remote branches",
 			slog.String("remote", ps.remote),
 			slog.String("error", err.Error()),
@@ -197,7 +206,7 @@ func deferCheckpointPushUntilNormalBranch(ctx context.Context, ps pushSettings) 
 		if lsErr != nil {
 			// Fail closed for checkpoint publication: the user's git push continues
 			// normally, while a later push can publish the pending metadata once the
-			// remote is reachable and has a normal branch.
+			// remote is reachable and has a branch.
 			logging.Warn(ctx, "checkpoint push deferred: could not inspect remote branches",
 				slog.String("remote", ps.remote),
 				slog.String("target", target),
@@ -206,22 +215,19 @@ func deferCheckpointPushUntilNormalBranch(ctx context.Context, ps pushSettings) 
 			return true
 		}
 
-		for _, line := range strings.Split(string(out), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) != 2 {
-				continue
-			}
-			branch := strings.TrimPrefix(fields[1], "refs/heads/")
-			if branch != fields[1] && branch != paths.MetadataBranchName {
-				return false
-			}
+		// A truly empty target (no heads) is the only case our metadata push
+		// could make the repository's default branch. Any existing head means
+		// it is safe to publish now.
+		if strings.TrimSpace(string(out)) == "" {
+			logging.Info(ctx, "checkpoint push deferred until the remote has a branch",
+				slog.String("remote", ps.remote),
+				slog.String("target", target),
+			)
+			return true
 		}
 	}
 
-	logging.Info(ctx, "checkpoint push deferred until a normal remote branch exists",
-		slog.String("remote", ps.remote),
-	)
-	return true
+	return false
 }
 
 // prePushCheckpointRefs drains the per-checkpoint push queue and batch-pushes the
