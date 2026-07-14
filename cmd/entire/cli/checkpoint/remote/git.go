@@ -241,6 +241,37 @@ func LsRemoteInDir(ctx context.Context, dir, remote string, patterns ...string) 
 	return lsRemote(ctx, dir, remote, patterns...)
 }
 
+// PushTargetsInDir resolves the endpoint or endpoints Git will use for a push.
+// A named remote may configure pushurl, which differs from its fetch URL and
+// can contain more than one destination. URLs and local paths are already
+// concrete push targets and are returned unchanged.
+func PushTargetsInDir(ctx context.Context, dir, target string) ([]string, error) {
+	if target == "" || IsURL(target) || isLocalPath(target) {
+		return []string{target}, nil
+	}
+
+	cmd := newCommand(ctx, "remote", "get-url", "--push", "--all", target)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	disableTerminalPrompt(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git remote get-url --push: %w", err)
+	}
+
+	var targets []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if target := strings.TrimSpace(line); target != "" {
+			targets = append(targets, target)
+		}
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("git remote get-url --push: no push target for %q", target)
+	}
+	return targets, nil
+}
+
 func lsRemote(ctx context.Context, dir, remote string, patterns ...string) ([]byte, error) {
 	args := append([]string{"ls-remote", remote}, patterns...)
 	cmd := newCommand(ctx, args...)

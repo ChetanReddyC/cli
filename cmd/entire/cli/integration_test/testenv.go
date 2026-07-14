@@ -1805,6 +1805,25 @@ func (env *TestEnv) SetupBareRemote() string {
 // multiple remotes.
 func (env *TestEnv) SetupNamedBareRemote(remoteName string) string {
 	env.T.Helper()
+	bareDir := env.SetupEmptyNamedBareRemote(remoteName)
+
+	// Push HEAD to the remote.
+	cmd := exec.CommandContext(env.T.Context(), "git", "push", "--no-verify", "-u", remoteName, "HEAD")
+	cmd.Dir = env.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		env.T.Fatalf("failed to push to %s: %v\n%s", remoteName, err, output)
+	}
+
+	env.setGitConfigBaseline()
+
+	return bareDir
+}
+
+// SetupEmptyNamedBareRemote creates a bare git repository and adds it as a
+// remote without pushing a branch. Use this to exercise first-push behavior.
+func (env *TestEnv) SetupEmptyNamedBareRemote(remoteName string) string {
+	env.T.Helper()
 
 	ctx := env.T.Context()
 
@@ -1827,14 +1846,6 @@ func (env *TestEnv) SetupNamedBareRemote(remoteName string) string {
 	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		env.T.Fatalf("failed to add remote %s: %v\n%s", remoteName, err, output)
-	}
-
-	// Push HEAD to the remote
-	cmd = exec.CommandContext(ctx, "git", "push", "--no-verify", "-u", remoteName, "HEAD")
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		env.T.Fatalf("failed to push to %s: %v\n%s", remoteName, err, output)
 	}
 
 	env.setGitConfigBaseline()

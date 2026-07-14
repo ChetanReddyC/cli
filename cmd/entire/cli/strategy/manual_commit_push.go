@@ -7,12 +7,15 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
@@ -35,6 +38,17 @@ var opfPrePushProgressWriter io.Writer = os.Stderr
 //   - push_sessions: false to disable automatic pushing of checkpoints
 //   - checkpoint_remote: {"provider": "github", "repo": "org/repo"} to push to a separate repo
 func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error {
+	return s.prePush(ctx, remote, false)
+}
+
+// PrePushFromGitHook handles a push initiated by Git's pre-push hook. Unlike
+// direct callers, it protects an empty user remote from receiving checkpoint
+// metadata before the user's first normal branch is published.
+func (s *ManualCommitStrategy) PrePushFromGitHook(ctx context.Context, remote string) error {
+	return s.prePush(ctx, remote, true)
+}
+
+func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, protectFirstUserBranch bool) error {
 	// Load settings once for remote resolution and push_sessions check.
 	// Spanned because checkpoint-remote resolution can perform a one-time
 	// network fetch of the metadata branch (fetchMetadataBranchIfMissing),
@@ -46,11 +60,15 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 	if ps.pushDisabled {
 		return nil
 	}
+	deferAutomaticCheckpointPush := protectFirstUserBranch && deferCheckpointPushUntilNormalBranch(ctx, ps)
 
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
 	// instead of the single v1 branch. (A configured git-branch mirror's v1 ref
 	// is not pushed here yet — mirror push for downgrade safety is a later step.)
 	if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: a bad checkpoints block already surfaces via Open; default to no refs push
+		if deferAutomaticCheckpointPush {
+			return nil
+		}
 		return s.prePushCheckpointRefs(ctx, ps)
 	}
 
@@ -116,6 +134,15 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 		}
 	}
 
+	if deferAutomaticCheckpointPush {
+		// Do this only after OPF has had a chance to rewrite v1: the outer
+		// user push may explicitly include the metadata branch.
+		logging.Info(ctx, "automatic checkpoint push deferred until a normal remote branch exists",
+			slog.String("remote", ps.remote),
+		)
+		return nil
+	}
+
 	// Thread the span's context into the push so the network push and any
 	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
 	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoint_refs")
@@ -130,6 +157,71 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 
 	cleanupPushedShadowBranches(ctx)
 	return nil
+}
+
+// deferCheckpointPushUntilNormalBranch keeps Entire's metadata from becoming
+// the first branch on a repository. Hosting providers such as GitHub can make
+// the first branch their default, so a pre-push hook must not independently
+// publish checkpoint metadata before the user's first normal branch lands.
+//
+// A separate checkpoint remote is intentionally exempt: it is a dedicated
+// metadata store, rather than the repository the user is pushing to.
+func deferCheckpointPushUntilNormalBranch(ctx context.Context, ps pushSettings) bool {
+	if ps.hasCheckpointURL() {
+		return false
+	}
+
+	dir, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		logging.Warn(ctx, "checkpoint push deferred: could not resolve worktree root",
+			slog.String("remote", ps.remote),
+			slog.String("error", err.Error()),
+		)
+		return true
+	}
+
+	targets, err := checkpointremote.PushTargetsInDir(ctx, dir, ps.remote)
+	if err != nil {
+		// Fail closed for checkpoint publication: the user's git push continues
+		// normally, while a later push can publish the pending metadata once the
+		// remote is reachable and has a normal branch.
+		logging.Warn(ctx, "checkpoint push deferred: could not inspect remote branches",
+			slog.String("remote", ps.remote),
+			slog.String("error", err.Error()),
+		)
+		return true
+	}
+
+	for _, target := range targets {
+		out, lsErr := checkpointremote.LsRemoteInDir(ctx, dir, target, "refs/heads/*")
+		if lsErr != nil {
+			// Fail closed for checkpoint publication: the user's git push continues
+			// normally, while a later push can publish the pending metadata once the
+			// remote is reachable and has a normal branch.
+			logging.Warn(ctx, "checkpoint push deferred: could not inspect remote branches",
+				slog.String("remote", ps.remote),
+				slog.String("target", target),
+				slog.String("error", lsErr.Error()),
+			)
+			return true
+		}
+
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) != 2 {
+				continue
+			}
+			branch := strings.TrimPrefix(fields[1], "refs/heads/")
+			if branch != fields[1] && branch != paths.MetadataBranchName {
+				return false
+			}
+		}
+	}
+
+	logging.Info(ctx, "checkpoint push deferred until a normal remote branch exists",
+		slog.String("remote", ps.remote),
+	)
+	return true
 }
 
 // prePushCheckpointRefs drains the per-checkpoint push queue and batch-pushes the
