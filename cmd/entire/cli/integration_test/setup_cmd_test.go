@@ -98,25 +98,6 @@ func TestEnableDisable(t *testing.T) {
 	}
 }
 
-func TestRewindBlockedWhenDisabled(t *testing.T) {
-	t.Parallel()
-	env := NewRepoWithCommit(t)
-	// Disable Entire
-	env.SetEnabled(false)
-
-	// Try to run checkpoint rewind --list - should show disabled message (not error)
-	stdout, err := env.RunCLIWithError("checkpoint", "rewind", "--list")
-	if err != nil {
-		t.Fatalf("checkpoint rewind --list command failed unexpectedly: %v\nOutput: %s", err, stdout)
-	}
-	if !strings.Contains(stdout, "Entire is disabled") {
-		t.Errorf("Expected disabled message, got: %s", stdout)
-	}
-	if !strings.Contains(stdout, "entire enable") {
-		t.Errorf("Expected message to mention 'entire enable', got: %s", stdout)
-	}
-}
-
 func TestHooksSilentWhenDisabled(t *testing.T) {
 	t.Parallel()
 	env := NewRepoWithCommit(t)

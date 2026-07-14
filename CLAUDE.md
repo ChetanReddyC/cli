@@ -23,11 +23,9 @@ This repo contains the CLI for Entire.
 ### Command Layout
 
 The visible CLI is organized around a set of noun groups plus a small set of
-top-level verbs. The groups are the canonical home for each verb; legacy
-top-level shortcuts remain functional but hidden, and emit a deprecation hint
-pointing at the canonical group form. Newer experimental command families are
-discoverable through `entire labs` and may remain hidden from root help while
-their canonical paths are still runnable.
+top-level verbs. The groups are the canonical home for each verb. Newer
+experimental command families are discoverable through `entire labs` and may
+remain hidden from root help while their canonical paths are still runnable.
 
 - `session` (alias: `sessions`): `list`, `info`, `tokens`, `stop`, `attach`, `adopt`, `resume`, `current`.
   `resume` with a branch arg switches to it and resumes its session; with no arg
@@ -38,9 +36,7 @@ their canonical paths are still runnable.
   `adopt` moves an active session from another repo or worktree into the current
   worktree and resets target-local checkpoint bookkeeping so future commits link
   to the adopted session from the new location.
-- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`, plus
-  the deprecated `rewind` (functional, prints a cobra deprecation message, will
-  be removed in a future release)
+- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`
 - `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`
 - `configure`: bare prints help and a hint pointing at `entire agent`; flags
   manage non-agent settings (telemetry, git-hook installation mode, strategy
@@ -103,23 +99,13 @@ MCP-host agents can launch the hidden `entire mcp` stdio server, which exposes
 Enabling a no-channel agent with `--agent-help-skill` reports the skill
 unsupported and points the agent at this passive path instead.
 
-Hidden top-level shortcuts (functional, emit a one-line deprecation hint):
-`resume` → `session resume`, `attach` → `session attach`, `explain` →
-`checkpoint explain`, `trace` → `doctor trace`.
 Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
 `checkpoint`. The `search` top-level remains hidden without a hint.
-
-Deprecated top-level commands (functional, print a cobra deprecation message):
-`reset` → `clean`, and `rewind` (no replacement, announces removal — same
-deprecation as `checkpoint rewind`).
 
 Hidden infrastructure commands: `hooks`, `trail`,
 `curl-bash-post-install`, `__send_analytics`, `mcp` (MCP stdio server for
 MCP-host agents).
 
-The `hideAsAlias(cmd, canonical)` helper in `cmd/entire/cli/aliascmd.go`
-marks a command Hidden and sets cobra's `Deprecated` field so the hint
-renders to stderr on every invocation while the command stays functional.
 Diagnostic subcommands live alongside `doctor.go` as `doctor_logs.go` and
 `doctor_bundle.go`. Group roots and noun-group children live in files
 named `<noun>_group.go` and `<noun>_<verb>.go` respectively.
@@ -573,7 +559,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **Worktree-specific branches** - each git worktree gets its own shadow branch namespace, preventing conflicts
 - **Supports multiple concurrent sessions** - checkpoints from different sessions in the same directory interleave on the same shadow branch
 - Condenses session logs to permanent `entire/checkpoints/v1` branch on user commits
-- Each committed session stores the raw transcript (`full.jsonl`, read by CLI rewind/resume/explain) plus a best-effort compact transcript (`transcript.jsonl`, generated via `transcript/compact`). Like `full.jsonl`, `transcript.jsonl` stores the **full compacted session** on every checkpoint (via `compact.FullWithBoundary`), so each checkpoint is self-contained and the session survives a mid-history checkpoint being lost/reverted/rebased. This checkpoint's slice begins at the session metadata's `compact_transcript_start` (a line offset in compact-output coordinates, distinct from `checkpoint_transcript_start` which indexes raw `full.jsonl` lines); a nil/absent marker means a legacy delta-only `transcript.jsonl` (read from line 0). The marker rounds toward inclusion when a streaming message straddles the boundary, so the slice never drops this checkpoint's content but may repeat ≤1 merged line at its head. Compact generation is best-effort and is skipped when the compacted output exceeds the 50MB blob cap (unlike `full.jsonl`, `transcript.jsonl` is not chunked — `full.jsonl` stays authoritative and the compact is regenerable); in the OPF finalize rewrite a failed/skipped regeneration drops the prior `transcript.jsonl` and clears the marker rather than shipping a stale, less-redacted compact. Both files are pushed with the v1 branch. The root `metadata.json` `sessions[].transcript` pointer keeps targeting `full.jsonl`; when the compact transcript was generated the session entry also carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted otherwise) so external readers can locate it next to `full.jsonl`.
+- Each committed session stores the raw transcript (`full.jsonl`, read by CLI resume/explain) plus a best-effort compact transcript (`transcript.jsonl`, generated via `transcript/compact`). Like `full.jsonl`, `transcript.jsonl` stores the **full compacted session** on every checkpoint (via `compact.FullWithBoundary`), so each checkpoint is self-contained and the session survives a mid-history checkpoint being lost/reverted/rebased. This checkpoint's slice begins at the session metadata's `compact_transcript_start` (a line offset in compact-output coordinates, distinct from `checkpoint_transcript_start` which indexes raw `full.jsonl` lines); a nil/absent marker means a legacy delta-only `transcript.jsonl` (read from line 0). The marker rounds toward inclusion when a streaming message straddles the boundary, so the slice never drops this checkpoint's content but may repeat ≤1 merged line at its head. Compact generation is best-effort and is skipped when the compacted output exceeds the 50MB blob cap (unlike `full.jsonl`, `transcript.jsonl` is not chunked — `full.jsonl` stays authoritative and the compact is regenerable); in the OPF finalize rewrite a failed/skipped regeneration drops the prior `transcript.jsonl` and clears the marker rather than shipping a stale, less-redacted compact. Both files are pushed with the v1 branch. The root `metadata.json` `sessions[].transcript` pointer keeps targeting `full.jsonl`; when the compact transcript was generated the session entry also carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted otherwise) so external readers can locate it next to `full.jsonl`.
 - Uses the `post-rewrite` Git hook to keep local session linkage aligned after amend/rebase rewrites
 - Builds git trees in-memory using go-git plumbing APIs
 - Rewind restores files from shadow branch commit tree (does not use `git reset`)

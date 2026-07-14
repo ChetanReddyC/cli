@@ -1102,7 +1102,7 @@ func TestReviewAttach_UsesPendingReviewMarkerDefaults(t *testing.T) {
 	errBuf := &bytes.Buffer{}
 	rootCmd.SetOut(outBuf)
 	rootCmd.SetErr(errBuf)
-	rootCmd.SetArgs([]string{"attach", "--review", sessionID, "--force"})
+	rootCmd.SetArgs([]string{"session", "attach", "--review", sessionID, "--force"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("attach --review failed: %v\nstderr: %s", err, errBuf.String())
 	}
@@ -1425,7 +1425,7 @@ func TestAttachCmd_ReviewDoesNotInferSkillsFromConfig(t *testing.T) {
 	}
 
 	rootCmd := NewRootCmd()
-	rootCmd.SetArgs([]string{"attach", "--force", "--review", sessionID})
+	rootCmd.SetArgs([]string{"session", "attach", "--force", "--review", sessionID})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("attach --review failed: %v", err)
 	}
@@ -1456,7 +1456,7 @@ func TestReviewAttachCmd_TagsSession(t *testing.T) {
 `)
 
 	rootCmd := NewRootCmd()
-	rootCmd.SetArgs([]string{"attach", "--review", "--force", "--skills", "/custom-review", sessionID})
+	rootCmd.SetArgs([]string{"session", "attach", "--review", "--force", "--skills", "/custom-review", sessionID})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("attach --review failed: %v", err)
 	}
@@ -1494,7 +1494,7 @@ func TestAttachCmd_ReviewWithoutSkillsOrConfigSucceeds(t *testing.T) {
 `)
 
 	rootCmd := NewRootCmd()
-	rootCmd.SetArgs([]string{"attach", "--force", "--review", sessionID})
+	rootCmd.SetArgs([]string{"session", "attach", "--force", "--review", sessionID})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("attach --review without skills config should succeed; got error: %v", err)
 	}
@@ -1550,7 +1550,7 @@ func TestAttachCmd_ReviewAutoDetectsAgent(t *testing.T) {
 	var errBuf, outBuf bytes.Buffer
 	rootCmd.SetErr(&errBuf)
 	rootCmd.SetOut(&outBuf)
-	rootCmd.SetArgs([]string{"attach", "--force", "--review", sessionID})
+	rootCmd.SetArgs([]string{"session", "attach", "--force", "--review", sessionID})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("attach --review with auto-detect failed: %v\nstderr: %s", err, errBuf.String())
 	}

@@ -118,20 +118,10 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newAPICmd())          // authenticated passthrough to core/cell APIs
 	cmd.AddCommand(newAgentHelpCmd(cmd)) // visible: agents on transports without context injection discover it via `entire help`
 
-	// Hidden top-level shortcuts. Functional but print a deprecation hint.
-	cmd.AddCommand(hideAsAlias(newResumeCmd(), "entire session resume"))
-	cmd.AddCommand(hideAsAlias(newAttachCmd(), "entire session attach"))
-	cmd.AddCommand(hideAsAlias(newExplainCmd(), "entire checkpoint explain"))
-	cmd.AddCommand(hideAsAlias(newTraceCmd(), "entire doctor trace"))
 	cmd.AddCommand(newSearchCmd()) // 'entire search' = 'checkpoint search' (hidden, no hint)
 
 	// Hidden labs commands (listed via `entire labs`; not deprecation shortcuts).
 	cmd.AddCommand(newExpertsCmd()) // agent/workflow provenance
-
-	// Deprecated top-level commands (functional; the constructors mark them
-	// Deprecated, which also excludes them from help and completion).
-	cmd.AddCommand(newResetCmd())
-	cmd.AddCommand(newRewindCmd())
 
 	// Hidden infrastructure.
 	cmd.AddCommand(newMCPCmd(cmd)) // MCP stdio server for MCP-host agents
