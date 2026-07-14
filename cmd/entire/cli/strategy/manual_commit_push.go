@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -208,10 +209,14 @@ func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool
 	// The empty-remote hazard exists only during the first-push window. Once
 	// every push target has been observed with at least one branch we record a
 	// fingerprint of that target set locally, so subsequent pushes short-circuit
-	// here instead of paying an ls-remote network round trip on every push
-	// forever. The fingerprint self-invalidates if the push URLs change.
+	// here instead of paying an ls-remote network round trip on every push. The
+	// marker self-invalidates if the push URLs change, and — because a remote can
+	// later be force-emptied or recreated empty under the same URL — it is only
+	// trusted for pushBootstrapTTL before the remote is re-probed. That bounds
+	// both the network cost (at most one probe per TTL) and the window in which a
+	// re-emptied remote could wrongly skip the guard.
 	fingerprint := pushTargetsFingerprint(targets)
-	if readPushBootstrapMarker(ctx) == fingerprint {
+	if stored, fresh := readPushBootstrapMarker(ctx); fresh && stored == fingerprint {
 		return false
 	}
 
@@ -257,6 +262,12 @@ func pushTargetsFingerprint(targets []string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// pushBootstrapTTL bounds how long a recorded bootstrap observation is trusted
+// before the remote is re-probed. It caps the network cost at one ls-remote per
+// interval while keeping the window small in which a remote that was emptied or
+// recreated under the same URL could wrongly skip the guard.
+const pushBootstrapTTL = time.Hour
+
 // pushBootstrapMarkerPath is the repo-level file recording that every resolved
 // push target has been observed to carry at least one branch. It lives under
 // the git common dir (shared across worktrees) rather than in .git/config so it
@@ -269,18 +280,23 @@ func pushBootstrapMarkerPath(ctx context.Context) (string, error) {
 	return filepath.Join(commonDir, "entire", "checkpoint-push-bootstrap"), nil
 }
 
-// readPushBootstrapMarker returns the stored fingerprint, or "" if the marker is
-// absent or unreadable.
-func readPushBootstrapMarker(ctx context.Context) string {
+// readPushBootstrapMarker returns the stored fingerprint and whether it is still
+// fresh (written within pushBootstrapTTL). A stale, absent, or unreadable marker
+// reports fresh=false so the caller re-probes the remote.
+func readPushBootstrapMarker(ctx context.Context) (fingerprint string, fresh bool) {
 	path, err := pushBootstrapMarkerPath(ctx)
 	if err != nil {
-		return ""
+		return "", false
 	}
 	data, err := os.ReadFile(path) //nolint:gosec // path is git common dir + constant, not user input
 	if err != nil {
-		return ""
+		return "", false
 	}
-	return strings.TrimSpace(string(data))
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(data)), time.Since(info.ModTime()) < pushBootstrapTTL
 }
 
 // writePushBootstrapMarker records fingerprint. Best-effort: a failure only

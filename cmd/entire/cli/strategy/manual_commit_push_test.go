@@ -2,8 +2,10 @@ package strategy
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"testing"
+	"time"
 
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -59,9 +61,20 @@ func TestDeferCheckpointPushOnEmptyRemote_BootstrapMarkerSkipsNetwork(t *testing
 	require.False(t, deferCheckpointPushOnEmptyRemote(ctx, ps),
 		"the bootstrap marker must short-circuit the network probe")
 
-	// A stale marker (targets changed) must not short-circuit: it falls back to
-	// probing and defers on the unreachable remote.
+	// A marker whose fingerprint doesn't match the current targets must not
+	// short-circuit: it falls back to probing and defers on the unreachable remote.
 	writePushBootstrapMarker(ctx, "stale-fingerprint")
 	require.True(t, deferCheckpointPushOnEmptyRemote(ctx, ps),
 		"a marker that does not match the current targets must not short-circuit")
+
+	// An expired marker must not be trusted even when the fingerprint matches:
+	// the remote could have been emptied/recreated since, so it is re-probed
+	// (and defers on the unreachable remote). Backdate the file past the TTL.
+	writePushBootstrapMarker(ctx, pushTargetsFingerprint(targets))
+	markerPath, err := pushBootstrapMarkerPath(ctx)
+	require.NoError(t, err)
+	stale := time.Now().Add(-pushBootstrapTTL - time.Minute)
+	require.NoError(t, os.Chtimes(markerPath, stale, stale))
+	require.True(t, deferCheckpointPushOnEmptyRemote(ctx, ps),
+		"an expired marker must be re-validated, not trusted indefinitely")
 }
