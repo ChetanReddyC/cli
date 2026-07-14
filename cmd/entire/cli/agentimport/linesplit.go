@@ -103,6 +103,16 @@ func rescopeSubagentTokensToDeltas(turns []Turn) {
 		}
 		cumulative := turns[i].Tokens.SubagentTokens
 		turns[i].Tokens.SubagentTokens = types.SubtractTokenUsage(cumulative, prevCumulative)
-		prevCumulative = cumulative
+		// Only advance the baseline when this turn carried a snapshot. A turn
+		// whose agent-<id>.jsonl transiently failed to read has a nil cumulative
+		// (CalculateTotalTokenUsage continue-s past the error); resetting
+		// prevCumulative to nil here would make the next non-nil snapshot subtract
+		// nothing and re-report the full cumulative, reintroducing the
+		// double-counting this rescoping removes. Mirrors the live path, where
+		// accumulateTokenUsage only replaces SubagentTokens when the incoming
+		// snapshot is non-nil.
+		if cumulative != nil {
+			prevCumulative = cumulative
+		}
 	}
 }

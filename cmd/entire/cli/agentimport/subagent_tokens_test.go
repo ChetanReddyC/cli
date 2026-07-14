@@ -83,6 +83,48 @@ func writeSubagentTranscript(t *testing.T, sf SessionFile, agentID, line string)
 	}
 }
 
+// TestRescopeSubagentTokensToDeltas_NilCumulativeThenReappears pins finding
+// 019f5ebc-cf27: when a turn's cumulative SubagentTokens snapshot is transiently
+// nil (the subagent's agent-<id>.jsonl failed to read, so CalculateTotalTokenUsage
+// continue-d past it and left SubagentTokens nil) and a later turn's snapshot
+// reappears non-nil, prevCumulative must NOT be reset to nil for the nil turn —
+// otherwise SubtractTokenUsage(cumulative, nil) on the reappearing turn returns
+// the full cumulative again and reintroduces the double-counting the PR fixes.
+// The deltas must still sum to the final cumulative exactly once.
+func TestRescopeSubagentTokensToDeltas_NilCumulativeThenReappears(t *testing.T) {
+	turns := []Turn{
+		{Tokens: &types.TokenUsage{InputTokens: 10, SubagentTokens: &types.TokenUsage{InputTokens: 100, OutputTokens: 50, APICallCount: 1}}},
+		// Transient read failure: main-agent tokens present, subagent snapshot nil.
+		{Tokens: &types.TokenUsage{InputTokens: 20}},
+		// Snapshot reappears, having grown to 300/150.
+		{Tokens: &types.TokenUsage{InputTokens: 30, SubagentTokens: &types.TokenUsage{InputTokens: 300, OutputTokens: 150, APICallCount: 3}}},
+	}
+
+	rescopeSubagentTokensToDeltas(turns)
+
+	// Turn 0 delta = 100-0 = 100.
+	if turns[0].Tokens.SubagentTokens == nil || turns[0].Tokens.SubagentTokens.InputTokens != 100 {
+		t.Fatalf("turn0 subagent delta = %#v, want input=100", turns[0].Tokens.SubagentTokens)
+	}
+	// Turn 1 had a nil snapshot: its delta stays nil.
+	if turns[1].Tokens.SubagentTokens != nil {
+		t.Fatalf("turn1 subagent delta = %#v, want nil", turns[1].Tokens.SubagentTokens)
+	}
+	// Turn 2 delta must be rescoped against turn 0's cumulative (100), NOT nil:
+	// 300-100 = 200, not the full 300.
+	if turns[2].Tokens.SubagentTokens == nil || turns[2].Tokens.SubagentTokens.InputTokens != 200 {
+		t.Fatalf("turn2 subagent delta = %#v, want input=200 (300 cumulative minus turn0 baseline 100)",
+			turns[2].Tokens.SubagentTokens)
+	}
+
+	// The per-turn deltas must sum to the final cumulative (300) exactly once.
+	sum := sumTurnSubagentTokens(turns)
+	if sum.InputTokens != 300 || sum.OutputTokens != 150 || sum.APICallCount != 3 {
+		t.Fatalf("summed subagent deltas = input=%d output=%d calls=%d, want 300/150/3 (counted once)",
+			sum.InputTokens, sum.OutputTokens, sum.APICallCount)
+	}
+}
+
 // TestImport_ClaudeSubagentTokensCountedOnceAcrossTurns builds a Claude session
 // where a subagent is spawned in the first turn and two more user-prompt turns
 // follow, then asserts the subagent's tokens are counted exactly once both in
