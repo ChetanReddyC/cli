@@ -276,7 +276,22 @@ type State struct {
 	// Set from hook data when the agent provides it.
 	ModelName string `json:"model_name,omitempty"`
 
-	// Token usage tracking (accumulated across all checkpoints in this session)
+	// Token usage tracking (accumulated across all checkpoints in this session).
+	//
+	// DECISION: SubagentTokens is "latest snapshot wins", not summed. Subagent
+	// usage arrives as a cumulative-since-session-start total (each subagent
+	// transcript is re-read from line 0 every call), so accumulateTokenUsage
+	// replaces rather than adds it (see cmd/entire/cli/strategy). Tradeoff: if
+	// the main transcript resets or rotates mid-session (compaction writing a
+	// fresh file, or a resume that truncates), a subsequent snapshot can be
+	// SMALLER than a previous one, so this session-wide total regresses
+	// (undercounts) for the rest of the session. This is accepted: undercounting
+	// after a transcript reset is preferable to the multiplicative overcount the
+	// summing approach produced, and the alternative (a session-wide high-water
+	// mark) would mask genuine subagent-transcript cleanup. Checkpoint deltas do
+	// not share this exposure — CheckpointTokenUsage.SubagentTokens is derived as
+	// (this total - SubagentTokensBaseline) and floored at 0 by clampSubtract, so
+	// a shrunk snapshot yields 0, never a negative or stale delta.
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
 
 	// CheckpointTokenUsage tracks hook-provided token usage since the last condensation.
