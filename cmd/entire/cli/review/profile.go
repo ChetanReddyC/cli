@@ -123,7 +123,7 @@ func applyLegacyReviewProfileFallback(s *settings.EntireSettings) {
 	// command. Codex has no such built-in, so spawn-time validation excludes
 	// those workers. Repair that generated shape in memory to a prompt-only
 	// Codex reviewer; explicitly configured Codex skills are left untouched.
-	normalizeLegacyCodexDefaultSkills(s.Review)
+	normalizeLegacyCodexDefaultSkills(s.Review) //nolint:staticcheck // intentional compatibility repair for deprecated review config
 	for name, profile := range s.ReviewProfiles {
 		normalizeLegacyCodexDefaultSkills(profile.Agents)
 		s.ReviewProfiles[name] = profile
