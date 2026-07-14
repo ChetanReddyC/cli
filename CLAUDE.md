@@ -604,6 +604,7 @@ The phase state machine, metadata directory layout, sharded checkpoint format, m
 
 - [Sessions and Checkpoints](docs/architecture/sessions-and-checkpoints.md) - domain model, storage layout, checkpoint ID linking, commit trailers, package structure
 - [Checkpoint Scenarios](docs/architecture/checkpoint-scenarios.md) - phase state machine and worked condensation scenarios
+- [Ref-Based Checkpoint Backend](docs/architecture/ref-checkpoint-backend.md) - git-refs backend: primary/mirror taxonomy, ref layout + sharding, push-discovery queue, read routing, config + rollout
 
 #### When Modifying the Strategy
 
