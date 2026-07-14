@@ -168,7 +168,7 @@ func TestWriteCodeSearchText(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeCodeSearchText(&buf, resp, newStatusStyles(&buf))
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf), false)
 
 	output := buf.String()
 	if !strings.Contains(output, "entireio/cli:main.go\n") {
@@ -203,7 +203,7 @@ func TestWriteCodeSearchText_GroupsByFile(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeCodeSearchText(&buf, resp, newStatusStyles(&buf))
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf), false)
 
 	output := buf.String()
 	if got := strings.Count(output, "r:a.go\n"); got != 1 {
@@ -232,7 +232,7 @@ func TestWriteCodeSearchText_CapsFilesAndMatchesPerFile(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeCodeSearchText(&buf, resp, newStatusStyles(&buf))
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf), false)
 	output := buf.String()
 
 	if got := strings.Count(output, "r:"); got != maxCodeSearchFiles {
@@ -252,7 +252,7 @@ func TestHighlightCodeMatches(t *testing.T) {
 
 	styles := statusStyles{colorEnabled: true}
 
-	out := highlightCodeMatches("func HandleRequest(w)", "handlerequest", styles)
+	out := highlightCodeMatches("func HandleRequest(w)", "handlerequest", styles, false)
 	if !strings.Contains(out, "\x1b[") {
 		t.Errorf("expected ANSI codes in highlighted output, got %q", out)
 	}
@@ -260,12 +260,25 @@ func TestHighlightCodeMatches(t *testing.T) {
 		t.Errorf("expected unmatched text preserved around highlight, got %q", out)
 	}
 
-	if out := highlightCodeMatches("no match here", "zzz", styles); out != "no match here" {
+	if out := highlightCodeMatches("no match here", "zzz", styles, false); out != "no match here" {
 		t.Errorf("expected unchanged line when no match, got %q", out)
 	}
 
+	// Case-sensitive search must not highlight case variants.
+	if out := highlightCodeMatches("func HandleRequest(w)", "handlerequest", styles, true); out != "func HandleRequest(w)" {
+		t.Errorf("expected no highlight for case mismatch with caseSensitive, got %q", out)
+	}
+
+	// Non-ASCII input falls back to exact matching (no case folding).
+	if out := highlightCodeMatches("comment ÉTÉ ici", "été", styles, false); out != "comment ÉTÉ ici" {
+		t.Errorf("expected no case-folded highlight for non-ASCII input, got %q", out)
+	}
+	if out := highlightCodeMatches("comment été ici", "été", styles, false); !strings.Contains(out, "\x1b[") {
+		t.Errorf("expected exact non-ASCII match highlighted, got %q", out)
+	}
+
 	plain := statusStyles{colorEnabled: false}
-	if out := highlightCodeMatches("func main()", "main", plain); out != "func main()" {
+	if out := highlightCodeMatches("func main()", "main", plain, false); out != "func main()" {
 		t.Errorf("expected unchanged line when color disabled, got %q", out)
 	}
 }
@@ -310,7 +323,7 @@ func TestWriteCodeSearchText_TruncatesLongLines(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeCodeSearchText(&buf, resp, newStatusStyles(&buf))
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf), false)
 
 	output := buf.String()
 	if strings.Contains(output, longLine) {
@@ -334,7 +347,7 @@ func TestWriteCodeSearchText_Empty(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeCodeSearchText(&buf, resp, newStatusStyles(&buf))
+	writeCodeSearchText(&buf, resp, newStatusStyles(&buf), false)
 
 	if !strings.Contains(buf.String(), "No code search results found") {
 		t.Errorf("expected empty results message, got:\n%s", buf.String())

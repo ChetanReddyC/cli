@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -498,7 +499,7 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 		return writeCodeSearchJSON(w, resp)
 	}
 
-	writeCodeSearchText(w, resp, newStatusStyles(w))
+	writeCodeSearchText(w, resp, newStatusStyles(w), opts.caseSensitive)
 	return nil
 }
 
@@ -825,7 +826,7 @@ const (
 // style): a colored "repo:path" header per file, indented line-numbered
 // matches beneath it, and a dimmed stats footer. Colors are applied only when
 // the writer supports them (styles.colorEnabled); piped output stays plain.
-func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse, styles statusStyles) {
+func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse, styles statusStyles, caseSensitive bool) {
 	if len(resp.Results) == 0 {
 		if len(resp.FailedJurisdictions) > 0 {
 			fmt.Fprintf(w, "No code search results found (some regions failed: %s)\n",
@@ -872,7 +873,7 @@ func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse, styles st
 				line = string(runes[:maxContextLineLen]) + "…"
 			}
 			lineNo := styles.render(styles.dim, fmt.Sprintf("%d:", r.Line))
-			fmt.Fprintf(w, "  %s %s\n", lineNo, highlightCodeMatches(line, resp.Query, styles))
+			fmt.Fprintf(w, "  %s %s\n", lineNo, highlightCodeMatches(line, resp.Query, styles, caseSensitive))
 			shown++
 		}
 		// ponytail: overflow counts only what this page fetched (peregrine
@@ -903,17 +904,19 @@ func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse, styles st
 }
 
 // highlightCodeMatches bold-red highlights occurrences of query in line
-// (grep convention). Matching is case-insensitive when lowercasing doesn't
-// change byte lengths (it can for some Unicode); otherwise it falls back to
-// exact matching so byte offsets stay aligned. Returns line unchanged when
-// color is disabled or there's nothing to highlight.
-func highlightCodeMatches(line, query string, styles statusStyles) string {
+// (grep convention). Matching mirrors the search: case-insensitive unless
+// caseSensitive is set. Case folding is only applied when both strings are
+// pure ASCII, since Unicode case mappings can change byte widths and
+// misalign offsets against the original line; non-ASCII input falls back to
+// exact matching. Returns line unchanged when color is disabled or there's
+// nothing to highlight.
+func highlightCodeMatches(line, query string, styles statusStyles, caseSensitive bool) string {
 	if !styles.colorEnabled || query == "" {
 		return line
 	}
 	haystack, needle := line, query
-	if l, q := strings.ToLower(line), strings.ToLower(query); len(l) == len(line) && len(q) == len(query) {
-		haystack, needle = l, q
+	if !caseSensitive && isASCII(line) && isASCII(query) {
+		haystack, needle = strings.ToLower(line), strings.ToLower(query)
 	}
 	matchStyle := styles.red.Bold(true)
 	var b strings.Builder
@@ -933,6 +936,16 @@ func highlightCodeMatches(line, query string, styles statusStyles) string {
 	}
 	b.WriteString(line[i:])
 	return b.String()
+}
+
+// isASCII reports whether s contains only ASCII bytes.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 // writeSearchJSON writes client-side paginated search results as JSON.
