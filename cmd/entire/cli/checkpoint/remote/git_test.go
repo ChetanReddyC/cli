@@ -1054,3 +1054,48 @@ func TestGitRemoteSectionExists(t *testing.T) {
 	runIsolatedGit(ctx, t, repoDir, "config", "--local", "remote."+url+".promisor", "true")
 	assert.True(t, gitRemoteSectionExists(ctx, repoDir, url))
 }
+
+// TestGitRemoteSectionExists_ExactSubsectionMatch verifies the check compares
+// the whole URL subsection, not a prefix: a longer URL that shares a prefix
+// (e.g. ".../repo.git") must not make a shorter one (".../repo") look present.
+func TestGitRemoteSectionExists_ExactSubsectionMatch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	const longURL = "https://example.com/org/repo.git"
+	const shortURL = "https://example.com/org/repo"
+	runIsolatedGit(ctx, t, repoDir, "config", "--local", "remote."+longURL+".promisor", "true")
+
+	assert.True(t, gitRemoteSectionExists(ctx, repoDir, longURL),
+		"the exact URL section is present")
+	assert.False(t, gitRemoteSectionExists(ctx, repoDir, shortURL),
+		"a prefix of an existing URL section must not count as present")
+}
+
+// TestStampNewlyCreatedRemote_StampsUnderCancelledContext guards the timed-out
+// fetch case: git records the promisor section before the fetch times out, so
+// the stamp must still land even though the fetch context is already cancelled.
+func TestStampNewlyCreatedRemote_StampsUnderCancelledContext(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	const url = "https://example.com/org/checkpoints.git"
+	// Simulate git having recorded the promisor section during a fetch that
+	// then timed out.
+	runIsolatedGit(context.Background(), t, repoDir, "config", "--local", "remote."+url+".promisor", "true")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // parent context already done, as after a timed-out fetch
+
+	stampNewlyCreatedRemote(ctx, repoDir, url)
+
+	assert.True(t, gitConfigBool(context.Background(), repoDir, "remote."+url+".skipFetchAll"),
+		"stamp must land even though the parent context is cancelled")
+	assert.True(t, gitConfigBool(context.Background(), repoDir, "remote."+url+".skipDefaultUpdate"),
+		"stamp must land even though the parent context is cancelled")
+}

@@ -11,10 +11,17 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
+
+// stampConfigTimeout bounds the local git-config reads/writes that mark a newly
+// created checkpoint remote as skipped. They run detached from the fetch's
+// context (see stampNewlyCreatedRemote), so a bound guards against a stuck
+// config lock hanging the caller.
+const stampConfigTimeout = 10 * time.Second
 
 // CheckpointTokenEnvVar is the environment variable for providing an access token
 // used to authenticate git push/fetch operations for checkpoint branches.
@@ -112,21 +119,34 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	disableTerminalPrompt(cmd)
 	out, err := cmd.CombinedOutput()
 
-	// Stamp whenever this fetch newly created the section — even on a fetch
-	// error. Git writes remote.<url>.promisor eagerly during connection setup,
-	// so a failed filtered fetch still leaves the phantom remote behind; if we
-	// only stamped on success it would linger unstamped forever (the section
-	// then exists on the next attempt, so it never looks "new" again). Checking
-	// existence after the fetch keeps us from inventing a section when the fetch
-	// died before git wrote anything.
-	if stampCandidate && !existedBefore && gitRemoteSectionExists(ctx, opts.Dir, stampURL) {
-		markRemoteSkipped(ctx, opts.Dir, stampURL)
+	if stampCandidate && !existedBefore {
+		stampNewlyCreatedRemote(ctx, opts.Dir, stampURL)
 	}
 
 	if err != nil {
 		return out, fmt.Errorf("git fetch: %w", err)
 	}
 	return out, nil
+}
+
+// stampNewlyCreatedRemote stamps a URL-keyed remote section that this fetch just
+// created. Git writes remote.<url>.promisor eagerly during connection setup, so
+// a filtered fetch that later fails still leaves the phantom remote behind;
+// stamping here — rather than only on fetch success — keeps it from lingering
+// unstamped forever (the section then exists on the next attempt, so it never
+// looks "new" again). Re-checking existence keeps us from inventing a section
+// when the fetch died before git wrote anything.
+//
+// The git-config commands run on a context detached from the fetch's deadline:
+// a filtered fetch that timed out leaves ctx already past its deadline, and
+// inheriting it would make these local commands fail immediately and leave the
+// phantom unstamped — the very miss this stamping exists to prevent.
+func stampNewlyCreatedRemote(ctx context.Context, dir, url string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stampConfigTimeout)
+	defer cancel()
+	if gitRemoteSectionExists(ctx, dir, url) {
+		markRemoteSkipped(ctx, dir, url)
+	}
 }
 
 // markRemoteSkipped stamps skipFetchAll/skipDefaultUpdate on a URL-keyed remote
@@ -163,7 +183,7 @@ func markRemoteSkipped(ctx context.Context, dir, url string) {
 // about to create a new URL-keyed remote, so we only stamp remotes we create and
 // never rewrite ones the user already has.
 func gitRemoteSectionExists(ctx context.Context, dir, url string) bool {
-	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--list")
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--list", "--name-only")
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -171,10 +191,21 @@ func gitRemoteSectionExists(ctx context.Context, dir, url string) bool {
 	if err != nil {
 		return false
 	}
-	// git --list preserves subsection (the URL) case, so match it verbatim.
-	prefix := "remote." + url + "."
+	// Each name is "remote.<url>.<key>". Git config keys carry no dots, so the
+	// final dotted component is the key and everything between "remote." and it
+	// is the subsection (the URL, whose case git preserves). Compare the
+	// subsection exactly so a longer URL that shares a prefix (e.g. a
+	// ".../repo.git" section vs a ".../repo" fetch) is not a false match.
 	for line := range strings.SplitSeq(string(out), "\n") {
-		if strings.HasPrefix(line, prefix) {
+		rest, ok := strings.CutPrefix(line, "remote.")
+		if !ok {
+			continue
+		}
+		lastDot := strings.LastIndexByte(rest, '.')
+		if lastDot < 0 {
+			continue
+		}
+		if rest[:lastDot] == url {
 			return true
 		}
 	}
