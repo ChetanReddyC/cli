@@ -11,10 +11,17 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
+
+// stampConfigTimeout bounds the local git-config reads/writes that mark a newly
+// created checkpoint remote as skipped. They run detached from the fetch's
+// context (see stampNewlyCreatedRemote), so a bound guards against a stuck
+// config lock hanging the caller.
+const stampConfigTimeout = 10 * time.Second
 
 // CheckpointTokenEnvVar is the environment variable for providing an access token
 // used to authenticate git push/fetch operations for checkpoint branches.
@@ -85,72 +92,94 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	args = append(args, opts.Remote)
 	args = append(args, opts.RefSpecs...)
 
+	// A filtered fetch from a URL makes git record a URL-keyed remote section
+	// (remote.<url>.*) so it can lazy-fetch filtered-out objects later. That
+	// section also turns the URL into a phantom remote that `git fetch --all`
+	// and `git remote update` keep dialing. When this fetch is the one creating
+	// the section, stamp skipFetchAll so bulk fetches skip our adhoc remote.
+	// Remotes that already existed are left untouched so we never rewrite the
+	// user's config.
+	var stampURL string
+	var stampCandidate, existedBefore bool
+	if filtered && IsURL(opts.Remote) {
+		stampCandidate = true
+		stampURL = opts.Remote
+		if token := strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)); token != "" && isValidToken(token) {
+			// With a checkpoint token, newCommand rewrites SSH targets to HTTPS
+			// and git records the section under the rewritten URL.
+			stampURL, _ = resolveTargetForTokenAuth(ctx, stampURL)
+		}
+		existedBefore = gitRemoteSectionExists(ctx, opts.Dir, stampURL)
+	}
+
 	cmd := newCommand(ctx, args...)
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
 	}
 	disableTerminalPrompt(cmd)
 	out, err := cmd.CombinedOutput()
+
+	if stampCandidate && !existedBefore {
+		stampNewlyCreatedRemote(ctx, opts.Dir, stampURL)
+	}
+
 	if err != nil {
 		return out, fmt.Errorf("git fetch: %w", err)
-	}
-	if filtered && IsURL(opts.Remote) {
-		// Stamp the URL git actually fetched from: with a checkpoint token set,
-		// newCommand rewrites SSH targets to HTTPS, and git records the
-		// promisor entry under the rewritten URL.
-		target := opts.Remote
-		if token := strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)); token != "" && isValidToken(token) {
-			target, _ = resolveTargetForTokenAuth(ctx, target)
-		}
-		markPromisorEntrySkipped(ctx, opts.Dir, target)
 	}
 	return out, nil
 }
 
-// markPromisorEntrySkipped excludes the URL-keyed config section that git
-// creates for a filtered URL fetch (remote.<url>.promisor=true) from
-// `git fetch --all` and `git remote update`. Git needs the promisor entry to
-// lazy-fetch filtered-out objects later, but the entry also makes the URL show
-// up as a fetchable remote, so without this every checkpoint URL ever fetched
-// from lingers as a phantom remote that bulk fetches keep dialing.
-// Best-effort: the fetch already succeeded, so failures only log.
-func markPromisorEntrySkipped(ctx context.Context, dir, url string) {
-	if !gitConfigBool(ctx, dir, "remote."+url+".promisor") {
-		// Git didn't record a promisor entry for this URL; don't invent a
-		// config section that wouldn't otherwise exist.
-		return
-	}
-	for _, key := range []string{"skipFetchAll", "skipDefaultUpdate"} {
-		fullKey := "remote." + url + "." + key
-		if gitConfigBool(ctx, dir, fullKey) {
-			// Checked per key so a partially-stamped entry (e.g. an earlier
-			// run failing between the two writes) still gets completed.
-			continue
-		}
-		cmd := exec.CommandContext(ctx, "git", "config", "--local", fullKey, "true")
-		if dir != "" {
-			cmd.Dir = dir
-		}
-		if out, cfgErr := cmd.CombinedOutput(); cfgErr != nil {
-			redactedURL := RedactURL(url)
-			// The output can echo the key, which embeds the URL — and a URL
-			// can carry credentials. Redact before logging.
-			msg := strings.TrimSpace(strings.ReplaceAll(string(out), url, redactedURL))
-			logging.Warn(ctx, "failed to mark promisor config entry as skipped for bulk fetches",
-				slog.String("url", redactedURL),
-				slog.String("key", key),
-				slog.String("output", msg),
-				slog.String("error", cfgErr.Error()),
-			)
-			return
-		}
+// stampNewlyCreatedRemote stamps a URL-keyed remote section that this fetch just
+// created. Git writes remote.<url>.promisor eagerly during connection setup, so
+// a filtered fetch that later fails still leaves the phantom remote behind;
+// stamping here — rather than only on fetch success — keeps it from lingering
+// unstamped forever (the section then exists on the next attempt, so it never
+// looks "new" again). Re-checking existence keeps us from inventing a section
+// when the fetch died before git wrote anything.
+//
+// The git-config commands run on a context detached from the fetch's deadline:
+// a filtered fetch that timed out leaves ctx already past its deadline, and
+// inheriting it would make these local commands fail immediately and leave the
+// phantom unstamped — the very miss this stamping exists to prevent.
+func stampNewlyCreatedRemote(ctx context.Context, dir, url string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stampConfigTimeout)
+	defer cancel()
+	if gitRemoteSectionExists(ctx, dir, url) {
+		markRemoteSkipped(ctx, dir, url)
 	}
 }
 
-// gitConfigBool reads a local git config key and reports whether it is set to
-// a true value. Missing keys and read errors report false.
-func gitConfigBool(ctx context.Context, dir, key string) bool {
-	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get", "--type=bool", key)
+// markRemoteSkipped stamps skipFetchAll on a URL-keyed remote section so
+// `git fetch --all` and `git remote update` skip it. Called only for remotes
+// this fetch just created, so an adhoc checkpoint URL never lingers as a phantom
+// remote that bulk fetches keep dialing.
+// Best-effort: the git config write is not worth failing the fetch over, so
+// failures only log.
+func markRemoteSkipped(ctx context.Context, dir, url string) {
+	fullKey := "remote." + url + ".skipFetchAll"
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", fullKey, "true")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if out, cfgErr := cmd.CombinedOutput(); cfgErr != nil {
+		redactedURL := RedactURL(url)
+		// The output can echo the key, which embeds the URL — and a URL can
+		// carry credentials. Redact before logging.
+		msg := strings.TrimSpace(strings.ReplaceAll(string(out), url, redactedURL))
+		logging.Warn(ctx, "failed to mark remote config entry as skipped for bulk fetches",
+			slog.String("url", redactedURL),
+			slog.String("output", msg),
+			slog.String("error", cfgErr.Error()),
+		)
+	}
+}
+
+// gitRemoteSectionExists reports whether a remote.<url>.* config section already
+// exists in the local git config. Used to tell whether a filtered URL fetch is
+// about to create a new URL-keyed remote, so we only stamp remotes we create and
+// never rewrite ones the user already has.
+func gitRemoteSectionExists(ctx context.Context, dir, url string) bool {
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--list", "--name-only")
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -158,7 +187,25 @@ func gitConfigBool(ctx context.Context, dir, key string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(string(out)) == "true"
+	// Each name is "remote.<url>.<key>". Git config keys carry no dots, so the
+	// final dotted component is the key and everything between "remote." and it
+	// is the subsection (the URL, whose case git preserves). Compare the
+	// subsection exactly so a longer URL that shares a prefix (e.g. a
+	// ".../repo.git" section vs a ".../repo" fetch) is not a false match.
+	for line := range strings.SplitSeq(string(out), "\n") {
+		rest, ok := strings.CutPrefix(line, "remote.")
+		if !ok {
+			continue
+		}
+		lastDot := strings.LastIndexByte(rest, '.')
+		if lastDot < 0 {
+			continue
+		}
+		if rest[:lastDot] == url {
+			return true
+		}
+	}
+	return false
 }
 
 // FetchBlobs fetches specific objects (typically blobs) by hash from a remote.
