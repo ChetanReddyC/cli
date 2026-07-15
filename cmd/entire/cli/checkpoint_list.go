@@ -114,7 +114,7 @@ func hasMultipleSessions(points []strategy.RewindPoint) bool {
 // rewindPointLabel renders a single rewind point as a display label. Shared by
 // the interactive rewind picker (runRewindInteractive) and the
 // `checkpoint list --pending` human view so both stay in sync. When
-// hasMultipleSessions is true, a truncated session prompt is appended to help
+// hasMultipleSessions is true, a sanitized session prompt is appended to help
 // disambiguate concurrent sessions.
 func rewindPointLabel(p strategy.RewindPoint, hasMultipleSessions bool) string {
 	timestamp := p.Date.Format("2006-01-02 15:04")
