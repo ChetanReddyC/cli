@@ -85,7 +85,7 @@ func LooksLikeSSHAuthFailure(errText string) bool {
 		"too many authentication failures",
 		"no more authentication methods to try",
 		"could not read from remote repository",
-		"enter passphrase for key", // should not appear under BatchMode, but keep
+		"enter passphrase for key",          // should not appear under BatchMode, but keep
 		"error reading ssh protocol banner", // sometimes accompanies aborted auth
 	}
 	for _, n := range needles {
