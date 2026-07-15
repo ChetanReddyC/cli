@@ -1125,17 +1125,17 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 	// plain `entire enable` (no --project/--local) resolved the strategy write
 	// to the existing project settings.json but wrote the enabled flag to
 	// settings.local.json, leaving the project file the user disabled still
-	// enabled=false (#1140).
+	// enabled=false.
 	targetFile, _ := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 	useProject := targetFile == settings.EntireSettingsFile
 
 	// The merged view can report enabled while the resolved target file is
-	// itself still disabled — exactly the legacy #1140 split state a pre-fix
-	// binary left on disk (committed settings.json enabled:false masked by
+	// itself still disabled — exactly the legacy split state a pre-fix binary
+	// left on disk (committed settings.json enabled:false masked by
 	// settings.local.json enabled:true, which wins in the merge). In that case
 	// the early "already enabled" return would never flip the target file, even
-	// with an explicit --project, so `enable` could not recover the state #1140
-	// reports. Only short-circuit when the merged view is enabled AND the target
+	// with an explicit --project, so `enable` could not recover that split
+	// state. Only short-circuit when the merged view is enabled AND the target
 	// file is not itself explicitly disabled.
 	enabled, err := IsEnabled(ctx)
 	if err == nil && enabled && !scopeExplicitlyDisabled(ctx, useProject) {
@@ -1151,7 +1151,7 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 // scopeExplicitlyDisabled reports whether the settings file for the given scope
 // exists and carries an explicit "enabled": false. A missing file or a missing
 // "enabled" key returns false: those default to enabled, so there is nothing to
-// recover. Used to detect the legacy #1140 split state where the merged view is
+// recover. Used to detect the legacy split state where the merged view is
 // enabled but the target file the user cares about is still disabled.
 func scopeExplicitlyDisabled(ctx context.Context, useProject bool) bool {
 	load := settings.LoadLocalRaw
@@ -1348,7 +1348,7 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 // runEnable flips the enabled flag to true in the scope chosen by the caller
 // (see setEnabledFlag). Callers resolve the scope: runEnableOnConfiguredRepo
 // uses settingsTargetFile so a bare `entire enable` targets the committed
-// settings.json when present and can recover a repo disabled there (#1140).
+// settings.json when present and can recover a repo disabled there.
 func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
 	if err := setEnabledFlag(ctx, true, useProjectSettings); err != nil {
 		return err
@@ -1407,7 +1407,7 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 // (local_dev, log_level, personal strategy_options/checkpoint_remote, ...) on
 // top of settings.json. Writing that merged struct back into one file would
 // leak a developer's local-only overrides into the shared, committed project
-// file whenever a write resolves to settings.json (#1140). setEnabledRaw
+// file whenever a write resolves to settings.json. setEnabledRaw
 // therefore edits only the "enabled" key in each file's own content; its
 // sibling saveEnabledState applies the same rule to a caller-provided,
 // already-target-scoped struct.
@@ -1456,7 +1456,8 @@ func setEnabledRaw(
 // merged-vs-scoped rationale). s must already be scoped to the target file's
 // own content: it is intentionally NOT written into the other scope, which
 // would overwrite that file's own fields (local_dev, log_level, personal
-// strategy_options, ...) — the #1140 leak, in the other direction.
+// strategy_options, ...) — the same leak this rule prevents, in the other
+// direction.
 func saveEnabledState(ctx context.Context, s *EntireSettings, useProjectSettings bool) error {
 	if useProjectSettings {
 		if err := SaveEntireSettings(ctx, s); err != nil {
@@ -1808,7 +1809,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	// Resolve the target file up front so the load below is scoped to that
 	// file's own content rather than the merged view (see setEnabledFlag for
 	// why: writing the merged struct back into a single scope leaks the other
-	// scope's fields into it, e.g. #1140).
+	// scope's fields into it).
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
 	if err != nil {

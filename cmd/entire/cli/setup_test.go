@@ -225,8 +225,8 @@ func TestRunEnable_AlreadyEnabled(t *testing.T) {
 	}
 }
 
-// TestRunEnableOnConfiguredRepo_RecoversLegacySplitState covers issue #1140
-// step 4: recovering the split state a pre-fix binary left on disk — committed
+// TestRunEnableOnConfiguredRepo_RecoversLegacySplitState covers recovering
+// the split state a pre-fix binary left on disk — committed
 // settings.json enabled:false, settings.local.json enabled:true. The local
 // override wins in the merged view, so IsEnabled reports true; a bare early
 // return on the merged view would leave the committed project file disabled
@@ -234,7 +234,7 @@ func TestRunEnable_AlreadyEnabled(t *testing.T) {
 // detect that the target scope is itself disabled and flip it.
 func TestRunEnableOnConfiguredRepo_RecoversLegacySplitState(t *testing.T) {
 	setupTestRepo(t)
-	// Legacy #1140 split state.
+	// Legacy split state.
 	writeSettings(t, testSettingsDisabled)
 	writeLocalSettings(t, `{"enabled": true}`)
 
@@ -254,7 +254,7 @@ func TestRunEnableOnConfiguredRepo_RecoversLegacySplitState(t *testing.T) {
 		t.Fatalf("runEnableOnConfiguredRepo(--project) error = %v", err)
 	}
 
-	// The committed project file must now be enabled — the state #1140 could
+	// The committed project file must now be enabled — this split state could
 	// not recover before this fix.
 	projectS, err := settings.LoadFromFile(EntireSettingsFile)
 	if err != nil {
@@ -496,7 +496,7 @@ func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
 // merged settings view (LoadEntireSettings) and write it back wholesale to the
 // project file via saveEnabledState, flattening settings.local.json-only
 // overrides (e.g. log_level) into the shared, committed settings.json — the
-// same #1140 leak fixed for the bare enable/disable path, just via a different
+// same leak fixed for the bare enable/disable path, just via a different
 // entry point (setupAgentHooksNonInteractive).
 func TestSetupAgentHooksNonInteractive_DoesNotLeakLocalOverridesIntoProject(t *testing.T) {
 	setupTestRepo(t)
@@ -1036,8 +1036,8 @@ func TestRunDisable_ProjectFlag_WritesCommittedFile(t *testing.T) {
 // `entire enable --project` with a local-only override present (e.g.
 // local_dev, set via settings.local.json) does not write that override into
 // the shared, committed project settings.json — only the enabled flag should
-// change there (#1140 finding: runEnable must not round-trip the merged
-// settings view through the project file).
+// change there (runEnable must not round-trip the merged settings view
+// through the project file).
 func TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, testSettingsDisabled)
@@ -1778,7 +1778,7 @@ func TestEnableCmd_ForceAndStrategyFlagsOnConfiguredDisabledRepo_ReenablesAndUpd
 	}
 }
 
-// Regression for #1140: `entire enable --checkpoint-remote ...` (no --project)
+// Regression: `entire enable --checkpoint-remote ...` (no --project)
 // on a repo disabled at the project level must re-enable the project
 // settings.json, not write the enabled flag to a shadow settings.local.json —
 // which left the file the user disabled still enabled=false.
@@ -1803,7 +1803,7 @@ func TestEnableCmd_StrategyFlagsOnDisabledProjectRepo_EnablesProjectFile(t *test
 		t.Fatalf("load project settings: %v", err)
 	}
 	if !projectS.Enabled {
-		t.Errorf("settings.json still enabled=false after enable; the enabled flag went to the wrong file (#1140)")
+		t.Errorf("settings.json still enabled=false after enable; the enabled flag went to the wrong file")
 	}
 }
 
