@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -118,11 +117,6 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	}
 
 	if count == 0 {
-		// Still self-heal a stale feature-flag config.toml left by an
-		// older entire version, even if hooks were already present.
-		if err := cleanupStaleFeatureConfig(repoRoot); err != nil {
-			return 0, err
-		}
 		return 0, nil
 	}
 
@@ -158,13 +152,11 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		return 0, fmt.Errorf("failed to write hooks.json: %w", err)
 	}
 
-	// Hooks are enabled by default in Codex (since 0.124.0), so no feature
-	// flag is written. Self-heal any stale .codex/config.toml an older
-	// entire version left behind.
-	if err := cleanupStaleFeatureConfig(repoRoot); err != nil {
-		return count, err
-	}
-
+	// No .codex/config.toml is written: hooks are enabled by default in
+	// Codex (since 0.124.0), and a TOML file inside Codex's reserved
+	// <CODEX_HOME>/agents tree would be rejected by its agent-role scanner
+	// at every startup (entireio/cli#842). A leftover config.toml written
+	// by an older entire version must be removed manually.
 	return count, nil
 }
 
@@ -358,79 +350,4 @@ func removeEntireHooks(groups []MatcherGroup) []MatcherGroup {
 		}
 	}
 	return result
-}
-
-// configFileName is the Codex config file name.
-const configFileName = "config.toml"
-
-// featureLine / legacyFeatureLine are the TOML feature-flag lines older
-// entire versions wrote to a project-local .codex/config.toml back when
-// Codex hooks were experimental (the flag was renamed from `codex_hooks`
-// to `hooks` in Codex 0.129.0). Hooks are enabled by default since Codex
-// 0.124.0 (openai/codex#19012), so the flag is no longer written — these
-// constants only identify stale files for cleanupStaleFeatureConfig.
-const (
-	featureLine       = "hooks = true"
-	legacyFeatureLine = "codex_hooks = true"
-)
-
-// cleanupStaleFeatureConfig removes a project-local .codex/config.toml left
-// behind by an older entire version that wrote the hooks feature flag there.
-// The flag is obsolete (hooks are on by default since Codex 0.124.0), and a
-// leftover config.toml is actively harmful when the repo lives inside
-// <CODEX_HOME>/agents — Codex recursively scans that tree for agent-role
-// TOML files and rejects the leftover at every startup as a "malformed
-// agent role definition" (entireio/cli#842). Only removes the file when
-// every non-blank line is one of the exact feature-flag lines or the
-// [features] header this package used to write (see
-// isEntireManagedLocalConfig) — a file carrying any unrelated user content
-// is left alone.
-func cleanupStaleFeatureConfig(repoRoot string) error {
-	configPath := filepath.Join(repoRoot, ".codex", configFileName)
-
-	data, err := os.ReadFile(configPath) //nolint:gosec // path constructed from repo root
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to read stale config.toml: %w", err)
-	}
-
-	if !isEntireManagedLocalConfig(string(data)) {
-		return nil
-	}
-	if err := os.Remove(configPath); err != nil {
-		return fmt.Errorf("failed to remove stale config.toml: %w", err)
-	}
-	return nil
-}
-
-// isEntireManagedLocalConfig reports whether content consists of nothing but
-// the [features] header and feature-flag lines this package used to write
-// (plus blank lines), with at least one such managed line present. Any other
-// non-blank line — a user's own setting or a comment — makes the file
-// unmanaged, so cleanup leaves it untouched.
-//
-// The check is line-anchored on purpose: a substring scan could mistake a
-// user's `webhooks = true` for our `hooks = true`, or match `[features]`
-// inside an unrelated value. A whole-line match cannot mistake a user's
-// line for ours.
-func isEntireManagedLocalConfig(content string) bool {
-	managed := map[string]bool{
-		"[features]":      true,
-		featureLine:       true,
-		legacyFeatureLine: true,
-	}
-	sawManaged := false
-	for raw := range strings.SplitSeq(content, "\n") {
-		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" {
-			continue
-		}
-		if !managed[trimmed] {
-			return false
-		}
-		sawManaged = true
-	}
-	return sawManaged
 }

@@ -46,7 +46,7 @@ func TestInstallHooks_CreatesHooksJSONOnly(t *testing.T) {
 	// written. A TOML file there is actively harmful when the repo lives
 	// inside <CODEX_HOME>/agents, where Codex's agent-role scanner rejects
 	// it at startup (entireio/cli#842).
-	projectConfig := filepath.Join(tempDir, ".codex", configFileName)
+	projectConfig := filepath.Join(tempDir, ".codex", "config.toml")
 	_, err = os.Stat(projectConfig)
 	require.True(t, os.IsNotExist(err), "install must not create .codex/config.toml")
 }
@@ -349,93 +349,35 @@ func TestInstallHooks_DoesNotModifyUserConfig(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(codexHome, 0o750))
 	existingConfig := "model = \"gpt-4.1\"\n"
-	require.NoError(t, os.WriteFile(filepath.Join(codexHome, configFileName), []byte(existingConfig), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(existingConfig), 0o600))
 
 	ag := &CodexAgent{}
 	_, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
 
-	configData, err := os.ReadFile(filepath.Join(codexHome, configFileName))
+	configData, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
 	require.NoError(t, err)
 	require.Contains(t, string(configData), "model = \"gpt-4.1\"")
 	require.NotContains(t, string(configData), `trust_level = "trusted"`)
 }
 
-// TestInstallHooks_CleansUpStaleFeatureConfig pins the self-heal: a
-// project-local .codex/config.toml containing only the feature-flag content
-// older entire versions wrote (either the current `hooks = true` form or the
-// legacy `codex_hooks = true` form) is removed on the next install. Hooks
-// are enabled by default in Codex, and a leftover TOML file under
-// <CODEX_HOME>/agents triggers a "malformed agent role definition" warning
-// at every Codex startup (entireio/cli#842).
-func TestInstallHooks_CleansUpStaleFeatureConfig(t *testing.T) {
-	staleContents := map[string]string{
-		"current form": "[features]\nhooks = true\n",
-		"legacy form":  "[features]\ncodex_hooks = true\n",
-		"both forms":   "[features]\ncodex_hooks = true\nhooks = true\n",
-		"extra blanks": "\n[features]\n\nhooks = true\n\n",
+// TestInstallHooks_LeavesExistingLocalConfigUntouched pins that install
+// never reads, rewrites, or deletes a project-local .codex/config.toml —
+// whether it's a user's own file or a feature-flag leftover from an older
+// entire version. The CLI no longer manages that file at all; leftovers
+// under <CODEX_HOME>/agents must be removed manually (entireio/cli#842).
+func TestInstallHooks_LeavesExistingLocalConfigUntouched(t *testing.T) {
+	contents := map[string]string{
+		"old entire leftover": "[features]\nhooks = true\n",
+		"user file":           "model = \"gpt-4.1\"\n",
 	}
-	for name, content := range staleContents {
+	for name, content := range contents {
 		t.Run(name, func(t *testing.T) {
 			tempDir := setupTestEnv(t)
 
 			codexDir := filepath.Join(tempDir, ".codex")
 			require.NoError(t, os.MkdirAll(codexDir, 0o750))
-			configPath := filepath.Join(codexDir, configFileName)
-			require.NoError(t, os.WriteFile(configPath, []byte(content), 0o600))
-
-			ag := &CodexAgent{}
-			_, err := ag.InstallHooks(context.Background(), false, false)
-			require.NoError(t, err)
-
-			_, err = os.Stat(configPath)
-			require.True(t, os.IsNotExist(err), "stale entire-managed config.toml must be removed")
-		})
-	}
-}
-
-// TestInstallHooks_CleansUpStaleFeatureConfig_WhenHooksAlreadyInstalled pins
-// that the self-heal also runs on a re-enable where hooks.json is already
-// up to date (the count == 0 path), so upgrading entire fixes the leftover
-// without requiring a force reinstall.
-func TestInstallHooks_CleansUpStaleFeatureConfig_WhenHooksAlreadyInstalled(t *testing.T) {
-	tempDir := setupTestEnv(t)
-
-	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
-	require.NoError(t, err)
-	require.Equal(t, 4, count)
-
-	configPath := filepath.Join(tempDir, ".codex", configFileName)
-	require.NoError(t, os.WriteFile(configPath, []byte("[features]\nhooks = true\n"), 0o600))
-
-	count, err = ag.InstallHooks(context.Background(), false, false)
-	require.NoError(t, err)
-	require.Equal(t, 0, count)
-
-	_, err = os.Stat(configPath)
-	require.True(t, os.IsNotExist(err), "stale config.toml must be removed even when hooks.json is already current")
-}
-
-// TestInstallHooks_PreservesUserLocalConfig pins that cleanup never deletes a
-// .codex/config.toml carrying anything beyond the exact feature-flag content
-// this package used to write — a user's own settings, comments, or lines that
-// merely contain our tokens as substrings (`webhooks = true`) make the file
-// unmanaged and it is left byte-identical.
-func TestInstallHooks_PreservesUserLocalConfig(t *testing.T) {
-	userContents := map[string]string{
-		"user setting alongside flag": "[features]\nhooks = true\nsandbox = \"workspace-write\"\n",
-		"comment":                     "# my codex config\n[features]\nhooks = true\n",
-		"substring lookalike":         "[features]\nwebhooks = true\n",
-		"unrelated file":              "model = \"gpt-4.1\"\n",
-	}
-	for name, content := range userContents {
-		t.Run(name, func(t *testing.T) {
-			tempDir := setupTestEnv(t)
-
-			codexDir := filepath.Join(tempDir, ".codex")
-			require.NoError(t, os.MkdirAll(codexDir, 0o750))
-			configPath := filepath.Join(codexDir, configFileName)
+			configPath := filepath.Join(codexDir, "config.toml")
 			require.NoError(t, os.WriteFile(configPath, []byte(content), 0o600))
 
 			ag := &CodexAgent{}
@@ -444,7 +386,7 @@ func TestInstallHooks_PreservesUserLocalConfig(t *testing.T) {
 
 			data, err := os.ReadFile(configPath)
 			require.NoError(t, err)
-			require.Equal(t, content, string(data), "config.toml with user content must be left untouched")
+			require.Equal(t, content, string(data), "install must not touch an existing .codex/config.toml")
 		})
 	}
 }
