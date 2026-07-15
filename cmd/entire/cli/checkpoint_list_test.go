@@ -198,8 +198,8 @@ func setupCheckpointListRepo(t *testing.T) (*git.Repository, string) {
 }
 
 // setupCheckpointListRepoWithShadowCheckpoint extends setupCheckpointListRepo by
-// seeding a shadow-branch checkpoint with real code changes, so both the
-// condensed branch view and the pending rewind-point view return an entry.
+// seeding a checkpoint on the v1 metadata branch with real code changes, so the
+// condensed branch view is non-empty for routing tests.
 func setupCheckpointListRepoWithShadowCheckpoint(t *testing.T) {
 	t.Helper()
 	repo, tmpDir := setupCheckpointListRepo(t)
