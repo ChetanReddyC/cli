@@ -4695,7 +4695,7 @@ func TestCheckpointSummary_HasReview(t *testing.T) {
 // Summary.Intent and ReviewPrompt that previously bypassed redaction because
 // the dispatcher only matched .jsonl. The PR 1236 fix extended the JSON-aware
 // branch to .json. We assert via a low-entropy AWS-key shaped secret (catches
-// the 7-layer pipeline) so the test stays deterministic without the OPF binary.
+// the regex-only pipeline) so the test stays deterministic without the OPF binary.
 func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 	t.Parallel()
 
