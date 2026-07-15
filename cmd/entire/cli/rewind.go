@@ -42,6 +42,7 @@ func getAgent(agentType types.AgentType) (agentpkg.Agent, error) {
 }
 
 func newRewindCmd() *cobra.Command {
+	var listFlag bool
 	var toFlag string
 	var logsOnlyFlag bool
 	var resetFlag bool
@@ -76,6 +77,13 @@ your agent's context.`,
 			external.DiscoverAndRegister(ctx)
 			w := cmd.OutOrStdout()
 			errW := cmd.ErrOrStderr()
+			// --list is a hidden deprecated bridge for external scripts that still
+			// invoke rewind --list. Same JSON bytes as checkpoint list --pending
+			// --json; remove together with the rewind command itself.
+			if listFlag {
+				fmt.Fprintln(errW, "note: 'rewind --list' is deprecated; use 'entire checkpoint list --pending --json'")
+				return runCheckpointPendingListJSON(ctx, w)
+			}
 			if toFlag != "" {
 				return runRewindToWithOptions(ctx, w, errW, toFlag, logsOnlyFlag, resetFlag)
 			}
@@ -83,6 +91,8 @@ your agent's context.`,
 		},
 	}
 
+	cmd.Flags().BoolVar(&listFlag, "list", false, "List available rewind points (JSON output); deprecated, use checkpoint list --pending --json")
+	_ = cmd.Flags().MarkHidden("list") //nolint:errcheck // flag is defined above
 	cmd.Flags().StringVar(&toFlag, "to", "", "Rewind to specific commit ID (non-interactive)")
 	cmd.Flags().BoolVar(&logsOnlyFlag, "logs-only", false, "Only restore logs, don't modify working directory (for logs-only points)")
 	cmd.Flags().BoolVar(&resetFlag, "reset", false, "Reset branch to commit (destructive, for logs-only points)")

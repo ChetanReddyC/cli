@@ -62,7 +62,7 @@ func newCheckpointSearchCmd() *cobra.Command {
 //	--json               condensed checkpoints as JSON (branchCheckpointJSON shape)
 //	--pending            live shadow-branch rewind points, human list
 //	--pending --json     live shadow-branch rewind points as JSON — the drop-in
-//	                     replacement for the removed `rewind --list`
+//	                     replacement for the deprecated `rewind --list` bridge
 //
 // The condensed dataset (entire/checkpoints/v1 for the branch) and the pending
 // dataset (strategy.GetRewindPoints; task checkpoints, logs-only points,
@@ -85,7 +85,7 @@ points instead (task checkpoints, logs-only points, condensation IDs).
 Output modes:
   --json             Machine-readable JSON instead of the human view.
   --pending          Select the live shadow-branch rewind-point dataset.
-  --pending --json   Rewind points as JSON (replaces the removed rewind --list).
+  --pending --json   Rewind points as JSON (replaces the deprecated rewind --list).
 
 Optionally filter condensed checkpoints by session ID with --session
 (not applicable with --pending).`,

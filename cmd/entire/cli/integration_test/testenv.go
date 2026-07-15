@@ -721,7 +721,7 @@ func (env *TestEnv) GetRewindPoints() []RewindPoint {
 	env.T.Helper()
 
 	// Run `checkpoint list --pending --json` using the shared binary. This is
-	// the drop-in replacement for the removed `rewind --list`; the JSON shape is
+	// the drop-in replacement for the deprecated `rewind --list` bridge; the JSON shape is
 	// identical. Parse stdout only — any notice goes to stderr.
 	cmd := exec.Command(getTestBinary(), "checkpoint", "list", "--pending", "--json")
 	cmd.Dir = env.RepoDir

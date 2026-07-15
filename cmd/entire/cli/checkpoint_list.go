@@ -11,10 +11,11 @@ import (
 )
 
 // pendingRewindPointJSON is the machine-readable shape emitted by
-// `entire checkpoint list --pending --json`. It is byte-for-byte the JSON that
-// the removed `rewind --list` produced, so downstream consumers (integration
-// and e2e test harnesses, external scripts) that parsed `rewind --list` keep
-// working unchanged after repointing to `checkpoint list --pending --json`.
+// `entire checkpoint list --pending --json` (and the deprecated `rewind --list`
+// bridge). It is byte-for-byte the JSON that `rewind --list` historically
+// produced, so downstream consumers (integration and e2e test harnesses,
+// external scripts) that parsed `rewind --list` keep working unchanged after
+// repointing to `checkpoint list --pending --json`.
 //
 // The field set, JSON names, omitempty markers, and the RFC3339 Date encoding
 // are load-bearing — this is a stable contract. CondensationID carries the
@@ -40,8 +41,9 @@ type pendingRewindPointJSON struct {
 const pendingRewindPointsLimit = 20
 
 // runCheckpointPendingListJSON emits the live shadow-branch rewind points as
-// JSON. This is the drop-in replacement for the removed `rewind --list`: same
-// dataset (strategy.GetRewindPoints), same cap, same JSON shape.
+// JSON. This is the drop-in replacement for (and the implementation behind)
+// the deprecated `rewind --list` bridge: same dataset (strategy.GetRewindPoints),
+// same cap, same JSON shape.
 func runCheckpointPendingListJSON(ctx context.Context, w io.Writer) error {
 	start := GetStrategy(ctx)
 
