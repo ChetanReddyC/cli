@@ -42,14 +42,13 @@ func TestInstallHooks_CreatesConfig(t *testing.T) {
 	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapProductionSilentHookCommand("entire hooks codex stop"), "Stop")
 	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
 
-	// Verify project-level config.toml enables the hooks feature (per-repo)
+	// Hooks are enabled by default in Codex, so no .codex/config.toml is
+	// written. A TOML file there is actively harmful when the repo lives
+	// inside <CODEX_HOME>/agents, where Codex's agent-role scanner rejects
+	// it at startup (entireio/cli#842).
 	projectConfig := filepath.Join(tempDir, ".codex", configFileName)
-	projectData, err := os.ReadFile(projectConfig)
-	require.NoError(t, err)
-	require.Contains(t, string(projectData), "hooks = true")
-	require.NotContains(t, string(projectData), "codex_hooks = true",
-		"deprecated codex_hooks line must not be written by fresh installs")
-	require.Contains(t, string(projectData), "[features]")
+	_, err = os.Stat(projectConfig)
+	require.True(t, os.IsNotExist(err), "install must not create .codex/config.toml")
 }
 
 func TestInstallHooks_WindowsWrapperProbeSuccessKeepsWrappedCommands(t *testing.T) {
@@ -362,30 +361,92 @@ func TestInstallHooks_DoesNotModifyUserConfig(t *testing.T) {
 	require.NotContains(t, string(configData), `trust_level = "trusted"`)
 }
 
-// TestInstallHooks_RewritesLegacyFeatureLine pins the rule that an existing
-// `codex_hooks = true` line — written by older entire CLI versions — must
-// be rewritten to the new `hooks = true` form on the next install. Codex
-// 0.129.0 still accepts the legacy alias but prints a deprecation warning
-// at every startup; rewriting silences it without forcing the user to
-// touch their .codex/config.toml.
-func TestInstallHooks_RewritesLegacyFeatureLine(t *testing.T) {
+// TestInstallHooks_CleansUpStaleFeatureConfig pins the self-heal: a
+// project-local .codex/config.toml containing only the feature-flag content
+// older entire versions wrote (either the current `hooks = true` form or the
+// legacy `codex_hooks = true` form) is removed on the next install. Hooks
+// are enabled by default in Codex, and a leftover TOML file under
+// <CODEX_HOME>/agents triggers a "malformed agent role definition" warning
+// at every Codex startup (entireio/cli#842).
+func TestInstallHooks_CleansUpStaleFeatureConfig(t *testing.T) {
+	staleContents := map[string]string{
+		"current form": "[features]\nhooks = true\n",
+		"legacy form":  "[features]\ncodex_hooks = true\n",
+		"both forms":   "[features]\ncodex_hooks = true\nhooks = true\n",
+		"extra blanks": "\n[features]\n\nhooks = true\n\n",
+	}
+	for name, content := range staleContents {
+		t.Run(name, func(t *testing.T) {
+			tempDir := setupTestEnv(t)
+
+			codexDir := filepath.Join(tempDir, ".codex")
+			require.NoError(t, os.MkdirAll(codexDir, 0o750))
+			configPath := filepath.Join(codexDir, configFileName)
+			require.NoError(t, os.WriteFile(configPath, []byte(content), 0o600))
+
+			ag := &CodexAgent{}
+			_, err := ag.InstallHooks(context.Background(), false, false)
+			require.NoError(t, err)
+
+			_, err = os.Stat(configPath)
+			require.True(t, os.IsNotExist(err), "stale entire-managed config.toml must be removed")
+		})
+	}
+}
+
+// TestInstallHooks_CleansUpStaleFeatureConfig_WhenHooksAlreadyInstalled pins
+// that the self-heal also runs on a re-enable where hooks.json is already
+// up to date (the count == 0 path), so upgrading entire fixes the leftover
+// without requiring a force reinstall.
+func TestInstallHooks_CleansUpStaleFeatureConfig_WhenHooksAlreadyInstalled(t *testing.T) {
 	tempDir := setupTestEnv(t)
 
-	codexDir := filepath.Join(tempDir, ".codex")
-	require.NoError(t, os.MkdirAll(codexDir, 0o750))
-	existingConfig := "[features]\ncodex_hooks = true\n"
-	configPath := filepath.Join(codexDir, configFileName)
-	require.NoError(t, os.WriteFile(configPath, []byte(existingConfig), 0o600))
-
 	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
+	require.Equal(t, 4, count)
 
-	configData, err := os.ReadFile(configPath)
+	configPath := filepath.Join(tempDir, ".codex", configFileName)
+	require.NoError(t, os.WriteFile(configPath, []byte("[features]\nhooks = true\n"), 0o600))
+
+	count, err = ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Contains(t, string(configData), "hooks = true")
-	require.NotContains(t, string(configData), "codex_hooks = true",
-		"legacy codex_hooks line must be replaced, not left alongside the new form")
+	require.Equal(t, 0, count)
+
+	_, err = os.Stat(configPath)
+	require.True(t, os.IsNotExist(err), "stale config.toml must be removed even when hooks.json is already current")
+}
+
+// TestInstallHooks_PreservesUserLocalConfig pins that cleanup never deletes a
+// .codex/config.toml carrying anything beyond the exact feature-flag content
+// this package used to write — a user's own settings, comments, or lines that
+// merely contain our tokens as substrings (`webhooks = true`) make the file
+// unmanaged and it is left byte-identical.
+func TestInstallHooks_PreservesUserLocalConfig(t *testing.T) {
+	userContents := map[string]string{
+		"user setting alongside flag": "[features]\nhooks = true\nsandbox = \"workspace-write\"\n",
+		"comment":                     "# my codex config\n[features]\nhooks = true\n",
+		"substring lookalike":         "[features]\nwebhooks = true\n",
+		"unrelated file":              "model = \"gpt-4.1\"\n",
+	}
+	for name, content := range userContents {
+		t.Run(name, func(t *testing.T) {
+			tempDir := setupTestEnv(t)
+
+			codexDir := filepath.Join(tempDir, ".codex")
+			require.NoError(t, os.MkdirAll(codexDir, 0o750))
+			configPath := filepath.Join(codexDir, configFileName)
+			require.NoError(t, os.WriteFile(configPath, []byte(content), 0o600))
+
+			ag := &CodexAgent{}
+			_, err := ag.InstallHooks(context.Background(), false, false)
+			require.NoError(t, err)
+
+			data, err := os.ReadFile(configPath)
+			require.NoError(t, err)
+			require.Equal(t, content, string(data), "config.toml with user content must be left untouched")
+		})
+	}
 }
 
 // assertHookCommand verifies that one of the hook entries in groups contains the expected command.

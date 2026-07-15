@@ -118,10 +118,10 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	}
 
 	if count == 0 {
-		// Still ensure the feature flag is configured even if hooks
-		// were already present (e.g., manually installed).
-		if err := ensureProjectFeatureEnabled(repoRoot); err != nil {
-			return 0, fmt.Errorf("failed to enable codex_hooks feature: %w", err)
+		// Still self-heal a stale feature-flag config.toml left by an
+		// older entire version, even if hooks were already present.
+		if err := cleanupStaleFeatureConfig(repoRoot); err != nil {
+			return 0, err
 		}
 		return 0, nil
 	}
@@ -158,10 +158,11 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		return 0, fmt.Errorf("failed to write hooks.json: %w", err)
 	}
 
-	// Enable the codex_hooks feature in the project-level .codex/config.toml.
-	// This keeps the feature flag per-repo rather than global.
-	if err := ensureProjectFeatureEnabled(repoRoot); err != nil {
-		return count, fmt.Errorf("failed to enable codex_hooks feature: %w", err)
+	// Hooks are enabled by default in Codex (since 0.124.0), so no feature
+	// flag is written. Self-heal any stale .codex/config.toml an older
+	// entire version left behind.
+	if err := cleanupStaleFeatureConfig(repoRoot); err != nil {
+		return count, err
 	}
 
 	return count, nil
@@ -362,79 +363,74 @@ func removeEntireHooks(groups []MatcherGroup) []MatcherGroup {
 // configFileName is the Codex config file name.
 const configFileName = "config.toml"
 
-// featureLine is the TOML line that enables the hooks feature. The flag was
-// renamed from `codex_hooks` to `hooks` in Codex 0.129.0; the old name is
-// still accepted as a legacy alias but emits a deprecation warning at
-// every startup. ensureProjectFeatureEnabled rewrites the legacy form when
-// it sees it.
+// featureLine / legacyFeatureLine are the TOML feature-flag lines older
+// entire versions wrote to a project-local .codex/config.toml back when
+// Codex hooks were experimental (the flag was renamed from `codex_hooks`
+// to `hooks` in Codex 0.129.0). Hooks are enabled by default since Codex
+// 0.124.0 (openai/codex#19012), so the flag is no longer written — these
+// constants only identify stale files for cleanupStaleFeatureConfig.
 const (
 	featureLine       = "hooks = true"
 	legacyFeatureLine = "codex_hooks = true"
 )
 
-// ensureProjectFeatureEnabled writes features.hooks = true to the
-// project-level .codex/config.toml. This keeps the feature flag per-repo.
-// Replaces the deprecated codex_hooks = true line if it's present.
-func ensureProjectFeatureEnabled(repoRoot string) error {
+// cleanupStaleFeatureConfig removes a project-local .codex/config.toml left
+// behind by an older entire version that wrote the hooks feature flag there.
+// The flag is obsolete (hooks are on by default since Codex 0.124.0), and a
+// leftover config.toml is actively harmful when the repo lives inside
+// <CODEX_HOME>/agents — Codex recursively scans that tree for agent-role
+// TOML files and rejects the leftover at every startup as a "malformed
+// agent role definition" (entireio/cli#842). Only removes the file when
+// every non-blank line is one of the exact feature-flag lines or the
+// [features] header this package used to write (see
+// isEntireManagedLocalConfig) — a file carrying any unrelated user content
+// is left alone.
+func cleanupStaleFeatureConfig(repoRoot string) error {
 	configPath := filepath.Join(repoRoot, ".codex", configFileName)
 
 	data, err := os.ReadFile(configPath) //nolint:gosec // path constructed from repo root
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to read config.toml: %w", err)
-	}
-
-	content := string(data)
-	hasNew := containsFeatureLine(content, featureLine)
-	hasLegacy := containsFeatureLine(content, legacyFeatureLine)
-	switch {
-	case hasNew && hasLegacy:
-		content = stripLegacyFeatureLine(content)
-	case hasNew:
-		return nil
-	case hasLegacy:
-		content = strings.Replace(content, legacyFeatureLine, featureLine, 1)
-	case strings.Contains(content, "[features]"):
-		content = strings.Replace(content, "[features]", "[features]\n"+featureLine, 1)
-	default:
-		if len(content) > 0 && !strings.HasSuffix(content, "\n") {
-			content += "\n"
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
 		}
-		content += "\n[features]\n" + featureLine + "\n"
+		return fmt.Errorf("failed to read stale config.toml: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o750); err != nil {
-		return fmt.Errorf("failed to create .codex directory: %w", err)
+	if !isEntireManagedLocalConfig(string(data)) {
+		return nil
 	}
-	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil { //nolint:gosec // path constructed from repo root
-		return fmt.Errorf("failed to write config.toml: %w", err)
+	if err := os.Remove(configPath); err != nil {
+		return fmt.Errorf("failed to remove stale config.toml: %w", err)
 	}
 	return nil
 }
 
-// containsFeatureLine checks for an exact line match. A plain
-// strings.Contains is wrong because "hooks = true" is a substring of
-// "codex_hooks = true" — without the line-boundary anchor we'd treat the
-// legacy form as if the new form was already present.
-func containsFeatureLine(content, line string) bool {
-	for _, raw := range strings.Split(content, "\n") {
-		if strings.TrimSpace(raw) == line {
-			return true
+// isEntireManagedLocalConfig reports whether content consists of nothing but
+// the [features] header and feature-flag lines this package used to write
+// (plus blank lines), with at least one such managed line present. Any other
+// non-blank line — a user's own setting or a comment — makes the file
+// unmanaged, so cleanup leaves it untouched.
+//
+// The check is line-anchored on purpose: a substring scan could mistake a
+// user's `webhooks = true` for our `hooks = true`, or match `[features]`
+// inside an unrelated value. A whole-line match cannot mistake a user's
+// line for ours.
+func isEntireManagedLocalConfig(content string) bool {
+	managed := map[string]bool{
+		"[features]":      true,
+		featureLine:       true,
+		legacyFeatureLine: true,
+	}
+	sawManaged := false
+	for raw := range strings.SplitSeq(content, "\n") {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
 		}
+		if !managed[trimmed] {
+			return false
+		}
+		sawManaged = true
 	}
-	return false
-}
-
-// stripLegacyFeatureLine removes the deprecated `codex_hooks = true` line
-// from a TOML config string, dropping a trailing blank line so the file
-// stays tidy. The new `hooks = true` is added separately by the caller.
-func stripLegacyFeatureLine(content string) string {
-	idx := strings.Index(content, legacyFeatureLine)
-	if idx < 0 {
-		return content
-	}
-	end := idx + len(legacyFeatureLine)
-	if end < len(content) && content[end] == '\n' {
-		end++
-	}
-	return content[:idx] + content[end:]
+	return sawManaged
 }
