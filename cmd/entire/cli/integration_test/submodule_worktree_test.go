@@ -26,7 +26,6 @@ import (
 func TestSubmoduleWorktree_SessionCreatesCheckpoint(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
-	defer env.Cleanup()
 
 	root := env.T.TempDir()
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
