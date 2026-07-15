@@ -99,6 +99,7 @@ func TestAgentHelpCommands_GatesTrailOnTrailsEnabled(t *testing.T) {
 // repo-scoped trails availability check instead of being treated as disabled.
 // Not parallel: changes the process working directory.
 func TestAgentHelpRepoContext_RefreshesUnknownTrailsEnablement(t *testing.T) {
+	t.Setenv("ENTIRE_TOKEN", makeTestJWT(t, `{"iss":"https://auth.entire.io","sub":"user-1","handle":"alice","aud":"https://entire.io"}`))
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
 	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:acme/app.git")
@@ -126,6 +127,40 @@ func TestAgentHelpRepoContext_RefreshesUnknownTrailsEnablement(t *testing.T) {
 	}
 	if !enabled {
 		t.Fatal("trails should be enabled after the availability refresh succeeds")
+	}
+}
+
+// Without a local auth identity, refreshing cannot produce a usable trails
+// decision. Skip it locally so agent-help does not block on API discovery before
+// auth eventually reports that the user is not logged in.
+// Not parallel: changes the process working directory and auth environment.
+func TestAgentHelpRepoContext_SkipsRefreshWithoutLocalIdentity(t *testing.T) {
+	t.Setenv("ENTIRE_TOKEN", "")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:acme/app.git")
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git remote add: %v", err)
+	}
+	t.Chdir(repoDir)
+
+	refreshCalls := 0
+	repoLine, enabled := agentHelpRepoContextWithRefresh(t.Context(), func(context.Context, trailEnablementScope) error {
+		refreshCalls++
+		return nil
+	})
+
+	if refreshCalls != 0 {
+		t.Fatalf("refresh calls = %d, want 0 without a local auth identity", refreshCalls)
+	}
+	if repoLine != "gh/acme/app" {
+		t.Errorf("repo line = %q, want gh/acme/app", repoLine)
+	}
+	if enabled {
+		t.Fatal("trails should not be advertised without a local auth identity")
 	}
 }
 

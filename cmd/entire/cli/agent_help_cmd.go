@@ -89,6 +89,14 @@ func agentHelpRepoContextWithRefresh(
 		repoLine = scope.RepoKey
 	}
 
+	// ResolveDataAPIToken performs data-host discovery before it can reject a
+	// missing login. The scope already carries the locally resolved auth identity,
+	// so avoid making an unauthenticated first run wait on a network request that
+	// cannot produce an enabled decision.
+	if scope.AuthKey == "" {
+		return repoLine, false
+	}
+
 	refreshCtx, cancel := context.WithTimeout(ctx, trailEnablementRefreshTimeout)
 	defer cancel()
 	if err := refresh(refreshCtx, scope); err != nil {
