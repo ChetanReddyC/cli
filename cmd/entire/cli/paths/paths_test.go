@@ -96,6 +96,50 @@ func TestIsInfrastructurePath(t *testing.T) {
 	}
 }
 
+func TestCaseInsensitiveFS(t *testing.T) {
+	t.Parallel()
+	want := runtime.GOOS == osWindows || runtime.GOOS == osDarwin
+	if got := CaseInsensitiveFS(); got != want {
+		t.Errorf("CaseInsensitiveFS() = %v, want %v (GOOS=%s)", got, want, runtime.GOOS)
+	}
+}
+
+// TestIsSubpath_CaseSensitivity and TestEqual_CaseSensitivity assert the
+// OS-based folding: case variants of a protected path are matched on
+// Windows/macOS (where they name the same file) and remain distinct on
+// case-sensitive Linux.
+func TestIsSubpath_CaseSensitivity(t *testing.T) {
+	t.Parallel()
+	// On a case-insensitive FS these name the same dir, so containment holds.
+	got := IsSubpath(".claude", ".Claude/marker.txt")
+	if got != CaseInsensitiveFS() {
+		t.Errorf("IsSubpath(.claude, .Claude/marker.txt) = %v, want %v (GOOS=%s)",
+			got, CaseInsensitiveFS(), runtime.GOOS)
+	}
+	// Same case is always a subpath; traversal is always rejected, regardless of case.
+	if !IsSubpath(".claude", ".claude/marker.txt") {
+		t.Error("IsSubpath(.claude, .claude/marker.txt) = false, want true")
+	}
+	if IsSubpath(".claude", ".Claude/../../etc/passwd") {
+		t.Error("IsSubpath must reject traversal even when case-folding")
+	}
+}
+
+func TestEqual_CaseSensitivity(t *testing.T) {
+	t.Parallel()
+	if !Equal(".terminalhirerc", ".terminalhirerc") {
+		t.Error("Equal should match identical paths")
+	}
+	got := Equal(".terminalhirerc", ".TerminalHireRC")
+	if got != CaseInsensitiveFS() {
+		t.Errorf("Equal(case variant) = %v, want %v (GOOS=%s)",
+			got, CaseInsensitiveFS(), runtime.GOOS)
+	}
+	if Equal(".terminalhirerc", "other") {
+		t.Error("Equal should not match distinct paths")
+	}
+}
+
 func TestToRelativePath_MSYSPaths(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS != "windows" {

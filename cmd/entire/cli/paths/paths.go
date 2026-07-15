@@ -21,6 +21,7 @@ const (
 	EntireMetadataDir = ".entire/metadata"
 
 	osWindows = "windows"
+	osDarwin  = "darwin"
 )
 
 // Metadata file names
@@ -142,12 +143,46 @@ func IsInfrastructurePath(path string) bool {
 // It uses filepath.Rel, which cleans both inputs and is traversal-resistant:
 // a crafted child like "/a/b/../../../etc/passwd" that escapes parent will
 // produce a relative path starting with ".." and be rejected.
+//
+// Matching honors the host OS's case sensitivity (see CaseInsensitiveFS): on
+// Windows/macOS ".Claude/x" is under ".claude" because they name the same
+// directory there, while on case-sensitive Linux they remain distinct. Folding
+// only ever widens containment to case variants of the same on-disk path; real
+// traversal escapes are still rejected regardless of case, so this cannot be
+// used to slip past a containment check.
 func IsSubpath(parent, child string) bool {
+	if CaseInsensitiveFS() {
+		parent = strings.ToLower(parent)
+		child = strings.ToLower(child)
+	}
 	rel, err := filepath.Rel(parent, child)
 	if err != nil {
 		return false
 	}
 	return !IsRelativeTraversal(rel)
+}
+
+// CaseInsensitiveFS reports whether path comparisons should be case-insensitive
+// on the host OS. This is OS-based, not volume-based: Windows and macOS default
+// to case-insensitive filesystems, Linux to case-sensitive. Keying on GOOS keeps
+// the result deterministic; on an atypical volume (e.g. a case-sensitive macOS
+// APFS volume) the only effect is that the exclusion/containment checks treat a
+// differently-cased path as matching, which merely over-excludes — the safe
+// direction for filters whose job is to keep sensitive paths out.
+func CaseInsensitiveFS() bool {
+	return runtime.GOOS == osWindows || runtime.GOOS == osDarwin
+}
+
+// Equal reports whether two paths refer to the same location, honoring the
+// host OS's case sensitivity (see CaseInsensitiveFS). Both inputs are cleaned
+// and slash-normalized before comparison.
+func Equal(a, b string) bool {
+	a = filepath.Clean(filepath.FromSlash(a))
+	b = filepath.Clean(filepath.FromSlash(b))
+	if CaseInsensitiveFS() {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // IsRelativeTraversal reports whether rel escapes its base directory.

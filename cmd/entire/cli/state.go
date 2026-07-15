@@ -238,8 +238,7 @@ func shouldIgnoreSessionTrackingPath(relPath string) bool {
 	}
 
 	for _, file := range agent.AllProtectedFiles() {
-		cleanFile := filepath.Clean(filepath.FromSlash(file))
-		if cleanPath == cleanFile {
+		if paths.Equal(cleanPath, file) {
 			return true
 		}
 	}
