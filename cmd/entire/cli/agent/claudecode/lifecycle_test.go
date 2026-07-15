@@ -99,9 +99,9 @@ func TestParseHookEvent_TurnStart(t *testing.T) {
 	}
 }
 
-// Regression for #1423: the VS Code extension prepends an <ide_opened_file>
-// context block to the prompt; it must be stripped so the session/checkpoint
-// title and prompt show only what the user typed.
+// The VS Code extension prepends an <ide_opened_file> context block to the
+// prompt; it must be stripped so the session/checkpoint title and prompt show
+// only what the user typed.
 func TestParseHookEvent_TurnStart_StripsIDEContextTags(t *testing.T) {
 	t.Parallel()
 

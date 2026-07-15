@@ -140,7 +140,7 @@ func (c *ClaudeCodeAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) 
 		SessionRef: raw.TranscriptPath,
 		// Strip IDE-injected context (e.g. <ide_opened_file> from the VS Code
 		// extension) so the session/checkpoint title and prompt show what the
-		// user actually typed, not the injected block (#1423).
+		// user actually typed, not the injected block.
 		Prompt:    textutil.StripIDEContextTags(raw.Prompt),
 		Timestamp: time.Now(),
 	}, nil
