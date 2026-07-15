@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
@@ -212,7 +213,7 @@ func TestRoot_NounGroupShorthandsUseCobraAliases(t *testing.T) {
 	}
 }
 
-func TestCheckpointSearchIsVisibleButTopLevelSearchIsHidden(t *testing.T) {
+func TestCheckpointSearchIsVisibleButTopLevelSearchIsExperimental(t *testing.T) {
 	t.Parallel()
 
 	root := NewRootCmd()
@@ -225,16 +226,19 @@ func TestCheckpointSearchIsVisibleButTopLevelSearchIsHidden(t *testing.T) {
 		t.Fatal("checkpoint search should be visible in checkpoint help")
 	}
 
+	// The top-level `entire search` shortcut is gated as experimental:
+	// visible and grouped in developer builds (the default test build),
+	// hidden in shipped releases.
 	topLevelSearch, _, err := root.Find([]string{"search"})
 	if err != nil {
 		t.Fatalf("find top-level search: %v", err)
 	}
-	if !topLevelSearch.Hidden {
-		t.Fatal("top-level search should remain hidden as a compatibility alias")
+	if topLevelSearch.GroupID != experimental.GroupID {
+		t.Fatalf("top-level search GroupID = %q, want %q (experimental)", topLevelSearch.GroupID, experimental.GroupID)
 	}
 }
 
-func TestCheckpointPolicyCommandIsHiddenDuringDevelopment(t *testing.T) {
+func TestCheckpointPolicyCommandIsExperimental(t *testing.T) {
 	t.Parallel()
 
 	root := NewRootCmd()
@@ -246,8 +250,10 @@ func TestCheckpointPolicyCommandIsHiddenDuringDevelopment(t *testing.T) {
 	if len(remaining) != 0 || checkpointPolicy.Use != "policy" {
 		t.Fatalf("checkpoint policy resolved to %q with remaining args %v", checkpointPolicy.Use, remaining)
 	}
-	if !checkpointPolicy.Hidden {
-		t.Fatal("checkpoint policy should be hidden while it is in active development")
+	// Gated as experimental: visible and grouped in developer builds
+	// (the default test build), hidden in shipped releases.
+	if checkpointPolicy.GroupID != experimental.GroupID {
+		t.Fatalf("checkpoint policy GroupID = %q, want %q (experimental)", checkpointPolicy.GroupID, experimental.GroupID)
 	}
 
 	topLevelPolicy, remaining, err := root.Find([]string{"policy"})
@@ -259,8 +265,10 @@ func TestCheckpointPolicyCommandIsHiddenDuringDevelopment(t *testing.T) {
 func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
 	t.Parallel()
 
-	// Commands intentionally left out of any group; cobra renders them
-	// under "Additional Commands".
+	// Commands intentionally left out of any group. version, labs, agent-help,
+	// and help render under cobra's "Additional Commands"; completion is
+	// allowlisted for completeness but never renders (hidden via
+	// CompletionOptions.HiddenDefaultCmd in NewRootCmd).
 	ungrouped := map[string]bool{
 		"version":    true,
 		"labs":       true,
@@ -302,6 +310,11 @@ func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
 
 	for _, c := range root.Commands() {
 		if c.Hidden || c.Deprecated != "" {
+			continue
+		}
+		// Experimental commands are grouped by experimental.Register (visible
+		// only in developer/nightly builds) — not part of this table.
+		if c.GroupID == experimental.GroupID {
 			continue
 		}
 		name := c.Name()
