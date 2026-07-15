@@ -1332,6 +1332,45 @@ func TestMergeReviewProfiles_PureAndPrecedence(t *testing.T) {
 	}
 }
 
+// TestSaveProjectRaw_CreatesMissingParentDir verifies the raw save path creates
+// its parent directory, mirroring the struct save path (saveToFile). Without
+// this, a raw enabled-flag flip in a repo that has never created .entire/
+// (e.g. a bare `entire disable` in a fresh repo) hard-fails with "no such file
+// or directory". Regression test for the saveRaw MkdirAll fix.
+func TestSaveProjectRaw_CreatesMissingParentDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, ".entire", "settings.json")
+
+	raw := map[string]json.RawMessage{"enabled": json.RawMessage("false")}
+	if err := SaveProjectRaw(path, raw); err != nil {
+		t.Fatalf("SaveProjectRaw() into a missing .entire dir should succeed, got: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("settings file should have been created: %v", err)
+	}
+	if !strings.Contains(string(data), `"enabled": false`) {
+		t.Errorf("expected enabled:false, got: %s", data)
+	}
+}
+
+// TestSaveLocalRaw_CreatesMissingParentDir is the local-scope mirror of
+// TestSaveProjectRaw_CreatesMissingParentDir.
+func TestSaveLocalRaw_CreatesMissingParentDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, ".entire", "settings.local.json")
+
+	raw := map[string]json.RawMessage{"enabled": json.RawMessage("false")}
+	if err := SaveLocalRaw(path, raw); err != nil {
+		t.Fatalf("SaveLocalRaw() into a missing .entire dir should succeed, got: %v", err)
+	}
+
+	if _, err := os.ReadFile(path); err != nil {
+		t.Fatalf("local settings file should have been created: %v", err)
+	}
+}
+
 // Regression: `entire enable --local` writes only .entire/settings.local.json,
 // but the hook activation check (IsSetUpAndEnabled) only looked for
 // .entire/settings.json, so hooks silently no-op'd. It must recognize a
