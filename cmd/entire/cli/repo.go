@@ -12,16 +12,15 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// newRepoCmd is the hidden `entire repo` command group: control-plane
-// repository lifecycle (create, list within a project, get, delete) plus the
-// `clone` convenience that resolves a mirror and shells out to `git clone`.
-// Other git content operations (log, diff, …) remain intentionally out of scope
-// here. Surfaced via `entire labs`.
+// newRepoCmd is the `entire repo` command group: control-plane
+// repository lifecycle (create, list within a project, get, delete), the
+// `mirror` and `visibility` subtrees, plus the `clone` convenience that
+// resolves a mirror and shells out to `git clone`. Other git content
+// operations (log, diff, …) remain intentionally out of scope here.
 func newRepoCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "repo",
-		Short:  "Manage Entire repositories",
-		Hidden: true,
+		Use:   "repo",
+		Short: "Manage Entire repositories",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newRepoCreateCmd())
@@ -39,11 +38,7 @@ func newRepoCmd() *cobra.Command {
 var repoColumns = []string{"ID", "NAME", "PROJECT", "CLUSTER", "STATE"}
 
 func repoRow(r coreapi.Repo) []string {
-	state := ""
-	if v, ok := r.State.Get(); ok {
-		state = string(v)
-	}
-	return []string{r.ID, r.Name, r.OwningProjectId, r.ClusterHost.Or("-"), state}
+	return []string{r.ID, r.Name, r.OwningProjectId, r.ClusterHost.Or("-"), r.State.Or("-")}
 }
 
 // repoDetailColumns / repoDetailRow extend the shared repo view with the
@@ -121,10 +116,10 @@ func newRepoCreateCmd() *cobra.Command {
 		Short: "Create a repository in a project",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
+			return runCoreMutation(cmd, func(ctx context.Context, c *coreapi.Client) (string, any, error) {
 				projID, err := resolveProjectRef(ctx, c, projectID)
 				if err != nil {
-					return nil, err
+					return "", nil, err
 				}
 				body := &coreapi.CreateRepoInputBody{
 					Name:      args[0],
@@ -135,26 +130,35 @@ func newRepoCreateCmd() *cobra.Command {
 				}
 				created, err := c.CreateRepo(ctx, body)
 				if err != nil {
-					return nil, err
+					return "", nil, err
 				}
-				return repoCreateOutput(created)
+				wire, err := repoCreateOutput(created)
+				if err != nil {
+					return "", nil, err
+				}
+				msg := fmt.Sprintf("✓ Created repository %s (%s)", created.Name, created.ID)
+				if remote := repoRemoteURL(*created); remote != "" {
+					msg += "\n  Remote: " + remote
+				}
+				return msg, wire, nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&projectID, "project", "", "owning project (name or ULID) (required)")
-	cmd.Flags().StringVar(&clusterHost, "cluster-host", "", "public host of the cluster to pin the repo to (defaults to the jurisdiction default)")
+	cmd.Flags().StringVar(&projectID, "project", "", "Owning project (name or ULID) (required)")
+	cmd.Flags().StringVar(&clusterHost, "cluster-host", "", "Public host of the cluster to pin the repo to (defaults to the jurisdiction default)")
 	markRequired(cmd, "project")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newRepoListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list <project>",
 		Short: "List repositories in a project",
 		Long:  "List repositories in a project, addressed by name or ULID.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreList(cmd, repoColumns, repoRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Repo, error) {
+			return runCoreList(cmd, "No repositories found in this project.", repoColumns, repoRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Repo, error) {
 				projID, err := resolveProjectRef(ctx, c, args[0])
 				if err != nil {
 					return nil, err
@@ -173,6 +177,8 @@ func newRepoListCmd() *cobra.Command {
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
 }
 
 func newRepoGetCmd() *cobra.Command {
@@ -192,6 +198,7 @@ func newRepoGetCmd() *cobra.Command {
 		},
 	}
 	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -280,6 +287,7 @@ func newRepoVisibilityGetCmd() *cobra.Command {
 		},
 	}
 	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -296,6 +304,7 @@ func newRepoVisibilitySetCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			vis, err := parseVisibility(args[1])
 			if err != nil {
+				cmd.SilenceUsage = true
 				return err
 			}
 			return runCoreObject(cmd, visibilityColumns, visibilityRow, func(ctx context.Context, c *coreapi.Client) (*repoVisibility, error) {
@@ -312,6 +321,7 @@ func newRepoVisibilitySetCmd() *cobra.Command {
 		},
 	}
 	bindRepoProjectFlag(cmd, &project)
+	addJSONFlag(cmd)
 	return cmd
 }
 
@@ -319,5 +329,5 @@ func newRepoVisibilitySetCmd() *cobra.Command {
 // addressed by name (a repo name is unique only within its project). Ignored
 // when the repo arg is already a ULID.
 func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
-	cmd.Flags().StringVar(project, "project", "", "owning project (name or ULID); required when <repo> is a name")
+	cmd.Flags().StringVar(project, "project", "", "Owning project (name or ULID); required when <repo> is a name")
 }

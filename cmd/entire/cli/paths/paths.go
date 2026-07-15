@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -30,12 +29,20 @@ const (
 	TranscriptFileName       = "full.jsonl"
 	TranscriptFileNameLegacy = "full.log"
 	// CompactTranscriptFileName is the compact transcript stored alongside
-	// full.jsonl, pre-sliced to the checkpoint's own portion.
+	// full.jsonl. It holds the full compacted session; this checkpoint's slice
+	// begins at the session metadata's compact_transcript_start.
 	CompactTranscriptFileName = "transcript.jsonl"
 	MetadataFileName          = "metadata.json"
 	CheckpointFileName        = "checkpoint.json"
 	ContentHashFileName       = "content_hash.txt"
 	SettingsFileName          = "settings.json"
+
+	// AssetsDir is the per-session subfolder holding externalized transcript
+	// assets (e.g. images); AssetsManifestFile indexes them. AssetsDirName is the
+	// bare tree-entry name (no trailing slash) used when walking git trees.
+	AssetsDirName      = "assets"
+	AssetsDir          = "assets/"
+	AssetsManifestFile = "assets/manifest.json"
 )
 
 // MetadataBranchName is the orphan branch used by manual-commit strategy to store metadata
@@ -187,34 +194,6 @@ func normalizeMSYSPath(p string) string {
 		return string(unicode.ToUpper(rune(p[1]))) + ":" + p[2:]
 	}
 	return p
-}
-
-// nonAlphanumericRegex matches any non-alphanumeric character
-var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
-
-// SanitizePathForClaude converts a path to Claude's project directory format.
-// Claude replaces any non-alphanumeric character with a dash.
-func SanitizePathForClaude(path string) string {
-	return nonAlphanumericRegex.ReplaceAllString(path, "-")
-}
-
-// GetClaudeProjectDir returns the directory where Claude stores session transcripts
-// for the given repository path.
-//
-// In test environments, set ENTIRE_TEST_CLAUDE_PROJECT_DIR to override the default location.
-func GetClaudeProjectDir(repoPath string) (string, error) {
-	override := os.Getenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR")
-	if override != "" {
-		return override, nil
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	projectDir := SanitizePathForClaude(repoPath)
-	return filepath.Join(homeDir, ".claude", "projects", projectDir), nil
 }
 
 // SessionMetadataDirFromSessionID returns the path to a session's metadata directory

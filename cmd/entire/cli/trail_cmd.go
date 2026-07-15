@@ -38,6 +38,10 @@ const (
 	trailFindMaxPages       = 10
 )
 
+func trailContextBlurb() string {
+	return "A trail ties together the context for a branch. Use `entire trail` to view, create, update, or watch it; use `entire trail finding` to manage agent findings."
+}
+
 func newTrailCmd() *cobra.Command {
 	var insecureHTTPAuth bool
 	var repoOverride string
@@ -46,8 +50,15 @@ func newTrailCmd() *cobra.Command {
 		Use:    "trail",
 		Short:  "Manage trails for your branches",
 		Hidden: true,
-		Args:   cobra.NoArgs,
-		Long:   "A trail ties together the context for a branch. Use `entire trail` to view, create, update, or watch it.",
+		// Hidden from root help while the surface matures, but advertised to
+		// coding agents through `entire agent-help` — only when trails are
+		// enabled for the repo, so we never point agents at trails they can't use.
+		Annotations: map[string]string{
+			agentHelpAnnotation:               agentHelpAnnotationEnabled,
+			agentHelpRequiresTrailsAnnotation: agentHelpAnnotationEnabled,
+		},
+		Args: cobra.NoArgs,
+		Long: trailContextBlurb(),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
@@ -132,14 +143,6 @@ type trailListOptions struct {
 	// Repo is an optional --repo override (forge/owner/repo or a clone URL);
 	// empty means derive the repo from the origin remote.
 	Repo string
-}
-
-func defaultTrailListOptions(insecureHTTP bool) trailListOptions {
-	return trailListOptions{
-		Status:       defaultTrailListStatus,
-		Limit:        defaultTrailListLimit,
-		InsecureHTTP: insecureHTTP,
-	}
 }
 
 func newTrailShowCmd() *cobra.Command {
@@ -416,14 +419,6 @@ func validateTrailListOptions(opts trailListOptions) ([]trail.Status, error) {
 		return nil, errors.New("limit must be greater than 0")
 	}
 	return parseTrailStatusFilter(opts.Status)
-}
-
-func runTrailListAllValidatedWithClient(ctx context.Context, w io.Writer, client *api.Client, opts trailListOptions) error {
-	statusFilters, err := validateTrailListOptions(opts)
-	if err != nil {
-		return err
-	}
-	return runTrailListAllWithClient(ctx, w, client, opts, statusFilters)
 }
 
 func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Client, opts trailListOptions, statusFilters []trail.Status) error {
@@ -1299,6 +1294,7 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 func newTrailCheckoutCmd() *cobra.Command {
 	var trailSelector string
 	var force bool
+	var worktree bool
 
 	cmd := &cobra.Command{
 		Use:   "checkout [<trail>]",
@@ -1308,6 +1304,13 @@ func newTrailCheckoutCmd() *cobra.Command {
 The trail may be given as the first argument or via --trail, as a number, id, or
 branch. Without one, the trail for the current branch is used. The trail's branch
 is checked out, fetching it from origin first when it only exists there.
+
+With --worktree, the branch is checked out into a git worktree under
+.entire/worktrees at the repo root instead of switching this checkout, and the
+command prints a cd command for the new worktree. Gitignored files matching
+.worktreeinclude patterns are copied into the worktree. When stdout is not a
+terminal, only the worktree path is printed, so scripts can use
+cd "$(entire trail checkout <trail> --worktree)".
 
 This must be run from within a clone of the repository the trail belongs to; the
 trail is looked up against that repository's origin remote.`,
@@ -1323,17 +1326,23 @@ trail is looked up against that repository's origin remote.`,
 			if err := ensureNoTrailRepoOverride(cmd, "trail checkout"); err != nil {
 				return err
 			}
-			return runTrailCheckout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector, force)
+			return runTrailCheckout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector, trailCheckoutOptions{Force: force, Worktree: worktree})
 		},
 	}
 
 	cmd.Flags().StringVar(&trailSelector, "trail", "", "Trail to check out (number, id, or branch; defaults to the current branch's trail)")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip the prompt before fetching a remote-only branch")
+	cmd.Flags().BoolVar(&worktree, "worktree", false, "Check out the trail branch in a worktree under .entire/worktrees instead of switching this checkout")
 
 	return cmd
 }
 
-func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector string, force bool) error {
+type trailCheckoutOptions struct {
+	Force    bool
+	Worktree bool
+}
+
+func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector string, opts trailCheckoutOptions) error {
 	// checkout rejects --repo (it operates on the local clone), so the enablement
 	// cache always tracks the local origin here.
 	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client) error {
@@ -1352,6 +1361,11 @@ func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool,
 			return fmt.Errorf("%s has no branch to check out", describeTrailRef(found))
 		}
 
+		if opts.Worktree {
+			fmt.Fprintf(errW, "Checking out %s in a worktree\n", describeTrailRef(found))
+			return checkoutTrailWorktree(ctx, w, errW, branch, opts.Force, found.Number)
+		}
+
 		currentBranch, _ := GetCurrentBranch(ctx) //nolint:errcheck // best-effort; a detached HEAD just means "not already on the branch"
 		if currentBranch == branch {
 			fmt.Fprintf(w, "Already on branch %s for %s.\n", branch, describeTrailRef(found))
@@ -1362,7 +1376,7 @@ func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool,
 		// switchToBranchForResume handles local vs. remote-only branches, the
 		// uncommitted-changes guard, and the fetch prompt; reuse it rather than
 		// re-deriving that logic here.
-		proceed, err := switchToBranchForResume(ctx, w, errW, branch, force)
+		proceed, err := switchToBranchForResume(ctx, w, errW, branch, opts.Force)
 		if err != nil {
 			return err
 		}

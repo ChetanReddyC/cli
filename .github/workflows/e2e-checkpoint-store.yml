@@ -56,7 +56,12 @@ jobs:
     permissions:
       actions: read
       contents: read
-      # Granted for every leg so copilot-cli works in the matrix; harmless for others.
+      # Needed by the copilot-cli leg. GitHub does not allow matrix expressions in
+      # `permissions:`, so this scope is granted to every leg's GITHUB_TOKEN. The
+      # token is kept away from non-copilot agents in two ways: it is only placed
+      # in COPILOT_GITHUB_TOKEN for the copilot-cli leg (see env blocks below), and
+      # checkout runs with persist-credentials: false so it is not left in
+      # .git/config for an agent process to read.
       copilot-requests: write
     strategy:
       fail-fast: false
@@ -68,6 +73,9 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Don't persist the (copilot-scoped) GITHUB_TOKEN in .git/config, where
+          # an agent process running in the checkout could read it.
+          persist-credentials: false
 
       - name: Install system dependencies
         run: |
@@ -116,7 +124,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+          # Only the copilot-cli leg gets the token; other agents must not receive it.
+          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
         run: go run ./e2e/bootstrap ${{ matrix.agent }}
 
       - name: E2E Checkpoint Store
@@ -130,7 +139,8 @@ jobs:
           E2E_GEMINI_MODEL: ${{ matrix.agent == 'gemini-cli' && 'gemini-3.1-flash-lite' || '' }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+          # Only the copilot-cli leg gets the token; other agents must not receive it.
+          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
           E2E_CONCURRENT_TEST_LIMIT: ${{ matrix.agent == 'gemini-cli' && '6' || matrix.agent == 'factoryai-droid' && '1' || matrix.agent == 'cursor-cli' && '2' || '' }}
           E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
           E2E_ENTIRE_BIN: /usr/local/bin/entire

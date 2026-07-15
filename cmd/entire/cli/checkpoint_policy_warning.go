@@ -43,9 +43,12 @@ func WarnCheckpointPolicyIfNeeded(ctx context.Context, w io.Writer, currentVersi
 	if err != nil {
 		return
 	}
-	if !checkpointpolicy.RequiresUpgrade(state.Policy) && !checkpointpolicy.UnsupportedWrite(state.Policy) {
+	if checkpointpolicy.CanSatisfyPolicy(state.Policy) {
 		return
 	}
 
-	fmt.Fprint(w, checkpointpolicy.UpgradeWarning(versioncheck.UpdateCommandForCurrentBinary(currentVersion)))
+	fmt.Fprint(w, checkpointpolicy.UnsupportedPolicyMessage(
+		state.Policy,
+		versioncheck.UpdateCommandForCurrentBinary(currentVersion),
+	))
 }

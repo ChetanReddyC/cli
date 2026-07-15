@@ -14,22 +14,37 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
 // addControlPlaneFlags registers the persistent flags shared by every
 // control-plane command group. Persistent so they're inherited by nested
 // subcommands (e.g. `entire repo mirror list`):
-//   - --json: emit the raw wire JSON instead of the default human table.
 //   - --insecure-http-auth: permit the token exchange over plain http://
 //     (local/dev deployments where the core isn't behind TLS). Hidden, as
-//     elsewhere in the CLI.
+//     elsewhere in the CLI. Applies to every subcommand because they all build
+//     a control-plane client.
+//
+// --json is deliberately NOT persistent here: it only makes sense on the read
+// and mutation verbs that render a wire payload, so it's registered per-command
+// with addJSONFlag. A persistent --json was inherited by side-effect verbs
+// (delete, clone, mirror create/remove, grant remove) that silently ignored it;
+// cobra can't hide a persistent flag from a subset of children, so the flag
+// lives on exactly the commands that honor it.
 func addControlPlaneFlags(cmd *cobra.Command) {
-	cmd.PersistentFlags().Bool("json", false, "output raw JSON instead of a table")
 	cmd.PersistentFlags().Bool("insecure-http-auth", false, "Allow authentication over plain HTTP (insecure, for local development only)")
 	if err := cmd.PersistentFlags().MarkHidden("insecure-http-auth"); err != nil {
 		panic(fmt.Sprintf("hide insecure-http-auth flag: %v", err))
 	}
+}
+
+// addJSONFlag registers the local --json flag on a command that renders a wire
+// payload (list/get/create/mutation verbs routed through the runCore* helpers).
+// Local, not persistent, so only these commands advertise and accept it — see
+// addControlPlaneFlags for why. Read it with jsonRequested.
+func addJSONFlag(cmd *cobra.Command) {
+	cmd.Flags().Bool("json", false, "Output raw JSON instead of a table")
 }
 
 // jsonRequested reports whether --json was set on cmd or an ancestor. A
@@ -94,12 +109,12 @@ func runControlPlaneDelete(
 			// delete call — e.g. a ULID passed straight through, or a concurrent
 			// delete) is the desired end state, not an error.
 			if isCoreNotFound(err) {
-				cmd.Printf("%s not found; nothing to delete\n", label)
+				fmt.Fprintf(cmd.OutOrStdout(), "%s not found; nothing to delete\n", label)
 				return nil
 			}
 			return err
 		}
-		cmd.Printf("Deleted %s\n", label)
+		fmt.Fprintf(cmd.OutOrStdout(), "✓ Deleted %s\n", label)
 		return nil
 	})
 }
@@ -142,36 +157,42 @@ func confirmControlPlaneDeletion(ctx context.Context, w io.Writer, label string,
 }
 
 // runCoreList fetches a slice via fn and renders it as an aligned table
-// (default) or the raw wire JSON (--json). headers names the columns; row
-// maps one item to its cells in the same order. The human view keeps the
-// output actionable — only the columns a person acts on — while --json
-// preserves the full model for scripting.
-func runCoreList[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
-	return runCore(cmd, renderCoreList(cmd, headers, row, fn))
+// (default) or the raw wire JSON (--json). empty is the full sentence printed
+// to stdout in place of the table when there are no items (e.g. "No
+// organizations found."). headers names the columns; row maps one item to its
+// cells in the same order. The human view keeps the output actionable — only
+// the columns a person acts on — while --json preserves the full model for
+// scripting.
+func runCoreList[T any](cmd *cobra.Command, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
+	return runCore(cmd, renderCoreList(cmd, empty, headers, row, fn))
 }
 
 // runCoreListForCluster is runCoreList for a resource-provider command (see
-// runCoreForCluster): identical table/JSON rendering, but dialing the core that
-// fronts clusterHost rather than the active context.
-func runCoreListForCluster[T any](cmd *cobra.Command, clusterHost string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
-	return runCoreForCluster(cmd, clusterHost, renderCoreList(cmd, headers, row, fn))
+// runCoreForCluster): identical table/JSON/empty-state rendering, but dialing
+// the core that fronts clusterHost rather than the active context.
+func runCoreListForCluster[T any](cmd *cobra.Command, clusterHost, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
+	return runCoreForCluster(cmd, clusterHost, renderCoreList(cmd, empty, headers, row, fn))
 }
 
 // renderCoreList builds the run-function shared by runCoreList and
-// runCoreListForCluster: fetch via fn, then render as a table (default) or raw
-// JSON (--json). Kept separate from the client-selection so the two list
-// variants differ only in which core they dial.
-func renderCoreList[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) func(context.Context, *coreapi.Client) error {
+// runCoreListForCluster: fetch via fn, then render as a table (default), the
+// empty sentence (no items), or raw JSON (--json). Kept separate from the
+// client-selection so the two list variants differ only in which core they
+// dial.
+func renderCoreList[T any](cmd *cobra.Command, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) func(context.Context, *coreapi.Client) error {
 	return func(ctx context.Context, c *coreapi.Client) error {
 		items, err := fn(ctx, c)
 		if err != nil {
 			return err
 		}
 		if jsonRequested(cmd) {
+			if items == nil {
+				items = []T{} // a nil slice encodes as null; scripts expect []
+			}
 			return printJSON(cmd.OutOrStdout(), items)
 		}
 		if len(items) == 0 {
-			fmt.Fprintln(cmd.ErrOrStderr(), "(none)")
+			fmt.Fprintln(cmd.OutOrStdout(), empty)
 			return nil
 		}
 		return printTable(cmd.OutOrStdout(), headers, items, row)
@@ -208,7 +229,23 @@ func fetchAllPages[T any](ctx context.Context, fetch func(ctx context.Context, c
 // field/value list (default) or raw JSON (--json), reusing the same column
 // definition as the matching list view.
 func runCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) error {
-	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+	return runCore(cmd, renderCoreObject(cmd, headers, row, fn))
+}
+
+// runCoreObjectForCluster is runCoreObject for a resource-provider command (see
+// runCoreForCluster): identical field/JSON rendering, but dialing the core that
+// fronts clusterHost rather than the active context.
+func runCoreObjectForCluster[T any](cmd *cobra.Command, clusterHost string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) error {
+	return runCoreForCluster(cmd, clusterHost, renderCoreObject(cmd, headers, row, fn))
+}
+
+// renderCoreObject builds the run-function shared by runCoreObject and
+// runCoreObjectForCluster: fetch via fn, then render as a field/value list
+// (default) or raw JSON (--json). Kept separate from the client-selection so
+// the two object variants differ only in which core they dial (mirroring
+// renderCoreList).
+func renderCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) func(context.Context, *coreapi.Client) error {
+	return func(ctx context.Context, c *coreapi.Client) error {
 		item, err := fn(ctx, c)
 		if err != nil {
 			return err
@@ -217,7 +254,7 @@ func runCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []st
 			return printJSON(cmd.OutOrStdout(), item)
 		}
 		return printFields(cmd.OutOrStdout(), headers, row(*item))
-	})
+	}
 }
 
 // tableStyles holds the foreground styles for the human table/field views,
@@ -238,9 +275,9 @@ func newTableStyles(w io.Writer) tableStyles {
 	}
 	return tableStyles{
 		enabled: true,
-		header:  lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true),
-		primary: lipgloss.NewStyle().Foreground(lipgloss.Color("7")),
-		cell:    lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+		header:  lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Bold(true),
+		primary: lipgloss.NewStyle(), // default fg: inverts with terminal theme
+		cell:    lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)),
 	}
 }
 
@@ -348,19 +385,26 @@ func writeTableRow(b *strings.Builder, cells []string, widths []int, styleFor fu
 	b.WriteByte('\n')
 }
 
-// runCoreJSON runs fn against an authenticated control-plane client and
-// prints its result as indented JSON. It owns the preamble every
-// control-plane command shares: silence usage so input errors don't spam
-// the usage block, build the client, and map an API error to a
-// problem-detail SilentError. Commands supply only the call + the value to
-// render.
-func runCoreJSON(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client) (any, error)) error {
+// runCoreMutation runs fn against the control plane and renders its outcome
+// the way the rest of the CLI renders mutations: prints the caller's
+// ✓-prefixed confirmation on stdout by default, or the wire object as JSON
+// when --json was passed. fn
+// returns both so the human line can name the created resource while --json
+// preserves the full wire model (additive-only: synthesized fields like the
+// repo remote URL are merged in, nothing is ever omitted). It owns the same
+// preamble as the other runCore variants: silence usage, build the client,
+// map API errors to problem-detail messages.
+func runCoreMutation(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client) (message string, wire any, err error)) error {
 	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-		out, err := fn(ctx, c)
+		message, wire, err := fn(ctx, c)
 		if err != nil {
 			return err
 		}
-		return printJSON(cmd.OutOrStdout(), out)
+		if jsonRequested(cmd) {
+			return printJSON(cmd.OutOrStdout(), wire)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), message)
+		return nil
 	})
 }
 
@@ -370,17 +414,25 @@ func runCoreJSON(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Cli
 // without standing up the auth/context/TLS stack.
 var activeCoreClient = func(context.Context) (*coreapi.Client, error) { return coreapi.New() }
 
-// runCore is the variant for commands that don't render JSON (delete,
-// revoke, remove): it runs the same preamble — silence usage, build
-// client, map API errors — and leaves any success output to fn. The client
-// dials the active context's core (coreapi.New); use runCoreForCluster for
-// commands addressed at a specific cluster.
+// clusterCoreClient builds the control-plane client for cluster-addressed
+// commands (see runCoreForCluster). Same test seam as activeCoreClient —
+// production wiring is coreapi.NewForCluster, which does live /.well-known
+// discovery that command-level tests must not reach.
+var clusterCoreClient func(ctx context.Context, clusterHost string) (*coreapi.Client, error) = coreapi.NewForCluster
+
+// runCore is the shared base for every active-context control-plane command:
+// it owns the preamble only — silence usage, build the client, map API
+// errors — and leaves all rendering to fn. The delete/revoke verbs call it
+// directly and render their own output; runCoreList, runCoreObject, and
+// runCoreMutation build on it to add their table/JSON/confirmation
+// rendering. The client dials the active context's core (coreapi.New); use
+// runCoreForCluster for commands addressed at a specific cluster.
 func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client) error) error {
 	return runCoreClient(cmd, activeCoreClient, fn)
 }
 
 // runCoreForCluster is runCore for resource-provider commands addressed at a
-// specific cluster (mirror create/remove, mirror collaborators add/remove/list):
+// specific cluster (mirror create/remove, mirror collaborators list):
 // it dials the core that fronts clusterHost — discovered from the cluster's
 // /.well-known/entire-cluster.json, authenticating with the matching local
 // context — instead of the active context. So the command works on a cluster in
@@ -388,7 +440,7 @@ func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client)
 // cluster_host". See coreapi.NewForCluster.
 func runCoreForCluster(cmd *cobra.Command, clusterHost string, fn func(ctx context.Context, c *coreapi.Client) error) error {
 	return runCoreClient(cmd, func(ctx context.Context) (*coreapi.Client, error) {
-		return coreapi.NewForCluster(ctx, clusterHost)
+		return clusterCoreClient(ctx, clusterHost)
 	}, fn)
 }
 
@@ -446,7 +498,7 @@ func renderCoreError(err error) error {
 }
 
 // printJSON writes v as indented JSON to w — the --json view for list/get
-// and the default for create commands that echo the new object.
+// and mutations.
 func printJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

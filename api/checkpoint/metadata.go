@@ -11,6 +11,14 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
+// TranscriptAsset is a binary blob (e.g. an image) lifted out of a transcript
+// and stored raw in the checkpoint, referenced by a placeholder in the log.
+type TranscriptAsset struct {
+	Name      string // stable asset filename / id, also used in the placeholder
+	MediaType string
+	Data      []byte
+}
+
 // WriteOptions contains options for writing a persistent checkpoint.
 type WriteOptions struct {
 	// CheckpointID is the stable 12-hex-char identifier
@@ -32,6 +40,11 @@ type WriteOptions struct {
 	// Transcript is the session transcript content (full.jsonl).
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
+
+	// Assets are binary blobs (e.g. images) lifted out of Transcript and
+	// referenced by path-bearing placeholders. Stored raw under the session's
+	// assets/ folder. Empty for agents/transcripts with no externalized images.
+	Assets []TranscriptAsset
 
 	// Prompts contains the raw user prompts from the session. Run through
 	// redactedJoinedPrompts before persisting — the writer does this
@@ -182,6 +195,20 @@ type UpdateOptions struct {
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
 
+	// Assets are the externalized image blobs matching Transcript's placeholders
+	// (see WriteOptions.Assets). Set together with Transcript so the backfill keeps
+	// the stored assets/ folder consistent with the transcript; empty clears any
+	// previously-stored assets when Transcript is replaced.
+	Assets []TranscriptAsset
+
+	// PreserveAssetsWhenEmpty keeps already-stored assets instead of clearing them
+	// when Assets is empty. Set on the finalize path for agents whose assets come
+	// from a best-effort sidecar capture (e.g. Cursor's sqlite3 store read): a
+	// transient capture miss at finalize must not wipe images a prior condensation
+	// successfully stored. Left false for codec agents, where an empty set means
+	// "the transcript has no images" and stale asset blobs should be cleared.
+	PreserveAssetsWhenEmpty bool
+
 	// Prompts contains the raw user prompts (replaces existing).
 	// See WriteOptions.Prompts.
 	Prompts []string
@@ -321,10 +348,25 @@ type Metadata struct {
 
 	// Transcript position at checkpoint start - tracks what was added during this checkpoint
 	TranscriptIdentifierAtStart string `json:"transcript_identifier_at_start,omitempty"` // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
-	CheckpointTranscriptStart   int    `json:"checkpoint_transcript_start,omitempty"`    // Transcript line offset at start of this checkpoint's data
+	CheckpointTranscriptStart   int    `json:"checkpoint_transcript_start,omitempty"`    // Raw transcript (full.jsonl) line offset at start of this checkpoint's data
 
 	// Deprecated: Use CheckpointTranscriptStart instead. Written for backward compatibility with older CLI versions.
 	TranscriptLinesAtStart int `json:"transcript_lines_at_start,omitempty"`
+
+	// CompactTranscriptStart is the line offset in the compact transcript.jsonl
+	// at which this checkpoint's data begins. transcript.jsonl stores the full
+	// compacted session (each checkpoint is self-contained), so readers segment
+	// this checkpoint's slice as compactLines[CompactTranscriptStart:]. The slice
+	// never drops this checkpoint's content, but its first line may repeat up to
+	// one compact line that began in the previous checkpoint (when a streaming
+	// message straddles the boundary and compaction merges it into one line), so
+	// segmenters must tolerate a bounded head overlap.
+	//
+	// A nil pointer marks a legacy checkpoint whose transcript.jsonl holds only
+	// this checkpoint's delta (CLI versions before the full-compact-transcript
+	// change), which is read as-is from line 0. A pointer is used so that "absent"
+	// (legacy delta file) is distinguishable from 0 (full file, first checkpoint).
+	CompactTranscriptStart *int `json:"compact_transcript_start,omitempty"`
 
 	// Token usage for this checkpoint
 	TokenUsage *types.TokenUsage `json:"token_usage,omitempty"`
@@ -379,6 +421,18 @@ func (m Metadata) GetTranscriptStart() int {
 	return m.TranscriptLinesAtStart
 }
 
+// GetCompactTranscriptStart returns the line offset in transcript.jsonl at which
+// this checkpoint's data begins, and whether the offset was recorded. ok=false
+// means a legacy checkpoint whose transcript.jsonl holds only this checkpoint's
+// delta (read it from line 0); ok=true with offset 0 means the full-compact file
+// whose first checkpoint starts at the beginning.
+func (m Metadata) GetCompactTranscriptStart() (offset int, ok bool) {
+	if m.CompactTranscriptStart == nil {
+		return 0, false
+	}
+	return *m.CompactTranscriptStart, true
+}
+
 // SessionFilePaths contains the absolute paths to session files from the git tree root.
 // Paths include the full checkpoint path prefix (e.g., "/a1/b2c3d4e5f6/1/metadata.json").
 // Used in CheckpointSummary.Sessions to map session IDs to their file locations.
@@ -389,10 +443,15 @@ type SessionFilePaths struct {
 	Transcript string `json:"transcript,omitempty"`
 	// CompactTranscript points at the compact transcript.jsonl when one was
 	// generated alongside full.jsonl. Omitted otherwise (non-compactable,
-	// empty, or oversized transcripts, and older CLI versions).
+	// empty, or oversized transcripts, and older CLI versions). transcript.jsonl
+	// holds the full compacted session; this checkpoint's slice begins at the
+	// session metadata's compact_transcript_start (see Metadata.CompactTranscriptStart).
 	CompactTranscript string `json:"compact_transcript,omitempty"`
 	ContentHash       string `json:"content_hash,omitempty"`
 	Prompt            string `json:"prompt"`
+	// AssetsManifest points at assets/manifest.json when images were externalized
+	// out of the transcript into the session's assets/ folder. Omitted otherwise.
+	AssetsManifest string `json:"assets_manifest,omitempty"`
 }
 
 // CheckpointSummary is the root-level metadata.json for a checkpoint.
@@ -407,7 +466,7 @@ type SessionFilePaths struct {
 //	├── 1/                    # First session
 //	│   ├── metadata.json     # Session-specific Metadata
 //	│   ├── full.jsonl        # Raw agent transcript
-//	│   ├── transcript.jsonl  # Compact transcript scoped to this checkpoint
+//	│   ├── transcript.jsonl  # Full compacted session (slice at compact_transcript_start)
 //	│   ├── prompt.txt
 //	│   └── content_hash.txt
 //	├── 2/                    # Second session
@@ -416,7 +475,6 @@ type SessionFilePaths struct {
 //nolint:revive // Named CheckpointSummary to avoid conflict with existing Summary struct
 type CheckpointSummary struct {
 	CLIVersion          string             `json:"cli_version,omitempty"`
-	CheckpointVersion   string             `json:"checkpoint_version,omitempty"`
 	CheckpointID        id.CheckpointID    `json:"checkpoint_id"`
 	Strategy            string             `json:"strategy"`
 	Branch              string             `json:"branch,omitempty"`

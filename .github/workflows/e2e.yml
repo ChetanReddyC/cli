@@ -49,6 +49,12 @@ jobs:
     permissions:
       actions: read
       contents: read
+      # Needed by the copilot-cli leg. GitHub does not allow matrix expressions in
+      # `permissions:`, so this scope is granted to every leg's GITHUB_TOKEN. The
+      # token is kept away from non-copilot agents in two ways: it is only placed
+      # in COPILOT_GITHUB_TOKEN for the copilot-cli leg (see env blocks below), and
+      # checkout runs with persist-credentials: false so it is not left in
+      # .git/config for an agent process to read.
       copilot-requests: write
     strategy:
       fail-fast: false
@@ -58,6 +64,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Don't persist the (copilot-scoped) GITHUB_TOKEN in .git/config, where
+          # an agent process running in the checkout could read it.
+          persist-credentials: false
 
       - name: Setup mise
         uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
@@ -95,7 +105,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+          # Only the copilot-cli leg gets the token; other agents must not receive it.
+          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
         run: go run ./e2e/bootstrap
 
       - name: Run E2E Tests
@@ -107,7 +118,8 @@ jobs:
           E2E_GEMINI_MODEL: ${{ matrix.agent == 'gemini-cli' && 'gemini-3.1-flash-lite' || '' }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+          # Only the copilot-cli leg gets the token; other agents must not receive it.
+          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
           E2E_CONCURRENT_TEST_LIMIT: ${{ matrix.agent == 'gemini-cli' && '6' || matrix.agent == 'factoryai-droid' && '1' || matrix.agent == 'cursor-cli' && '2' || '' }}
         # roger-roger is deterministic, so it runs through its dedicated task,
         # which does NOT enable --rerun-fails. Routing it through the default
@@ -196,7 +208,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Notify Slack of E2E failure
-        uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
+        uses: slackapi/slack-github-action@0d95c9a7becc1e6e297d76df9bc735c44f4cbcbc # v3.0.5
         with:
           webhook: ${{ secrets.E2E_SLACK_WEBHOOK_URL }}
           webhook-type: incoming-webhook

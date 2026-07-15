@@ -35,7 +35,7 @@ func TestOrgList_FollowsCursor(t *testing.T) {
 		default:
 			t.Errorf("unexpected cursor %q", cursor)
 		}
-		if err := writeJSON(w, &body); err != nil {
+		if err := printJSON(w, &body); err != nil {
 			t.Errorf("encode orgs: %v", err)
 		}
 	}))
@@ -70,7 +70,7 @@ func TestOrgList_FollowsCursor(t *testing.T) {
 func TestMirrorList_FollowsCursor(t *testing.T) {
 	var gotTokens []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/mirrors" {
+		if r.URL.Path != mirrorsAPIPath {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
 		token := r.URL.Query().Get("pageToken")
@@ -89,7 +89,7 @@ func TestMirrorList_FollowsCursor(t *testing.T) {
 		default:
 			t.Errorf("unexpected pageToken %q", token)
 		}
-		if err := writeJSON(w, &body); err != nil {
+		if err := printJSON(w, &body); err != nil {
 			t.Errorf("encode mirrors: %v", err)
 		}
 	}))

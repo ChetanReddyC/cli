@@ -12,6 +12,11 @@ type CreateBindingParams struct {
 	AccountId string
 }
 
+// CreateRepoCIWebhookParams is parameters of createRepoCIWebhook operation.
+type CreateRepoCIWebhookParams struct {
+	RepoId string
+}
+
 // DeleteBindingParams is parameters of deleteBinding operation.
 type DeleteBindingParams struct {
 	AccountId string
@@ -40,6 +45,13 @@ type DeleteProjectParams struct {
 // DeleteRepoParams is parameters of deleteRepo operation.
 type DeleteRepoParams struct {
 	RepoId string
+}
+
+// DeleteRepoCIWebhookParams is parameters of deleteRepoCIWebhook operation.
+type DeleteRepoCIWebhookParams struct {
+	RepoId   string
+	ID       string
+	Teardown OptBool `json:",omitempty,omitzero"`
 }
 
 // DeleteServiceAccountParams is parameters of deleteServiceAccount operation.
@@ -182,7 +194,8 @@ type ListOrgsParams struct {
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
 	// Optional: exact-match org name (case-insensitive).
-	Name OptString `json:",omitempty,omitzero"`
+	Name        OptString `json:",omitempty,omitzero"`
+	IfNoneMatch OptString `json:",omitempty,omitzero"`
 }
 
 // ListProjectMembersParams is parameters of listProjectMembers operation.
@@ -215,6 +228,11 @@ type ListProjectsParams struct {
 	Name OptString `json:",omitempty,omitzero"`
 }
 
+// ListRepoCIWebhooksParams is parameters of listRepoCIWebhooks operation.
+type ListRepoCIWebhooksParams struct {
+	RepoId string
+}
+
 // ListRepoGrantsParams is parameters of listRepoGrants operation.
 type ListRepoGrantsParams struct {
 	// Maximum entries to return; server may cap further.
@@ -222,6 +240,12 @@ type ListRepoGrantsParams struct {
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
 	RepoId    string
+}
+
+// ListReposParams is parameters of listRepos operation.
+type ListReposParams struct {
+	// Onboarded (default): repos in Entire; all: also include onboardable GitHub candidates.
+	Scope OptListReposScope `json:",omitempty,omitzero"`
 }
 
 // ListServiceAccountGrantsParams is parameters of listServiceAccountGrants operation.
@@ -242,6 +266,12 @@ type ListServiceAccountsParams struct {
 	OrgId     string
 }
 
+// LookupRepoBySlugParams is parameters of lookupRepoBySlug operation.
+type LookupRepoBySlugParams struct {
+	// Provider-scoped slug, e.g. gh/acme/oss-lib or et/my-project/my-repo.
+	Slug string
+}
+
 // LookupResourcesParams is parameters of lookupResources operation.
 type LookupResourcesParams struct {
 	// Maximum entries to return; server may cap further.
@@ -253,6 +283,12 @@ type LookupResourcesParams struct {
 	// Optional: only list resources where the caller has this permission. pageSize/pageToken apply only
 	// when set.
 	Permission OptString `json:",omitempty,omitzero"`
+}
+
+// PatchRepoCIWebhookParams is parameters of patchRepoCIWebhook operation.
+type PatchRepoCIWebhookParams struct {
+	RepoId string
+	ID     string
 }
 
 // RemoveOrgMemberParams is parameters of removeOrgMember operation.
@@ -267,17 +303,6 @@ type ResolveHandleParams struct {
 	// IdP slug (e.g. "github").
 	Provider string
 	// User-visible handle at the provider.
-	Handle string
-}
-
-// RevokeMirrorCollaboratorParams is parameters of revokeMirrorCollaborator operation.
-type RevokeMirrorCollaboratorParams struct {
-	Provider RevokeMirrorCollaboratorProvider
-	Owner    string
-	Repo     string
-	// Public host of the cluster serving the mirror.
-	ClusterHost string
-	// Qualified grantee handle, e.g. github:alice.
 	Handle string
 }
 

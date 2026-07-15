@@ -20,8 +20,8 @@ func TestWarnCheckpointPolicyIfNeeded(t *testing.T) {
 		_ = repo.Close()
 	})
 	_, err = checkpointpolicy.WriteLocal(t.Context(), repo, plumbing.ZeroHash, checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v1",
-		CheckpointMinVersion: "refs-v1",
+		CheckpointVersion:    "refs-v2",
+		CheckpointMinVersion: "refs-v2",
 	})
 	require.NoError(t, err)
 

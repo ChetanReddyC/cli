@@ -4193,7 +4193,7 @@ func TestWriteTemporaryTask_SubagentTranscript_RedactsSecrets(t *testing.T) {
 	}
 }
 
-func TestAddDirectoryToEntries_PathTraversal(t *testing.T) {
+func TestAddDirectoryToChanges_PathTraversal(t *testing.T) {
 	t.Parallel()
 	tempDir := t.TempDir()
 
@@ -4216,16 +4216,15 @@ func TestAddDirectoryToEntries_PathTraversal(t *testing.T) {
 		t.Fatalf("failed to write file: %v", err)
 	}
 
-	entries := make(map[string]object.TreeEntry)
-	err = addDirectoryToEntriesWithAbsPath(context.Background(), repo, metadataDir, ".entire/metadata/session", entries)
+	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, ".entire/metadata/session")
 	if err != nil {
-		t.Fatalf("addDirectoryToEntriesWithAbsPath failed: %v", err)
+		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
 
 	// Verify the regular file was included with correct path
 	expectedPath := filepath.ToSlash(filepath.Join(".entire/metadata/session", "sub", "data.txt"))
-	if _, ok := entries[expectedPath]; !ok {
-		t.Errorf("expected entry at %q, got entries: %v", expectedPath, entries)
+	if len(changes) != 1 || changes[0].Path != expectedPath {
+		t.Errorf("expected one change at %q, got %#v", expectedPath, changes)
 	}
 }
 
@@ -4248,14 +4247,6 @@ func TestMetadataDirectoryWalkersAllowDotDotPrefixedNames(t *testing.T) {
 
 	expectedPath := filepath.ToSlash(filepath.Join("checkpoint", "..generated", "schema.json"))
 
-	entries := make(map[string]object.TreeEntry)
-	if err := addDirectoryToEntriesWithAbsPath(context.Background(), repo, metadataDir, "checkpoint", entries); err != nil {
-		t.Fatalf("addDirectoryToEntriesWithAbsPath failed: %v", err)
-	}
-	if _, ok := entries[expectedPath]; !ok {
-		t.Fatalf("expected entry at %q, got entries: %v", expectedPath, entries)
-	}
-
 	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, "checkpoint")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
@@ -4274,7 +4265,7 @@ func TestMetadataDirectoryWalkersAllowDotDotPrefixedNames(t *testing.T) {
 	}
 }
 
-func TestAddDirectoryToEntries_SkipsSymlinks(t *testing.T) {
+func TestAddDirectoryToChanges_SkipsSymlinks(t *testing.T) {
 	t.Parallel()
 	tempDir := t.TempDir()
 
@@ -4308,28 +4299,32 @@ func TestAddDirectoryToEntries_SkipsSymlinks(t *testing.T) {
 		t.Fatalf("failed to create symlink: %v", err)
 	}
 
-	entries := make(map[string]object.TreeEntry)
-	err = addDirectoryToEntriesWithAbsPath(context.Background(), repo, metadataDir, "checkpoint/", entries)
+	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, "checkpoint/")
 	if err != nil {
-		t.Fatalf("addDirectoryToEntriesWithAbsPath failed: %v", err)
+		t.Fatalf("addDirectoryToChanges failed: %v", err)
+	}
+
+	paths := make(map[string]bool, len(changes))
+	for _, c := range changes {
+		paths[c.Path] = true
 	}
 
 	// Verify regular file was included
-	if _, ok := entries["checkpoint/regular.txt"]; !ok {
-		t.Error("regular.txt should be included in entries")
+	if !paths["checkpoint/regular.txt"] {
+		t.Error("regular.txt should be included in changes")
 	}
 
 	// Verify symlink was NOT included
-	if _, ok := entries["checkpoint/sneaky-link"]; ok {
-		t.Error("symlink should NOT be included in entries — this would allow reading files outside the metadata directory")
+	if paths["checkpoint/sneaky-link"] {
+		t.Error("symlink should NOT be included in changes — this would allow reading files outside the metadata directory")
 	}
 
-	if len(entries) != 1 {
-		t.Errorf("expected 1 entry, got %d", len(entries))
+	if len(changes) != 1 {
+		t.Errorf("expected 1 change, got %d", len(changes))
 	}
 }
 
-func TestAddDirectoryToEntries_SkipsSymlinkedDirectories(t *testing.T) {
+func TestAddDirectoryToChanges_SkipsSymlinkedDirectories(t *testing.T) {
 	t.Parallel()
 	tempDir := t.TempDir()
 
@@ -4364,24 +4359,28 @@ func TestAddDirectoryToEntries_SkipsSymlinkedDirectories(t *testing.T) {
 		t.Fatalf("failed to create directory symlink: %v", err)
 	}
 
-	entries := make(map[string]object.TreeEntry)
-	err = addDirectoryToEntriesWithAbsPath(context.Background(), repo, metadataDir, "checkpoint/", entries)
+	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, "checkpoint/")
 	if err != nil {
-		t.Fatalf("addDirectoryToEntriesWithAbsPath failed: %v", err)
+		t.Fatalf("addDirectoryToChanges failed: %v", err)
+	}
+
+	paths := make(map[string]bool, len(changes))
+	for _, c := range changes {
+		paths[c.Path] = true
 	}
 
 	// Verify regular file was included
-	if _, ok := entries["checkpoint/regular.txt"]; !ok {
-		t.Error("regular.txt should be included in entries")
+	if !paths["checkpoint/regular.txt"] {
+		t.Error("regular.txt should be included in changes")
 	}
 
 	// Verify files from the symlinked directory were NOT included
-	if _, ok := entries["checkpoint/evil-dir-link/secret.txt"]; ok {
+	if paths["checkpoint/evil-dir-link/secret.txt"] {
 		t.Error("files inside symlinked directory should NOT be included — this would allow reading files outside the metadata directory")
 	}
 
-	if len(entries) != 1 {
-		t.Errorf("expected 1 entry (regular.txt only), got %d: %v", len(entries), entries)
+	if len(changes) != 1 {
+		t.Errorf("expected 1 change (regular.txt only), got %d: %v", len(changes), changes)
 	}
 }
 
@@ -4696,7 +4695,7 @@ func TestCheckpointSummary_HasReview(t *testing.T) {
 // Summary.Intent and ReviewPrompt that previously bypassed redaction because
 // the dispatcher only matched .jsonl. The PR 1236 fix extended the JSON-aware
 // branch to .json. We assert via a low-entropy AWS-key shaped secret (catches
-// the 7-layer pipeline) so the test stays deterministic without the OPF binary.
+// the regex-only pipeline) so the test stays deterministic without the OPF binary.
 func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -4796,9 +4795,9 @@ func readSummaryFromBranch(t *testing.T, repo *git.Repository, checkpointID id.C
 	return summary
 }
 
-// readSessionMetadataAtIndex reads the per-session Metadata for
-// session at numbered subfolder `index` (0-based) under the checkpoint.
-func readSessionMetadataAtIndex(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID, index int) Metadata {
+// readSessionMetadata reads the per-session Metadata for the first session
+// (numbered subfolder "0") under the checkpoint.
+func readSessionMetadata(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID) Metadata {
 	t.Helper()
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
@@ -4816,9 +4815,9 @@ func readSessionMetadataAtIndex(t *testing.T, repo *git.Repository, checkpointID
 	if err != nil {
 		t.Fatalf("get checkpoint subtree: %v", err)
 	}
-	sessionTree, err := checkpointTree.Tree(strconv.Itoa(index))
+	sessionTree, err := checkpointTree.Tree("0")
 	if err != nil {
-		t.Fatalf("get session subtree %d: %v", index, err)
+		t.Fatalf("get session subtree 0: %v", err)
 	}
 	sessionFile, err := sessionTree.File(paths.MetadataFileName)
 	if err != nil {
@@ -4947,7 +4946,7 @@ func TestCommittedMetadata_InvestigateFieldsRoundTrip(t *testing.T) {
 		t.Fatalf("WriteCommitted: %v", err)
 	}
 
-	meta := readSessionMetadataAtIndex(t, repo, checkpointID, 0)
+	meta := readSessionMetadata(t, repo, checkpointID)
 	if meta.Kind != "agent_investigate" {
 		t.Errorf("Kind: got %q, want agent_investigate", meta.Kind)
 	}

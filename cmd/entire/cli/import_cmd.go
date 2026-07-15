@@ -36,7 +36,11 @@ func newImportAgentCmd(imp agentimport.Importer) *cobra.Command {
 		Short: fmt.Sprintf("Import existing %s transcripts as read-only checkpoints", imp.AgentType()),
 		Long: fmt.Sprintf(`Import pre-existing %s transcripts for this repo (the past month) as
 read-only checkpoints. Imported history is searchable and explainable but is
-not rewindable.`, imp.AgentType()),
+not rewindable.
+
+Import honors checkpoint policy before scanning transcripts. If the configured
+checkpoint_version or checkpoint_min_version is unsupported by this CLI, import
+fails even with --dry-run.`, imp.AgentType()),
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			ctx := c.Context()
@@ -51,6 +55,10 @@ not rewindable.`, imp.AgentType()),
 				return fmt.Errorf("open repository: %w", err)
 			}
 			defer repo.Close()
+
+			if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, repo); err != nil {
+				return err
+			}
 
 			// Load repo/user-configured redaction (opt-in PII, custom_redactions,
 			// redactor packs) before any checkpoint write. Imported transcripts
