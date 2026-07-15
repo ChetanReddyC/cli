@@ -1693,7 +1693,7 @@ func TestPrintNonInteractiveSSHAuthHint(t *testing.T) {
 
 func TestNonInteractiveSSHAuthFailure(t *testing.T) {
 	t.Parallel()
-	authErr := errors.New("git push: Permission denied (publickey).")
+	authErr := errors.New("permission denied (publickey)")
 	ctx := remote.WithNonInteractiveSSH(context.Background())
 	assert.True(t, nonInteractiveSSHAuthFailure(ctx, authErr))
 	assert.False(t, nonInteractiveSSHAuthFailure(context.Background(), authErr),
