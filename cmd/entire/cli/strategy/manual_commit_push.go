@@ -7,6 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
+	"strings"
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -35,6 +37,17 @@ var opfPrePushProgressWriter io.Writer = os.Stderr
 //   - push_sessions: false to disable automatic pushing of checkpoints
 //   - checkpoint_remote: {"provider": "github", "repo": "org/repo"} to push to a separate repo
 func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error {
+	return s.prePush(ctx, remote, false)
+}
+
+// PrePushFromGitHook handles a push initiated by Git's pre-push hook. Unlike
+// direct callers, it protects an empty user remote from receiving checkpoint
+// metadata before the user's first normal branch is published.
+func (s *ManualCommitStrategy) PrePushFromGitHook(ctx context.Context, remote string) error {
+	return s.prePush(ctx, remote, true)
+}
+
+func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, protectFirstUserBranch bool) error {
 	// Load settings once for remote resolution and push_sessions check.
 	// Spanned because checkpoint-remote resolution can perform a one-time
 	// network fetch of the metadata branch (fetchMetadataBranchIfMissing),
@@ -48,11 +61,19 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 	}
 
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
-	// instead of the single v1 branch. (A configured git-branch mirror's v1 ref
-	// is not pushed here yet — mirror push for downgrade safety is a later step.)
+	// instead of the single v1 branch. Those refs live under refs/entire/, not
+	// refs/heads/, so a forge can never pick them as a repository's default
+	// branch — the empty-remote guard below is unnecessary for this backend.
+	// (A configured git-branch mirror's v1 ref is not pushed here yet — mirror
+	// push for downgrade safety is a later step.)
 	if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: a bad checkpoints block already surfaces via Open; default to no refs push
 		return s.prePushCheckpointRefs(ctx, ps)
 	}
+
+	// git-branch primary: entire/checkpoints/v1 is a real refs/heads branch, so
+	// on an otherwise-empty remote a forge like GitHub would select it as the
+	// default. Defer publication until the user's own branch exists there.
+	deferAutomaticCheckpointPush := protectFirstUserBranch && deferCheckpointPushOnEmptyRemote(ctx, ps)
 
 	refs := checkpoint.ResolveRefs(ctx)
 	repo, repoErr := OpenRepository(ctx)
@@ -116,6 +137,15 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 		}
 	}
 
+	if deferAutomaticCheckpointPush {
+		// Do this only after OPF has had a chance to rewrite v1: the outer
+		// user push may explicitly include the metadata branch.
+		logging.Info(ctx, "automatic checkpoint push deferred until the remote has a branch",
+			slog.String("remote", ps.remote),
+		)
+		return nil
+	}
+
 	// Thread the span's context into the push so the network push and any
 	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
 	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoint_refs")
@@ -130,6 +160,79 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 
 	cleanupPushedShadowBranches(ctx)
 	return nil
+}
+
+// deferCheckpointPushOnEmptyRemote reports whether publication of the git-branch
+// v1 metadata should be held back because the push remote may be brand new.
+//
+// Hosting providers such as GitHub make the first branch pushed to an empty
+// repository its default, so the pre-push hook must not publish
+// entire/checkpoints/v1 ahead of the user's own first branch. The check is
+// purely local: if a remote-tracking ref for this remote already exists
+// (refs/remotes/<remote>/*), the remote has been fetched from or pushed to
+// before and therefore already has at least one branch, so publishing cannot
+// make our metadata the default. Otherwise defer — git records a
+// remote-tracking ref after the first successful push, so the deferred metadata
+// publishes on the next push.
+//
+// It deliberately performs no ls-remote/fetch. A network round trip on the
+// pre-push path can trigger an SSH security-key touch prompt (and doing so per
+// push URL would multiply those prompts), which is a poor pre-push UX. This is
+// also why it uses only the remote git handed the hook rather than resolving
+// every configured push URL.
+//
+// A separate checkpoint remote is exempt: it is a dedicated metadata store, not
+// the repository the user pushes to.
+func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool {
+	if ps.hasCheckpointURL() {
+		return false
+	}
+
+	// The hazard only arises for a configured remote (the `git remote add
+	// origin …` then first-push flow). Pushing straight to a bare URL hands that
+	// URL to the hook as the remote arg, and git never records a
+	// refs/remotes/<url>/* tracking ref for it — so a tracking-ref check would
+	// defer the metadata forever. Publish for a non-configured (URL) target
+	// rather than strand it; the first-branch scenario always uses a named
+	// remote.
+	if !isConfiguredRemote(ctx, ps.remote) {
+		return false
+	}
+
+	// Known limitation, accepted for the no-network design: a tracking ref left
+	// over from before a remote was deleted and recreated empty under the same
+	// URL reads as "established", so v1 would publish to the now-empty remote.
+	// Detecting that requires asking the remote — the network round trip we
+	// deliberately avoid here. The scenario is rare and its default branch is
+	// recoverable by resetting it on the forge.
+	return !remoteHasTrackingRefs(ctx, ps.remote)
+}
+
+// isConfiguredRemote reports whether name is a configured git remote, as
+// opposed to a bare URL that git passes through verbatim when a push targets a
+// URL directly. Local and best-effort (reads config, no network); any error is
+// treated as "not a configured remote".
+func isConfiguredRemote(ctx context.Context, name string) bool {
+	if name == "" {
+		return false
+	}
+	return exec.CommandContext(ctx, "git", "remote", "get-url", name).Run() == nil
+}
+
+// remoteHasTrackingRefs reports whether any refs/remotes/<remote>/* ref exists
+// locally. Its presence means the remote has been fetched from or pushed to
+// before and so already has at least one branch. Local-only and best-effort:
+// any error is treated as "no tracking refs" so the caller fails safe (defers).
+func remoteHasTrackingRefs(ctx context.Context, remote string) bool {
+	if remote == "" {
+		return false
+	}
+	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--count=1", "refs/remotes/"+remote+"/")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) != ""
 }
 
 // prePushCheckpointRefs drains the per-checkpoint push queue and batch-pushes the
