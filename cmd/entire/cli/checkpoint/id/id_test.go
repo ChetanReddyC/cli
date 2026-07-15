@@ -1,6 +1,7 @@
 package id
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 	"time"
@@ -18,7 +19,8 @@ func TestCheckpointID_Time(t *testing.T) {
 	// precision), so remote-ref discovery can sort/display a checkpoint by its
 	// real creation time from the ref name alone — no store read.
 	want := time.UnixMilli(1700000000000).UTC()
-	minted := ulid.MustNew(ulid.Timestamp(want), nil)
+	// Deterministic entropy (zeros); Time() only reads the timestamp prefix.
+	minted := ulid.MustNew(ulid.Timestamp(want), bytes.NewReader(make([]byte, 16)))
 	got, ok := CheckpointID(minted.String()).Time()
 	if !ok {
 		t.Fatalf("Time() ok = false for a valid ULID %q", minted)

@@ -128,7 +128,7 @@ To close that gap `List` supports **opt-in remote discovery**:
 - A **remote ref lister** injected by the CLI runs a single `git ls-remote refs/entire/checkpoints/*` — **names only, no object transfer** — against the checkpoint remote.
 - Each advertised ref that has no local ref yet is added to the result as a not-yet-hydrated `CheckpointInfo`. Its `CreatedAt` is recovered from the ULID timestamp in the ref name, so it sorts by real recency without a fetch; the rest of its contents are **hydrated lazily on the next read** via the on-demand ref fetch.
 
-Enumeration is **checkpoint-remote-scoped** — the same authority rule as the on-demand fetch and #1719: with a `checkpoint_remote` configured it queries that remote, and with **none** configured it does nothing (returns no refs), leaving `List` local-only rather than scanning origin. Discovery is also **best-effort and additive**: an `ls-remote` failure logs and returns the local results rather than failing the whole listing.
+Enumeration is **checkpoint-remote-scoped** — the same authority rule as the on-demand fetch and #1719: with a `checkpoint_remote` configured it queries that remote, and with **none** configured it does nothing (returns no refs), leaving `List` local-only rather than scanning origin. Discovery is also **best-effort and additive**: an `ls-remote` failure or a short timeout (a few seconds — this path must not turn a previously-local listing into a long hang when the remote is unreachable) logs and returns the local results rather than failing the whole listing. URL resolution and `ls-remote` run from the worktree root so repo-local git config applies.
 
 ## Read routing and coexistence
 

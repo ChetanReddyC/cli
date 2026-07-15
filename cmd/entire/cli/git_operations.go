@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
@@ -493,10 +494,12 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 	return nil
 }
 
-// checkpointRefListTimeout bounds the ls-remote enumeration of checkpoint refs
-// so a slow or unreachable checkpoint remote cannot hang `entire checkpoint
-// list`; on timeout the store falls back to local refs only.
-const checkpointRefListTimeout = 30 * time.Second
+// checkpointRefListTimeout bounds the names-only ls-remote used by user-facing
+// `entire checkpoint list` / branch explain. Kept short (not a full fetch
+// budget): discovery is best-effort and additive — on timeout or unreachable
+// remote the store falls back to local refs rather than stalling a previously
+// instant command for tens of seconds.
+const checkpointRefListTimeout = 5 * time.Second
 
 // ListCheckpointRefsOnRemote enumerates the per-checkpoint refs
 // (refs/entire/checkpoints/<shard>/<id>) present on the checkpoint remote, names
@@ -510,12 +513,20 @@ const checkpointRefListTimeout = 30 * time.Second
 // remote, and with none configured it returns (nil, nil) so List stays
 // local-only rather than scanning origin. This keeps the default (no
 // checkpoint_remote) behavior unchanged.
+//
+// Resolution and ls-remote are pinned to the worktree root (not process cwd) so
+// repo-local git config (url.*.insteadOf, credential helpers, remotes) applies.
 func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, error) {
 	if !remote.Configured(ctx) {
 		return nil, nil
 	}
 
-	url, err := remote.FetchURL(ctx)
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve worktree root: %w", err)
+	}
+
+	url, err := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: worktreeRoot})
 	if err != nil {
 		return nil, fmt.Errorf("resolve checkpoint remote URL: %w", err)
 	}
@@ -523,7 +534,7 @@ func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, 
 	ctx, cancel := context.WithTimeout(ctx, checkpointRefListTimeout)
 	defer cancel()
 
-	output, err := remote.LsRemoteInDir(ctx, "", url, checkpoint.CheckpointRefPrefix+"*")
+	output, err := remote.LsRemoteInDir(ctx, worktreeRoot, url, checkpoint.CheckpointRefPrefix+"*")
 	if err != nil {
 		return nil, fmt.Errorf("ls-remote checkpoint refs from %s: %w", remote.RedactURL(url), err)
 	}

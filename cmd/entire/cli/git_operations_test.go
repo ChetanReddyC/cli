@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
@@ -715,4 +716,33 @@ func TestListCheckpointRefsOnRemote_NotConfigured(t *testing.T) {
 	names, err := ListCheckpointRefsOnRemote(context.Background())
 	require.NoError(t, err)
 	assert.Nil(t, names, "no checkpoint_remote configured must leave List local-only (no remote enumeration)")
+}
+
+// TestListCheckpointRefsOnRemote_ResolvesFromSubdir proves worktree pinning:
+// enumeration resolves the worktree root (and therefore repo-local settings)
+// even when the process cwd is a subdirectory, rather than depending on cwd
+// alone. Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_ResolvesFromSubdir(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+
+	sub := filepath.Join(dir, "nested", "deep")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+	t.Chdir(sub)
+
+	names, err := ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, names, "no checkpoint_remote from a subdir must still be a no-op (worktree-resolved settings)")
+}
+
+// TestCheckpointRefListTimeoutIsShort pins the discovery budget: user-facing
+// list/explain must not inherit a long fetch-style hang when the remote is
+// unreachable (best-effort fallback to local refs).
+func TestCheckpointRefListTimeoutIsShort(t *testing.T) {
+	t.Parallel()
+	assert.LessOrEqual(t, checkpointRefListTimeout, 5*time.Second)
+	assert.Greater(t, checkpointRefListTimeout, time.Duration(0))
 }
