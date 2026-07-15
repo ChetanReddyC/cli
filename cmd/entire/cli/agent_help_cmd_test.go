@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os/exec"
 	"strings"
@@ -127,6 +128,57 @@ func TestAgentHelpRepoContext_RefreshesUnknownTrailsEnablement(t *testing.T) {
 	}
 	if !enabled {
 		t.Fatal("trails should be enabled after the availability refresh succeeds")
+	}
+}
+
+// A failed availability refresh is cached only long enough to prevent repeated
+// blocking calls during a network outage, then becomes retryable.
+// Not parallel: changes the process working directory and auth environment.
+func TestAgentHelpRepoContext_CachesRefreshFailureBriefly(t *testing.T) {
+	t.Setenv("ENTIRE_TOKEN", makeTestJWT(t, `{"iss":"https://auth.entire.io","sub":"user-1","handle":"alice","aud":"https://entire.io"}`))
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:acme/app.git")
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git remote add: %v", err)
+	}
+	t.Chdir(repoDir)
+
+	refreshCalls := 0
+	_, enabled := agentHelpRepoContextWithRefresh(t.Context(), func(context.Context, trailEnablementScope) error {
+		refreshCalls++
+		return errors.New("offline")
+	})
+	if enabled {
+		t.Fatal("trails should not be advertised after a failed availability refresh")
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refresh calls after first invocation = %d, want 1", refreshCalls)
+	}
+
+	// The failed attempt leaves a short-lived negative entry, so another
+	// invocation does not repeat the blocking refresh.
+	_, enabled = agentHelpRepoContextWithRefresh(t.Context(), func(context.Context, trailEnablementScope) error {
+		refreshCalls++
+		return errors.New("refresh should have been suppressed by the failure cache")
+	})
+	if enabled {
+		t.Fatal("trails should remain unadvertised during the refresh-failure backoff")
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refresh calls after second invocation = %d, want 1", refreshCalls)
+	}
+
+	// Unlike a definitive disabled result, the failure entry becomes unknown
+	// after the short backoff and can be retried.
+	scope, err := currentTrailEnablementScope(t.Context())
+	if err != nil {
+		t.Fatalf("resolve trail scope: %v", err)
+	}
+	if got := cachedTrailsEnablementForScope(t.Context(), scope, time.Now().Add(trailEnablementRefreshFailureCacheTTL+time.Second)); got != trailEnablementCacheUnknown {
+		t.Fatalf("cache after failure backoff = %v, want unknown", got)
 	}
 }
 

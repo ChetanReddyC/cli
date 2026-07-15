@@ -23,6 +23,7 @@ import (
 
 const (
 	trailEnablementCacheTTL                   = time.Hour
+	trailEnablementRefreshFailureCacheTTL     = 5 * time.Minute
 	trailEnablementSessionStartRefreshTimeout = time.Second
 	trailEnablementRefreshTimeout             = 3 * time.Second
 )
@@ -193,6 +194,16 @@ func saveTrailsEnabledForScope(ctx context.Context, scope trailEnablementScope, 
 		return fmt.Errorf("save clone preferences: %w", err)
 	}
 	return nil
+}
+
+// cacheTrailsEnablementRefreshFailure records a short-lived disabled decision
+// after an agent-help refresh fails. It prevents repeated invocations from each
+// waiting on the same degraded network while retrying much sooner than a real
+// server-provided disabled decision. Backdating reuses the existing cache schema
+// and expiry logic while giving the entry only the failure TTL remaining.
+func cacheTrailsEnablementRefreshFailure(ctx context.Context, scope trailEnablementScope, now time.Time) error {
+	checkedAt := now.Add(-trailEnablementCacheTTL + trailEnablementRefreshFailureCacheTTL)
+	return saveTrailsEnabledForScope(ctx, scope, false, checkedAt)
 }
 
 func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEnablementScope) error {

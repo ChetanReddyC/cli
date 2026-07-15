@@ -89,6 +89,11 @@ func agentHelpRepoContextWithRefresh(
 		repoLine = scope.RepoKey
 	}
 
+	now := time.Now()
+	if decision := cachedTrailsEnablementForScope(ctx, scope, now); decision != trailEnablementCacheUnknown {
+		return repoLine, decision == trailEnablementCacheEnabled
+	}
+
 	// ResolveDataAPIToken performs data-host discovery before it can reject a
 	// missing login. The scope already carries the locally resolved auth identity,
 	// so avoid making an unauthenticated first run wait on a network request that
@@ -100,6 +105,10 @@ func agentHelpRepoContextWithRefresh(
 	refreshCtx, cancel := context.WithTimeout(ctx, trailEnablementRefreshTimeout)
 	defer cancel()
 	if err := refresh(refreshCtx, scope); err != nil {
+		// A short negative cache keeps an offline authenticated user from paying
+		// this timeout on every agent-help invocation while still retrying much
+		// sooner than a definitive disabled result.
+		_ = cacheTrailsEnablementRefreshFailure(ctx, scope, time.Now())
 		return repoLine, false
 	}
 	return repoLine, cachedTrailsEnablementForScope(ctx, scope, time.Now()) == trailEnablementCacheEnabled
