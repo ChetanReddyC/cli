@@ -14,6 +14,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
@@ -48,6 +49,20 @@ func (s *ManualCommitStrategy) PrePushFromGitHook(ctx context.Context, remote st
 }
 
 func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, protectFirstUserBranch bool) error {
+	// This runs inside the user's `git push` pre-push hook. Every checkpoint
+	// git subprocess spawned here (metadata fetch, policy sync, checkpoint
+	// push and its recovery fetch) must fail fast rather than block on an
+	// interactive SSH passphrase prompt — there is no way to answer it here and
+	// it would hang the user's push. Foreground commands do not set this.
+	//
+	// BatchMode=yes suppresses passphrase/PIN prompts (including FIDO2
+	// verify-required PIN entry). Touch-only security keys still work because
+	// user-presence touch is not a terminal read. Users who need a PIN prompt
+	// in this path should load the key into ssh-agent, or set an explicit
+	// BatchMode=no via GIT_SSH_COMMAND / core.sshCommand (respected by the
+	// non-interactive SSH helper).
+	ctx = checkpointremote.WithNonInteractiveSSH(ctx)
+
 	// Load settings once for remote resolution and push_sessions check.
 	// Spanned because checkpoint-remote resolution can perform a one-time
 	// network fetch of the metadata branch (fetchMetadataBranchIfMissing),
@@ -345,7 +360,8 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 
 	// Fast path: push all refs in one round-trip (fast-forward-only). If every
 	// ref was up to date or fast-forwarded, we're done.
-	if err := batchPushRefs(pushCtx, pushTarget, existing); err == nil {
+	batchErr := batchPushRefs(pushCtx, pushTarget, existing)
+	if batchErr == nil {
 		stop(" done")
 		if removeErr := queue.Remove(existing); removeErr != nil {
 			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
@@ -354,6 +370,16 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 		return len(existing), nil
 	}
 	stop("")
+
+	// Non-interactive SSH auth failures cannot be fixed by per-ref
+	// fetch+replay. Surface the same actionable hint as the v1 doPushRef path
+	// (issue #1523) instead of only logging to .entire/logs/.
+	if nonInteractiveSSHAuthFailure(pushCtx, batchErr) {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't push checkpoint refs: %v\n", batchErr)
+		printNonInteractiveSSHAuthHint()
+		printCheckpointRemoteHint(pushTarget)
+		return 0, batchErr
+	}
 
 	// At least one ref was rejected — typically a non-fast-forward divergence
 	// (the same checkpoint re-written on another machine). Retry per ref with
@@ -368,6 +394,9 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 		if err := pushCheckpointRefWithRecovery(pushCtx, pushTarget, ref); err != nil {
 			logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 				slog.String("ref", ref.String()), slog.String("error", err.Error()))
+			if nonInteractiveSSHAuthFailure(pushCtx, err) {
+				printNonInteractiveSSHAuthHint()
+			}
 			if firstErr == nil {
 				firstErr = err
 			}

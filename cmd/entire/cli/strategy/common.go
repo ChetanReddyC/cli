@@ -352,7 +352,7 @@ const (
 // registered agent config directories.
 func isProtectedPath(relPath string) bool {
 	for _, dir := range protectedDirs() {
-		if paths.IsSubpath(dir, relPath) {
+		if paths.IsProtectedSubpath(dir, relPath) {
 			return true
 		}
 	}
