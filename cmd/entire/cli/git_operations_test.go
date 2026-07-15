@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
@@ -634,4 +636,83 @@ func gitOutput(t *testing.T, dir string, args ...string) string {
 func gitDefaultBranch(t *testing.T, dir string) string {
 	t.Helper()
 	return gitOutput(t, dir, "rev-parse", "--abbrev-ref", "HEAD")
+}
+
+// TestParseCheckpointRefNames verifies the ls-remote parser keeps only
+// checkpoint refs and ignores unrelated advertisement lines (HEAD, branches,
+// peeled tags) and blanks.
+func TestParseCheckpointRefNames(t *testing.T) {
+	t.Parallel()
+	const sha = "e9ed0bd3ad3b2071aefab6e6ad20527dc910957b"
+	output := []byte(strings.Join([]string{
+		sha + "\tHEAD",
+		sha + "\trefs/heads/main",
+		sha + "\trefs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN",
+		sha + "\trefs/entire/checkpoints/f6/a1b2c3d4e5f6",
+		sha + "\trefs/tags/v1.0.0",
+		sha + "\trefs/tags/v1.0.0^{}",
+		"",
+	}, "\n"))
+
+	names := parseCheckpointRefNames(output)
+	got := make([]string, len(names))
+	for i, n := range names {
+		got[i] = n.String()
+	}
+	assert.ElementsMatch(t, []string{
+		"refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN",
+		"refs/entire/checkpoints/f6/a1b2c3d4e5f6",
+	}, got)
+}
+
+// TestParseCheckpointRefNames_RealLsRemote exercises the parser against genuine
+// `git ls-remote 'refs/entire/checkpoints/*'` output from a local bare remote,
+// confirming the glob matches the nested <shard>/<id> refs and nothing else.
+func TestParseCheckpointRefNames_RealLsRemote(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	bareDir := t.TempDir()
+	gitRun(t, bareDir, "init", "--bare", "-q", bareDir)
+
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.WriteFile(t, workDir, "f.txt", "init")
+	testutil.GitAdd(t, workDir, "f.txt")
+	testutil.GitCommit(t, workDir, "init")
+	head := gitOutput(t, workDir, "rev-parse", "HEAD")
+	gitRun(t, workDir, "update-ref", "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN", head)
+	gitRun(t, workDir, "update-ref", "refs/entire/checkpoints/f6/a1b2c3d4e5f6", head)
+	gitRun(t, workDir, "remote", "add", "origin", bareDir)
+	gitRun(t, workDir, "push", "-q", "origin", "refs/entire/checkpoints/*:refs/entire/checkpoints/*")
+
+	out, err := remote.LsRemoteInDir(ctx, workDir, bareDir, checkpoint.CheckpointRefPrefix+"*")
+	require.NoError(t, err)
+
+	names := parseCheckpointRefNames(out)
+	got := make([]string, len(names))
+	for i, n := range names {
+		got[i] = n.String()
+	}
+	assert.ElementsMatch(t, []string{
+		"refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN",
+		"refs/entire/checkpoints/f6/a1b2c3d4e5f6",
+	}, got)
+}
+
+// TestListCheckpointRefsOnRemote_NotConfigured proves the authority gate: with
+// no checkpoint_remote configured, enumeration is a no-op (nil, no error, no
+// network) so List behavior stays unchanged (local-only) — never scanning
+// origin. Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_NotConfigured(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+
+	names, err := ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, names, "no checkpoint_remote configured must leave List local-only (no remote enumeration)")
 }

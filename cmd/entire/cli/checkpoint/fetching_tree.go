@@ -23,6 +23,17 @@ type BlobFetchFunc func(ctx context.Context, hashes []plumbing.Hash) error
 // package cannot resolve the remote target itself, so the CLI layer injects it.
 type RefFetchFunc func(ctx context.Context, ref plumbing.ReferenceName) error
 
+// RemoteRefListFunc enumerates the per-checkpoint refs present on the configured
+// checkpoint remote (names only, via `ls-remote refs/entire/checkpoints/*` — no
+// object transfer), returning their full ref names. The git-refs store uses it
+// in List to discover checkpoints written on another machine that have no local
+// ref yet; each discovered checkpoint is then hydrated lazily on read via
+// RefFetchFunc. The checkpoint package cannot resolve the remote target itself,
+// so the CLI layer injects it. Enumeration is checkpoint-remote-scoped (never
+// origin): it returns (nil, nil) when no checkpoint remote is configured, which
+// leaves List local-only — the same authority rule as the on-demand fetch.
+type RemoteRefListFunc func(ctx context.Context) ([]plumbing.ReferenceName, error)
+
 // FetchingTree wraps a git tree to automatically fetch missing blobs on demand.
 // After a treeless fetch (--filter=blob:none), tree objects are available locally
 // but blob objects are not. Each File() call checks whether the target blob

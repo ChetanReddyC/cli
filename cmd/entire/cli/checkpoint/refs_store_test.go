@@ -118,6 +118,118 @@ func TestGitRefsStore_OnDemandRefFetch_FailurePropagates(t *testing.T) {
 	})
 }
 
+// TestGitRefsStore_ListRemoteDiscovery exercises the git-refs List remote-ref
+// discovery that fixes #1770: on a second device, a checkpoint written
+// elsewhere has no local ref, so a purely local List shows zero. With discovery
+// opted in (WithRemoteListDiscovery) and a remote lister configured, List
+// enumerates the checkpoint remote (names only) and surfaces the not-yet-local
+// checkpoint; a later read hydrates it.
+func TestGitRefsStore_ListRemoteDiscovery(t *testing.T) {
+	t.Parallel()
+
+	// A ULID that exists only "on the remote" (never written locally).
+	remoteOnly := id.CheckpointID("01KVBJCWYA4YW6J5M9GP655HZN")
+	remoteOnlyRef := mustRefName(t, remoteOnly)
+	//nolint:unparam // test fake mirrors RemoteRefListFunc's (…, error) signature; it always succeeds here.
+	lister := func(context.Context) ([]plumbing.ReferenceName, error) {
+		return []plumbing.ReferenceName{remoteOnlyRef}, nil
+	}
+
+	ids := func(infos []CheckpointInfo) map[id.CheckpointID]struct{} {
+		out := make(map[id.CheckpointID]struct{}, len(infos))
+		for _, info := range infos {
+			out[info.CheckpointID] = struct{}{}
+		}
+		return out
+	}
+
+	t.Run("discovers remote-only checkpoint when opted in", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+		store.SetRemoteRefLister(lister)
+
+		infos, err := store.List(WithRemoteListDiscovery(context.Background()))
+		require.NoError(t, err)
+		got := ids(infos)
+		assert.Contains(t, got, local, "local checkpoint still listed")
+		assert.Contains(t, got, remoteOnly, "remote-only checkpoint discovered via ls-remote")
+
+		// The discovered entry carries the ULID's embedded creation time, so it
+		// sorts by real recency without an object fetch.
+		for _, info := range infos {
+			if info.CheckpointID == remoteOnly {
+				assert.False(t, info.CreatedAt.IsZero(), "discovered ULID checkpoint should carry its embedded creation time")
+			}
+		}
+	})
+
+	t.Run("stays local-only without the discovery marker", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+		store.SetRemoteRefLister(lister)
+
+		infos, err := store.List(context.Background())
+		require.NoError(t, err)
+		got := ids(infos)
+		assert.Contains(t, got, local)
+		assert.NotContains(t, got, remoteOnly, "no enumeration without WithRemoteListDiscovery (keeps the hot path network-free)")
+	})
+
+	t.Run("stays local-only when no lister is configured", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+
+		infos, err := store.List(WithRemoteListDiscovery(context.Background()))
+		require.NoError(t, err)
+		got := ids(infos)
+		assert.Contains(t, got, local)
+		assert.NotContains(t, got, remoteOnly)
+	})
+
+	t.Run("does not duplicate a checkpoint already present locally", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+		// The lister also advertises the checkpoint that already exists locally.
+		store.SetRemoteRefLister(func(context.Context) ([]plumbing.ReferenceName, error) {
+			return []plumbing.ReferenceName{mustRefName(t, local), remoteOnlyRef}, nil
+		})
+
+		infos, err := store.List(WithRemoteListDiscovery(context.Background()))
+		require.NoError(t, err)
+		count := 0
+		for _, info := range infos {
+			if info.CheckpointID == local {
+				count++
+			}
+		}
+		assert.Equal(t, 1, count, "a locally-present checkpoint advertised by the remote is not duplicated")
+	})
+
+	t.Run("enumeration failure degrades to local-only", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		local := id.MustCheckpointID("a1b2c3d4e5f6")
+		refsWrite(t, store, local, "s-local", "t")
+		store.SetRemoteRefLister(func(context.Context) ([]plumbing.ReferenceName, error) {
+			return nil, assert.AnError // e.g. offline / ls-remote failed
+		})
+
+		infos, err := store.List(WithRemoteListDiscovery(context.Background()))
+		require.NoError(t, err, "a remote enumeration failure must not fail the whole listing")
+		got := ids(infos)
+		assert.Contains(t, got, local, "local checkpoints remain listed when discovery fails")
+		assert.NotContains(t, got, remoteOnly)
+	})
+}
+
 func TestGitRefsStore_WriteAllVariantsAndRead(t *testing.T) {
 	t.Parallel()
 	store := newRefsStore(t)

@@ -493,6 +493,63 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 	return nil
 }
 
+// checkpointRefListTimeout bounds the ls-remote enumeration of checkpoint refs
+// so a slow or unreachable checkpoint remote cannot hang `entire checkpoint
+// list`; on timeout the store falls back to local refs only.
+const checkpointRefListTimeout = 30 * time.Second
+
+// ListCheckpointRefsOnRemote enumerates the per-checkpoint refs
+// (refs/entire/checkpoints/<shard>/<id>) present on the checkpoint remote, names
+// only, via a single `git ls-remote refs/entire/checkpoints/*` — no object
+// transfer. The git-refs store's List uses it to discover checkpoints written
+// on another machine that have no local ref yet, then hydrates each lazily on
+// read through FetchCheckpointRef.
+//
+// Enumeration is checkpoint-remote-scoped, matching the on-demand fetch and PR
+// #1719's authority rule: with a checkpoint_remote configured it queries that
+// remote, and with none configured it returns (nil, nil) so List stays
+// local-only rather than scanning origin. This keeps the default (no
+// checkpoint_remote) behavior unchanged.
+func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, error) {
+	if !remote.Configured(ctx) {
+		return nil, nil
+	}
+
+	url, err := remote.FetchURL(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve checkpoint remote URL: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, checkpointRefListTimeout)
+	defer cancel()
+
+	output, err := remote.LsRemoteInDir(ctx, "", url, checkpoint.CheckpointRefPrefix+"*")
+	if err != nil {
+		return nil, fmt.Errorf("ls-remote checkpoint refs from %s: %w", remote.RedactURL(url), err)
+	}
+	return parseCheckpointRefNames(output), nil
+}
+
+// parseCheckpointRefNames extracts the checkpoint ref names from `git ls-remote`
+// output. Each line is "<hash>\t<refname>"; only refs under CheckpointRefPrefix
+// are kept (the store re-validates each via ParseRef). Peeled tag lines
+// ("<hash>\t<refname>^{}") never carry the checkpoint prefix, so they drop out.
+func parseCheckpointRefNames(output []byte) []plumbing.ReferenceName {
+	var names []plumbing.ReferenceName
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		name := fields[1]
+		if !strings.HasPrefix(name, checkpoint.CheckpointRefPrefix) {
+			continue
+		}
+		names = append(names, plumbing.ReferenceName(name))
+	}
+	return names
+}
+
 // FetchBlobsByHash fetches specific blob objects from the remote by their SHA-1 hashes.
 // Uses "git fetch <target> <hash>" which goes through normal credential helpers,
 // unlike fetch-pack which bypasses them. Requires the server to support

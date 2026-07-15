@@ -32,8 +32,9 @@ var (
 type gitRefsStore struct {
 	*treeWriter
 
-	blobFetcher BlobFetchFunc
-	refFetcher  RefFetchFunc
+	blobFetcher     BlobFetchFunc
+	refFetcher      RefFetchFunc
+	remoteRefLister RemoteRefListFunc
 }
 
 // newGitRefsStore constructs the per-checkpoint-ref store for a repository.
@@ -50,6 +51,38 @@ func (s *gitRefsStore) SetBlobFetcher(f BlobFetchFunc) {
 // a checkpoint written on another machine). nil leaves reads local-only.
 func (s *gitRefsStore) SetRefFetcher(f RefFetchFunc) {
 	s.refFetcher = f
+}
+
+// SetRemoteRefLister configures remote checkpoint-ref enumeration for List (see
+// RemoteRefListFunc). It only takes effect when List is called on a context
+// marked by WithRemoteListDiscovery, so the per-turn hook hot path — which
+// lists local refs without opting in — never triggers a network round trip. nil
+// leaves List local-only.
+func (s *gitRefsStore) SetRemoteRefLister(f RemoteRefListFunc) {
+	s.remoteRefLister = f
+}
+
+// remoteListDiscoveryKey marks a context as permitting List to enumerate the
+// checkpoint remote. It is an unexported key type so only this package can set
+// or read the marker.
+type remoteListDiscoveryKey struct{}
+
+// WithRemoteListDiscovery marks ctx to allow gitRefsStore.List to enumerate
+// checkpoint refs on the configured checkpoint remote (see RemoteRefListFunc)
+// and surface not-yet-local checkpoints. Set it only on explicit, user-facing
+// enumeration flows (e.g. `entire checkpoint list` / the branch `explain`
+// view), never on the per-turn commit hook: routine local listings must stay
+// network-free. Without this marker List is local-only regardless of whether a
+// remote lister is configured.
+func WithRemoteListDiscovery(ctx context.Context) context.Context {
+	return context.WithValue(ctx, remoteListDiscoveryKey{}, true)
+}
+
+// remoteListDiscoveryEnabled reports whether ctx was marked via
+// WithRemoteListDiscovery.
+func remoteListDiscoveryEnabled(ctx context.Context) bool {
+	v, ok := ctx.Value(remoteListDiscoveryKey{}).(bool)
+	return ok && v
 }
 
 // Write dispatches a persistent write request to the matching ref operation,
@@ -357,8 +390,17 @@ func (s *gitRefsStore) ReadSessionContent(ctx context.Context, checkpointID id.C
 }
 
 // List enumerates local checkpoint refs and reads each root summary, sorted most
-// recent first. Storage-level listing is local-refs-only for now (no remote
-// enumeration), matching the issue's first-version scope.
+// recent first.
+//
+// When the context opts in (WithRemoteListDiscovery) and a remote ref lister is
+// configured, it additionally discovers checkpoints that exist on the
+// checkpoint remote but have no local ref yet — the "second device sees zero
+// checkpoints" case. Discovery is names-only (an ls-remote of
+// refs/entire/checkpoints/*, no object transfer): each remote-only checkpoint is
+// listed from its ref name alone and hydrated lazily on a later read via the
+// on-demand ref fetch. Remote enumeration is best-effort and additive — a
+// failure logs and leaves the local results intact rather than failing the
+// whole listing.
 func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err //nolint:wrapcheck // Propagating context cancellation
@@ -371,6 +413,7 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 	defer refs.Close()
 
 	var checkpoints []CheckpointInfo
+	seen := make(map[id.CheckpointID]struct{})
 	err = refs.ForEach(func(ref *plumbing.Reference) error {
 		cid, ok := ParseRef(ref.Name())
 		if !ok {
@@ -385,14 +428,59 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 			return nil //nolint:nilerr // skip unreadable refs, keep listing
 		}
 		checkpoints = append(checkpoints, readCommittedInfoFromCheckpointTree(cid, tree))
+		seen[cid] = struct{}{}
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("iterate checkpoint refs: %w", err)
 	}
 
+	if s.remoteRefLister != nil && remoteListDiscoveryEnabled(ctx) {
+		checkpoints = s.appendRemoteDiscovered(ctx, checkpoints, seen)
+	}
+
 	sortCheckpointInfosByRecency(checkpoints)
 	return checkpoints, nil
+}
+
+// appendRemoteDiscovered enumerates checkpoint refs on the configured checkpoint
+// remote and appends any that are not present locally (tracked in seen) as
+// not-yet-hydrated CheckpointInfos. It never fetches objects: the ref name
+// yields the checkpoint ID, and a ULID ID yields its creation time, so a
+// discovered checkpoint sorts and displays correctly before its first read
+// hydrates the rest. Best-effort: an enumeration failure logs and returns the
+// unchanged local list.
+func (s *gitRefsStore) appendRemoteDiscovered(ctx context.Context, checkpoints []CheckpointInfo, seen map[id.CheckpointID]struct{}) []CheckpointInfo {
+	remoteRefs, err := s.remoteRefLister(ctx)
+	if err != nil {
+		logging.Warn(ctx, "git-refs: remote checkpoint enumeration failed; listing local refs only",
+			slog.String("error", err.Error()))
+		return checkpoints
+	}
+	for _, refName := range remoteRefs {
+		cid, ok := ParseRef(refName)
+		if !ok {
+			continue
+		}
+		if _, dup := seen[cid]; dup {
+			continue
+		}
+		seen[cid] = struct{}{}
+		checkpoints = append(checkpoints, remoteDiscoveredInfo(cid))
+	}
+	return checkpoints
+}
+
+// remoteDiscoveredInfo builds the minimal CheckpointInfo for a checkpoint known
+// only by its remote ref name. Its contents are not fetched here (that happens
+// lazily on read); CreatedAt is recovered from the ULID timestamp so the entry
+// sorts by real creation time, and is left zero for a (rare) legacy-hex ref.
+func remoteDiscoveredInfo(cid id.CheckpointID) CheckpointInfo {
+	info := CheckpointInfo{CheckpointID: cid}
+	if createdAt, ok := cid.Time(); ok {
+		info.CreatedAt = createdAt
+	}
+	return info
 }
 
 // GetCheckpointAuthor returns the author of the checkpoint ref's tip commit (the

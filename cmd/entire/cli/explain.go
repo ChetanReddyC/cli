@@ -2044,14 +2044,24 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	// Warn (once per process) if metadata branches are disconnected
 	strategy.WarnIfMetadataDisconnected()
 
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	// This is a user-facing enumeration (`entire checkpoint list` / the branch
+	// `explain` view), so opt into git-refs remote discovery: when a
+	// checkpoint_remote is configured, List enumerates it (names only) to
+	// surface refs-native checkpoints written on another machine, and the
+	// fetchers hydrate each on read. WithRemoteListDiscovery keeps this off the
+	// per-turn hook hot path.
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		BlobFetcher:     FetchBlobsByHash,
+		RefFetcher:      FetchCheckpointRef,
+		RemoteRefLister: ListCheckpointRefsOnRemote,
+	})
 	if err != nil {
 		return nil, false, fmt.Errorf("open checkpoint store: %w", err)
 	}
 	store := stores.Persistent
 
 	// Get all committed checkpoints for lookup.
-	committedInfos, err := store.List(ctx)
+	committedInfos, err := store.List(checkpoint.WithRemoteListDiscovery(ctx))
 	if err != nil {
 		committedInfos = nil // Continue without committed checkpoints
 	}
