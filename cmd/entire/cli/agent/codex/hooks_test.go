@@ -21,7 +21,7 @@ func setupTestEnv(t *testing.T) string {
 	return tempDir
 }
 
-func TestInstallHooks_CreatesConfig(t *testing.T) {
+func TestInstallHooks_CreatesHooksJSONOnly(t *testing.T) {
 	tempDir := setupTestEnv(t)
 
 	ag := &CodexAgent{}
