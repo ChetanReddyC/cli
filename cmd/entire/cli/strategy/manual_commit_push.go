@@ -187,7 +187,36 @@ func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool
 	if ps.hasCheckpointURL() {
 		return false
 	}
+
+	// The hazard only arises for a configured remote (the `git remote add
+	// origin …` then first-push flow). Pushing straight to a bare URL hands that
+	// URL to the hook as the remote arg, and git never records a
+	// refs/remotes/<url>/* tracking ref for it — so a tracking-ref check would
+	// defer the metadata forever. Publish for a non-configured (URL) target
+	// rather than strand it; the first-branch scenario always uses a named
+	// remote.
+	if !isConfiguredRemote(ctx, ps.remote) {
+		return false
+	}
+
+	// Known limitation, accepted for the no-network design: a tracking ref left
+	// over from before a remote was deleted and recreated empty under the same
+	// URL reads as "established", so v1 would publish to the now-empty remote.
+	// Detecting that requires asking the remote — the network round trip we
+	// deliberately avoid here. The scenario is rare and its default branch is
+	// recoverable by resetting it on the forge.
 	return !remoteHasTrackingRefs(ctx, ps.remote)
+}
+
+// isConfiguredRemote reports whether name is a configured git remote, as
+// opposed to a bare URL that git passes through verbatim when a push targets a
+// URL directly. Local and best-effort (reads config, no network); any error is
+// treated as "not a configured remote".
+func isConfiguredRemote(ctx context.Context, name string) bool {
+	if name == "" {
+		return false
+	}
+	return exec.CommandContext(ctx, "git", "remote", "get-url", name).Run() == nil
 }
 
 // remoteHasTrackingRefs reports whether any refs/remotes/<remote>/* ref exists

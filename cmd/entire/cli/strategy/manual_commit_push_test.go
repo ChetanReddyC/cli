@@ -37,6 +37,12 @@ func TestDeferCheckpointPushOnEmptyRemote_UsesLocalTrackingRefs(t *testing.T) {
 	require.True(t, deferCheckpointPushOnEmptyRemote(ctx, ps),
 		"a remote with no tracking refs must defer")
 
+	// A push straight to a bare URL is not a configured remote; git never records
+	// a tracking ref for it, so the guard must publish rather than defer forever.
+	require.False(t,
+		deferCheckpointPushOnEmptyRemote(ctx, pushSettings{remote: "https://example.invalid/repo.git"}),
+		"a bare-URL push target must not defer")
+
 	// git records a remote-tracking ref after the first successful push; simulate
 	// that locally (no network). The remote is now established → publish.
 	run("update-ref", "refs/remotes/origin/main", "HEAD")
