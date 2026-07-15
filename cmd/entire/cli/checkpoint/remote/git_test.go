@@ -1254,7 +1254,9 @@ func TestLooksLikeSSHAuthFailure(t *testing.T) {
 		{"git push: Permission denied (publickey).", true},
 		{"Permission denied (publickey,password).", true},
 		{"ERROR: Permission denied (publickey).\r\nfatal: Could not read from remote repository.", true},
-		{"fatal: Could not read from remote repository.", true},
+		{"fatal: Could not read from remote repository.", false}, // generic transport epilogue, not auth
+		{"ssh: connect to host example.com port 22: Connection refused\nfatal: Could not read from remote repository.", false},
+		{"enter passphrase for key '/home/me/.ssh/id_rsa':", false},
 		{"non-fast-forward", false},
 		{"Connection timed out", false},
 		{"", false},

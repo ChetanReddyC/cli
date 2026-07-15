@@ -78,15 +78,16 @@ func LooksLikeSSHAuthFailure(errText string) bool {
 		return false
 	}
 	lower := strings.ToLower(errText)
+	// Keep needles auth-specific. Do not match git's generic
+	// "Could not read from remote repository" epilogue — that also appears on
+	// network failures where an ssh-agent hint would be wrong. Real auth
+	// failures always include a Permission denied / auth-methods line too.
 	needles := []string{
 		"permission denied (publickey)",
 		"permission denied (keyboard-interactive",
 		"permission denied (password)",
 		"too many authentication failures",
 		"no more authentication methods to try",
-		"could not read from remote repository",
-		"enter passphrase for key",          // should not appear under BatchMode, but keep
-		"error reading ssh protocol banner", // sometimes accompanies aborted auth
 	}
 	for _, n := range needles {
 		if strings.Contains(lower, n) {
