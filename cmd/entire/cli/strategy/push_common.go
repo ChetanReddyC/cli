@@ -181,7 +181,7 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) e
 	// Non-interactive SSH (pre-push BatchMode): auth failures cannot be fixed by
 	// fetch+rebase, and retrying would just reprint the same opaque error.
 	// Surface an actionable ssh-agent hint and skip recovery (issue #1523).
-	if remote.IsNonInteractiveSSH(ctx) && remote.LooksLikeSSHAuthFailure(err.Error()) {
+	if nonInteractiveSSHAuthFailure(ctx, err) {
 		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't push %s: %v\n", refLabel, err)
 		printNonInteractiveSSHAuthHint()
 		printCheckpointRemoteHint(target)
@@ -201,7 +201,7 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) e
 	if syncErr != nil {
 		stop("")
 		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", refLabel, syncErr)
-		if remote.IsNonInteractiveSSH(ctx) && remote.LooksLikeSSHAuthFailure(syncErr.Error()) {
+		if nonInteractiveSSHAuthFailure(ctx, syncErr) {
 			printNonInteractiveSSHAuthHint()
 		}
 		printCheckpointRemoteHint(target)
@@ -216,7 +216,7 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) e
 	if result, err := tryPushRefCommon(ctx, target, ref); err != nil {
 		stop("")
 		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to push %s after sync: %v\n", refLabel, err)
-		if remote.IsNonInteractiveSSH(ctx) && remote.LooksLikeSSHAuthFailure(err.Error()) {
+		if nonInteractiveSSHAuthFailure(ctx, err) {
 			printNonInteractiveSSHAuthHint()
 		}
 		printCheckpointRemoteHint(target)
@@ -234,6 +234,13 @@ func refDisplayName(ref plumbing.ReferenceName) string {
 		return ref.Short()
 	}
 	return ref.String()
+}
+
+// nonInteractiveSSHAuthFailure reports whether err is an SSH auth-shaped
+// failure under a BatchMode (non-interactive) context. Used to print the
+// actionable ssh-agent hint and skip useless recovery retries.
+func nonInteractiveSSHAuthFailure(ctx context.Context, err error) bool {
+	return err != nil && remote.IsNonInteractiveSSH(ctx) && remote.LooksLikeSSHAuthFailure(err.Error())
 }
 
 // printCheckpointRemoteHint prints a hint when a push to a checkpoint URL fails.

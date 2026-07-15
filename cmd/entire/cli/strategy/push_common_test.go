@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
@@ -1688,4 +1689,15 @@ func TestPrintNonInteractiveSSHAuthHint(t *testing.T) {
 	assert.Contains(t, out, "ssh-add")
 	assert.Contains(t, out, "Checkpoint push skipped")
 	assert.Equal(t, 1, strings.Count(out, "Checkpoint push skipped"), "hint must print once")
+}
+
+func TestNonInteractiveSSHAuthFailure(t *testing.T) {
+	t.Parallel()
+	authErr := errors.New("git push: Permission denied (publickey).")
+	ctx := remote.WithNonInteractiveSSH(context.Background())
+	assert.True(t, nonInteractiveSSHAuthFailure(ctx, authErr))
+	assert.False(t, nonInteractiveSSHAuthFailure(context.Background(), authErr),
+		"interactive context must not treat auth errors as BatchMode hints")
+	assert.False(t, nonInteractiveSSHAuthFailure(ctx, errors.New("non-fast-forward")))
+	assert.False(t, nonInteractiveSSHAuthFailure(ctx, nil))
 }

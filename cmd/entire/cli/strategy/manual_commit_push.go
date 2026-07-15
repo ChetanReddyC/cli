@@ -360,7 +360,8 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 
 	// Fast path: push all refs in one round-trip (fast-forward-only). If every
 	// ref was up to date or fast-forwarded, we're done.
-	if err := batchPushRefs(pushCtx, pushTarget, existing); err == nil {
+	batchErr := batchPushRefs(pushCtx, pushTarget, existing)
+	if batchErr == nil {
 		stop(" done")
 		if removeErr := queue.Remove(existing); removeErr != nil {
 			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
@@ -369,6 +370,16 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 		return len(existing), nil
 	}
 	stop("")
+
+	// Non-interactive SSH auth failures cannot be fixed by per-ref
+	// fetch+replay. Surface the same actionable hint as the v1 doPushRef path
+	// (issue #1523) instead of only logging to .entire/logs/.
+	if nonInteractiveSSHAuthFailure(pushCtx, batchErr) {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't push checkpoint refs: %v\n", batchErr)
+		printNonInteractiveSSHAuthHint()
+		printCheckpointRemoteHint(pushTarget)
+		return 0, batchErr
+	}
 
 	// At least one ref was rejected — typically a non-fast-forward divergence
 	// (the same checkpoint re-written on another machine). Retry per ref with
@@ -383,6 +394,9 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 		if err := pushCheckpointRefWithRecovery(pushCtx, pushTarget, ref); err != nil {
 			logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 				slog.String("ref", ref.String()), slog.String("error", err.Error()))
+			if nonInteractiveSSHAuthFailure(pushCtx, err) {
+				printNonInteractiveSSHAuthHint()
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
