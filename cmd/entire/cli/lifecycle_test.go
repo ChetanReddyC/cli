@@ -2237,7 +2237,7 @@ func TestPromptWindowStaleHookDoesNotResetEarly(t *testing.T) {
 }
 
 // TestHandleLifecycleSessionStart_NoSynchronousNetworkForTrailEnablement
-// guards against #450 (SessionStart hooks stalling Claude Code startup): the
+// guards against SessionStart hooks stalling agent startup: the
 // trails-enablement cache refresh must be handed off to a detached subprocess,
 // never performed inline on the SessionStart hook path. A slow/unreachable API
 // host previously added up to trailEnablementSessionStartRefreshTimeout (1s) of
@@ -2257,8 +2257,8 @@ func TestHandleLifecycleSessionStart_NoSynchronousNetworkForTrailEnablement(t *t
 
 	// Blackhole https host: accept connections but never complete the TLS
 	// handshake or respond, so an inline dial stalls until a timeout fires
-	// (mirrors the unreachable-host case that motivated #450) rather than
-	// failing fast.
+	// (mirrors the unreachable-host case that motivated the detached refresh)
+	// rather than failing fast.
 	var dialed int32
 	var lc net.ListenConfig
 	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
@@ -2305,15 +2305,15 @@ func TestHandleLifecycleSessionStart_NoSynchronousNetworkForTrailEnablement(t *t
 	}
 	// Backstops: SessionStart neither contacted the API host nor blocked.
 	if got := atomic.LoadInt32(&dialed); got != 0 {
-		t.Fatalf("SessionStart dialed the trails-enablement API synchronously (#450 regression); the refresh must run out of process")
+		t.Fatalf("SessionStart dialed the trails-enablement API synchronously; the refresh must run out of process")
 	}
 	if elapsed > time.Second {
-		t.Fatalf("handleLifecycleSessionStart took %v; trails-enablement refresh must be detached, not synchronous (#450)", elapsed)
+		t.Fatalf("handleLifecycleSessionStart took %v; trails-enablement refresh must be detached, not synchronous", elapsed)
 	}
 }
 
 // TestRunTrailEnablementRefresh_BoundedByTimeoutAgainstUnresponsiveHost
-// verifies the deferred work spawned for #450 still completes (or at least
+// verifies the deferred refresh work still completes (or at least
 // gives up) within its own bounded timeout when the API host never
 // responds — the network work that used to block SessionStart must still
 // happen, just out of the hook's critical path, and it must not hang forever.
@@ -2388,8 +2388,8 @@ func TestNewRefreshTrailEnablementCmd_APIFailureExitsZero(t *testing.T) {
 		"detached refresh command must exit 0 even when the API call fails (best-effort cache warming)")
 }
 
-// TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile guards the #450
-// diagnosability fix: the detached __refresh_trail_enablement child runs with
+// TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile guards
+// diagnosability: the detached __refresh_trail_enablement child runs with
 // stdout/stderr discarded, so a failing background refresh must still leave a
 // trail in .entire/logs/entire.log instead of vanishing. The command runs in a
 // repo with no origin remote, so the scope resolves-and-fails locally (no
@@ -2407,7 +2407,7 @@ func TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile(t *testing.T) {
 	logData, err := os.ReadFile(filepath.Join(root, ".entire", "logs", "entire.log"))
 	require.NoError(t, err)
 	require.Contains(t, string(logData), "trails enablement refresh skipped: scope unresolved",
-		"background refresh failure must be diagnosable in .entire/logs/entire.log (#450)")
+		"background refresh failure must be diagnosable in .entire/logs/entire.log")
 }
 
 // TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree guards the file-init
@@ -2433,7 +2433,7 @@ func TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree(t *testing.T) {
 }
 
 // TestTrailRefreshRecentlySpawned_ThrottlesWithinWindow verifies the spawn-side
-// guard (#450 follow-up): within trailRefreshSpawnThrottle of a recorded spawn,
+// guard: within trailRefreshSpawnThrottle of a recorded spawn,
 // further spawns are suppressed; once the window passes a fresh spawn is allowed
 // and re-recorded. Without this, an unreachable host — which never writes the
 // cache, so the hourly TTL never starts — would fork a refresh child on every
@@ -2454,7 +2454,7 @@ func TestTrailRefreshRecentlySpawned_ThrottlesWithinWindow(t *testing.T) {
 
 // TestSpawnDetachedTrailEnablementRefresh_CollapsesBurst verifies the throttle is
 // actually wired into the spawn path: a burst of SessionStart-driven attempts for
-// the same repo forks a single child, not one per hook (#450 follow-up).
+// the same repo forks a single child, not one per hook.
 func TestSpawnDetachedTrailEnablementRefresh_CollapsesBurst(t *testing.T) {
 	setupStopTestRepo(t)
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -203,7 +204,7 @@ func saveTrailsEnabledForScope(ctx context.Context, scope trailEnablementScope, 
 // cache when it's unknown/expired for scope. Callers on hot, latency-sensitive
 // paths (SessionStart) must not block on this: resolving the API token and
 // dialing TrailsEnabled can stall for seconds when the host is slow or
-// unreachable (VPN, firewall, offline — see #450). Instead of doing that
+// unreachable (VPN, firewall, offline). Instead of doing that
 // network work inline, hand it off to a detached `__refresh_trail_enablement`
 // subprocess and return immediately; a later SessionStart will observe the
 // freshly written cache once the subprocess completes. The "not supported"
@@ -219,10 +220,6 @@ func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEn
 	return nil
 }
 
-// runTrailEnablementRefresh performs the actual (potentially slow) network
-// refresh. It is invoked from the detached `__refresh_trail_enablement`
-// subprocess spawned by refreshTrailsEnabledCacheIfStaleForScope, never
-// synchronously from a hook path.
 // trailRefreshAPIClient is the authenticated-client seam used by
 // runTrailEnablementRefresh, swapped in tests so they can force the
 // refreshTrailsEnabledCacheForScope error branch (e.g. a broken API host)
@@ -230,14 +227,18 @@ func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEn
 // NewAuthenticatedAPIClient.
 var trailRefreshAPIClient = NewAuthenticatedAPIClient
 
+// runTrailEnablementRefresh performs the actual (potentially slow) network
+// refresh. It is invoked from the detached `__refresh_trail_enablement`
+// subprocess spawned by refreshTrailsEnabledCacheIfStaleForScope, never
+// synchronously from a hook path.
 func runTrailEnablementRefresh(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, trailEnablementRefreshTimeout)
 	defer cancel()
 
 	// This runs detached with stdout/stderr discarded, so log at debug to the
 	// repo's .entire/logs/entire.log (initialized by newRefreshTrailEnablementCmd).
-	// Without this, an unreachable/failing host — the exact #450 symptom — would
-	// leave the background refresh silently failing with no diagnostic trail.
+	// Without this, an unreachable/failing host would leave the background
+	// refresh silently failing with no diagnostic trail.
 	logCtx := logging.WithComponent(ctx, "trail-refresh")
 
 	scope, err := currentTrailEnablementScope(ctx)
@@ -281,6 +282,15 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 // `go test` binary doesn't understand `__refresh_trail_enablement` as an
 // argument). Production code always uses spawnDetachedTrailRefreshProcess.
 var trailRefreshSpawn = spawnDetachedTrailRefreshProcess
+
+// spawnDetachedTrailRefreshProcess starts `entire __refresh_trail_enablement`
+// as a detached child so the trails-enablement network refresh can't add
+// latency to the SessionStart hook that spawned it. The child runs from the
+// worktree root because the refresh resolves the origin remote and
+// git-common-dir for cache storage from its working directory.
+func spawnDetachedTrailRefreshProcess(worktreeRoot string) {
+	execx.SpawnDetached(worktreeRoot, "__refresh_trail_enablement")
+}
 
 // trailRefreshSpawnThrottle bounds how often SessionStart forks a detached
 // refresh child for a given repo. When the API host is unreachable the refresh
@@ -355,8 +365,8 @@ func newRefreshTrailEnablementCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			// Detached child with discarded stdout/stderr: initialize file
-			// logging so a failing background refresh (the #450 unreachable-host
-			// symptom) is diagnosable in .entire/logs/entire.log rather than
+			// logging so a failing background refresh (e.g. an unreachable
+			// host) is diagnosable in .entire/logs/entire.log rather than
 			// vanishing. Guard on WorktreeRoot first — matching resume/rewind/
 			// reset/explain — so a child whose worktree was removed or relocated
 			// between spawn and exec (or a manual invocation outside a repo)
