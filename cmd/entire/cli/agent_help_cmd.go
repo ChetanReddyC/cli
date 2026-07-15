@@ -68,15 +68,31 @@ high-level map of when to use entire and which subcommand; pass a command path
 // agentHelpRepoContext resolves the origin remote ONCE and derives both the repo
 // line (forge/owner/repo, or "" when it can't be determined — no origin /
 // detached HEAD — so the renderer degrades gracefully) and whether trails are
-// enabled for that scope. Previously the repo line and the trails check resolved
-// origin independently, costing two git subprocesses per `entire agent-help` run.
+// enabled for that scope. Unlike the prompt-path gate, agent-help is an explicit
+// command and can afford to refresh an absent or stale enablement decision rather
+// than incorrectly treating an unknown cache entry as "trails unavailable".
 func agentHelpRepoContext(ctx context.Context) (repoLine string, trailsEnabled bool) {
+	return agentHelpRepoContextWithRefresh(ctx, refreshTrailsEnabledCacheIfStaleForScope)
+}
+
+// agentHelpRepoContextWithRefresh keeps the refresh dependency explicit so the
+// cache-miss behavior can be tested without authenticating against a real API.
+func agentHelpRepoContextWithRefresh(
+	ctx context.Context,
+	refresh func(context.Context, trailEnablementScope) error,
+) (repoLine string, trailsEnabled bool) {
 	scope, err := currentTrailEnablementScope(ctx)
 	if err != nil {
 		return "", false
 	}
 	if scope.Forge != "" && scope.Owner != "" && scope.Repo != "" {
 		repoLine = scope.RepoKey
+	}
+
+	refreshCtx, cancel := context.WithTimeout(ctx, trailEnablementRefreshTimeout)
+	defer cancel()
+	if err := refresh(refreshCtx, scope); err != nil {
+		return repoLine, false
 	}
 	return repoLine, cachedTrailsEnablementForScope(ctx, scope, time.Now()) == trailEnablementCacheEnabled
 }

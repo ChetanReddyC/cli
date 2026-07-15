@@ -2,11 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/spf13/cobra"
 )
 
@@ -88,6 +92,40 @@ func TestAgentHelpCommands_GatesTrailOnTrailsEnabled(t *testing.T) {
 	}
 	if !contains(disabled, "checkpoint") {
 		t.Errorf("non-trail commands should always be advertised, got %v", disabled)
+	}
+}
+
+// agent-help is invoked explicitly, so an absent cache entry must trigger the
+// repo-scoped trails availability check instead of being treated as disabled.
+// Not parallel: changes the process working directory.
+func TestAgentHelpRepoContext_RefreshesUnknownTrailsEnablement(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:acme/app.git")
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git remote add: %v", err)
+	}
+	t.Chdir(repoDir)
+
+	refreshCalls := 0
+	repoLine, enabled := agentHelpRepoContextWithRefresh(t.Context(), func(ctx context.Context, scope trailEnablementScope) error {
+		refreshCalls++
+		if scope.RepoKey != "gh/acme/app" {
+			t.Fatalf("refresh scope repo = %q, want gh/acme/app", scope.RepoKey)
+		}
+		return saveTrailsEnabledForScope(ctx, scope, true, time.Now())
+	})
+
+	if refreshCalls != 1 {
+		t.Fatalf("refresh calls = %d, want 1", refreshCalls)
+	}
+	if repoLine != "gh/acme/app" {
+		t.Errorf("repo line = %q, want gh/acme/app", repoLine)
+	}
+	if !enabled {
+		t.Fatal("trails should be enabled after the availability refresh succeeds")
 	}
 }
 
