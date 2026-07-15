@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
 )
@@ -111,7 +112,9 @@ func agentHelpRepoContextWithRefresh(
 		// A separate short backoff keeps an offline authenticated user from paying
 		// this timeout on every agent-help invocation. It must not alter the shared
 		// enablement decision, which SessionStart uses for context injection.
-		_ = saveAgentHelpTrailsRefreshFailure(ctx, scope, time.Now())
+		if cacheErr := saveAgentHelpTrailsRefreshFailure(ctx, scope, time.Now()); cacheErr != nil {
+			logging.Debug(ctx, "failed to save agent-help trails refresh backoff", "error", cacheErr)
+		}
 		return repoLine, false
 	}
 	return repoLine, cachedTrailsEnablementForScope(ctx, scope, time.Now()) == trailEnablementCacheEnabled

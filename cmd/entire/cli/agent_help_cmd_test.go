@@ -15,6 +15,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const agentHelpTestRepo = "gh/acme/app"
+
 // commandNames returns the Use-name of each command, for assertions.
 func commandNames(cmds []*cobra.Command) []string {
 	names := make([]string, 0, len(cmds))
@@ -114,8 +116,8 @@ func TestAgentHelpRepoContext_RefreshesUnknownTrailsEnablement(t *testing.T) {
 	refreshCalls := 0
 	repoLine, enabled := agentHelpRepoContextWithRefresh(t.Context(), func(ctx context.Context, scope trailEnablementScope) error {
 		refreshCalls++
-		if scope.RepoKey != "gh/acme/app" {
-			t.Fatalf("refresh scope repo = %q, want gh/acme/app", scope.RepoKey)
+		if scope.RepoKey != agentHelpTestRepo {
+			t.Fatalf("refresh scope repo = %q, want %s", scope.RepoKey, agentHelpTestRepo)
 		}
 		return saveTrailsEnabledForScope(ctx, scope, true, time.Now())
 	})
@@ -123,8 +125,8 @@ func TestAgentHelpRepoContext_RefreshesUnknownTrailsEnablement(t *testing.T) {
 	if refreshCalls != 1 {
 		t.Fatalf("refresh calls = %d, want 1", refreshCalls)
 	}
-	if repoLine != "gh/acme/app" {
-		t.Errorf("repo line = %q, want gh/acme/app", repoLine)
+	if repoLine != agentHelpTestRepo {
+		t.Errorf("repo line = %q, want %s", repoLine, agentHelpTestRepo)
 	}
 	if !enabled {
 		t.Fatal("trails should be enabled after the availability refresh succeeds")
@@ -213,8 +215,8 @@ func TestAgentHelpRepoContext_SkipsRefreshWithoutLocalIdentity(t *testing.T) {
 	if refreshCalls != 0 {
 		t.Fatalf("refresh calls = %d, want 0 without a local auth identity", refreshCalls)
 	}
-	if repoLine != "gh/acme/app" {
-		t.Errorf("repo line = %q, want gh/acme/app", repoLine)
+	if repoLine != agentHelpTestRepo {
+		t.Errorf("repo line = %q, want %s", repoLine, agentHelpTestRepo)
 	}
 	if enabled {
 		t.Fatal("trails should not be advertised without a local auth identity")
@@ -226,10 +228,10 @@ func TestRunAgentHelp_TrailDrillGatedOnTrailsEnabled(t *testing.T) {
 	t.Parallel()
 	root := NewRootCmd()
 
-	if _, err := runAgentHelp(root, []string{"trail"}, "gh/acme/app", false, true); err != nil {
+	if _, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, true); err != nil {
 		t.Errorf("trail drill should resolve when trails enabled: %v", err)
 	}
-	_, err := runAgentHelp(root, []string{"trail"}, "gh/acme/app", false, false)
+	_, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, false)
 	if err == nil {
 		t.Fatalf("trail drill should be unavailable when trails disabled")
 	}
@@ -261,7 +263,7 @@ func TestRunAgentHelp_JSONGatesTrailOnTrailsEnabled(t *testing.T) {
 		return false
 	}
 
-	disabled, err := runAgentHelp(NewRootCmd(), nil, "gh/acme/app", true /*json*/, false /*trailsDisabled*/)
+	disabled, err := runAgentHelp(NewRootCmd(), nil, agentHelpTestRepo, true /*json*/, false /*trailsDisabled*/)
 	if err != nil {
 		t.Fatalf("json top (trails disabled): %v", err)
 	}
@@ -272,7 +274,7 @@ func TestRunAgentHelp_JSONGatesTrailOnTrailsEnabled(t *testing.T) {
 		t.Errorf("checkpoint should always appear in --json subcommands:\n%s", disabled)
 	}
 
-	enabled, err := runAgentHelp(NewRootCmd(), nil, "gh/acme/app", true, true)
+	enabled, err := runAgentHelp(NewRootCmd(), nil, agentHelpTestRepo, true, true)
 	if err != nil {
 		t.Fatalf("json top (trails enabled): %v", err)
 	}
@@ -292,11 +294,11 @@ func TestRunAgentHelp_DrillRejectsUnadvertisedCommands(t *testing.T) {
 	root.AddCommand(&cobra.Command{Use: "hooks", Short: "infra", Hidden: true})
 	root.AddCommand(&cobra.Command{Use: "reset", Short: "old", Deprecated: "use clean"})
 
-	if _, err := runAgentHelp(root, []string{"status"}, "gh/acme/app", false, true); err != nil {
+	if _, err := runAgentHelp(root, []string{"status"}, agentHelpTestRepo, false, true); err != nil {
 		t.Errorf("visible command should be drillable: %v", err)
 	}
 	for _, name := range []string{"hooks", "reset"} {
-		if _, err := runAgentHelp(root, []string{name}, "gh/acme/app", false, true); err == nil {
+		if _, err := runAgentHelp(root, []string{name}, agentHelpTestRepo, false, true); err == nil {
 			t.Errorf("drilling unadvertised command %q should error, matching the advertised listing", name)
 		}
 	}
@@ -308,7 +310,7 @@ func TestRunAgentHelp_DrillRejectsUnadvertisedCommands(t *testing.T) {
 func TestRenderAgentHelpTop_DisabledExampleIsNonTrail(t *testing.T) {
 	t.Parallel()
 
-	out := renderAgentHelpTop(NewRootCmd(), "gh/acme/app", false)
+	out := renderAgentHelpTop(NewRootCmd(), agentHelpTestRepo, false)
 	if !strings.Contains(out, "entire agent-help checkpoint") {
 		t.Errorf("disabled top should use checkpoint as the drill example:\n%s", out)
 	}
@@ -358,7 +360,7 @@ func TestRenderAgentHelpCommand_ShowsFlagsAndSubcommands(t *testing.T) {
 	cmd.AddCommand(&cobra.Command{Use: "show", Short: "Show a trail"})
 	cmd.AddCommand(&cobra.Command{Use: "list", Short: "List trails"})
 
-	out := renderAgentHelpCommand(cmd, "gh/acme/app", true)
+	out := renderAgentHelpCommand(cmd, agentHelpTestRepo, true)
 
 	for _, want := range []string{
 		"trail",
@@ -368,7 +370,7 @@ func TestRenderAgentHelpCommand_ShowsFlagsAndSubcommands(t *testing.T) {
 		"--branch",
 		"show",
 		"list",
-		"gh/acme/app",
+		agentHelpTestRepo,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("agent-help command output missing %q:\n%s", want, out)
@@ -385,13 +387,13 @@ func TestRenderAgentHelpTop_ListsCommandsRepoAndRule(t *testing.T) {
 	t.Parallel()
 
 	root := NewRootCmd()
-	out := renderAgentHelpTop(root, "gh/acme/app", true)
+	out := renderAgentHelpTop(root, agentHelpTestRepo, true)
 
 	for _, want := range []string{
 		"trail",             // hidden but revealed via annotation
 		"checkpoint",        // visible
 		"status",            // visible
-		"gh/acme/app",       // auto-detected repo
+		agentHelpTestRepo,   // auto-detected repo
 		"entire agent-help", // drill-down pointer
 		"never ask",         // the standing repo-inference rule
 	} {
@@ -408,7 +410,7 @@ func TestRunAgentHelp_Dispatch(t *testing.T) {
 
 	root := NewRootCmd()
 
-	top, err := runAgentHelp(root, nil, "gh/acme/app", false, true)
+	top, err := runAgentHelp(root, nil, agentHelpTestRepo, false, true)
 	if err != nil {
 		t.Fatalf("top: unexpected error: %v", err)
 	}
@@ -416,7 +418,7 @@ func TestRunAgentHelp_Dispatch(t *testing.T) {
 		t.Fatalf("top output unexpected:\n%s", top)
 	}
 
-	drill, err := runAgentHelp(root, []string{"trail"}, "gh/acme/app", false, true)
+	drill, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, true)
 	if err != nil {
 		t.Fatalf("drill: unexpected error: %v", err)
 	}
@@ -424,7 +426,7 @@ func TestRunAgentHelp_Dispatch(t *testing.T) {
 		t.Fatalf("drill output unexpected:\n%s", drill)
 	}
 
-	jsonOut, err := runAgentHelp(root, []string{"trail"}, "gh/acme/app", true, true)
+	jsonOut, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, true, true)
 	if err != nil {
 		t.Fatalf("json: unexpected error: %v", err)
 	}
@@ -441,8 +443,8 @@ func TestRunAgentHelp_Dispatch(t *testing.T) {
 	if parsed.Command != "entire trail" {
 		t.Errorf("json command = %q, want %q", parsed.Command, "entire trail")
 	}
-	if parsed.Repo != "gh/acme/app" {
-		t.Errorf("json repo = %q, want %q", parsed.Repo, "gh/acme/app")
+	if parsed.Repo != agentHelpTestRepo {
+		t.Errorf("json repo = %q, want %q", parsed.Repo, agentHelpTestRepo)
 	}
 	var hasRepoFlag bool
 	for _, f := range parsed.Flags {
