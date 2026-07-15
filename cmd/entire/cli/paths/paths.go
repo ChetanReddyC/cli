@@ -134,9 +134,12 @@ func AbsPath(ctx context.Context, relPath string) (string, error) {
 }
 
 // IsInfrastructurePath returns true if the path is part of CLI infrastructure
-// (i.e., inside the .entire directory)
+// (i.e., inside the .entire directory). It is used only to EXCLUDE infra paths
+// from checkpoints/tracking, so it matches case-insensitively on
+// case-insensitive filesystems via IsProtectedSubpath. Do not use it as a
+// containment/allow gate.
 func IsInfrastructurePath(path string) bool {
-	return IsSubpath(EntireDir, path)
+	return IsProtectedSubpath(EntireDir, path)
 }
 
 // IsSubpath reports whether child is lexically under parent (or equal to it).
@@ -144,17 +147,13 @@ func IsInfrastructurePath(path string) bool {
 // a crafted child like "/a/b/../../../etc/passwd" that escapes parent will
 // produce a relative path starting with ".." and be rejected.
 //
-// Matching honors the host OS's case sensitivity (see CaseInsensitiveFS): on
-// Windows/macOS ".Claude/x" is under ".claude" because they name the same
-// directory there, while on case-sensitive Linux they remain distinct. Folding
-// only ever widens containment to case variants of the same on-disk path; real
-// traversal escapes are still rejected regardless of case, so this cannot be
-// used to slip past a containment check.
+// Matching is case-SENSITIVE. This is the correct primitive for fail-closed
+// containment/allow checks (e.g. validating an attacker-influenced path stays
+// under an Entire-owned dir): on a case-sensitive volume a differently-cased
+// path names a different directory, so folding it in would fail open. For
+// EXCLUSION decisions that must also catch case variants on Windows/macOS, use
+// IsProtectedSubpath instead.
 func IsSubpath(parent, child string) bool {
-	if CaseInsensitiveFS() {
-		parent = strings.ToLower(parent)
-		child = strings.ToLower(child)
-	}
 	rel, err := filepath.Rel(parent, child)
 	if err != nil {
 		return false
@@ -162,20 +161,38 @@ func IsSubpath(parent, child string) bool {
 	return !IsRelativeTraversal(rel)
 }
 
+// IsProtectedSubpath reports whether child is under parent for the purpose of
+// EXCLUDING protected/infrastructure content from checkpoints and tracking.
+// Unlike IsSubpath it honors OS case-insensitivity (see CaseInsensitiveFS), so
+// a case variant of a protected dir (".Claude" vs ".claude") is still excluded
+// on Windows/macOS.
+//
+// SECURITY: never use this for allow/containment decisions. Case-folding widens
+// what counts as "inside" parent, which is safe only when the effect is to
+// exclude more. On a case-sensitive volume under a case-insensitive GOOS it
+// over-matches; for a fail-closed gate that would fail open. Use IsSubpath there.
+func IsProtectedSubpath(parent, child string) bool {
+	if CaseInsensitiveFS() {
+		return IsSubpath(strings.ToLower(parent), strings.ToLower(child))
+	}
+	return IsSubpath(parent, child)
+}
+
 // CaseInsensitiveFS reports whether path comparisons should be case-insensitive
 // on the host OS. This is OS-based, not volume-based: Windows and macOS default
 // to case-insensitive filesystems, Linux to case-sensitive. Keying on GOOS keeps
-// the result deterministic; on an atypical volume (e.g. a case-sensitive macOS
-// APFS volume) the only effect is that the exclusion/containment checks treat a
-// differently-cased path as matching, which merely over-excludes — the safe
-// direction for filters whose job is to keep sensitive paths out.
+// the result deterministic. It must only influence EXCLUSION decisions (see
+// IsProtectedSubpath / Equal): on an atypical volume (e.g. a case-sensitive
+// macOS APFS volume) it treats a differently-cased path as matching, which is
+// safe only when the effect is to exclude more, never to widen an allow gate.
 func CaseInsensitiveFS() bool {
 	return runtime.GOOS == osWindows || runtime.GOOS == osDarwin
 }
 
-// Equal reports whether two paths refer to the same location, honoring the
-// host OS's case sensitivity (see CaseInsensitiveFS). Both inputs are cleaned
-// and slash-normalized before comparison.
+// Equal reports whether two paths refer to the same location, honoring the host
+// OS's case sensitivity (see CaseInsensitiveFS). Both inputs are cleaned and
+// slash-normalized before comparison. Like IsProtectedSubpath, this is intended
+// for EXCLUSION matching (e.g. protected files), not fail-closed containment.
 func Equal(a, b string) bool {
 	a = filepath.Clean(filepath.FromSlash(a))
 	b = filepath.Clean(filepath.FromSlash(b))

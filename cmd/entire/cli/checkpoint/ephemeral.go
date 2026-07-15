@@ -1217,7 +1217,7 @@ func isProtectedCheckpointPath(relPath string) bool {
 		}
 	}
 	for _, dir := range agent.AllProtectedDirs() {
-		if paths.IsSubpath(filepath.Clean(filepath.FromSlash(dir)), cleanPath) {
+		if paths.IsProtectedSubpath(filepath.Clean(filepath.FromSlash(dir)), cleanPath) {
 			return true
 		}
 	}

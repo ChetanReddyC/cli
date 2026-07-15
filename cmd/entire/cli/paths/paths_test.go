@@ -104,24 +104,39 @@ func TestCaseInsensitiveFS(t *testing.T) {
 	}
 }
 
-// TestIsSubpath_CaseSensitivity and TestEqual_CaseSensitivity assert the
-// OS-based folding: case variants of a protected path are matched on
-// Windows/macOS (where they name the same file) and remain distinct on
-// case-sensitive Linux.
-func TestIsSubpath_CaseSensitivity(t *testing.T) {
+// TestIsSubpath_AlwaysCaseSensitive locks in that IsSubpath — the fail-closed
+// containment primitive used by allow gates (rewind/utils) — never folds case
+// on any OS. A differently-cased path must not count as contained, or a
+// crafted, attacker-influenced value could fail open on a case-sensitive volume.
+func TestIsSubpath_AlwaysCaseSensitive(t *testing.T) {
 	t.Parallel()
-	// On a case-insensitive FS these name the same dir, so containment holds.
-	got := IsSubpath(".claude", ".Claude/marker.txt")
-	if got != CaseInsensitiveFS() {
-		t.Errorf("IsSubpath(.claude, .Claude/marker.txt) = %v, want %v (GOOS=%s)",
-			got, CaseInsensitiveFS(), runtime.GOOS)
+	if IsSubpath(".entire/metadata", ".Entire/metadata") {
+		t.Error("IsSubpath must be case-sensitive (fail-closed); .Entire/metadata must not be under .entire/metadata")
 	}
-	// Same case is always a subpath; traversal is always rejected, regardless of case.
 	if !IsSubpath(".claude", ".claude/marker.txt") {
 		t.Error("IsSubpath(.claude, .claude/marker.txt) = false, want true")
 	}
-	if IsSubpath(".claude", ".Claude/../../etc/passwd") {
-		t.Error("IsSubpath must reject traversal even when case-folding")
+	if IsSubpath(".claude", ".claude/../../etc/passwd") {
+		t.Error("IsSubpath must reject traversal")
+	}
+}
+
+// TestIsProtectedSubpath_CaseSensitivity asserts OS-based folding for the
+// EXCLUSION helper: case variants match on Windows/macOS (where they name the
+// same on-disk path), stay distinct on case-sensitive Linux, and traversal is
+// always rejected.
+func TestIsProtectedSubpath_CaseSensitivity(t *testing.T) {
+	t.Parallel()
+	got := IsProtectedSubpath(".claude", ".Claude/marker.txt")
+	if got != CaseInsensitiveFS() {
+		t.Errorf("IsProtectedSubpath(.claude, .Claude/marker.txt) = %v, want %v (GOOS=%s)",
+			got, CaseInsensitiveFS(), runtime.GOOS)
+	}
+	if !IsProtectedSubpath(".claude", ".claude/marker.txt") {
+		t.Error("IsProtectedSubpath(.claude, .claude/marker.txt) = false, want true")
+	}
+	if IsProtectedSubpath(".claude", ".Claude/../../etc/passwd") {
+		t.Error("IsProtectedSubpath must reject traversal even when case-folding")
 	}
 }
 
