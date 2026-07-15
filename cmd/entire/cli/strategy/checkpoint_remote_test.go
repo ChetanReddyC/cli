@@ -11,7 +11,9 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
@@ -1124,6 +1126,183 @@ func TestEnsurePrimaryRef_OfflineCheckpointRemoteFallsBackToOrphan(t *testing.T)
 	tree, err := commit.Tree()
 	require.NoError(t, err)
 	assert.Empty(t, tree.Entries, "expected empty orphan fallback when checkpoint remote is unreachable")
+}
+
+// TestURLTargetsCheckpointRepo verifies the issue #1374 guard that distinguishes a
+// derived checkpoint URL from remote.FetchURL's silent origin fallback: only URLs
+// whose owner/repo match the configured checkpoint repo (host-agnostic,
+// case-insensitive) are accepted.
+func TestURLTargetsCheckpointRepo(t *testing.T) {
+	t.Parallel()
+
+	config := &settings.CheckpointRemoteConfig{Provider: "github", Repo: "org/checkpoints"}
+
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"HTTPS checkpoint repo", "https://github.com/org/checkpoints.git", true},
+		{"SSH checkpoint repo", "git@github.com:org/checkpoints.git", true},
+		{"enterprise host, same repo path", "https://github.example.com/org/checkpoints.git", true},
+		{"case-insensitive owner/repo", "https://github.com/Org/Checkpoints.git", true},
+		{"origin fallback (different repo)", "https://github.com/org/main-repo.git", false},
+		{"different owner", "https://github.com/other/checkpoints.git", false},
+		{"unparseable url", "not a url", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, urlTargetsCheckpointRepo(tt.url, config))
+		})
+	}
+}
+
+// TestEnsurePrimaryRef_CheckpointRemoteTakesPrecedenceOverOrigin verifies issue
+// #1374: when a checkpoint_remote is configured, EnsurePrimaryRef adopts its branch
+// even when a stale origin/entire/checkpoints/v1 tracking ref is present. Origin is
+// no longer the authoritative checkpoint store, so it must not be seeded from.
+//
+// Not parallel: uses t.Chdir().
+func TestEnsurePrimaryRef_CheckpointRemoteTakesPrecedenceOverOrigin(t *testing.T) {
+	ctx := context.Background()
+
+	// Checkpoint remote holds the authoritative checkpoint.
+	checkpointRemoteDir := t.TempDir()
+	testutil.InitRepo(t, checkpointRemoteDir)
+	testutil.WriteFile(t, checkpointRemoteDir, "f.txt", "init")
+	testutil.GitAdd(t, checkpointRemoteDir, "f.txt")
+	testutil.GitCommit(t, checkpointRemoteDir, "init")
+	cpDefault := checkpointRemoteCurrentBranch(ctx, t, checkpointRemoteDir)
+	runCheckpointRemoteGit(ctx, t, checkpointRemoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, checkpointRemoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, checkpointRemoteDir, "aaaaaaaaaaaa", "authoritative")
+	runCheckpointRemoteGit(ctx, t, checkpointRemoteDir, "checkout", cpDefault)
+	cpTip := checkpointRemoteRevParse(ctx, t, checkpointRemoteDir, paths.MetadataBranchName)
+
+	// Origin holds a different, stale checkpoint branch.
+	originDir := t.TempDir()
+	testutil.InitRepo(t, originDir)
+	testutil.WriteFile(t, originDir, "f.txt", "init")
+	testutil.GitAdd(t, originDir, "f.txt")
+	testutil.GitCommit(t, originDir, "init")
+	originDefault := checkpointRemoteCurrentBranch(ctx, t, originDir)
+	runCheckpointRemoteGit(ctx, t, originDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, originDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, originDir, "bbbbbbbbbbbb", "stale")
+	runCheckpointRemoteGit(ctx, t, originDir, "checkout", originDefault)
+
+	// Local repo (device B): fetch origin so a stale origin tracking ref exists,
+	// then repoint origin at an SSH URL so FetchURL derives the github checkpoint
+	// URL. The stale tracking ref and its objects survive the set-url.
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	runCheckpointRemoteGit(ctx, t, localDir, "remote", "add", "origin", "file://"+originDir)
+	runCheckpointRemoteGit(ctx, t, localDir, "fetch", "origin")
+	runCheckpointRemoteGit(ctx, t, localDir, "remote", "set-url", "origin", "git@github.com:org/main-repo.git")
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, paths.SettingsFileName),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
+		0o644,
+	))
+
+	// The SSH origin + github checkpoint_remote resolves (via remote.FetchURL) to
+	// git@github.com:org/checkpoints.git. Redirect that derived URL to the local
+	// checkpoint remote so the real fetch path runs hermetically.
+	redirectGitURL(t, localDir, "git@github.com:org/checkpoints.git", "file://"+checkpointRemoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	// Sanity: the stale origin tracking ref exists and differs from the remote.
+	originRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), true)
+	require.NoError(t, err, "test setup: origin tracking ref should exist")
+	require.NotEqual(t, cpTip, originRef.Hash().String(), "test setup: origin must differ from checkpoint remote")
+
+	require.NoError(t, EnsurePrimaryRef(WithCheckpointRemoteBootstrap(ctx), repo))
+
+	got := checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName)
+	assert.Equal(t, cpTip, got, "local branch should adopt the checkpoint remote, not the stale origin ref")
+	files := checkpointRemoteMetadataFiles(ctx, t, localDir)
+	assert.Contains(t, files, "aa/aaaaaaaaaa/"+paths.MetadataFileName, "authoritative checkpoint-remote data should be present")
+	assert.NotContains(t, files, "bb/bbbbbbbbbb/"+paths.MetadataFileName, "stale origin data must not be adopted")
+}
+
+// TestEnsurePrimaryRef_HealsVercelOnlyOrphanFromCheckpointRemote verifies the issue
+// #1374 heal covers a local metadata branch carrying only vercel.json — the
+// orphan-init state in a vercel-enabled repo. A literal empty-tree check skipped it
+// (the tree is not empty), leaving those devices divergent forever.
+//
+// Not parallel: uses t.Chdir().
+func TestEnsurePrimaryRef_HealsVercelOnlyOrphanFromCheckpointRemote(t *testing.T) {
+	ctx := context.Background()
+
+	// Checkpoint remote holds the authoritative checkpoint.
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	remoteDefault := checkpointRemoteCurrentBranch(ctx, t, remoteDir)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "aaaaaaaaaaaa", "device-a")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", remoteDefault)
+	remoteTip := checkpointRemoteRevParse(ctx, t, remoteDir, paths.MetadataBranchName)
+
+	// Local repo (device B): a local orphan carrying only vercel.json — the
+	// vercel-enabled bug state left behind by orphan initialization.
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	runCheckpointRemoteGit(ctx, t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
+	localDefault := checkpointRemoteCurrentBranch(ctx, t, localDir)
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, localDir, "rm", "-rf", ".")
+	testutil.WriteFile(t, localDir, vercelconfig.FileName, `{"git":{"deploymentEnabled":{"entire/**":false}}}`)
+	runCheckpointRemoteGit(ctx, t, localDir, "add", vercelconfig.FileName)
+	runCheckpointRemoteGit(ctx, t, localDir, "commit", "-m", "Initialize metadata branch")
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", localDefault)
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, paths.SettingsFileName),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
+		0o644,
+	))
+	redirectGitURL(t, localDir, "git@github.com:org/checkpoints.git", "file://"+remoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	vercelOnlyTip := checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName)
+	require.NotEqual(t, remoteTip, vercelOnlyTip, "test setup: vercel-only orphan must differ from remote tip")
+
+	require.NoError(t, EnsurePrimaryRef(WithCheckpointRemoteBootstrap(ctx), repo))
+
+	healed := checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName)
+	assert.Equal(t, remoteTip, healed,
+		"a vercel.json-only orphan should be treated as un-initialized and healed to the exact remote tip")
+	files := checkpointRemoteMetadataFiles(ctx, t, localDir)
+	assert.Contains(t, files, "aa/aaaaaaaaaa/"+paths.MetadataFileName, "the healed branch should contain the checkpoint remote data")
 }
 
 // redirectGitURL appends a git `url.<replacement>.insteadOf = <match>` rule to
