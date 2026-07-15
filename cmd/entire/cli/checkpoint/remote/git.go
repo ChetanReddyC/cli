@@ -46,13 +46,58 @@ type nonInteractiveSSHKey struct{}
 // user's own `git push` until the checkpoint push budget kills it, with no way
 // to type the passphrase. Foreground commands (resume, explain) leave it unset
 // so they can still prompt.
+//
+// BatchMode tradeoffs (issue #1523):
+//   - Passphrase-protected keys with no ssh-agent: fail fast (desired).
+//   - Touch-only security keys (sk-, user-presence only): still work — touch is
+//     not a terminal passphrase read.
+//   - PIN-protected FIDO2 keys (verify-required): PIN entry goes through ssh's
+//     passphrase reader, so BatchMode suppresses it and the push fails. Load the
+//     key into ssh-agent beforehand, or set an explicit BatchMode=no via
+//     GIT_SSH_COMMAND / core.sshCommand (respected; we do not override it).
 func WithNonInteractiveSSH(ctx context.Context) context.Context {
 	return context.WithValue(ctx, nonInteractiveSSHKey{}, true)
+}
+
+// IsNonInteractiveSSH reports whether ctx was marked with WithNonInteractiveSSH.
+func IsNonInteractiveSSH(ctx context.Context) bool {
+	return nonInteractiveSSHFromContext(ctx)
 }
 
 func nonInteractiveSSHFromContext(ctx context.Context) bool {
 	v, ok := ctx.Value(nonInteractiveSSHKey{}).(bool)
 	return ok && v
+}
+
+// LooksLikeSSHAuthFailure reports whether errText looks like an SSH
+// authentication failure (passphrase/PIN unavailable under BatchMode, missing
+// agent identity, publickey rejection, etc.). Used to print an actionable
+// ssh-agent hint from the pre-push checkpoint path.
+func LooksLikeSSHAuthFailure(errText string) bool {
+	if errText == "" {
+		return false
+	}
+	lower := strings.ToLower(errText)
+	needles := []string{
+		"permission denied (publickey)",
+		"permission denied (keyboard-interactive",
+		"permission denied (password)",
+		"too many authentication failures",
+		"no more authentication methods to try",
+		"could not read from remote repository",
+		"enter passphrase for key", // should not appear under BatchMode, but keep
+		"error reading ssh protocol banner", // sometimes accompanies aborted auth
+	}
+	for _, n := range needles {
+		if strings.Contains(lower, n) {
+			return true
+		}
+	}
+	// Generic publickey denial without the parenthetical form.
+	if strings.Contains(lower, "permission denied") && strings.Contains(lower, "publickey") {
+		return true
+	}
+	return false
 }
 
 // batchModeOptionRe matches an explicit BatchMode ssh option (e.g.

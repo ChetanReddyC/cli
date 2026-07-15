@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1666,4 +1667,25 @@ func TestPrintProtectedRefBlock(t *testing.T) {
 		assert.Contains(t, out, displayPushTarget("git@github.com:org/repo.git"))
 		assert.NotContains(t, out, "git@github.com:org/repo.git")
 	})
+}
+
+func TestPrintNonInteractiveSSHAuthHint(t *testing.T) {
+	// Reset the once for this test process isolation: reassign the sync.Once.
+	sshAuthHintOnce = sync.Once{}
+
+	var buf bytes.Buffer
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+	printNonInteractiveSSHAuthHint()
+	printNonInteractiveSSHAuthHint() // second call must be a no-op
+	require.NoError(t, w.Close())
+	os.Stderr = old
+	_, copyErr := io.Copy(&buf, r)
+	require.NoError(t, copyErr)
+	out := buf.String()
+	assert.Contains(t, out, "ssh-add")
+	assert.Contains(t, out, "Checkpoint push skipped")
+	assert.Equal(t, 1, strings.Count(out, "Checkpoint push skipped"), "hint must print once")
 }

@@ -1244,3 +1244,31 @@ func TestNewCommand_NonInteractiveSSH(t *testing.T) {
 		assert.Nil(t, cmd.Env, "unmarked command should not set a custom env")
 	})
 }
+
+func TestLooksLikeSSHAuthFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"git push: Permission denied (publickey).", true},
+		{"Permission denied (publickey,password).", true},
+		{"ERROR: Permission denied (publickey).\r\nfatal: Could not read from remote repository.", true},
+		{"fatal: Could not read from remote repository.", true},
+		{"non-fast-forward", false},
+		{"Connection timed out", false},
+		{"", false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, LooksLikeSSHAuthFailure(tt.in))
+		})
+	}
+}
+
+func TestIsNonInteractiveSSH(t *testing.T) {
+	t.Parallel()
+	assert.False(t, IsNonInteractiveSSH(context.Background()))
+	assert.True(t, IsNonInteractiveSSH(WithNonInteractiveSSH(context.Background())))
+}

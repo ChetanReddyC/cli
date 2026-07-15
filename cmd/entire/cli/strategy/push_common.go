@@ -178,6 +178,16 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) e
 		return nil
 	}
 
+	// Non-interactive SSH (pre-push BatchMode): auth failures cannot be fixed by
+	// fetch+rebase, and retrying would just reprint the same opaque error.
+	// Surface an actionable ssh-agent hint and skip recovery (issue #1523).
+	if remote.IsNonInteractiveSSH(ctx) && remote.LooksLikeSSHAuthFailure(err.Error()) {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't push %s: %v\n", refLabel, err)
+		printNonInteractiveSSHAuthHint()
+		printCheckpointRemoteHint(target)
+		return nil
+	}
+
 	// Push failed - likely non-fast-forward. Try to fetch and rebase.
 	// Spanned (with the network fetch as a child) so the trace distinguishes
 	// "the raw push is slow" from "we keep hitting contention and re-syncing".
@@ -191,6 +201,9 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) e
 	if syncErr != nil {
 		stop("")
 		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", refLabel, syncErr)
+		if remote.IsNonInteractiveSSH(ctx) && remote.LooksLikeSSHAuthFailure(syncErr.Error()) {
+			printNonInteractiveSSHAuthHint()
+		}
 		printCheckpointRemoteHint(target)
 		return nil // Don't fail the main push
 	}
@@ -203,6 +216,9 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) e
 	if result, err := tryPushRefCommon(ctx, target, ref); err != nil {
 		stop("")
 		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to push %s after sync: %v\n", refLabel, err)
+		if remote.IsNonInteractiveSSH(ctx) && remote.LooksLikeSSHAuthFailure(err.Error()) {
+			printNonInteractiveSSHAuthHint()
+		}
 		printCheckpointRemoteHint(target)
 	} else {
 		finishPush(ctx, stop, result, target)
@@ -228,6 +244,20 @@ func printCheckpointRemoteHint(target string) {
 	}
 	fmt.Fprintln(os.Stderr, "[entire] A checkpoint remote is configured in Entire settings (.entire/settings.json or .entire/settings.local.json) but could not be reached.")
 	fmt.Fprintln(os.Stderr, "[entire] Checkpoints are saved locally but not synced. Ensure you have access to the checkpoint remote.")
+}
+
+// sshAuthHintOnce ensures the ssh-agent hint prints at most once per process
+// (pre-push can push multiple refs).
+var sshAuthHintOnce sync.Once
+
+// printNonInteractiveSSHAuthHint tells the user how to unblock checkpoint pushes
+// that failed because SSH needed interactive auth under BatchMode (issue #1523).
+func printNonInteractiveSSHAuthHint() {
+	sshAuthHintOnce.Do(func() {
+		fmt.Fprintln(os.Stderr, "[entire] Checkpoint push skipped: SSH needs interactive auth (passphrase/PIN) and cannot prompt during git hooks.")
+		fmt.Fprintln(os.Stderr, "[entire] Load your key into ssh-agent (`ssh-add`), then push again. Checkpoints are saved locally until then.")
+		fmt.Fprintln(os.Stderr, "[entire] PIN-protected security keys: unlock/add them to the agent first. To allow prompts in this path, set GIT_SSH_COMMAND (or core.sshCommand) with an explicit BatchMode=no.")
+	})
 }
 
 // settingsHintOnce ensures the settings commit hint prints at most once per process.
