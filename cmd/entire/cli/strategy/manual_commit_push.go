@@ -71,9 +71,9 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 
 	// OPF pre-push rewrite: if OPF is configured, resolve the user's
 	// decision (env > settings > prompt > non-TTY auto-run), then
-	// re-redact unpushed v1 commits with the 8-layer pipeline before
-	// pushing. Skipped entirely when OPF is off, so the common-case
-	// fast path is unchanged.
+	// re-redact unpushed v1 commits with OPF (producing the OPF-applied,
+	// 9-layer pipeline) before pushing. Skipped entirely when OPF is off,
+	// so the common-case fast path is unchanged.
 	if redact.OPFEnabled() {
 		cfg, _ := settings.Load(ctx) //nolint:errcheck // Load already failed at hook init; fall back to nil
 		var opfCfg *settings.OPFSettings
@@ -92,7 +92,7 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 			return errOPFAbortedByUser
 		case OPFSkip:
 			// User opted out for this push (or settings/env say
-			// "never"). Push 7-layer content as-is.
+			// "never"). Push regex-only (8-layer) content as-is.
 			logging.Info(ctx, "OPF skipped for this push (user choice or settings)")
 		case OPFRun:
 			_, opfSpan := perf.Start(ctx, "opf_pre_push_rewrite")

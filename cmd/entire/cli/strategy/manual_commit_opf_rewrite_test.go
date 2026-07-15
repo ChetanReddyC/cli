@@ -656,8 +656,8 @@ func TestOPFRewrite_PreservesAssetsSubtreeVerbatim(t *testing.T) {
 
 // Fail-closed regression: when the OPF runtime fails and the breaker
 // trips, the rewrite must NOT CAS the ref. Otherwise the new commits
-// would carry Entire-OPF-Applied: true while their content is 7-layer
-// only, and future pushes would skip them — silently shipping unredacted
+// would carry Entire-OPF-Applied: true while their content is regex-only,
+// and future pushes would skip them — silently shipping unredacted
 // content to the remote.
 func TestRewriteUnpushedV1WithOPF_BreakerTrippedMidRewrite_AbortsBeforeCAS(t *testing.T) {
 	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})
