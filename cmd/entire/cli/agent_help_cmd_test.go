@@ -158,7 +158,7 @@ func TestAgentHelpRepoContext_CachesRefreshFailureBriefly(t *testing.T) {
 		t.Fatalf("refresh calls after first invocation = %d, want 1", refreshCalls)
 	}
 
-	// The failed attempt leaves a short-lived negative entry, so another
+	// The failed attempt leaves a short-lived agent-help-only backoff, so another
 	// invocation does not repeat the blocking refresh.
 	_, enabled = agentHelpRepoContextWithRefresh(t.Context(), func(context.Context, trailEnablementScope) error {
 		refreshCalls++
@@ -171,14 +171,19 @@ func TestAgentHelpRepoContext_CachesRefreshFailureBriefly(t *testing.T) {
 		t.Fatalf("refresh calls after second invocation = %d, want 1", refreshCalls)
 	}
 
-	// Unlike a definitive disabled result, the failure entry becomes unknown
-	// after the short backoff and can be retried.
 	scope, err := currentTrailEnablementScope(t.Context())
 	if err != nil {
 		t.Fatalf("resolve trail scope: %v", err)
 	}
-	if got := cachedTrailsEnablementForScope(t.Context(), scope, time.Now().Add(trailEnablementRefreshFailureCacheTTL+time.Second)); got != trailEnablementCacheUnknown {
-		t.Fatalf("cache after failure backoff = %v, want unknown", got)
+	// The shared decision remains unknown, so SessionStart is not prevented from
+	// doing its own authoritative refresh and context-injection decision.
+	if got := cachedTrailsEnablementForScope(t.Context(), scope, time.Now()); got != trailEnablementCacheUnknown {
+		t.Fatalf("shared trails cache after agent-help failure = %v, want unknown", got)
+	}
+	// The agent-help-only marker expires after the short backoff and permits a
+	// later help invocation to retry.
+	if recentAgentHelpTrailsRefreshFailure(t.Context(), scope, time.Now().Add(agentHelpTrailsRefreshFailureBackoff+time.Second)) {
+		t.Fatal("agent-help refresh failure should expire after the backoff")
 	}
 }
 

@@ -23,7 +23,7 @@ import (
 
 const (
 	trailEnablementCacheTTL                   = time.Hour
-	trailEnablementRefreshFailureCacheTTL     = 5 * time.Minute
+	agentHelpTrailsRefreshFailureBackoff      = 5 * time.Minute
 	trailEnablementSessionStartRefreshTimeout = time.Second
 	trailEnablementRefreshTimeout             = 3 * time.Second
 )
@@ -196,14 +196,39 @@ func saveTrailsEnabledForScope(ctx context.Context, scope trailEnablementScope, 
 	return nil
 }
 
-// cacheTrailsEnablementRefreshFailure records a short-lived disabled decision
-// after an agent-help refresh fails. It prevents repeated invocations from each
-// waiting on the same degraded network while retrying much sooner than a real
-// server-provided disabled decision. Backdating reuses the existing cache schema
-// and expiry logic while giving the entry only the failure TTL remaining.
-func cacheTrailsEnablementRefreshFailure(ctx context.Context, scope trailEnablementScope, now time.Time) error {
-	checkedAt := now.Add(-trailEnablementCacheTTL + trailEnablementRefreshFailureCacheTTL)
-	return saveTrailsEnabledForScope(ctx, scope, false, checkedAt)
+// recentAgentHelpTrailsRefreshFailure reports whether agent-help should back off
+// after a failed availability refresh for this exact repo/API/auth scope. This
+// marker is deliberately separate from TrailsEnabled: lifecycle SessionStart
+// must still perform its authoritative probe and decide context injection.
+func recentAgentHelpTrailsRefreshFailure(ctx context.Context, scope trailEnablementScope, now time.Time) bool {
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil || prefs.TrailsAgentHelpRefreshFailedAt == nil {
+		return false
+	}
+	if prefs.TrailsAgentHelpFailureRepoKey != scope.RepoKey ||
+		prefs.TrailsAgentHelpFailureAPIBase != scope.APIBase ||
+		prefs.TrailsAgentHelpFailureAuthKey != scope.AuthKey {
+		return false
+	}
+	failedAt := *prefs.TrailsAgentHelpRefreshFailedAt
+	if failedAt.IsZero() || now.Before(failedAt) {
+		return false
+	}
+	return now.Sub(failedAt) <= agentHelpTrailsRefreshFailureBackoff
+}
+
+func saveAgentHelpTrailsRefreshFailure(ctx context.Context, scope trailEnablementScope, failedAt time.Time) error {
+	failedAtUTC := failedAt.UTC()
+	if err := settings.ModifyClonePreferences(ctx, func(prefs *settings.ClonePreferences) error {
+		prefs.TrailsAgentHelpRefreshFailedAt = &failedAtUTC
+		prefs.TrailsAgentHelpFailureRepoKey = scope.RepoKey
+		prefs.TrailsAgentHelpFailureAPIBase = scope.APIBase
+		prefs.TrailsAgentHelpFailureAuthKey = scope.AuthKey
+		return nil
+	}); err != nil {
+		return fmt.Errorf("save clone preferences: %w", err)
+	}
+	return nil
 }
 
 func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEnablementScope) error {

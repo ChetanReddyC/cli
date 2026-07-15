@@ -101,14 +101,17 @@ func agentHelpRepoContextWithRefresh(
 	if scope.AuthKey == "" {
 		return repoLine, false
 	}
+	if recentAgentHelpTrailsRefreshFailure(ctx, scope, now) {
+		return repoLine, false
+	}
 
 	refreshCtx, cancel := context.WithTimeout(ctx, trailEnablementRefreshTimeout)
 	defer cancel()
 	if err := refresh(refreshCtx, scope); err != nil {
-		// A short negative cache keeps an offline authenticated user from paying
-		// this timeout on every agent-help invocation while still retrying much
-		// sooner than a definitive disabled result.
-		_ = cacheTrailsEnablementRefreshFailure(ctx, scope, time.Now())
+		// A separate short backoff keeps an offline authenticated user from paying
+		// this timeout on every agent-help invocation. It must not alter the shared
+		// enablement decision, which SessionStart uses for context injection.
+		_ = saveAgentHelpTrailsRefreshFailure(ctx, scope, time.Now())
 		return repoLine, false
 	}
 	return repoLine, cachedTrailsEnablementForScope(ctx, scope, time.Now()) == trailEnablementCacheEnabled
