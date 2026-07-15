@@ -105,11 +105,13 @@ type condenseOpts struct {
 	allAgentFiles    map[string]struct{} // Union of all sessions' FilesTouched for cross-session exclusion (nil = single-session)
 }
 
-// redactSessionJSONLBytes runs the 7-layer redaction pipeline over a
-// session transcript at post-commit condensation. OPF is intentionally
-// NOT included here — it runs exclusively in the pre-push rewrite path
+// redactSessionJSONLBytes runs the regex-only redaction pipeline (the
+// eight always-on/opt-in layers) over a session transcript at
+// post-commit condensation. OPF is intentionally NOT included here —
+// it runs exclusively in the pre-push rewrite path
 // (strategy/manual_commit_opf_rewrite.go), which re-redacts the
-// 7-layer blobs and produces 8-layer commits before the push.
+// regex-only blobs and produces OPF-applied (9-layer) commits before
+// the push.
 //
 // Exposed as a var so tests can inject deterministic success/error
 // returns. The signature still takes a context so the var can be
@@ -355,7 +357,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		summary = generateSummary(ctx, redactedTranscript, sessionData.FilesTouched, state)
 	}
 
-	// Post-commit emits 7-layer-only blobs. OPF runs later in the
+	// Post-commit emits regex-only blobs. OPF runs later in the
 	// pre-push rewrite path, never here.
 	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(sessionData.SkillEvents, state.TurnID))
 

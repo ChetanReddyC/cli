@@ -284,7 +284,7 @@ type OPFSettings struct {
 
 	// PromptDefault controls whether the pre-push hook asks the user
 	// before running OPF. "" (default) and "ask" both surface the
-	// interactive prompt; "never" skips OPF and pushes 7-layer content;
+	// interactive prompt; "never" skips OPF and pushes regex-only content;
 	// "always" runs without asking. ENTIRE_OPF=yes|no on the push
 	// invocation overrides this setting per-push.
 	PromptDefault string `json:"prompt_default,omitempty"`
