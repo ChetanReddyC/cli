@@ -16,6 +16,11 @@ import (
 // ~/.claude/settings.json (see the rationale in GenerateText).
 const settingSourcesUser = "user"
 
+// disableHooksSettings is layered on top of the user settings via --settings so
+// user-level hooks (SessionStart/UserPromptSubmit/Stop) do not fire on these
+// internal --print calls (see the rationale in GenerateText).
+const disableHooksSettings = `{"disableAllHooks":true}`
+
 // GenerateText sends a prompt to the Claude CLI and returns the raw text response.
 // Implements the agent.TextGenerator interface.
 // The model parameter hints which model to use (e.g., "haiku", "sonnet").
@@ -47,9 +52,18 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 	// their plain `claude -p` worked. Project/local isolation is already
 	// guaranteed by cmd.Dir = os.TempDir() below, so "user" restores auth
 	// without reintroducing repo-scoped settings.
+	//
+	// Loading user settings also brings in any user-level hooks; --settings
+	// {"disableAllHooks":true} layers over them so SessionStart/UserPromptSubmit/
+	// Stop hooks do not fire (and cannot error or cause side effects) on these
+	// internal text-generation calls. This preserves the isolation intent of the
+	// os.TempDir()/StripGitEnv setup while keeping auth working. --settings does
+	// not affect auth resolution (verified: keychain/credentials, ANTHROPIC_API_KEY
+	// and apiKeyHelper all still authenticate).
 	cmd := commandRunner(ctx, claudePath,
 		"--print", "--output-format", "json",
-		"--model", model, "--setting-sources", settingSourcesUser)
+		"--model", model, "--setting-sources", settingSourcesUser,
+		"--settings", disableHooksSettings)
 
 	// Isolate from the user's git repo to prevent recursive hook triggers
 	// and index pollution (matches agent.RunIsolatedTextGeneratorCLI behavior).
