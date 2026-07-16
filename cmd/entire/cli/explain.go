@@ -2097,6 +2097,12 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 		if !found {
 			return
 		}
+		// Remote-discovered refs-native List stubs carry only CheckpointID/
+		// CreatedAt. Hydrate before projecting into RewindPoint so --session
+		// filters (and prompt display) see the real SessionID instead of
+		// silently dropping the second-device checkpoints this path surfaces.
+		cpInfo = checkpoint.HydrateListedCheckpointInfo(ctx, store, cpInfo)
+		committedByID[cpID] = cpInfo
 
 		message := strings.Split(c.Message, "\n")[0]
 		point := strategy.RewindPoint{
@@ -2586,11 +2592,14 @@ func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.R
 	var sb strings.Builder
 	styles := newStatusStyles(w)
 
-	// Filter by session if specified (must happen before counting)
+	// Filter by session if specified (must happen before counting). Use the
+	// shared matcher so archived contributors in SessionIDs are considered —
+	// matching only SessionID (latest contributor) silently drops multi-session
+	// checkpoints where the requested session was archived.
 	if sessionFilter != "" {
 		var filtered []strategy.RewindPoint
 		for _, p := range points {
-			if p.SessionID == sessionFilter || strings.HasPrefix(p.SessionID, sessionFilter) {
+			if checkpointMatchesSessionFilter(p, sessionFilter) {
 				filtered = append(filtered, p)
 			}
 		}

@@ -230,6 +230,41 @@ func TestGitRefsStore_ListRemoteDiscovery(t *testing.T) {
 	})
 }
 
+// TestHydrateListedCheckpointInfo covers the trail-871 gap: a names-only List
+// stub has empty SessionID, so --session filters would silently drop it until
+// the checkpoint is read. HydrateListedCheckpointInfo fills session identity
+// from the store (triggering on-demand fetch when configured) so filters match.
+func TestHydrateListedCheckpointInfo(t *testing.T) {
+	t.Parallel()
+
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	refsWrite(t, store, cid, "session-from-device-a", "transcript")
+
+	stub := remoteDiscoveredInfo(cid)
+	require.True(t, listedCheckpointNeedsHydration(stub))
+	require.Empty(t, stub.SessionID)
+	require.Zero(t, stub.SessionCount)
+
+	hydrated := HydrateListedCheckpointInfo(context.Background(), store, stub)
+	assert.Equal(t, "session-from-device-a", hydrated.SessionID)
+	assert.Equal(t, 1, hydrated.SessionCount)
+	assert.Equal(t, []string{"session-from-device-a"}, hydrated.SessionIDs)
+	assert.False(t, listedCheckpointNeedsHydration(hydrated))
+
+	// Already-hydrated infos are returned unchanged (no redundant reads needed
+	// for the session-filter path once collectCheckpoint has cached them).
+	again := HydrateListedCheckpointInfo(context.Background(), store, hydrated)
+	assert.Equal(t, hydrated, again)
+
+	// Missing checkpoint: best-effort leave the stub as-is so listing still
+	// surfaces the ID even when the remote fetch/read fails.
+	missing := remoteDiscoveredInfo(id.CheckpointID("01KVBJCWYA4YW6J5M9GP655HZN"))
+	unchanged := HydrateListedCheckpointInfo(context.Background(), store, missing)
+	assert.Equal(t, missing, unchanged)
+	assert.Empty(t, unchanged.SessionID)
+}
+
 func TestGitRefsStore_WriteAllVariantsAndRead(t *testing.T) {
 	t.Parallel()
 	store := newRefsStore(t)

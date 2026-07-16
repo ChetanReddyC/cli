@@ -4230,6 +4230,45 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 			t.Errorf("expected 'session ... nonexistent-session' in output, got:\n%s", output)
 		}
 	})
+
+	t.Run("filter matches archived SessionIDs contributor", func(t *testing.T) {
+		// Multi-session checkpoint: latest SessionID is beta, but alpha is still
+		// in SessionIDs. The shared matcher must keep it when filtering for alpha.
+		multi := []strategy.RewindPoint{
+			{
+				ID:           "abc123def456",
+				Message:      "multi-session checkpoint",
+				Date:         now,
+				CheckpointID: "chk444444444",
+				SessionID:    "2026-01-22-session-beta",
+				SessionIDs:   []string{"2026-01-22-session-alpha", "2026-01-22-session-beta"},
+			},
+		}
+		output := formatBranchCheckpoints(io.Discard, "main", multi, "2026-01-22-session-alpha")
+		if !strings.Contains(output, "checkpoints  1") {
+			t.Errorf("expected archived contributor to match session filter, got:\n%s", output)
+		}
+	})
+
+	t.Run("unhydrated remote stub does not match session filter", func(t *testing.T) {
+		// Documents the pre-hydrate failure mode trail 871 caught: a names-only
+		// List stub has empty SessionID, so --session would drop it. Production
+		// collectCheckpoint hydrates before formatting; this asserts the filter
+		// itself does not invent a match for an empty SessionID.
+		stub := []strategy.RewindPoint{
+			{
+				ID:           "abc123def456",
+				Message:      "remote-discovered stub",
+				Date:         now,
+				CheckpointID: "01KVBJCWYA4YW6J5M9GP655HZN",
+				SessionID:    "",
+			},
+		}
+		output := formatBranchCheckpoints(io.Discard, "main", stub, "2026-01-22-session-alpha")
+		if !strings.Contains(output, "checkpoints  0") {
+			t.Errorf("empty SessionID stub must not match a session filter, got:\n%s", output)
+		}
+	})
 }
 
 func TestRunExplain_SessionFlagFiltersListView(t *testing.T) {

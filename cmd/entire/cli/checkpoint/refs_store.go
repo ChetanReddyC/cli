@@ -483,6 +483,56 @@ func remoteDiscoveredInfo(cid id.CheckpointID) CheckpointInfo {
 	return info
 }
 
+// listedCheckpointNeedsHydration reports whether info is a names-only List stub
+// (as produced by remoteDiscoveredInfo): CheckpointID/CreatedAt may be set, but
+// SessionID and SessionCount are still zero. Callers that need session identity
+// for filtering or display should HydrateListedCheckpointInfo first.
+func listedCheckpointNeedsHydration(info CheckpointInfo) bool {
+	return info.SessionID == "" && info.SessionCount == 0 && !info.CheckpointID.IsEmpty()
+}
+
+// HydrateListedCheckpointInfo fills SessionID/Agent/etc for a List entry that
+// was discovered by name only. It reads the checkpoint (triggering an on-demand
+// ref fetch when configured) and mirrors the fields List populates for local
+// refs. Best-effort: returns info unchanged on read failure so listing still
+// surfaces the checkpoint without session metadata.
+func HydrateListedCheckpointInfo(ctx context.Context, store interface {
+	Read(ctx context.Context, checkpointID id.CheckpointID) (*CheckpointSummary, error)
+	ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*Metadata, error)
+}, info CheckpointInfo) CheckpointInfo {
+	if !listedCheckpointNeedsHydration(info) {
+		return info
+	}
+	summary, err := store.Read(ctx, info.CheckpointID)
+	if err != nil || summary == nil {
+		return info
+	}
+	info.CheckpointsCount = summary.CheckpointsCount
+	info.FilesTouched = summary.FilesTouched
+	info.SessionCount = len(summary.Sessions)
+	info.Imported = summary.Imported
+	info.SessionIDs = info.SessionIDs[:0]
+	for i := range summary.Sessions {
+		meta, metaErr := store.ReadSessionMetadata(ctx, info.CheckpointID, i)
+		if metaErr != nil || meta == nil {
+			continue
+		}
+		if meta.SessionID != "" {
+			info.SessionIDs = append(info.SessionIDs, meta.SessionID)
+		}
+		if i == len(summary.Sessions)-1 {
+			info.Agent = meta.Agent
+			info.SessionID = meta.SessionID
+			if !meta.CreatedAt.IsZero() {
+				info.CreatedAt = meta.CreatedAt
+			}
+			info.IsTask = meta.IsTask
+			info.ToolUseID = meta.ToolUseID
+		}
+	}
+	return info
+}
+
 // GetCheckpointAuthor returns the author of the checkpoint ref's tip commit (the
 // most recent writer). Returns a zero Author when the ref is absent.
 func (s *gitRefsStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error) {
