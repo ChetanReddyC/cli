@@ -48,6 +48,9 @@ func withNumberedTrail(cmd *cobra.Command, fn func(ctx context.Context, client *
 	if selector != "" && strings.TrimSpace(branch) != "" {
 		return errors.New("pass --trail or --branch, not both")
 	}
+	if err := ensureTrailRepoHasTarget(repoOverride, selector != "" || strings.TrimSpace(branch) != "", "pass --trail or --branch"); err != nil {
+		return err
+	}
 	// Auth/not-logged-in messages go to stderr; w carries command output only.
 	return runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), repoOverride, func(ctx context.Context, client *api.Client) error {
 		found, forge, owner, repo, err := resolveNumberedTrail(ctx, client, repoOverride, selector, branch)

@@ -59,6 +59,9 @@ func submitTrailApproval(ctx context.Context, w, errW io.Writer, insecureHTTP bo
 	if selector != "" && strings.TrimSpace(branch) != "" {
 		return errors.New("pass a trail selector or --branch, not both")
 	}
+	if err := ensureTrailRepoHasTarget(repoOverride, selector != "" || strings.TrimSpace(branch) != "", "pass a trail selector or --branch"); err != nil {
+		return err
+	}
 	req, err := buildApprovalRequest(event, message)
 	if err != nil {
 		return err
@@ -146,6 +149,9 @@ func newTrailApprovalsCmd() *cobra.Command {
 func runTrailApprovals(ctx context.Context, w, errW io.Writer, insecureHTTP bool, repoOverride, selector, branch string, jsonOut bool) error {
 	if selector != "" && strings.TrimSpace(branch) != "" {
 		return errors.New("pass a trail selector or --branch, not both")
+	}
+	if err := ensureTrailRepoHasTarget(repoOverride, selector != "" || strings.TrimSpace(branch) != "", "pass a trail selector or --branch"); err != nil {
+		return err
 	}
 	// Auth/not-logged-in messages go to stderr; w carries command output only.
 	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client) error {
