@@ -609,17 +609,32 @@ func newRepoMirrorListCmd() *cobra.Command {
 					return nil, err
 				}
 				hostBySlug := clusterHostBySlug(clusters.Clusters)
-				out, err := c.ListRepos(ctx, coreapi.ListReposParams{Scope: coreapi.NewOptListReposScope(coreapi.ListReposScopeAll)})
+				truncated := false
+				repos, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.RepoIndexEntry, string, error) {
+					params := coreapi.ListReposParams{Scope: coreapi.NewOptListReposScope(coreapi.ListReposScopeAll)}
+					if cursor != "" {
+						params.PageToken = coreapi.NewOptString(cursor)
+					}
+					out, lerr := c.ListRepos(ctx, params)
+					if lerr != nil {
+						return nil, "", lerr
+					}
+					next := out.NextPageToken.Or("")
+					// A capped page mid-chain is fine — the cursor walks past it.
+					// Only a capped page with no cursor to continue from (legacy
+					// server, or a hard directory cap) leaves repos unseen, and a
+					// short directory must not read as "this is everything".
+					truncated = truncated || (out.Truncated && next == "")
+					return out.Repos, next, nil
+				})
 				if err != nil {
 					return nil, err
 				}
-				// The server caps the directory and has no pagination cursor, so
-				// a truncated result would otherwise read as "this is everything".
 				// Warn on stderr (skipped for --json) rather than fail.
-				if out.Truncated && !jsonRequested(cmd) {
+				if truncated && !jsonRequested(cmd) {
 					fmt.Fprintln(cmd.ErrOrStderr(), "Warning: the repo directory was truncated by the server; some repos are not shown.")
 				}
-				rows := buildRepoDir(out.Repos, hostBySlug)
+				rows := buildRepoDir(repos, hostBySlug)
 				rows = filterByName(rows, func(r repoDirRow) string { return r.Repo }, name)
 				if owner != "" {
 					rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {

@@ -379,6 +379,12 @@ func candidateEntry(fullName, visibility string, access coreapi.RepoCandidateAcc
 	}
 }
 
+// Paths the fake control-plane servers below route on.
+const (
+	testClustersPath = "/api/v1/clusters"
+	testReposPath    = "/api/v1/repos"
+)
+
 // serveRepoList stands up a fake control-plane serving the two endpoints the
 // merged `list` calls: GET /clusters (the slug→host catalog used to synthesise
 // clone URLs) and GET /repos?scope=all (the directory). It points the
@@ -394,12 +400,62 @@ func serveRepoList(t *testing.T, repos []coreapi.RepoIndexEntry, clusters []core
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/api/v1/clusters":
+		case testClustersPath:
 			if err := printJSON(w, &coreapi.ListClustersOutputBody{Clusters: clusters}); err != nil {
 				t.Errorf("encode clusters response: %v", err)
 			}
-		case "/api/v1/repos":
+		case testReposPath:
 			if err := printJSON(w, &coreapi.ListReposOutputBody{Repos: repos, Truncated: truncated}); err != nil {
+				t.Errorf("encode repos response: %v", err)
+			}
+			recCh <- recordedRequest{method: r.Method, path: r.URL.Path, query: r.URL.Query()}
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := activeCoreClient
+	activeCoreClient = func(context.Context) (*coreapi.Client, error) {
+		return coreapi.NewWithBearer(srv.URL, "tok")
+	}
+	t.Cleanup(func() { activeCoreClient = prev })
+	return recCh
+}
+
+// serveRepoListPaged is serveRepoList with a keyset-paginated /repos: each call
+// answers with the page addressed by the pageToken query param ("" is the first
+// page), echoing that page's NextPageToken so the client can walk the chain.
+// Every /repos request is delivered on the returned channel (buffered to the
+// page count so the handler never blocks).
+func serveRepoListPaged(t *testing.T, pages []coreapi.ListReposOutputBody, clusters []coreapi.Cluster) <-chan recordedRequest {
+	t.Helper()
+	tokenToPage := make(map[string]coreapi.ListReposOutputBody, len(pages))
+	for i, p := range pages {
+		token := ""
+		if i > 0 {
+			token = pages[i-1].NextPageToken.Or("")
+			require.NotEmpty(t, token, "every page but the last needs a NextPageToken linking to the next one")
+		}
+		tokenToPage[token] = p
+	}
+	recCh := make(chan recordedRequest, len(pages))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case testClustersPath:
+			if err := printJSON(w, &coreapi.ListClustersOutputBody{Clusters: clusters}); err != nil {
+				t.Errorf("encode clusters response: %v", err)
+			}
+		case testReposPath:
+			page, ok := tokenToPage[r.URL.Query().Get("pageToken")]
+			if !ok {
+				t.Errorf("unexpected pageToken %q", r.URL.Query().Get("pageToken"))
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if err := printJSON(w, &page); err != nil {
 				t.Errorf("encode repos response: %v", err)
 			}
 			recCh <- recordedRequest{method: r.Method, path: r.URL.Path, query: r.URL.Query()}
@@ -426,9 +482,9 @@ func serveRepoListClustersError(t *testing.T, repos []coreapi.RepoIndexEntry) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/clusters":
+		case testClustersPath:
 			w.WriteHeader(http.StatusInternalServerError)
-		case "/api/v1/repos":
+		case testReposPath:
 			w.Header().Set("Content-Type", "application/json")
 			if err := printJSON(w, &coreapi.ListReposOutputBody{Repos: repos}); err != nil {
 				t.Errorf("encode repos response: %v", err)
@@ -493,7 +549,7 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		rec := <-recCh
 
 		require.Equal(t, http.MethodGet, rec.method)
-		require.Equal(t, "/api/v1/repos", rec.path)
+		require.Equal(t, testReposPath, rec.path)
 		require.Equal(t, "all", rec.query.Get("scope"), "list must request the unified directory")
 		require.Contains(t, stderr, "Listing repos on")
 		for _, h := range []string{"NAME", "CLONE URL", "PRIVATE", "STATUS", "ACCESS"} {
@@ -521,6 +577,50 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		serveRepoList(t, nil, clusters, false)
 		stdout, _ := runMirrorList(t)
 		require.Contains(t, stdout, "No repos found.")
+	})
+
+	t.Run("the directory follows nextPageToken across every page", func(t *testing.T) {
+		recCh := serveRepoListPaged(t, []coreapi.ListReposOutputBody{
+			{
+				Repos:         []coreapi.RepoIndexEntry{onboardedEntry("acme/web", "private", "us")},
+				NextPageToken: coreapi.NewOptString("p2"),
+			},
+			{
+				Repos: []coreapi.RepoIndexEntry{candidateEntry("acme/marketing", "public", coreapi.RepoCandidateAccessAdmin, true)},
+			},
+		}, clusters)
+		stdout, stderr := runMirrorList(t)
+
+		// The command has returned, so every request it made is already
+		// buffered; a non-blocking receive distinguishes "never fetched the
+		// second page" from a hang.
+		first := <-recCh
+		require.Empty(t, first.query.Get("pageToken"), "the first request starts the chain")
+		select {
+		case second := <-recCh:
+			require.Equal(t, "p2", second.query.Get("pageToken"), "the second request passes the cursor back")
+		default:
+			t.Fatal("the directory stopped after page 1 instead of following nextPageToken")
+		}
+		require.Contains(t, stdout, "acme/web", "page-1 row renders")
+		require.Contains(t, stdout, "acme/marketing", "page-2 row renders")
+		require.NotContains(t, stderr, "truncated", "a fully-walked chain is not a truncated directory")
+	})
+
+	t.Run("a capped page mid-chain does not warn once the cursor walks past it", func(t *testing.T) {
+		serveRepoListPaged(t, []coreapi.ListReposOutputBody{
+			{
+				Repos:         []coreapi.RepoIndexEntry{onboardedEntry("acme/web", "private", "us")},
+				NextPageToken: coreapi.NewOptString("p2"),
+				Truncated:     true,
+			},
+			{
+				Repos: []coreapi.RepoIndexEntry{onboardedEntry("acme/api", "private", "us")},
+			},
+		}, clusters)
+		stdout, stderr := runMirrorList(t)
+		require.Contains(t, stdout, "acme/api", "the chain was walked to the end")
+		require.NotContains(t, stderr, "truncated", "nothing was left unseen, so no warning")
 	})
 
 	t.Run("truncated result warns on stderr, not stdout", func(t *testing.T) {
