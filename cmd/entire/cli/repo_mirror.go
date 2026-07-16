@@ -819,7 +819,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 	setFlagGroup(cmd, flagGroupFormatting, "json", "no-pager")
 	useGroupedFlagHelp(cmd,
 		flagGroup{name: flagGroupNavigation},
-		flagGroup{name: flagGroupFiltering, note: "Client-side: applied only to the fetched rows; combine with --all to filter/sort the complete directory."},
+		flagGroup{name: flagGroupFiltering, note: "Applied only to the fetched rows; combine with --all to filter/sort the complete mirror list."},
 		flagGroup{name: flagGroupFormatting},
 	)
 	return cmd

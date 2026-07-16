@@ -1843,20 +1843,24 @@ func TestRepoMirrorList_PageMode(t *testing.T) {
 	})
 }
 
-// TestRepoMirrorList_ClientSideGroupNote pins that the client-side caveat is
+// TestRepoMirrorList_FilterGroupNote pins that the fetched-window caveat is
 // stated once, at the Filtering & Sorting group level, instead of repeated on
-// every flag: every flag in that group runs on the client today (/repos
-// offers the server no filter or sort params), so the shared fact belongs to
-// the group. Individual flag descriptions stay free of the boilerplate; if a
-// flag ever gains a server-side implementation it must leave the group.
-func TestRepoMirrorList_ClientSideGroupNote(t *testing.T) {
+// every flag — and in user terms: what the flags apply to and how to widen
+// it, with no "client-side" implementation talk. Every flag in the group runs
+// on the client today (/repos offers the server no filter or sort params);
+// a flag that gains a server-side implementation must leave the group.
+func TestRepoMirrorList_FilterGroupNote(t *testing.T) {
 	stdout, _, err := execMirrorList(t, "--help")
 	require.NoError(t, err)
-	require.Equal(t, 1, strings.Count(stdout, "Client-side:"), "the client-side note appears exactly once, at group level")
+	const note = "Applied only to the fetched rows; combine with --all to filter/sort the complete mirror list."
+	require.Equal(t, 1, strings.Count(stdout, note), "the window note appears exactly once, at group level")
+	navIdx := strings.Index(stdout, "Navigation Flags:")
+	require.GreaterOrEqual(t, navIdx, 0, "expected a Navigation Flags section")
+	require.NotContains(t, stdout[navIdx:], "Client-side", "no implementation detail in the flag sections")
 	idx := strings.Index(stdout, "Filtering & Sorting Flags:")
 	require.GreaterOrEqual(t, idx, 0, "expected a Filtering & Sorting Flags section")
 	requireOrder(t, stdout[idx:],
-		"Filtering & Sorting Flags:", "Client-side:", "--all", "--access",
+		"Filtering & Sorting Flags:", note, "--access",
 	)
 
 	cmd := newRepoMirrorListCmd()
