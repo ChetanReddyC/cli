@@ -127,8 +127,8 @@ func ensureNoTrailRepoOverride(cmd *cobra.Command, op string) error {
 // ensureTrailRepoHasTarget requires an explicit branch or selector when --repo
 // targets another repo; otherwise the command would resolve the local branch
 // against the wrong repo. hint names the acceptable targets.
-func ensureTrailRepoHasTarget(repoOverride string, hasTarget bool, hint string) error {
-	if repoOverride != "" && !hasTarget {
+func ensureTrailRepoHasTarget(cmd *cobra.Command, hasTarget bool, hint string) error {
+	if trailRepoFlag(cmd) != "" && !hasTarget {
 		return fmt.Errorf("--repo requires an explicit target: %s", hint)
 	}
 	return nil
@@ -165,7 +165,7 @@ Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 			if selector != "" && trailBranchFlag(cmd) != "" {
 				return errors.New("pass a trail selector or --branch, not both")
 			}
-			if err := ensureTrailRepoHasTarget(trailRepoFlag(cmd), selector != "" || trailBranchFlag(cmd) != "", "pass a trail selector or --branch"); err != nil {
+			if err := ensureTrailRepoHasTarget(cmd, selector != "" || trailBranchFlag(cmd) != "", "pass a trail selector or --branch"); err != nil {
 				return err
 			}
 			return runTrailShow(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector, trailRepoFlag(cmd), trailBranchFlag(cmd))
@@ -1108,7 +1108,7 @@ func newTrailUpdateCmd() *cobra.Command {
 		Short: "Update trail metadata",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := ensureTrailRepoHasTarget(trailRepoFlag(cmd), strings.TrimSpace(branch) != "", "pass --branch"); err != nil {
+			if err := ensureTrailRepoHasTarget(cmd, strings.TrimSpace(branch) != "", "pass --branch"); err != nil {
 				return err
 			}
 			return runTrailUpdate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailUpdateInputs{
@@ -1608,7 +1608,7 @@ Deletion is permanent; you are prompted to confirm unless --force is passed.`,
 			if number > 0 && cmd.Flags().Changed("branch") {
 				return errors.New("cannot combine a trail <number> with --branch")
 			}
-			if err := ensureTrailRepoHasTarget(trailRepoFlag(cmd), number > 0 || strings.TrimSpace(branch) != "", "pass a trail number or --branch"); err != nil {
+			if err := ensureTrailRepoHasTarget(cmd, number > 0 || strings.TrimSpace(branch) != "", "pass a trail number or --branch"); err != nil {
 				return err
 			}
 			return runTrailDelete(cmd, number, branch, force)

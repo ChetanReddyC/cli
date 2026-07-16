@@ -59,9 +59,6 @@ func submitTrailApproval(ctx context.Context, w, errW io.Writer, insecureHTTP bo
 	if selector != "" && strings.TrimSpace(branch) != "" {
 		return errors.New("pass a trail selector or --branch, not both")
 	}
-	if err := ensureTrailRepoHasTarget(repoOverride, selector != "" || strings.TrimSpace(branch) != "", "pass a trail selector or --branch"); err != nil {
-		return err
-	}
 	req, err := buildApprovalRequest(event, message)
 	if err != nil {
 		return err
@@ -100,6 +97,9 @@ If <trail> is omitted, approves the trail for the current branch (or --branch).
 The trail must be open and have a linked branch.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := ensureTrailRepoHasTarget(cmd, selectorFromArgs(args) != "" || strings.TrimSpace(branch) != "", "pass a trail selector or --branch"); err != nil {
+				return err
+			}
 			return submitTrailApproval(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd),
 				trailRepoFlag(cmd), selectorFromArgs(args), branch, "APPROVE", message, "Approved")
 		},
@@ -120,6 +120,9 @@ If <trail> is omitted, targets the trail for the current branch (or --branch).
 A reason (--message) is required. The trail must be open and have a linked branch.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := ensureTrailRepoHasTarget(cmd, selectorFromArgs(args) != "" || strings.TrimSpace(branch) != "", "pass a trail selector or --branch"); err != nil {
+				return err
+			}
 			return submitTrailApproval(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd),
 				trailRepoFlag(cmd), selectorFromArgs(args), branch, "REQUEST_CHANGES", message, "Requested changes on")
 		},
@@ -137,6 +140,9 @@ func newTrailApprovalsCmd() *cobra.Command {
 		Short: "List approval decisions on a trail",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := ensureTrailRepoHasTarget(cmd, selectorFromArgs(args) != "" || strings.TrimSpace(branch) != "", "pass a trail selector or --branch"); err != nil {
+				return err
+			}
 			return runTrailApprovals(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd),
 				trailRepoFlag(cmd), selectorFromArgs(args), branch, jsonOut)
 		},
@@ -149,9 +155,6 @@ func newTrailApprovalsCmd() *cobra.Command {
 func runTrailApprovals(ctx context.Context, w, errW io.Writer, insecureHTTP bool, repoOverride, selector, branch string, jsonOut bool) error {
 	if selector != "" && strings.TrimSpace(branch) != "" {
 		return errors.New("pass a trail selector or --branch, not both")
-	}
-	if err := ensureTrailRepoHasTarget(repoOverride, selector != "" || strings.TrimSpace(branch) != "", "pass a trail selector or --branch"); err != nil {
-		return err
 	}
 	// Auth/not-logged-in messages go to stderr; w carries command output only.
 	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client) error {
