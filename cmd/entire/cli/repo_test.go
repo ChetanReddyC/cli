@@ -1,10 +1,17 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/go-faster/jx"
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/internal/coreapi"
 )
@@ -231,4 +238,157 @@ func TestRepoCreateOutput_OmitsRemoteWhenUnresolvable(t *testing.T) {
 	if _, ok := got["remote"]; ok {
 		t.Errorf("expected no remote field, got %v", got["remote"])
 	}
+}
+
+// testProjectULID is a syntactically valid ULID so `repo list <project>` skips
+// the by-name resolution round-trip and goes straight to ListProjectRepos.
+const testProjectULID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+// bulkRepos builds n minimal project repos named <prefix>-0000…, for tests
+// that need to cross the fetch budget.
+func bulkRepos(prefix string, n int) []coreapi.Repo {
+	repos := make([]coreapi.Repo, 0, n)
+	for i := range n {
+		repos = append(repos, coreapi.Repo{
+			ID:              fmt.Sprintf("%s-%04d", prefix, i),
+			Name:            fmt.Sprintf("%s-%04d", prefix, i),
+			OwningProjectId: testProjectULID,
+		})
+	}
+	return repos
+}
+
+// serveProjectRepos stands up a fake control-plane serving keyset-paginated
+// GET /projects/{id}/repos: each call answers with the page addressed by the
+// pageToken query param ("" is the first page). Every request is delivered on
+// the returned channel (buffered to the page count so the handler never
+// blocks). Points the active-context client seam at the server.
+func serveProjectRepos(t *testing.T, pages []coreapi.ListProjectReposOutputBody) <-chan recordedRequest {
+	t.Helper()
+	tokenToPage := make(map[string]coreapi.ListProjectReposOutputBody, len(pages))
+	for i, p := range pages {
+		token := ""
+		if i > 0 {
+			token = pages[i-1].NextPageToken.Or("")
+			require.NotEmpty(t, token, "every page but the last needs a NextPageToken linking to the next one")
+		}
+		tokenToPage[token] = p
+	}
+	recCh := make(chan recordedRequest, len(pages))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/v1/projects/"+testProjectULID+"/repos" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		page, ok := tokenToPage[r.URL.Query().Get("pageToken")]
+		if !ok {
+			t.Errorf("unexpected pageToken %q", r.URL.Query().Get("pageToken"))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if err := printJSON(w, &page); err != nil {
+			t.Errorf("encode repos response: %v", err)
+		}
+		recCh <- recordedRequest{method: r.Method, path: r.URL.Path, query: r.URL.Query()}
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := activeCoreClient
+	activeCoreClient = func(context.Context) (*coreapi.Client, error) {
+		return coreapi.NewWithBearer(srv.URL, "tok")
+	}
+	t.Cleanup(func() { activeCoreClient = prev })
+	return recCh
+}
+
+// execRepoList runs `repo list <project>` under a parent carrying the
+// control-plane persistent flags, mirroring execMirrorList.
+func execRepoList(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	parent := &cobra.Command{Use: "repo"}
+	addControlPlaneFlags(parent)
+	parent.AddCommand(newRepoListCmd())
+	var out, errOut bytes.Buffer
+	parent.SetOut(&out)
+	parent.SetErr(&errOut)
+	parent.SetArgs(append([]string{"list", testProjectULID}, args...))
+	err = parent.ExecuteContext(t.Context())
+	return out.String(), errOut.String(), err
+}
+
+// TestRepoList_FetchBudget pins the bounded cursor walk on `repo list`: by
+// default at most coreListFetchBudget entries are fetched with a stderr
+// disclosure, --limit bounds the fetch directly (this list has no local
+// filters or sort), and --all lifts the bound.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoList_FetchBudget(t *testing.T) {
+	t.Run("the default fetch budget stops the walk and discloses the partial window", func(t *testing.T) {
+		recCh := serveProjectRepos(t, []coreapi.ListProjectReposOutputBody{
+			{Repos: bulkRepos("bulk", 1000), NextPageToken: coreapi.NewOptString("p2")},
+			{Repos: bulkRepos("tail", 1)},
+		})
+		stdout, stderr, err := execRepoList(t)
+		require.NoError(t, err)
+		require.NotContains(t, stdout, "tail-0000", "the walk must stop at the budget")
+		<-recCh
+		select {
+		case rec := <-recCh:
+			t.Fatalf("no second page request expected, got one with pageToken=%q", rec.query.Get("pageToken"))
+		default:
+		}
+		require.Contains(t, stderr, "first 1000")
+		require.Contains(t, stderr, "--all")
+	})
+
+	t.Run("--all walks past the budget and prints no note", func(t *testing.T) {
+		serveProjectRepos(t, []coreapi.ListProjectReposOutputBody{
+			{Repos: bulkRepos("bulk", 1000), NextPageToken: coreapi.NewOptString("p2")},
+			{Repos: bulkRepos("tail", 1)},
+		})
+		stdout, stderr, err := execRepoList(t, "--all")
+		require.NoError(t, err)
+		require.Contains(t, stdout, "tail-0000", "--all fetches the full list")
+		require.NotContains(t, stderr, "--all", "a complete walk needs no note")
+	})
+
+	t.Run("--limit bounds the fetch directly and prints no note", func(t *testing.T) {
+		// No local filters or sort on this list, so --limit N never needs
+		// entries beyond the first N: the walk stops early and, because the
+		// user asked for the cap, no partial-window note is printed.
+		recCh := serveProjectRepos(t, []coreapi.ListProjectReposOutputBody{
+			{Repos: bulkRepos("page1", 2), NextPageToken: coreapi.NewOptString("p2")},
+			{Repos: bulkRepos("page2", 2)},
+		})
+		stdout, stderr, err := execRepoList(t, "--limit", "2")
+		require.NoError(t, err)
+		require.Contains(t, stdout, "page1-0001")
+		require.NotContains(t, stdout, "page2-0000", "the walk stops once --limit is satisfied")
+		<-recCh
+		select {
+		case rec := <-recCh:
+			t.Fatalf("no second page request expected, got one with pageToken=%q", rec.query.Get("pageToken"))
+		default:
+		}
+		require.NotContains(t, stderr, "--all", "an explicit --limit is not a surprise; no note")
+	})
+
+	t.Run("--limit trims a page overshoot from the rows shown", func(t *testing.T) {
+		serveProjectRepos(t, []coreapi.ListProjectReposOutputBody{
+			{Repos: bulkRepos("page1", 5)},
+		})
+		stdout, _, err := execRepoList(t, "--limit", "3")
+		require.NoError(t, err)
+		require.Contains(t, stdout, "page1-0002")
+		require.NotContains(t, stdout, "page1-0003", "rows past --limit are trimmed")
+	})
+
+	t.Run("a negative --limit fails fast", func(t *testing.T) {
+		serveProjectRepos(t, nil)
+		_, _, err := execRepoList(t, "--limit", "-1")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "--limit")
+	})
 }

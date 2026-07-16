@@ -671,7 +671,7 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 }
 
 // TestRepoMirrorList_FetchBudget pins the bounded cursor walk: by default at
-// most repoDirFetchBudget entries are fetched (raised to --limit when larger),
+// most coreListFetchBudget entries are fetched (raised to --limit when larger),
 // a partial window is disclosed on stderr — including for --json — and --all
 // lifts the bound entirely.
 //

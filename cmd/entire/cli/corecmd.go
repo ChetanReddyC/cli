@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -199,30 +200,72 @@ func renderCoreList[T any](cmd *cobra.Command, empty string, headers []string, r
 	}
 }
 
+// coreListFetchBudget bounds how many entries a bounded list command fetches
+// by default. The control plane pages but cannot filter or sort these lists,
+// so without a bound every call would walk the entire collection — thousands
+// of requests on a large org. Commands that stop at the budget must disclose
+// the partial window on stderr and offer --all.
+const coreListFetchBudget = 1000
+
 // fetchAllPages drives a keyset-paginated list endpoint to completion: it
 // calls fetch with an empty cursor, then re-calls it with each returned
 // nextPageToken until the cursor comes back empty, concatenating every page.
 // The control plane caps the page size (and may cap it further than a caller
 // requests), so a single call only returns one page — list commands must loop
-// or they silently truncate. The next==cursor guard turns a misbehaving server
-// that fails to advance the cursor into an error instead of an infinite loop.
+// or they silently truncate.
 func fetchAllPages[T any](ctx context.Context, fetch func(ctx context.Context, cursor string) (items []T, next string, err error)) ([]T, error) {
+	items, _, err := fetchPagesBounded(ctx, 0, fetch)
+	return items, err
+}
+
+// fetchPagesBounded is fetchAllPages with a fetch budget: the cursor walk
+// stops once at least budget entries have been fetched (a page is never split,
+// so the result can overshoot by up to one page). partial reports that the
+// walk stopped with a cursor remaining — entries exist beyond the returned
+// slice and the caller must disclose that. budget <= 0 means unbounded. The
+// next==cursor guard turns a misbehaving server that fails to advance the
+// cursor into an error instead of an infinite loop.
+func fetchPagesBounded[T any](ctx context.Context, budget int, fetch func(ctx context.Context, cursor string) (items []T, next string, err error)) (items []T, partial bool, err error) {
 	var all []T
 	cursor := ""
 	for {
-		items, next, err := fetch(ctx, cursor)
+		page, next, err := fetch(ctx, cursor)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		all = append(all, items...)
+		all = append(all, page...)
 		if next == "" {
-			return all, nil
+			return all, false, nil
+		}
+		if budget > 0 && len(all) >= budget {
+			return all, true, nil
 		}
 		if next == cursor {
-			return nil, fmt.Errorf("pagination did not advance (cursor %q repeated)", next)
+			return nil, false, fmt.Errorf("pagination did not advance (cursor %q repeated)", next)
 		}
 		cursor = next
 	}
+}
+
+// flushThroughPager runs run with the command's stdout captured, then flushes
+// the captured output — through a pager when stdout is a real terminal and the
+// content is taller than the screen (see outputWithPager), directly otherwise.
+// --json output never pages: a machine consumer driving a PTY would hang
+// waiting on the pager's keyboard, and JSON is not for reading. Output is
+// flushed even when run errors, so partial renders are not swallowed.
+func flushThroughPager(cmd *cobra.Command, noPager bool, run func() error) error {
+	finalOut := cmd.OutOrStdout()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	err := run()
+	cmd.SetOut(finalOut)
+	content := buf.String()
+	if noPager || jsonRequested(cmd) {
+		fmt.Fprint(finalOut, content)
+	} else {
+		outputWithPager(finalOut, content)
+	}
+	return err
 }
 
 // runCoreObject fetches a single value via fn and renders it as a vertical

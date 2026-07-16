@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -564,12 +563,6 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 	}
 }
 
-// repoDirFetchBudget bounds how many directory entries one `repo mirror list`
-// call fetches by default (raised to --limit when larger, lifted by --all).
-// The server pages but cannot filter or sort, so without a bound every call
-// would walk the entire directory — thousands of requests on a large org.
-const repoDirFetchBudget = 1000
-
 func newRepoMirrorListCmd() *cobra.Command {
 	var cluster, owner, name, status, access string
 	var private bool
@@ -585,7 +578,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 			"This replaces the former `--show-available` flag: both are one table now, " +
 			"served by GET /repos?scope=all.\n\n" +
 			"The server only pages the directory — it does not filter or sort. By " +
-			"default at most " + strconv.Itoa(repoDirFetchBudget) + " entries are fetched (or --limit's value when " +
+			"default at most " + strconv.Itoa(coreListFetchBudget) + " entries are fetched (or --limit's value when " +
 			"larger); every filter (--name, --owner, --cluster, --status, --access, " +
 			"--private) and --sort then runs locally over that fetched window. When " +
 			"the directory has more entries a note on stderr says so — pass --all to " +
@@ -603,152 +596,135 @@ func newRepoMirrorListCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Buffer the rendered table so long TTY output can go through a
 			// pager; the row set is fully materialized for the client-side sort
-			// anyway, so buffering the render adds nothing. Non-TTY writers and
-			// short output pass through outputWithPager untouched.
-			finalOut := cmd.OutOrStdout()
-			var buf bytes.Buffer
-			cmd.SetOut(&buf)
-			err := runCoreList(cmd, "No repos found.", columnHeaders(repoDirColumns), repoDirCells, func(ctx context.Context, c *coreapi.Client) ([]repoDirRow, error) {
-				// Identity-scoped: shows repos visible from the active login's
-				// federation, so naming the core the client actually dials
-				// (c.CoreOrigin, which reflects ENTIRE_TOKEN's aud) makes a
-				// surprising empty result legible. On stderr so it never lands
-				// in a piped table; skipped for --json to keep output clean.
-				if !jsonRequested(cmd) {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Listing repos on %s\n", c.CoreOrigin())
-				}
-				// /repos placements carry only a cluster slug; the clone URL
-				// needs the cluster's public host, so join against the catalog.
-				// This extra round-trip exists ONLY to resolve slug->host for the
-				// synthesized clone URL (see mirrorCloneURL): if /repos ever
-				// returns the clone URL (or host) on a placement, drop both this
-				// ListClusters call and the synthesis.
-				//
-				// Fail the whole command if the catalog is unavailable rather than
-				// degrade: the clone URL is the payload of a mirror listing, and
-				// --json suppresses the stderr banner, so a degraded run would hand
-				// a script row-complete data with silently empty clone URLs and a
-				// zero exit. Fail-fast keeps the output honest, matching how a
-				// ListRepos error aborts below.
-				clusters, err := c.ListClusters(ctx)
-				if err != nil {
-					return nil, err
-				}
-				hostBySlug := clusterHostBySlug(clusters.Clusters)
-				// The server cannot filter or sort this directory, so the whole
-				// pipeline below is local. Bound what one call fetches: the
-				// budget caps the cursor walk (raised to --limit when larger,
-				// lifted entirely by --all) so a huge org pays for a few pages,
-				// not thousands — at the disclosed price of filters and sort
-				// seeing only the fetched window.
-				budget := max(repoDirFetchBudget, limit)
-				truncated := false
-				fetched := 0
-				partial := false
-				repos, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.RepoIndexEntry, string, error) {
-					params := coreapi.ListReposParams{Scope: coreapi.NewOptListReposScope(coreapi.ListReposScopeAll)}
-					if cursor != "" {
-						params.PageToken = coreapi.NewOptString(cursor)
+			// anyway, so buffering the render adds nothing.
+			return flushThroughPager(cmd, noPager, func() error {
+				return runCoreList(cmd, "No repos found.", columnHeaders(repoDirColumns), repoDirCells, func(ctx context.Context, c *coreapi.Client) ([]repoDirRow, error) {
+					// Identity-scoped: shows repos visible from the active login's
+					// federation, so naming the core the client actually dials
+					// (c.CoreOrigin, which reflects ENTIRE_TOKEN's aud) makes a
+					// surprising empty result legible. On stderr so it never lands
+					// in a piped table; skipped for --json to keep output clean.
+					if !jsonRequested(cmd) {
+						fmt.Fprintf(cmd.ErrOrStderr(), "Listing repos on %s\n", c.CoreOrigin())
 					}
-					out, lerr := c.ListRepos(ctx, params)
-					if lerr != nil {
-						return nil, "", lerr
+					// /repos placements carry only a cluster slug; the clone URL
+					// needs the cluster's public host, so join against the catalog.
+					// This extra round-trip exists ONLY to resolve slug->host for the
+					// synthesized clone URL (see mirrorCloneURL): if /repos ever
+					// returns the clone URL (or host) on a placement, drop both this
+					// ListClusters call and the synthesis.
+					//
+					// Fail the whole command if the catalog is unavailable rather than
+					// degrade: the clone URL is the payload of a mirror listing, and
+					// --json suppresses the stderr banner, so a degraded run would hand
+					// a script row-complete data with silently empty clone URLs and a
+					// zero exit. Fail-fast keeps the output honest, matching how a
+					// ListRepos error aborts below.
+					clusters, err := c.ListClusters(ctx)
+					if err != nil {
+						return nil, err
 					}
-					fetched += len(out.Repos)
-					next := out.NextPageToken.Or("")
-					// A capped page mid-chain is fine — the cursor walks past it.
-					// Only a capped page with no cursor to continue from (legacy
-					// server, or a hard directory cap) leaves repos unseen, and a
-					// short directory must not read as "this is everything".
-					truncated = truncated || (out.Truncated && next == "")
-					if !all && next != "" && fetched >= budget {
-						partial = true
-						next = "" // stop the walk; disclosed below
+					hostBySlug := clusterHostBySlug(clusters.Clusters)
+					// The server cannot filter or sort this directory, so the whole
+					// pipeline below is local. Bound what one call fetches: the
+					// budget caps the cursor walk (raised to --limit when larger,
+					// lifted entirely by --all) so a huge org pays for a few pages,
+					// not thousands — at the disclosed price of filters and sort
+					// seeing only the fetched window.
+					budget := max(coreListFetchBudget, limit)
+					if all {
+						budget = 0 // unbounded
 					}
-					return out.Repos, next, nil
+					truncated := false
+					repos, partial, err := fetchPagesBounded(ctx, budget, func(ctx context.Context, cursor string) ([]coreapi.RepoIndexEntry, string, error) {
+						params := coreapi.ListReposParams{Scope: coreapi.NewOptListReposScope(coreapi.ListReposScopeAll)}
+						if cursor != "" {
+							params.PageToken = coreapi.NewOptString(cursor)
+						}
+						out, lerr := c.ListRepos(ctx, params)
+						if lerr != nil {
+							return nil, "", lerr
+						}
+						next := out.NextPageToken.Or("")
+						// A capped page mid-chain is fine — the cursor walks past it.
+						// Only a capped page with no cursor to continue from (legacy
+						// server, or a hard directory cap) leaves repos unseen, and a
+						// short directory must not read as "this is everything".
+						truncated = truncated || (out.Truncated && next == "")
+						return out.Repos, next, nil
+					})
+					if err != nil {
+						return nil, err
+					}
+					if partial {
+						// Unlike the server-truncation warning below, this note is
+						// deliberate client behavior with an escape hatch, and a
+						// script acting on silently partial data is the worst
+						// outcome — so it prints for --json too (stderr never
+						// corrupts the stdout JSON).
+						fmt.Fprintf(cmd.ErrOrStderr(),
+							"Note: the repo directory has more entries; results were computed from the first %d fetched.\n"+
+								"All filters and --sort are local to that window — pass --all to fetch the complete directory.\n",
+							len(repos))
+					}
+					// Warn on stderr (skipped for --json) rather than fail.
+					if truncated && !jsonRequested(cmd) {
+						fmt.Fprintln(cmd.ErrOrStderr(), "Warning: the repo directory was truncated by the server; some repos are not shown.")
+					}
+					rows := buildRepoDir(repos, hostBySlug)
+					rows = filterByName(rows, func(r repoDirRow) string { return r.Repo }, name)
+					if owner != "" {
+						rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
+							o, _, _ := strings.Cut(r.Repo, "/")
+							return !strings.EqualFold(o, owner)
+						})
+					}
+					if cluster != "" {
+						// Candidates are cluster-agnostic, so --cluster keeps only
+						// onboarded rows on the named cluster (matching how the old
+						// --show-available ignored --cluster for candidates).
+						// Placements carry only a slug, but the clone URLs this command
+						// prints — and the old server-side --cluster — identify clusters
+						// by public host (e.g. aws-us-east-2.entire.io). Accept either
+						// form so a host copied from a clone URL still matches.
+						rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
+							return !strings.EqualFold(r.Cluster, cluster) &&
+								!strings.EqualFold(hostBySlug[r.Cluster], cluster)
+						})
+					}
+					if status != "" {
+						// Exact (case-insensitive) match on the displayed STATUS cell,
+						// which spans both row types: mirrors (ready/processing/failed/
+						// suspended) and candidates (available/owner-only).
+						rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
+							return !strings.EqualFold(r.Status, status)
+						})
+					}
+					if access != "" {
+						// ACCESS is candidate-only (read/write/admin); mirror rows carry
+						// none, so --access naturally narrows to matching candidates.
+						rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
+							return !strings.EqualFold(r.Access, access)
+						})
+					}
+					if cmd.Flags().Changed("private") {
+						// Tri-state: gate on Changed so an unset flag means "all", while
+						// --private / --private=false narrow to private / public rows.
+						rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
+							return r.Private != private
+						})
+					}
+					if err := sortRepoDir(rows, sortSpec); err != nil {
+						return nil, err
+					}
+					// Cap last, after filters and the sort, so --limit N always
+					// means "the first N rows of the table you would have seen".
+					if limit > 0 && len(rows) > limit {
+						rows = rows[:limit]
+					}
+					return rows, nil
 				})
-				if err != nil {
-					return nil, err
-				}
-				if partial {
-					// Unlike the server-truncation warning below, this note is
-					// deliberate client behavior with an escape hatch, and a
-					// script acting on silently partial data is the worst
-					// outcome — so it prints for --json too (stderr never
-					// corrupts the stdout JSON).
-					fmt.Fprintf(cmd.ErrOrStderr(),
-						"Note: the repo directory has more entries; results were computed from the first %d fetched.\n"+
-							"All filters and --sort are local to that window — pass --all to fetch the complete directory.\n",
-						fetched)
-				}
-				// Warn on stderr (skipped for --json) rather than fail.
-				if truncated && !jsonRequested(cmd) {
-					fmt.Fprintln(cmd.ErrOrStderr(), "Warning: the repo directory was truncated by the server; some repos are not shown.")
-				}
-				rows := buildRepoDir(repos, hostBySlug)
-				rows = filterByName(rows, func(r repoDirRow) string { return r.Repo }, name)
-				if owner != "" {
-					rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
-						o, _, _ := strings.Cut(r.Repo, "/")
-						return !strings.EqualFold(o, owner)
-					})
-				}
-				if cluster != "" {
-					// Candidates are cluster-agnostic, so --cluster keeps only
-					// onboarded rows on the named cluster (matching how the old
-					// --show-available ignored --cluster for candidates).
-					// Placements carry only a slug, but the clone URLs this command
-					// prints — and the old server-side --cluster — identify clusters
-					// by public host (e.g. aws-us-east-2.entire.io). Accept either
-					// form so a host copied from a clone URL still matches.
-					rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
-						return !strings.EqualFold(r.Cluster, cluster) &&
-							!strings.EqualFold(hostBySlug[r.Cluster], cluster)
-					})
-				}
-				if status != "" {
-					// Exact (case-insensitive) match on the displayed STATUS cell,
-					// which spans both row types: mirrors (ready/processing/failed/
-					// suspended) and candidates (available/owner-only).
-					rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
-						return !strings.EqualFold(r.Status, status)
-					})
-				}
-				if access != "" {
-					// ACCESS is candidate-only (read/write/admin); mirror rows carry
-					// none, so --access naturally narrows to matching candidates.
-					rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
-						return !strings.EqualFold(r.Access, access)
-					})
-				}
-				if cmd.Flags().Changed("private") {
-					// Tri-state: gate on Changed so an unset flag means "all", while
-					// --private / --private=false narrow to private / public rows.
-					rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
-						return r.Private != private
-					})
-				}
-				if err := sortRepoDir(rows, sortSpec); err != nil {
-					return nil, err
-				}
-				// Cap last, after filters and the sort, so --limit N always
-				// means "the first N rows of the table you would have seen".
-				if limit > 0 && len(rows) > limit {
-					rows = rows[:limit]
-				}
-				return rows, nil
 			})
-			cmd.SetOut(finalOut)
-			// Flush whatever rendered even on error, then surface the error.
-			// --json never pages: a machine consumer driving a PTY would hang
-			// waiting on the pager's keyboard, and JSON is not for reading.
-			content := buf.String()
-			if noPager || jsonRequested(cmd) {
-				fmt.Fprint(finalOut, content)
-			} else {
-				outputWithPager(finalOut, content)
-			}
-			return err
 		},
 	}
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Keep only mirrors on this cluster, by slug or public host (drops onboardable candidates)")
@@ -759,7 +735,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&private, "private", false, "Filter by visibility: --private for private only, --private=false for public only (omit for all)")
 	cmd.Flags().StringVar(&sortSpec, "sort", "", "Sort by column key (e.g. name, clone-url; prefix '-' for descending). Default: name ascending")
 	cmd.Flags().IntVar(&limit, "limit", 0, "Show at most N rows, applied after the local filters and sort (0 shows all fetched)")
-	cmd.Flags().BoolVar(&all, "all", false, "Fetch the complete directory instead of the first "+strconv.Itoa(repoDirFetchBudget)+" entries (slower on large orgs)")
+	cmd.Flags().BoolVar(&all, "all", false, "Fetch the complete directory instead of the first "+strconv.Itoa(coreListFetchBudget)+" entries (slower on large orgs)")
 	cmd.Flags().BoolVar(&noPager, "no-pager", false, "Print directly to stdout instead of a pager for long output")
 	addJSONFlag(cmd)
 	return cmd
