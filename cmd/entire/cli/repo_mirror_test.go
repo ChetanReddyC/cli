@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -385,6 +386,16 @@ const (
 	testReposPath    = "/api/v1/repos"
 )
 
+// bulkEntries builds n onboarded /repos entries named <prefix>/repo-0000…,
+// for tests that need to cross the fetch budget.
+func bulkEntries(prefix string, n int) []coreapi.RepoIndexEntry {
+	entries := make([]coreapi.RepoIndexEntry, 0, n)
+	for i := range n {
+		entries = append(entries, onboardedEntry(fmt.Sprintf("%s/repo-%04d", prefix, i), "private", "us"))
+	}
+	return entries
+}
+
 // serveRepoList stands up a fake control-plane serving the two endpoints the
 // merged `list` calls: GET /clusters (the slug→host catalog used to synthesise
 // clone URLs) and GET /repos?scope=all (the directory). It points the
@@ -656,6 +667,93 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		}, clusters, false)
 		stdout, _ := runMirrorList(t, "--no-pager")
 		require.Contains(t, stdout, "acme/web")
+	})
+}
+
+// TestRepoMirrorList_FetchBudget pins the bounded cursor walk: by default at
+// most repoDirFetchBudget entries are fetched (raised to --limit when larger),
+// a partial window is disclosed on stderr — including for --json — and --all
+// lifts the bound entirely.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoMirrorList_FetchBudget(t *testing.T) {
+	clusters := []coreapi.Cluster{{Slug: "us", PublicUrl: "https://aws-us-east-2.entire.io"}}
+
+	t.Run("the default fetch budget stops the walk and discloses the partial window", func(t *testing.T) {
+		recCh := serveRepoListPaged(t, []coreapi.ListReposOutputBody{
+			{
+				Repos:         bulkEntries("bulk", 1000),
+				NextPageToken: coreapi.NewOptString("p2"),
+			},
+			{
+				Repos: []coreapi.RepoIndexEntry{onboardedEntry("tail/end", "private", "us")},
+			},
+		}, clusters)
+		stdout, stderr := runMirrorList(t)
+
+		require.NotContains(t, stdout, "tail/end", "the walk must stop at the budget, not fetch page 2")
+		<-recCh
+		select {
+		case rec := <-recCh:
+			t.Fatalf("no second page request expected, got one with pageToken=%q", rec.query.Get("pageToken"))
+		default:
+		}
+		require.Contains(t, stderr, "first 1000", "the note says how much was fetched")
+		require.Contains(t, stderr, "local", "the note says filters/sort ran locally over the window")
+		require.Contains(t, stderr, "--all", "the note points at the escape hatch")
+	})
+
+	t.Run("the partial-window note reaches --json runs on stderr", func(t *testing.T) {
+		// A script acting on silently partial data is the worst outcome, so
+		// unlike the legacy server-truncation warning this note is NOT
+		// suppressed for --json; stderr never corrupts the stdout JSON.
+		serveRepoListPaged(t, []coreapi.ListReposOutputBody{
+			{
+				Repos:         bulkEntries("bulk", 1000),
+				NextPageToken: coreapi.NewOptString("p2"),
+			},
+			{
+				Repos: []coreapi.RepoIndexEntry{onboardedEntry("tail/end", "private", "us")},
+			},
+		}, clusters)
+		stdout, stderr := runMirrorList(t, "--json")
+		require.Contains(t, stderr, "--all")
+		require.NotContains(t, stdout, "tail/end")
+	})
+
+	t.Run("--all walks past the budget and prints no note", func(t *testing.T) {
+		serveRepoListPaged(t, []coreapi.ListReposOutputBody{
+			{
+				Repos:         bulkEntries("bulk", 1000),
+				NextPageToken: coreapi.NewOptString("p2"),
+			},
+			{
+				Repos: []coreapi.RepoIndexEntry{onboardedEntry("tail/end", "private", "us")},
+			},
+		}, clusters)
+		stdout, stderr := runMirrorList(t, "--all")
+		require.Contains(t, stdout, "tail/end", "--all fetches the full directory")
+		require.NotContains(t, stderr, "--all", "a complete walk needs no note")
+	})
+
+	t.Run("--limit above the budget raises the fetch budget to match", func(t *testing.T) {
+		serveRepoListPaged(t, []coreapi.ListReposOutputBody{
+			{
+				Repos:         bulkEntries("aaa", 1000),
+				NextPageToken: coreapi.NewOptString("p2"),
+			},
+			{
+				Repos:         bulkEntries("bbb", 500),
+				NextPageToken: coreapi.NewOptString("p3"),
+			},
+			{
+				Repos: []coreapi.RepoIndexEntry{onboardedEntry("tail/end", "private", "us")},
+			},
+		}, clusters)
+		stdout, stderr := runMirrorList(t, "--limit", "1200")
+		require.Contains(t, stdout, "bbb/repo-0100", "rows past the default budget are shown when --limit asks for them")
+		require.NotContains(t, stdout, "tail/end", "the walk still stops once --limit is satisfiable")
+		require.Contains(t, stderr, "first 1500", "the note reports the real fetched count")
 	})
 
 	t.Run("a capped page mid-chain does not warn once the cursor walks past it", func(t *testing.T) {

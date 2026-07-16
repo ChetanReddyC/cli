@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -563,12 +564,18 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 	}
 }
 
+// repoDirFetchBudget bounds how many directory entries one `repo mirror list`
+// call fetches by default (raised to --limit when larger, lifted by --all).
+// The server pages but cannot filter or sort, so without a bound every call
+// would walk the entire directory — thousands of requests on a large org.
+const repoDirFetchBudget = 1000
+
 func newRepoMirrorListCmd() *cobra.Command {
 	var cluster, owner, name, status, access string
 	var private bool
 	var sortSpec string
 	var limit int
-	var noPager bool
+	var noPager, all bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List repos you can see: existing mirrors and GitHub repos you could onboard",
@@ -576,7 +583,13 @@ func newRepoMirrorListCmd() *cobra.Command {
 			"mirrors (with clone URL and clone STATUS) and onboardable GitHub repos " +
 			"(with ACCESS and an available/owner-only STATUS). Sparse cells show '-'.\n\n" +
 			"This replaces the former `--show-available` flag: both are one table now, " +
-			"served by a single GET /repos?scope=all call.",
+			"served by GET /repos?scope=all.\n\n" +
+			"The server only pages the directory — it does not filter or sort. By " +
+			"default at most " + strconv.Itoa(repoDirFetchBudget) + " entries are fetched (or --limit's value when " +
+			"larger); every filter (--name, --owner, --cluster, --status, --access, " +
+			"--private) and --sort then runs locally over that fetched window. When " +
+			"the directory has more entries a note on stderr says so — pass --all to " +
+			"fetch everything (slower on large orgs).",
 		Args: cobra.NoArgs,
 		// Validate --sort before RunE so a bad column fails fast, without the
 		// network round-trip RunE would otherwise do first.
@@ -622,7 +635,16 @@ func newRepoMirrorListCmd() *cobra.Command {
 					return nil, err
 				}
 				hostBySlug := clusterHostBySlug(clusters.Clusters)
+				// The server cannot filter or sort this directory, so the whole
+				// pipeline below is local. Bound what one call fetches: the
+				// budget caps the cursor walk (raised to --limit when larger,
+				// lifted entirely by --all) so a huge org pays for a few pages,
+				// not thousands — at the disclosed price of filters and sort
+				// seeing only the fetched window.
+				budget := max(repoDirFetchBudget, limit)
 				truncated := false
+				fetched := 0
+				partial := false
 				repos, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.RepoIndexEntry, string, error) {
 					params := coreapi.ListReposParams{Scope: coreapi.NewOptListReposScope(coreapi.ListReposScopeAll)}
 					if cursor != "" {
@@ -632,16 +654,32 @@ func newRepoMirrorListCmd() *cobra.Command {
 					if lerr != nil {
 						return nil, "", lerr
 					}
+					fetched += len(out.Repos)
 					next := out.NextPageToken.Or("")
 					// A capped page mid-chain is fine — the cursor walks past it.
 					// Only a capped page with no cursor to continue from (legacy
 					// server, or a hard directory cap) leaves repos unseen, and a
 					// short directory must not read as "this is everything".
 					truncated = truncated || (out.Truncated && next == "")
+					if !all && next != "" && fetched >= budget {
+						partial = true
+						next = "" // stop the walk; disclosed below
+					}
 					return out.Repos, next, nil
 				})
 				if err != nil {
 					return nil, err
+				}
+				if partial {
+					// Unlike the server-truncation warning below, this note is
+					// deliberate client behavior with an escape hatch, and a
+					// script acting on silently partial data is the worst
+					// outcome — so it prints for --json too (stderr never
+					// corrupts the stdout JSON).
+					fmt.Fprintf(cmd.ErrOrStderr(),
+						"Note: the repo directory has more entries; results were computed from the first %d fetched.\n"+
+							"All filters and --sort are local to that window — pass --all to fetch the complete directory.\n",
+						fetched)
 				}
 				// Warn on stderr (skipped for --json) rather than fail.
 				if truncated && !jsonRequested(cmd) {
@@ -720,7 +758,8 @@ func newRepoMirrorListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&access, "access", "", "Filter by exact ACCESS (candidates only: read/write/admin)")
 	cmd.Flags().BoolVar(&private, "private", false, "Filter by visibility: --private for private only, --private=false for public only (omit for all)")
 	cmd.Flags().StringVar(&sortSpec, "sort", "", "Sort by column key (e.g. name, clone-url; prefix '-' for descending). Default: name ascending")
-	cmd.Flags().IntVar(&limit, "limit", 0, "Show at most N rows, applied after filters and sort (0 shows all)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "Show at most N rows, applied after the local filters and sort (0 shows all fetched)")
+	cmd.Flags().BoolVar(&all, "all", false, "Fetch the complete directory instead of the first "+strconv.Itoa(repoDirFetchBudget)+" entries (slower on large orgs)")
 	cmd.Flags().BoolVar(&noPager, "no-pager", false, "Print directly to stdout instead of a pager for long output")
 	addJSONFlag(cmd)
 	return cmd
