@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -566,6 +567,8 @@ func newRepoMirrorListCmd() *cobra.Command {
 	var cluster, owner, name, status, access string
 	var private bool
 	var sortSpec string
+	var limit int
+	var noPager bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List repos you can see: existing mirrors and GitHub repos you could onboard",
@@ -578,11 +581,21 @@ func newRepoMirrorListCmd() *cobra.Command {
 		// Validate --sort before RunE so a bad column fails fast, without the
 		// network round-trip RunE would otherwise do first.
 		PreRunE: func(_ *cobra.Command, _ []string) error {
+			if limit < 0 {
+				return fmt.Errorf("--limit must be zero or positive, got %d", limit)
+			}
 			_, _, err := parseSortColumn(sortSpec, repoDirColumns)
 			return err
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runCoreList(cmd, "No repos found.", columnHeaders(repoDirColumns), repoDirCells, func(ctx context.Context, c *coreapi.Client) ([]repoDirRow, error) {
+			// Buffer the rendered table so long TTY output can go through a
+			// pager; the row set is fully materialized for the client-side sort
+			// anyway, so buffering the render adds nothing. Non-TTY writers and
+			// short output pass through outputWithPager untouched.
+			finalOut := cmd.OutOrStdout()
+			var buf bytes.Buffer
+			cmd.SetOut(&buf)
+			err := runCoreList(cmd, "No repos found.", columnHeaders(repoDirColumns), repoDirCells, func(ctx context.Context, c *coreapi.Client) ([]repoDirRow, error) {
 				// Identity-scoped: shows repos visible from the active login's
 				// federation, so naming the core the client actually dials
 				// (c.CoreOrigin, which reflects ENTIRE_TOKEN's aud) makes a
@@ -680,8 +693,24 @@ func newRepoMirrorListCmd() *cobra.Command {
 				if err := sortRepoDir(rows, sortSpec); err != nil {
 					return nil, err
 				}
+				// Cap last, after filters and the sort, so --limit N always
+				// means "the first N rows of the table you would have seen".
+				if limit > 0 && len(rows) > limit {
+					rows = rows[:limit]
+				}
 				return rows, nil
 			})
+			cmd.SetOut(finalOut)
+			// Flush whatever rendered even on error, then surface the error.
+			// --json never pages: a machine consumer driving a PTY would hang
+			// waiting on the pager's keyboard, and JSON is not for reading.
+			content := buf.String()
+			if noPager || jsonRequested(cmd) {
+				fmt.Fprint(finalOut, content)
+			} else {
+				outputWithPager(finalOut, content)
+			}
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Keep only mirrors on this cluster, by slug or public host (drops onboardable candidates)")
@@ -691,6 +720,8 @@ func newRepoMirrorListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&access, "access", "", "Filter by exact ACCESS (candidates only: read/write/admin)")
 	cmd.Flags().BoolVar(&private, "private", false, "Filter by visibility: --private for private only, --private=false for public only (omit for all)")
 	cmd.Flags().StringVar(&sortSpec, "sort", "", "Sort by column key (e.g. name, clone-url; prefix '-' for descending). Default: name ascending")
+	cmd.Flags().IntVar(&limit, "limit", 0, "Show at most N rows, applied after filters and sort (0 shows all)")
+	cmd.Flags().BoolVar(&noPager, "no-pager", false, "Print directly to stdout instead of a pager for long output")
 	addJSONFlag(cmd)
 	return cmd
 }

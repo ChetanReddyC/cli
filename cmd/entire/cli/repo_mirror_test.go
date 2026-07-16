@@ -607,6 +607,57 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		require.NotContains(t, stderr, "truncated", "a fully-walked chain is not a truncated directory")
 	})
 
+	t.Run("--limit caps rows after the default name sort", func(t *testing.T) {
+		serveRepoList(t, []coreapi.RepoIndexEntry{
+			onboardedEntry("zeta/last", "private", "us"),
+			onboardedEntry("acme/web", "private", "us"),
+			onboardedEntry("mid/way", "private", "us"),
+		}, clusters, false)
+		stdout, _ := runMirrorList(t, "--limit", "2")
+		require.Contains(t, stdout, "acme/web")
+		require.Contains(t, stdout, "mid/way")
+		require.NotContains(t, stdout, "zeta/last", "sorted last, so --limit 2 drops it")
+	})
+
+	t.Run("--limit applies to --json rows too", func(t *testing.T) {
+		serveRepoList(t, []coreapi.RepoIndexEntry{
+			onboardedEntry("zeta/last", "private", "us"),
+			onboardedEntry("acme/web", "private", "us"),
+		}, clusters, false)
+		stdout, _ := runMirrorList(t, "--json", "--limit", "1")
+		require.Contains(t, stdout, "acme/web")
+		require.NotContains(t, stdout, "zeta/last")
+	})
+
+	t.Run("--limit composes with filters before capping", func(t *testing.T) {
+		serveRepoList(t, []coreapi.RepoIndexEntry{
+			onboardedEntry("acme/web", "private", "us"),
+			candidateEntry("acme/marketing", "public", coreapi.RepoCandidateAccessAdmin, true),
+			candidateEntry("acme/site", "public", coreapi.RepoCandidateAccessAdmin, true),
+		}, clusters, false)
+		stdout, _ := runMirrorList(t, "--status", "available", "--limit", "1")
+		require.Contains(t, stdout, "acme/marketing", "first available candidate by name survives")
+		require.NotContains(t, stdout, "acme/site", "capped after the filter")
+		require.NotContains(t, stdout, "acme/web", "filtered out before the cap")
+	})
+
+	t.Run("a negative --limit fails fast", func(t *testing.T) {
+		serveRepoList(t, nil, clusters, false)
+		err := runMirrorListErr(t, "--limit", "-1")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "--limit")
+	})
+
+	t.Run("--no-pager is accepted and leaves the table intact", func(t *testing.T) {
+		// Unit runs write to a buffer, never a TTY, so the pager cannot engage
+		// here; this pins that the escape hatch parses and output is unchanged.
+		serveRepoList(t, []coreapi.RepoIndexEntry{
+			onboardedEntry("acme/web", "private", "us"),
+		}, clusters, false)
+		stdout, _ := runMirrorList(t, "--no-pager")
+		require.Contains(t, stdout, "acme/web")
+	})
+
 	t.Run("a capped page mid-chain does not warn once the cursor walks past it", func(t *testing.T) {
 		serveRepoListPaged(t, []coreapi.ListReposOutputBody{
 			{
