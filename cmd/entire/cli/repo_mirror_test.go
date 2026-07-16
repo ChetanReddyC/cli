@@ -1853,7 +1853,9 @@ func TestRepoMirrorList_ClientSideGroupNote(t *testing.T) {
 	stdout, _, err := execMirrorList(t, "--help")
 	require.NoError(t, err)
 	require.Equal(t, 1, strings.Count(stdout, "Client-side:"), "the client-side note appears exactly once, at group level")
-	requireOrder(t, stdout[strings.Index(stdout, "Filtering & Sorting Flags:"):],
+	idx := strings.Index(stdout, "Filtering & Sorting Flags:")
+	require.GreaterOrEqual(t, idx, 0, "expected a Filtering & Sorting Flags section")
+	requireOrder(t, stdout[idx:],
 		"Filtering & Sorting Flags:", "Client-side:", "--all", "--access",
 	)
 
