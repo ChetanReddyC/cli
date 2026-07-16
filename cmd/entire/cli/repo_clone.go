@@ -107,14 +107,16 @@ func newRepoCloneCmd() *cobra.Command {
 				return runGitClone(cmd.Context(), cmd, ref, targetDir)
 			}
 
-			provider, owner, repo, err := parseMirrorCloneRef(ref)
+			// provider is always "github" for the /gh/ shorthand; the pull-gated
+			// resolver pins the provider itself, so it's not threaded through.
+			_, owner, repo, err := parseMirrorCloneRef(ref)
 			if err != nil {
 				return fmt.Errorf("invalid <repo>: %w", err)
 			}
 
 			var mirrors []coreapi.Mirror
 			lister := func(ctx context.Context, c *coreapi.Client) error {
-				ms, err := listMirrorsForRepo(ctx, c, provider, owner, repo)
+				ms, err := resolvePullablePlacements(ctx, c, owner, repo)
 				if err != nil {
 					return err
 				}
@@ -202,6 +204,51 @@ func listMirrorsForRepo(ctx context.Context, c mirrorLister, provider, owner, re
 		}
 	}
 	return matched, nil
+}
+
+// mirrorResolver is the subset of the control-plane client
+// resolvePullablePlacements needs. Narrowing to an interface lets tests inject
+// a fake; *coreapi.Client satisfies it.
+type mirrorResolver interface {
+	ResolveMirrorPlacements(ctx context.Context, params coreapi.ResolveMirrorPlacementsParams) (*coreapi.ResolvePlacementsOutputBody, error)
+}
+
+// resolvePullablePlacements returns every cluster placement of one GitHub
+// upstream the caller may pull (clone). It backs `repo clone /gh/<owner>/<repo>`
+// and deliberately differs from listMirrorsForRepo: that reads the
+// affiliation-scoped mirror list (repo#list), which omits public mirrors the
+// caller holds no grant on, so the shorthand used to fail on a public repo that
+// clones fine by full entire:// URL. This hits the pull-gated /mirrors/placements
+// endpoint instead — the same authority the clone's STS exchange enforces — so
+// anything clonable resolves, public or private-with-grant.
+//
+// owner/repo arrive already lowercased from parseMirrorCloneRef; the server
+// matches case-insensitively regardless. Results map into coreapi.Mirror so the
+// cluster picker (selectCloneTarget) is untouched — only the fields it reads
+// (ClusterHost, Cell, Jurisdiction) plus the coords are populated. An empty
+// result means not mirrored or not pullable, and the caller surfaces that.
+func resolvePullablePlacements(ctx context.Context, c mirrorResolver, owner, repo string) ([]coreapi.Mirror, error) {
+	out, err := c.ResolveMirrorPlacements(ctx, coreapi.ResolveMirrorPlacementsParams{
+		Provider: coreapi.ResolveMirrorPlacementsProviderGithub,
+		Owner:    owner,
+		Repo:     repo,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolve mirror placements: %w", err)
+	}
+	mirrors := make([]coreapi.Mirror, 0, len(out.Placements))
+	for _, p := range out.Placements {
+		mirrors = append(mirrors, coreapi.Mirror{
+			MirrorId:     p.MirrorId,
+			Provider:     mirrorCloneProviderGitHub,
+			Owner:        owner,
+			Repo:         repo,
+			ClusterHost:  p.ClusterHost,
+			Cell:         p.Cell,
+			Jurisdiction: p.Jurisdiction,
+		})
+	}
+	return mirrors, nil
 }
 
 // selectCloneTarget resolves which mirror placement to clone from. With one

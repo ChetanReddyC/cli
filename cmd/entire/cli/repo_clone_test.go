@@ -189,6 +189,52 @@ func TestSelectCloneTarget(t *testing.T) {
 	})
 }
 
+// TestResolvePullablePlacements_MapsPlacements verifies the clone-discovery
+// resolver hits the pull-gated /mirrors/placements endpoint with the upstream
+// coords and maps every returned placement into a coreapi.Mirror the picker can
+// consume (host + cell + jurisdiction + coords). A public mirror the caller
+// holds no grant on resolves here even though it never would via the
+// affiliation-scoped list — that's the whole point of the endpoint.
+func TestResolvePullablePlacements_MapsPlacements(t *testing.T) {
+	t.Parallel()
+	var gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		body := &coreapi.ResolvePlacementsOutputBody{Placements: []coreapi.ResolvedPlacement{
+			{MirrorId: "01AAA", ClusterHost: "aws-us-east-2.entire.io", Cell: coreapi.NewOptString("aws-us-east-2"), Jurisdiction: coreapi.NewOptString("us")},
+			{MirrorId: "01BBB", ClusterHost: "aws-eu-west-1.entire.io", Cell: coreapi.NewOptString("aws-eu-west-1"), Jurisdiction: coreapi.NewOptString("eu")},
+		}}
+		if err := printJSON(w, body); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := coreapi.NewWithBearer(srv.URL, "tok")
+	require.NoError(t, err)
+
+	got, err := resolvePullablePlacements(t.Context(), c, "karthik-rameshkumar", "my-entire")
+	require.NoError(t, err)
+
+	require.Equal(t, "/api/v1/mirrors/placements", gotPath)
+	require.Contains(t, gotQuery, "provider=github")
+	require.Contains(t, gotQuery, "owner=karthik-rameshkumar")
+	require.Contains(t, gotQuery, "repo=my-entire")
+
+	require.Len(t, got, 2)
+	require.Equal(t, "aws-us-east-2.entire.io", got[0].ClusterHost)
+	require.Equal(t, "aws-us-east-2", got[0].Cell.Or(""))
+	require.Equal(t, "us", got[0].Jurisdiction.Or(""))
+	require.Equal(t, "01AAA", got[0].MirrorId)
+	// Coords are echoed onto every placement so the synthesized clone URL and
+	// the picker labels carry them.
+	require.Equal(t, "karthik-rameshkumar", got[0].Owner)
+	require.Equal(t, "my-entire", got[0].Repo)
+	require.Equal(t, "aws-eu-west-1.entire.io", got[1].ClusterHost)
+}
+
 // TestListMirrorsForRepo_FiltersByRepo verifies the client-side repo filter:
 // the list API filters provider+owner server-side, but the repo match (which
 // the API has no param for) is applied locally.
