@@ -1859,3 +1859,35 @@ func TestRepoMirrorList_ClientSideFlagMarking(t *testing.T) {
 		require.NotContains(t, f.Usage, "Experimental", "no blanket experimental label on --%s", name)
 	}
 }
+
+// TestRepoMirrorList_GroupedFlagHelp pins the grouped help layout: flags are
+// presented by usage — navigation (how much is fetched / which page),
+// filtering & sorting (client-side, window-scoped), formatting — so the
+// window semantics are legible at a glance.
+func TestRepoMirrorList_GroupedFlagHelp(t *testing.T) {
+	stdout, _, err := execMirrorList(t, "--help")
+	require.NoError(t, err)
+	// Anchor past the Long text (which mentions flags by name) so the order
+	// assertions see only the flag sections.
+	idx := strings.Index(stdout, "Navigation Flags:")
+	require.GreaterOrEqual(t, idx, 0, "expected a Navigation Flags section")
+	requireOrder(t, stdout[idx:],
+		"Navigation Flags:", "--all", "--limit", "--page-size", "--page-token",
+		"Filtering & Sorting Flags:", "--access", "--cluster", "--name", "--owner", "--private", "--sort", "--status",
+		"Formatting Flags:", "--json", "--no-pager",
+	)
+}
+
+// TestRepoMirrorList_FilterHelpPointsAtAll pins that every client-side
+// filter/sort flag tells the user how to get a full-directory result:
+// combine it with --all.
+func TestRepoMirrorList_FilterHelpPointsAtAll(t *testing.T) {
+	t.Parallel()
+	cmd := newRepoMirrorListCmd()
+	for _, name := range []string{"name", "owner", "cluster", "status", "access", "private", "sort"} {
+		f := cmd.Flags().Lookup(name)
+		require.NotNil(t, f, "flag --%s must exist", name)
+		require.Contains(t, f.Usage, "fetched", "flag --%s must say it applies to fetched rows only", name)
+		require.Contains(t, f.Usage, "--all", "flag --%s must point at --all for a full filter/sort", name)
+	}
+}

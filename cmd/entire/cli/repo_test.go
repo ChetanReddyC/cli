@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-faster/jx"
@@ -478,4 +479,20 @@ func TestRepoList_PageMode(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "--page-size")
 	})
+}
+
+// TestRepoList_GroupedFlagHelp pins the grouped help layout on `repo list`:
+// navigation flags then formatting flags (this list has no filter/sort).
+func TestRepoList_GroupedFlagHelp(t *testing.T) {
+	stdout, _, err := execRepoList(t, "--help")
+	require.NoError(t, err)
+	// Anchor past the Long text (which mentions flags by name) so the order
+	// assertions see only the flag sections.
+	idx := strings.Index(stdout, "Navigation Flags:")
+	require.GreaterOrEqual(t, idx, 0, "expected a Navigation Flags section")
+	requireOrder(t, stdout[idx:],
+		"Navigation Flags:", "--all", "--limit", "--page-size", "--page-token",
+		"Formatting Flags:", "--json", "--no-pager",
+	)
+	require.NotContains(t, stdout, "Filtering & Sorting Flags:")
 }

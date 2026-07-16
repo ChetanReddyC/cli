@@ -802,7 +802,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 	// filter and --sort: they apply only to the rows the call fetched (the
 	// budget/--limit window, or one page in page mode). If a flag gains a
 	// server-side implementation, drop the marker from that flag.
-	const localWindow = "Client-side: applies only to the fetched rows (see --all/--limit/--page-size). "
+	const localWindow = "Client-side: applies only to the fetched rows; combine with --all to filter/sort the complete directory. "
 	cmd.Flags().StringVar(&cluster, "cluster", "", localWindow+"Keep only mirrors on this cluster, by slug or public host (drops onboardable candidates)")
 	cmd.Flags().StringVar(&owner, "owner", "", localWindow+"Filter by upstream owner login")
 	cmd.Flags().StringVar(&name, "name", "", localWindow+"Filter by owner/repo substring, matching the NAME column (case-insensitive)")
@@ -815,6 +815,10 @@ func newRepoMirrorListCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noPager, "no-pager", false, "Print directly to stdout instead of a pager for long output")
 	pageModeFlags(cmd, &pageSize, &pageToken)
 	addJSONFlag(cmd)
+	setFlagGroup(cmd, flagGroupNavigation, "all", "limit", "page-size", "page-token")
+	setFlagGroup(cmd, flagGroupFiltering, "name", "owner", "cluster", "status", "access", "private", "sort")
+	setFlagGroup(cmd, flagGroupFormatting, "json", "no-pager")
+	useGroupedFlagHelp(cmd, flagGroupNavigation, flagGroupFiltering, flagGroupFormatting)
 	return cmd
 }
 

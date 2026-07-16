@@ -249,6 +249,9 @@ func newRepoListCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noPager, "no-pager", false, "Print directly to stdout instead of a pager for long output")
 	pageModeFlags(cmd, &pageSize, &pageToken)
 	addJSONFlag(cmd)
+	setFlagGroup(cmd, flagGroupNavigation, "all", "limit", "page-size", "page-token")
+	setFlagGroup(cmd, flagGroupFormatting, "json", "no-pager")
+	useGroupedFlagHelp(cmd, flagGroupNavigation, flagGroupFiltering, flagGroupFormatting)
 	return cmd
 }
 
