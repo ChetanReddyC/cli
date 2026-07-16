@@ -73,7 +73,26 @@ high-level map of when to use entire and which subcommand; pass a command path
 // command and can afford to refresh an absent or stale enablement decision rather
 // than incorrectly treating an unknown cache entry as "trails unavailable".
 func agentHelpRepoContext(ctx context.Context) (repoLine string, trailsEnabled bool) {
-	return agentHelpRepoContextWithRefresh(ctx, refreshTrailsEnabledCacheIfStaleForScope)
+	return agentHelpRepoContextWithRefresh(ctx, refreshAgentHelpTrailsEnabledCacheIfStaleForScope)
+}
+
+// refreshAgentHelpTrailsEnabledCacheIfStaleForScope refreshes synchronously
+// because agent-help is an explicit command whose output must reflect the
+// current availability decision. SessionStart uses the detached
+// refreshTrailsEnabledCacheIfStaleForScope path instead to avoid hook latency.
+func refreshAgentHelpTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEnablementScope) error {
+	if cachedTrailsEnablementForScope(ctx, scope, time.Now()) != trailEnablementCacheUnknown {
+		return nil
+	}
+	if !scope.Supported {
+		return saveTrailsEnabledForScope(ctx, scope, false, time.Now())
+	}
+	client, err := NewAuthenticatedAPIClient(ctx, false)
+	if err != nil {
+		return err
+	}
+	_, err = refreshTrailsEnabledCacheForScope(ctx, client, scope)
+	return err
 }
 
 // agentHelpRepoContextWithRefresh keeps the refresh dependency explicit so the

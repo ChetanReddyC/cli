@@ -720,9 +720,10 @@ type RewindPoint struct {
 func (env *TestEnv) GetRewindPoints() []RewindPoint {
 	env.T.Helper()
 
-	// Run rewind --list using the shared binary. Parse stdout only — the
-	// deprecated command prints a notice on stderr that would break the JSON.
-	cmd := exec.Command(getTestBinary(), "checkpoint", "rewind", "--list")
+	// Run `checkpoint list --pending --json` using the shared binary. This is
+	// the drop-in replacement for the deprecated `rewind --list` bridge; the JSON shape is
+	// identical. Parse stdout only — any notice goes to stderr.
+	cmd := exec.Command(getTestBinary(), "checkpoint", "list", "--pending", "--json")
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 
@@ -730,7 +731,7 @@ func (env *TestEnv) GetRewindPoints() []RewindPoint {
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
-		env.T.Fatalf("rewind --list failed: %v\nOutput: %s\nStderr: %s", err, output, stderr.String())
+		env.T.Fatalf("checkpoint list --pending --json failed: %v\nOutput: %s\nStderr: %s", err, output, stderr.String())
 	}
 
 	// Parse JSON output
