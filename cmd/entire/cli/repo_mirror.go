@@ -563,7 +563,7 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 	}
 }
 
-// repoDirLocalFilters carries the experimental client-side filter/sort flags
+// repoDirLocalFilters carries the client-side filter/sort flags
 // of `repo mirror list`. privateSet distinguishes an unset --private (keep
 // all) from an explicit --private/--private=false (tri-state flag).
 type repoDirLocalFilters struct {
@@ -572,7 +572,7 @@ type repoDirLocalFilters struct {
 	sortSpec                             string
 }
 
-// applyRepoDirLocal runs the experimental client-side filter/sort pipeline
+// applyRepoDirLocal runs the client-side filter/sort pipeline
 // over rows. The server cannot filter or sort the directory, so this applies
 // only to the rows the caller fetched. hostBySlug is needed because --cluster
 // accepts a public host while rows carry only the placement slug.
@@ -665,7 +665,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 			"served by GET /repos?scope=all.\n\n" +
 			"The server only pages the directory — it does not filter or sort. By " +
 			"default at most " + strconv.Itoa(coreListFetchBudget) + " entries are fetched (or --limit's value when " +
-			"larger); the experimental filter flags (--name, --owner, --cluster, " +
+			"larger); the client-side filter flags (--name, --owner, --cluster, " +
 			"--status, --access, --private) and --sort run locally over that fetched " +
 			"window only. When the directory has more entries a note on stderr says " +
 			"so — pass --all to fetch everything (slower on large orgs).\n\n" +
@@ -687,7 +687,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 			return err
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// The experimental client-side pipeline is shared by both modes:
+			// The client-side pipeline is shared by both modes:
 			// every filter and the sort run over whatever rows the server
 			// round-trip(s) yielded — the fetched window in walk mode, one
 			// page in page mode.
@@ -701,7 +701,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 			}
 			if pageSize > 0 || pageToken != "" {
 				// Single-page cursor passthrough: one /repos request, cursor
-				// reported for resumption. The experimental local pipeline
+				// reported for resumption. The client-side local pipeline
 				// applies to just this page; the cursor survives filtering.
 				return flushThroughPager(cmd, noPager, func() error {
 					return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
@@ -797,11 +797,12 @@ func newRepoMirrorListCmd() *cobra.Command {
 			})
 		},
 	}
-	// The filter/sort flags are experimental and client-side: the server
-	// cannot filter or sort the directory, so they apply only to the rows the
-	// call fetched (the budget/--limit window, or one page in page mode).
-	// That limitation is accepted while they are experimental.
-	const localWindow = "Experimental, client-side: applies only to the fetched rows (see --all/--limit/--page-size). "
+	// Only flags that actually run on the client carry this marker. Today
+	// /repos offers the server no filter or sort params, so that is every
+	// filter and --sort: they apply only to the rows the call fetched (the
+	// budget/--limit window, or one page in page mode). If a flag gains a
+	// server-side implementation, drop the marker from that flag.
+	const localWindow = "Client-side: applies only to the fetched rows (see --all/--limit/--page-size). "
 	cmd.Flags().StringVar(&cluster, "cluster", "", localWindow+"Keep only mirrors on this cluster, by slug or public host (drops onboardable candidates)")
 	cmd.Flags().StringVar(&owner, "owner", "", localWindow+"Filter by upstream owner login")
 	cmd.Flags().StringVar(&name, "name", "", localWindow+"Filter by owner/repo substring, matching the NAME column (case-insensitive)")

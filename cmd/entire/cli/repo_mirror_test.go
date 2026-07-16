@@ -1843,16 +1843,19 @@ func TestRepoMirrorList_PageMode(t *testing.T) {
 	})
 }
 
-// TestRepoMirrorList_ExperimentalFlagMarking pins that every client-side
-// filter/sort flag on the merged list says so in its help: these run over the
-// fetched window only (see the fetch budget), which is accepted while they
-// are experimental.
-func TestRepoMirrorList_ExperimentalFlagMarking(t *testing.T) {
+// TestRepoMirrorList_ClientSideFlagMarking pins that exactly the filter/sort
+// flags that run on the client say so in their help — these apply over the
+// fetched window only (see the fetch budget). The marking is factual, not a
+// blanket "experimental" label: /repos offers the server no filter or sort
+// params, so today that is all of them; a flag that gains a server-side
+// implementation must drop the marker.
+func TestRepoMirrorList_ClientSideFlagMarking(t *testing.T) {
 	t.Parallel()
 	cmd := newRepoMirrorListCmd()
 	for _, name := range []string{"name", "owner", "cluster", "status", "access", "private", "sort"} {
 		f := cmd.Flags().Lookup(name)
 		require.NotNil(t, f, "flag --%s must exist", name)
-		require.Contains(t, f.Usage, "Experimental", "flag --%s must be marked experimental", name)
+		require.Contains(t, f.Usage, "Client-side", "flag --%s runs on the client and must say so", name)
+		require.NotContains(t, f.Usage, "Experimental", "no blanket experimental label on --%s", name)
 	}
 }
