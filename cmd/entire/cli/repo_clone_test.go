@@ -77,17 +77,17 @@ func TestMirrorCellLabel(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name   string
-		mirror coreapi.Mirror
+		mirror coreapi.ResolvedPlacement
 		want   string
 	}{
 		{
 			name:   "host only",
-			mirror: coreapi.Mirror{ClusterHost: "aws-us-east-2.entire.io"},
+			mirror: coreapi.ResolvedPlacement{ClusterHost: "aws-us-east-2.entire.io"},
 			want:   "aws-us-east-2.entire.io",
 		},
 		{
 			name: "cell and jurisdiction",
-			mirror: coreapi.Mirror{
+			mirror: coreapi.ResolvedPlacement{
 				ClusterHost:  "aws-us-east-2.entire.io",
 				Cell:         coreapi.NewOptString("aws-us-east-2"),
 				Jurisdiction: coreapi.NewOptString("us"),
@@ -96,7 +96,7 @@ func TestMirrorCellLabel(t *testing.T) {
 		},
 		{
 			name: "cell without jurisdiction",
-			mirror: coreapi.Mirror{
+			mirror: coreapi.ResolvedPlacement{
 				ClusterHost: "aws-us-east-2.entire.io",
 				Cell:        coreapi.NewOptString("aws-us-east-2"),
 			},
@@ -139,26 +139,26 @@ func (*nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 func TestSelectCloneTarget(t *testing.T) {
 	t.Parallel()
 
-	usEast := coreapi.Mirror{Repo: "entire-api", ClusterHost: "aws-us-east-2.entire.io"}
-	euWest := coreapi.Mirror{Repo: "entire-api", ClusterHost: "aws-eu-west-1.entire.io"}
+	usEast := coreapi.ResolvedPlacement{ClusterHost: "aws-us-east-2.entire.io"}
+	euWest := coreapi.ResolvedPlacement{ClusterHost: "aws-eu-west-1.entire.io"}
 
 	t.Run("single placement returns directly", func(t *testing.T) {
 		t.Parallel()
-		got, err := selectCloneTarget(newCloneTestCmd(), []coreapi.Mirror{usEast}, "")
+		got, err := selectCloneTarget(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast}, "")
 		require.NoError(t, err)
 		require.Equal(t, "aws-us-east-2.entire.io", got.ClusterHost)
 	})
 
 	t.Run("dedupes repeated host to a single placement", func(t *testing.T) {
 		t.Parallel()
-		got, err := selectCloneTarget(newCloneTestCmd(), []coreapi.Mirror{usEast, usEast}, "")
+		got, err := selectCloneTarget(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, usEast}, "")
 		require.NoError(t, err)
 		require.Equal(t, "aws-us-east-2.entire.io", got.ClusterHost)
 	})
 
 	t.Run("--cluster picks the matching placement", func(t *testing.T) {
 		t.Parallel()
-		got, err := selectCloneTarget(newCloneTestCmd(), []coreapi.Mirror{usEast, euWest}, "aws-eu-west-1.entire.io")
+		got, err := selectCloneTarget(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "aws-eu-west-1.entire.io")
 		require.NoError(t, err)
 		require.Equal(t, "aws-eu-west-1.entire.io", got.ClusterHost)
 	})
@@ -167,14 +167,14 @@ func TestSelectCloneTarget(t *testing.T) {
 		t.Parallel()
 		// DNS hosts are case-insensitive: a mixed-case --cluster must still match
 		// the API's lowercase ClusterHost rather than falsely "not mirrored".
-		got, err := selectCloneTarget(newCloneTestCmd(), []coreapi.Mirror{usEast, euWest}, "AWS-EU-West-1.Entire.IO")
+		got, err := selectCloneTarget(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "AWS-EU-West-1.Entire.IO")
 		require.NoError(t, err)
 		require.Equal(t, "aws-eu-west-1.entire.io", got.ClusterHost)
 	})
 
 	t.Run("--cluster with no match errors and lists hosts", func(t *testing.T) {
 		t.Parallel()
-		_, err := selectCloneTarget(newCloneTestCmd(), []coreapi.Mirror{usEast, euWest}, "aws-ap-south-1.entire.io")
+		_, err := selectCloneTarget(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "aws-ap-south-1.entire.io")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "aws-us-east-2.entire.io")
 		require.Contains(t, err.Error(), "aws-eu-west-1.entire.io")
@@ -183,19 +183,19 @@ func TestSelectCloneTarget(t *testing.T) {
 	t.Run("multiple placements with no terminal errors with a --cluster pointer", func(t *testing.T) {
 		t.Parallel()
 		// go test is non-interactive, so the picker path is unreachable here.
-		_, err := selectCloneTarget(newCloneTestCmd(), []coreapi.Mirror{usEast, euWest}, "")
+		_, err := selectCloneTarget(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "--cluster")
 	})
 }
 
-// TestResolvePullablePlacements_MapsPlacements verifies the clone-discovery
+// TestResolvePullablePlacements_ReturnsPlacements verifies the clone-discovery
 // resolver hits the pull-gated /mirrors/placements endpoint with the upstream
-// coords and maps every returned placement into a coreapi.Mirror the picker can
-// consume (host + cell + jurisdiction + coords). A public mirror the caller
-// holds no grant on resolves here even though it never would via the
-// affiliation-scoped list — that's the whole point of the endpoint.
-func TestResolvePullablePlacements_MapsPlacements(t *testing.T) {
+// coords and returns every placement (host + cell + jurisdiction) for the
+// picker. A public mirror the caller holds no grant on resolves here even
+// though it never would via the affiliation-scoped list — the whole point of
+// the endpoint.
+func TestResolvePullablePlacements_ReturnsPlacements(t *testing.T) {
 	t.Parallel()
 	var gotPath, gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -228,10 +228,6 @@ func TestResolvePullablePlacements_MapsPlacements(t *testing.T) {
 	require.Equal(t, "aws-us-east-2", got[0].Cell.Or(""))
 	require.Equal(t, "us", got[0].Jurisdiction.Or(""))
 	require.Equal(t, "01AAA", got[0].MirrorId)
-	// Coords are echoed onto every placement so the synthesized clone URL and
-	// the picker labels carry them.
-	require.Equal(t, "karthik-rameshkumar", got[0].Owner)
-	require.Equal(t, "my-entire", got[0].Repo)
 	require.Equal(t, "aws-eu-west-1.entire.io", got[1].ClusterHost)
 }
 

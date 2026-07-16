@@ -114,13 +114,13 @@ func newRepoCloneCmd() *cobra.Command {
 				return fmt.Errorf("invalid <repo>: %w", err)
 			}
 
-			var mirrors []coreapi.Mirror
+			var placements []coreapi.ResolvedPlacement
 			lister := func(ctx context.Context, c *coreapi.Client) error {
-				ms, err := resolvePullablePlacements(ctx, c, owner, repo)
+				ps, err := resolvePullablePlacements(ctx, c, owner, repo)
 				if err != nil {
 					return err
 				}
-				mirrors = ms
+				placements = ps
 				return nil
 			}
 			// An explicit --cluster may name a cluster in a different federation
@@ -144,11 +144,11 @@ func newRepoCloneCmd() *cobra.Command {
 				return err
 			}
 
-			if len(mirrors) == 0 {
+			if len(placements) == 0 {
 				return fmt.Errorf("no mirror found for /gh/%s/%s; run 'entire repo mirror create github.com/%s/%s' to onboard it", owner, repo, owner, repo)
 			}
 
-			chosen, err := selectCloneTarget(cmd, mirrors, cluster)
+			chosen, err := selectCloneTarget(cmd, placements, cluster)
 			if err != nil {
 				return err
 			}
@@ -206,13 +206,6 @@ func listMirrorsForRepo(ctx context.Context, c mirrorLister, provider, owner, re
 	return matched, nil
 }
 
-// mirrorResolver is the subset of the control-plane client
-// resolvePullablePlacements needs. Narrowing to an interface lets tests inject
-// a fake; *coreapi.Client satisfies it.
-type mirrorResolver interface {
-	ResolveMirrorPlacements(ctx context.Context, params coreapi.ResolveMirrorPlacementsParams) (*coreapi.ResolvePlacementsOutputBody, error)
-}
-
 // resolvePullablePlacements returns every cluster placement of one GitHub
 // upstream the caller may pull (clone). It backs `repo clone /gh/<owner>/<repo>`
 // and deliberately differs from listMirrorsForRepo: that reads the
@@ -223,11 +216,9 @@ type mirrorResolver interface {
 // anything clonable resolves, public or private-with-grant.
 //
 // owner/repo arrive already lowercased from parseMirrorCloneRef; the server
-// matches case-insensitively regardless. Results map into coreapi.Mirror so the
-// cluster picker (selectCloneTarget) is untouched — only the fields it reads
-// (ClusterHost, Cell, Jurisdiction) plus the coords are populated. An empty
-// result means not mirrored or not pullable, and the caller surfaces that.
-func resolvePullablePlacements(ctx context.Context, c mirrorResolver, owner, repo string) ([]coreapi.Mirror, error) {
+// matches case-insensitively regardless. An empty result means not mirrored or
+// not pullable, and the caller surfaces that.
+func resolvePullablePlacements(ctx context.Context, c *coreapi.Client, owner, repo string) ([]coreapi.ResolvedPlacement, error) {
 	out, err := c.ResolveMirrorPlacements(ctx, coreapi.ResolveMirrorPlacementsParams{
 		Provider: coreapi.ResolveMirrorPlacementsProviderGithub,
 		Owner:    owner,
@@ -236,49 +227,37 @@ func resolvePullablePlacements(ctx context.Context, c mirrorResolver, owner, rep
 	if err != nil {
 		return nil, fmt.Errorf("resolve mirror placements: %w", err)
 	}
-	mirrors := make([]coreapi.Mirror, 0, len(out.Placements))
-	for _, p := range out.Placements {
-		mirrors = append(mirrors, coreapi.Mirror{
-			MirrorId:     p.MirrorId,
-			Provider:     mirrorCloneProviderGitHub,
-			Owner:        owner,
-			Repo:         repo,
-			ClusterHost:  p.ClusterHost,
-			Cell:         p.Cell,
-			Jurisdiction: p.Jurisdiction,
-		})
-	}
-	return mirrors, nil
+	return out.Placements, nil
 }
 
 // selectCloneTarget resolves which mirror placement to clone from. With one
 // placement it returns it directly. With --cluster it picks the matching one (or
 // errors listing the available hosts). With more than one and no flag it prompts
 // interactively, failing fast with a --cluster pointer when there's no terminal.
-func selectCloneTarget(cmd *cobra.Command, mirrors []coreapi.Mirror, clusterFlag string) (coreapi.Mirror, error) {
+func selectCloneTarget(cmd *cobra.Command, placements []coreapi.ResolvedPlacement, clusterFlag string) (coreapi.ResolvedPlacement, error) {
 	// Dedupe by cluster host: one placement per cluster is what a clone targets,
 	// and the same host appearing twice would only confuse the picker. Key on the
 	// case-folded host — DNS is case-insensitive, so a --cluster value differing
 	// only in case from the API's ClusterHost must still match (the alternative is
 	// a misleading "not mirrored on ..." after a successful lookup + dial).
-	byHost := make(map[string]coreapi.Mirror, len(mirrors))
-	hosts := make([]string, 0, len(mirrors))
-	for _, m := range mirrors {
-		key := strings.ToLower(m.ClusterHost)
+	byHost := make(map[string]coreapi.ResolvedPlacement, len(placements))
+	hosts := make([]string, 0, len(placements))
+	for _, p := range placements {
+		key := strings.ToLower(p.ClusterHost)
 		if _, seen := byHost[key]; seen {
 			continue
 		}
-		byHost[key] = m
+		byHost[key] = p
 		hosts = append(hosts, key)
 	}
 	sort.Strings(hosts)
 
 	if clusterFlag != "" {
-		m, ok := byHost[strings.ToLower(strings.TrimSpace(clusterFlag))]
+		p, ok := byHost[strings.ToLower(strings.TrimSpace(clusterFlag))]
 		if !ok {
-			return coreapi.Mirror{}, fmt.Errorf("repo is not mirrored on %q; available: %s", clusterFlag, strings.Join(hosts, ", "))
+			return coreapi.ResolvedPlacement{}, fmt.Errorf("repo is not mirrored on %q; available: %s", clusterFlag, strings.Join(hosts, ", "))
 		}
-		return m, nil
+		return p, nil
 	}
 
 	if len(hosts) == 1 {
@@ -286,7 +265,7 @@ func selectCloneTarget(cmd *cobra.Command, mirrors []coreapi.Mirror, clusterFlag
 	}
 
 	if !interactive.CanPromptInteractively() {
-		return coreapi.Mirror{}, fmt.Errorf("repo is mirrored on %d clusters; pass --cluster to choose one of: %s", len(hosts), strings.Join(hosts, ", "))
+		return coreapi.ResolvedPlacement{}, fmt.Errorf("repo is mirrored on %d clusters; pass --cluster to choose one of: %s", len(hosts), strings.Join(hosts, ", "))
 	}
 
 	options := make([]huh.Option[string], len(hosts))
@@ -308,30 +287,30 @@ func selectCloneTarget(cmd *cobra.Command, mirrors []coreapi.Mirror, clusterFlag
 		// caller stops instead of falling through to clone a zero-value target
 		// (the `entire:///gh/...` empty-host bug); a real form error propagates.
 		if cerr := handleFormCancellation(cmd.ErrOrStderr(), "Clone", err); cerr != nil {
-			return coreapi.Mirror{}, cerr
+			return coreapi.ResolvedPlacement{}, cerr
 		}
-		return coreapi.Mirror{}, NewSilentError(errors.New("clone cancelled"))
+		return coreapi.ResolvedPlacement{}, NewSilentError(errors.New("clone cancelled"))
 	}
-	m, ok := byHost[selected]
+	p, ok := byHost[selected]
 	if !ok {
-		return coreapi.Mirror{}, NewSilentError(errors.New("clone cancelled"))
+		return coreapi.ResolvedPlacement{}, NewSilentError(errors.New("clone cancelled"))
 	}
-	return m, nil
+	return p, nil
 }
 
 // mirrorCellLabel is the human label for a mirror placement in the clone picker:
 // the physical cell and jurisdiction when known, always anchored by the cluster
 // host that goes into the clone URL.
-func mirrorCellLabel(m coreapi.Mirror) string {
-	cell := strings.TrimSpace(m.Cell.Or(""))
-	jur := strings.TrimSpace(m.Jurisdiction.Or(""))
+func mirrorCellLabel(p coreapi.ResolvedPlacement) string {
+	cell := strings.TrimSpace(p.Cell.Or(""))
+	jur := strings.TrimSpace(p.Jurisdiction.Or(""))
 	switch {
 	case cell != "" && jur != "":
-		return fmt.Sprintf("%s (%s) — %s", cell, jur, m.ClusterHost)
+		return fmt.Sprintf("%s (%s) — %s", cell, jur, p.ClusterHost)
 	case cell != "":
-		return fmt.Sprintf("%s — %s", cell, m.ClusterHost)
+		return fmt.Sprintf("%s — %s", cell, p.ClusterHost)
 	default:
-		return m.ClusterHost
+		return p.ClusterHost
 	}
 }
 
