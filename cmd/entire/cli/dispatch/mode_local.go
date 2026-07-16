@@ -168,7 +168,7 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 		if len(branches) > 0 {
 			currentBranch = branches[0]
 		}
-		reachableCheckpointIDs, err = reachableCheckpointIDsInRange(ctx, repoRoot, branchLocalRevRange(ctx, repoRoot, currentBranch), since)
+		reachableCheckpointIDs, err = reachableCheckpointIDsInRange(ctx, repoRoot, branchLocalRevRange(ctx, repoRoot, currentBranch), since, until)
 		if err != nil {
 			return nil, err
 		}
@@ -295,11 +295,18 @@ func readLocalSummaryTitle(ctx context.Context, store checkpoint.PersistentStore
 }
 
 // reachableCheckpointIDsInRange maps each checkpoint ID referenced by a commit
-// trailer in revRange (since <cutoff>) to the most recent commit time that
-// references it. The commit time is the "landed on this branch" timestamp,
-// used both for membership checks and to window checkpoints that are fetched
-// on demand by ID (whose CheckpointSummary carries no CreatedAt of its own).
-func reachableCheckpointIDsInRange(ctx context.Context, repoRoot, revRange string, since time.Time) (map[string]time.Time, error) {
+// trailer in revRange, within the window [since, until), to the most recent
+// referencing commit time *that falls inside the window*. The commit time is
+// the "landed on this branch" timestamp, used both for membership checks and to
+// window checkpoints that are fetched on demand by ID (whose CheckpointSummary
+// carries no CreatedAt of its own).
+//
+// Commits outside the window are ignored entirely, so a checkpoint referenced
+// by both an in-window commit and a later out-of-window commit still records
+// its in-window time (and is therefore not dropped by the caller's window
+// check). git's --since/--until only bound the scan; the explicit in-loop check
+// is authoritative for the half-open [since, until) boundary.
+func reachableCheckpointIDsInRange(ctx context.Context, repoRoot, revRange string, since, until time.Time) (map[string]time.Time, error) {
 	cmd := exec.CommandContext(
 		ctx,
 		"git",
@@ -308,6 +315,7 @@ func reachableCheckpointIDsInRange(ctx context.Context, repoRoot, revRange strin
 		"log",
 		revRange,
 		"--since="+since.UTC().Format(time.RFC3339),
+		"--until="+until.UTC().Format(time.RFC3339),
 		"--grep",
 		"Entire-Checkpoint:",
 		"--format=%cI%x00%B%x00%x00",
@@ -326,6 +334,9 @@ func reachableCheckpointIDsInRange(ctx context.Context, repoRoot, revRange strin
 		}
 		commitTime, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(parts[0]))
 		if parseErr != nil {
+			continue
+		}
+		if commitTime.Before(since) || !commitTime.Before(until) {
 			continue
 		}
 		for _, checkpointID := range trailers.ParseAllCheckpoints(parts[1]) {

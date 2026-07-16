@@ -813,7 +813,8 @@ func TestReachableCheckpointIDsInRange_LimitsLogToWindowAndCheckpointTrailers(t 
 	t.Setenv("TEST_GIT_ARGS_FILE", argsFile)
 
 	since := time.Date(2026, 4, 1, 12, 30, 0, 0, time.UTC)
-	reachable, err := reachableCheckpointIDsInRange(context.Background(), "/tmp/repo", "origin/main..HEAD", since)
+	until := time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC)
+	reachable, err := reachableCheckpointIDsInRange(context.Background(), "/tmp/repo", "origin/main..HEAD", since, until)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -832,8 +833,50 @@ func TestReachableCheckpointIDsInRange_LimitsLogToWindowAndCheckpointTrailers(t 
 	if !strings.Contains(args, "--since=2026-04-01T12:30:00Z") {
 		t.Fatalf("expected git log to bound history by since window, got args %q", args)
 	}
+	if !strings.Contains(args, "--until=2026-05-01T12:30:00Z") {
+		t.Fatalf("expected git log to bound history by until window, got args %q", args)
+	}
 	if !strings.Contains(args, "origin/main..HEAD") {
 		t.Fatalf("expected git log to use the supplied rev range, got args %q", args)
+	}
+}
+
+// TestReachableCheckpointIDsInRange_KeepsInWindowTimeDespiteLaterCommit is the
+// regression test for the bugbot finding: a checkpoint referenced by both an
+// in-window commit and a later out-of-window commit must record its in-window
+// time so the caller's [since, until) check does not drop it.
+func TestReachableCheckpointIDsInRange_KeepsInWindowTimeDespiteLaterCommit(t *testing.T) {
+	tmpDir := t.TempDir()
+	gitPath := filepath.Join(tmpDir, "git")
+
+	// git log emits newest-first: the out-of-window commit (after until) comes
+	// before the in-window commit, both referencing the same checkpoint. Only
+	// the in-window one should be recorded.
+	script := "#!/bin/sh\n" +
+		"if [ \"$3\" = \"log\" ]; then\n" +
+		"  printf '2026-06-15T10:00:00Z\\000later subject\\n\\nEntire-Checkpoint: " + testCheckpointID + "\\000\\000'\n" +
+		"  printf '2026-04-10T10:00:00Z\\000in-window subject\\n\\nEntire-Checkpoint: " + testCheckpointID + "\\000\\000'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(gitPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	since := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	reachable, err := reachableCheckpointIDsInRange(context.Background(), "/tmp/repo", "HEAD", since, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := reachable[testCheckpointID]
+	if !ok {
+		t.Fatalf("expected checkpoint %s to be reachable via its in-window commit, got %v", testCheckpointID, reachable)
+	}
+	want := time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("expected in-window commit time %s, got %s (later out-of-window commit leaked)", want, got)
 	}
 }
 
