@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -1772,4 +1773,86 @@ func TestSortRepoDir(t *testing.T) {
 		require.Contains(t, err.Error(), "unknown sort column")
 		require.Contains(t, err.Error(), "name")
 	})
+}
+
+// TestRepoMirrorList_PageMode pins single-page cursor passthrough on the
+// merged directory: one /repos request per call, an --json envelope carrying
+// nextPageToken, a table resume hint on stderr, and the (experimental)
+// client-side filters/sort applying to just that page.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoMirrorList_PageMode(t *testing.T) {
+	clusters := []coreapi.Cluster{{Slug: "us", PublicUrl: "https://aws-us-east-2.entire.io"}}
+
+	t.Run("--page-size makes one request and hints the resume token", func(t *testing.T) {
+		recCh := serveRepoListPaged(t, []coreapi.ListReposOutputBody{
+			{
+				Repos:         []coreapi.RepoIndexEntry{onboardedEntry("acme/web", "private", "us")},
+				NextPageToken: coreapi.NewOptString("p2"),
+			},
+			{
+				Repos: []coreapi.RepoIndexEntry{onboardedEntry("tail/end", "private", "us")},
+			},
+		}, clusters)
+		stdout, stderr := runMirrorList(t, "--page-size", "1")
+		rec := <-recCh
+		require.Equal(t, "1", rec.query.Get("pageSize"))
+		select {
+		case rec := <-recCh:
+			t.Fatalf("page mode must make exactly one request, got a second with pageToken=%q", rec.query.Get("pageToken"))
+		default:
+		}
+		require.Contains(t, stdout, "acme/web")
+		require.NotContains(t, stdout, "tail/end")
+		require.Contains(t, stderr, "--page-token p2")
+	})
+
+	t.Run("--json page mode emits the envelope and filters apply to the page", func(t *testing.T) {
+		serveRepoListPaged(t, []coreapi.ListReposOutputBody{
+			{
+				Repos: []coreapi.RepoIndexEntry{
+					onboardedEntry("acme/web", "private", "us"),
+					candidateEntry("acme/marketing", "public", coreapi.RepoCandidateAccessAdmin, true),
+				},
+				NextPageToken: coreapi.NewOptString("p2"),
+			},
+			{
+				Repos: []coreapi.RepoIndexEntry{onboardedEntry("tail/end", "private", "us")},
+			},
+		}, clusters)
+		stdout, _ := runMirrorList(t, "--json", "--page-size", "2", "--status", "available")
+		var envelope struct {
+			Items         []repoDirRow `json:"items"`
+			NextPageToken string       `json:"nextPageToken"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(stdout), &envelope))
+		require.Len(t, envelope.Items, 1, "the client-side --status filter applies to the fetched page")
+		require.Equal(t, "acme/marketing", envelope.Items[0].Repo)
+		require.Equal(t, "p2", envelope.NextPageToken, "the cursor survives local filtering")
+	})
+
+	t.Run("page mode excludes the walk flags", func(t *testing.T) {
+		serveRepoListPaged(t, nil, clusters)
+		for _, combo := range [][]string{
+			{"--page-size", "5", "--all"},
+			{"--page-token", "p2", "--limit", "3"},
+		} {
+			err := runMirrorListErr(t, combo...)
+			require.Error(t, err, "combo %v must be rejected", combo)
+		}
+	})
+}
+
+// TestRepoMirrorList_ExperimentalFlagMarking pins that every client-side
+// filter/sort flag on the merged list says so in its help: these run over the
+// fetched window only (see the fetch budget), which is accepted while they
+// are experimental.
+func TestRepoMirrorList_ExperimentalFlagMarking(t *testing.T) {
+	t.Parallel()
+	cmd := newRepoMirrorListCmd()
+	for _, name := range []string{"name", "owner", "cluster", "status", "access", "private", "sort"} {
+		f := cmd.Flags().Lookup(name)
+		require.NotNil(t, f, "flag --%s must exist", name)
+		require.Contains(t, f.Usage, "Experimental", "flag --%s must be marked experimental", name)
+	}
 }

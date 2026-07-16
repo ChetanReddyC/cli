@@ -392,3 +392,90 @@ func TestRepoList_FetchBudget(t *testing.T) {
 		require.Contains(t, err.Error(), "--limit")
 	})
 }
+
+// TestRepoList_PageMode pins the single-page cursor passthrough: --page-size /
+// --page-token make exactly one request, --json wraps rows in an envelope
+// carrying nextPageToken, the table view prints a resume hint on stderr, and
+// page mode excludes the walk flags.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoList_PageMode(t *testing.T) {
+	t.Run("--page-size makes one request and passes the size through", func(t *testing.T) {
+		recCh := serveProjectRepos(t, []coreapi.ListProjectReposOutputBody{
+			{Repos: bulkRepos("page1", 2), NextPageToken: coreapi.NewOptString("p2")},
+			{Repos: bulkRepos("page2", 2)},
+		})
+		stdout, stderr, err := execRepoList(t, "--page-size", "2")
+		require.NoError(t, err)
+		rec := <-recCh
+		require.Equal(t, "2", rec.query.Get("pageSize"))
+		select {
+		case rec := <-recCh:
+			t.Fatalf("page mode must make exactly one request, got a second with pageToken=%q", rec.query.Get("pageToken"))
+		default:
+		}
+		require.Contains(t, stdout, "page1-0001")
+		require.NotContains(t, stdout, "page2-0000")
+		require.Contains(t, stderr, "--page-token p2", "the table view hints how to resume")
+	})
+
+	t.Run("--page-token resumes from the cursor", func(t *testing.T) {
+		recCh := serveProjectRepos(t, []coreapi.ListProjectReposOutputBody{
+			{Repos: bulkRepos("page1", 2), NextPageToken: coreapi.NewOptString("p2")},
+			{Repos: bulkRepos("page2", 2)},
+		})
+		stdout, stderr, err := execRepoList(t, "--page-token", "p2")
+		require.NoError(t, err)
+		rec := <-recCh
+		require.Equal(t, "p2", rec.query.Get("pageToken"))
+		require.Contains(t, stdout, "page2-0000")
+		require.NotContains(t, stdout, "page1-0000")
+		require.NotContains(t, stderr, "--page-token", "the last page carries no resume hint")
+	})
+
+	t.Run("--json page mode emits the envelope with nextPageToken", func(t *testing.T) {
+		serveProjectRepos(t, []coreapi.ListProjectReposOutputBody{
+			{Repos: bulkRepos("page1", 2), NextPageToken: coreapi.NewOptString("p2")},
+			{Repos: bulkRepos("page2", 2)},
+		})
+		stdout, _, err := execRepoList(t, "--json", "--page-size", "2")
+		require.NoError(t, err)
+		var envelope struct {
+			Items         []coreapi.Repo `json:"items"`
+			NextPageToken string         `json:"nextPageToken"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(stdout), &envelope))
+		require.Len(t, envelope.Items, 2)
+		require.Equal(t, "p2", envelope.NextPageToken)
+	})
+
+	t.Run("--json page mode omits nextPageToken on the last page", func(t *testing.T) {
+		serveProjectRepos(t, []coreapi.ListProjectReposOutputBody{
+			{Repos: bulkRepos("only", 1)},
+		})
+		stdout, _, err := execRepoList(t, "--json", "--page-size", "5")
+		require.NoError(t, err)
+		require.NotContains(t, stdout, "nextPageToken")
+		require.Contains(t, stdout, `"items"`)
+	})
+
+	t.Run("page mode excludes the walk flags", func(t *testing.T) {
+		serveProjectRepos(t, nil)
+		for _, combo := range [][]string{
+			{"--page-size", "5", "--all"},
+			{"--page-token", "p2", "--all"},
+			{"--page-size", "5", "--limit", "3"},
+			{"--page-token", "p2", "--limit", "3"},
+		} {
+			_, _, err := execRepoList(t, combo...)
+			require.Error(t, err, "combo %v must be rejected", combo)
+		}
+	})
+
+	t.Run("a non-positive --page-size fails fast", func(t *testing.T) {
+		serveProjectRepos(t, nil)
+		_, _, err := execRepoList(t, "--page-size", "0")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "--page-size")
+	})
+}

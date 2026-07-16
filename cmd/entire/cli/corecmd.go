@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 
 	"charm.land/huh/v2"
@@ -245,6 +246,57 @@ func fetchPagesBounded[T any](ctx context.Context, budget int, fetch func(ctx co
 		}
 		cursor = next
 	}
+}
+
+// listPage is the --json envelope for single-page (cursor passthrough) list
+// output: rows plus the cursor to resume from, omitted on the last page. Page
+// mode cannot emit the bare array the walk modes use — the caller needs the
+// cursor to continue, and stdout is the only machine-readable channel.
+type listPage[T any] struct {
+	Items         []T    `json:"items"`
+	NextPageToken string `json:"nextPageToken,omitempty"`
+}
+
+// renderCoreListPage renders one fetched page of a list command: --json emits
+// the listPage envelope; the table view prints the usual table, preceded by a
+// stderr resume hint carrying the cursor when more entries exist.
+func renderCoreListPage[T any](cmd *cobra.Command, empty string, headers []string, row func(T) []string, items []T, next string) error {
+	if jsonRequested(cmd) {
+		if items == nil {
+			items = []T{} // a nil slice encodes as null; scripts expect []
+		}
+		return printJSON(cmd.OutOrStdout(), listPage[T]{Items: items, NextPageToken: next})
+	}
+	if next != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "More entries available: resume with --page-token %s\n", next)
+	}
+	if len(items) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), empty)
+		return nil
+	}
+	return printTable(cmd.OutOrStdout(), headers, items, row)
+}
+
+// pageModeFlags wires the single-page cursor-passthrough flags onto a list
+// command and excludes them from the walk flags (--all, --limit): one call =
+// one request, so a walk bound makes no sense alongside them. Callers validate
+// pageSize positivity in PreRunE via validatePageSize.
+func pageModeFlags(cmd *cobra.Command, pageSize *int, pageToken *string) {
+	cmd.Flags().IntVar(pageSize, "page-size", 0, "Fetch a single page of at most N entries (the server may cap N) and print the resume cursor")
+	cmd.Flags().StringVar(pageToken, "page-token", "", "Fetch the single page at this cursor (from a previous run's nextPageToken)")
+	cmd.MarkFlagsMutuallyExclusive("page-size", "all")
+	cmd.MarkFlagsMutuallyExclusive("page-token", "all")
+	cmd.MarkFlagsMutuallyExclusive("page-size", "limit")
+	cmd.MarkFlagsMutuallyExclusive("page-token", "limit")
+}
+
+// validatePageSize rejects an explicitly set non-positive or
+// int32-overflowing --page-size; an unset flag passes.
+func validatePageSize(cmd *cobra.Command, pageSize int) error {
+	if cmd.Flags().Changed("page-size") && (pageSize <= 0 || pageSize > math.MaxInt32) {
+		return fmt.Errorf("--page-size must be a positive int32, got %d", pageSize)
+	}
+	return nil
 }
 
 // flushThroughPager runs run with the command's stdout captured, then flushes
