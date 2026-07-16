@@ -1406,7 +1406,7 @@ func TestExplainCommit_WithMetadataTrailerButNoCheckpoint(t *testing.T) {
 
 	// Commit with Entire-Metadata trailer (no Entire-Checkpoint)
 	metadataDir := ".entire/metadata/" + sessionID
-	commitMessage := trailers.FormatMetadata("Add new feature", metadataDir)
+	commitMessage := fmt.Sprintf("Add new feature\n\n%s: %s\n", trailers.MetadataTrailerKey, metadataDir)
 	commitHash, err := w.Commit(commitMessage, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  "Test",
@@ -3655,71 +3655,6 @@ func TestGetReachableTemporaryCheckpoints_FiltersByWorktree(t *testing.T) {
 	if !foundLocal {
 		t.Errorf("expected local worktree checkpoint (session %s), got: %+v", sessionIDLocal, points)
 	}
-}
-
-func TestIsAncestorOf(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize git repo
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create first commit
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("v1"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	commit1, err := w.Commit("first commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
-	})
-	if err != nil {
-		t.Fatalf("failed to create first commit: %v", err)
-	}
-
-	// Create second commit
-	if err := os.WriteFile(testFile, []byte("v2"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	commit2, err := w.Commit("second commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
-	})
-	if err != nil {
-		t.Fatalf("failed to create second commit: %v", err)
-	}
-
-	t.Run("commit is ancestor of later commit", func(t *testing.T) {
-		// commit1 should be an ancestor of commit2
-		if !strategy.IsAncestorOf(context.Background(), repo, commit1, commit2) {
-			t.Error("expected commit1 to be ancestor of commit2")
-		}
-	})
-
-	t.Run("commit is not ancestor of earlier commit", func(t *testing.T) {
-		// commit2 should NOT be an ancestor of commit1
-		if strategy.IsAncestorOf(context.Background(), repo, commit2, commit1) {
-			t.Error("expected commit2 to NOT be ancestor of commit1")
-		}
-	})
-
-	t.Run("commit is ancestor of itself", func(t *testing.T) {
-		// A commit should be considered an ancestor of itself
-		if !strategy.IsAncestorOf(context.Background(), repo, commit1, commit1) {
-			t.Error("expected commit to be ancestor of itself")
-		}
-	})
 }
 
 func TestGetBranchCheckpoints_OnFeatureBranch(t *testing.T) {

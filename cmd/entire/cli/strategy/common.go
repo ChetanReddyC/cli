@@ -260,40 +260,6 @@ func setRefHash(repo *git.Repository, refName plumbing.ReferenceName, hash plumb
 	return nil
 }
 
-// IsAncestorOf checks if commit is an ancestor of (or equal to) target.
-// Returns true if target can reach commit by following parent links.
-// Limits search to MaxCommitTraversalDepth commits to avoid excessive traversal.
-func IsAncestorOf(ctx context.Context, repo *git.Repository, commit, target plumbing.Hash) bool {
-	if commit == target {
-		return true
-	}
-
-	iter, err := repo.Log(&git.LogOptions{From: target})
-	if err != nil {
-		return false
-	}
-	defer iter.Close()
-
-	found := false
-	count := 0
-	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Best-effort search, errors are non-fatal
-		if err := ctx.Err(); err != nil {
-			return err //nolint:wrapcheck // Propagating context cancellation
-		}
-		count++
-		if count > MaxCommitTraversalDepth {
-			return errStop
-		}
-		if c.Hash == commit {
-			found = true
-			return errStop
-		}
-		return nil
-	})
-
-	return found
-}
-
 // ListCheckpoints returns all checkpoints from committed checkpoint storage.
 func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	repo, err := OpenRepository(ctx)
@@ -1265,25 +1231,6 @@ func branchExistsCLI(ctx context.Context, branchName string) error {
 		return fmt.Errorf("branch %s not found: %w", branchName, err)
 	}
 	return nil
-}
-
-// HardResetWithProtection performs a git reset --hard to the specified commit.
-// Uses the git CLI instead of go-git because go-git's HardReset incorrectly
-// deletes untracked directories (like .entire/) even when they're in .gitignore.
-// Returns the short commit ID (7 chars) on success for display purposes.
-func HardResetWithProtection(ctx context.Context, commitHash plumbing.Hash) (shortID string, err error) {
-	hashStr := commitHash.String()
-	cmd := exec.CommandContext(ctx, "git", "reset", "--hard", hashStr)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("reset failed: %s: %w", strings.TrimSpace(string(output)), err)
-	}
-
-	// Return short commit ID for display
-	shortID = hashStr
-	if len(shortID) > 7 {
-		shortID = shortID[:7]
-	}
-	return shortID, nil
 }
 
 // collectUntrackedFiles collects untracked files in the working directory that are

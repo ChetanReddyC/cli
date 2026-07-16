@@ -257,17 +257,6 @@ func runGitHubBootstrapInitWith(ctx context.Context, w, errW io.Writer, opts Git
 	}, nil
 }
 
-// runGitHubBootstrapWith runs the full bootstrap (init + finalize) in one
-// call, used by tests that don't need to assert phasing. The real caller
-// runs the two phases around agent setup.
-func runGitHubBootstrapWith(ctx context.Context, w, errW io.Writer, opts GitHubBootstrapOptions, runner bootstrapRunner) error {
-	state, err := runGitHubBootstrapInitWith(ctx, w, errW, opts, runner)
-	if err != nil {
-		return err
-	}
-	return runGitHubBootstrapFinalize(ctx, w, state)
-}
-
 // runGitHubBootstrapFinalize runs the post-setup half: stage + initial
 // commit (now including any `.entire/`, agent hook, and settings files
 // written by the enable flow), then create the GitHub repo and push.
