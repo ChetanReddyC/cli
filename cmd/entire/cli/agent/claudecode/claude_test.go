@@ -56,6 +56,41 @@ func TestProtectedDirs(t *testing.T) {
 	}
 }
 
+func TestGenerateText_LoadsUserSettingsForAuth(t *testing.T) {
+	t.Parallel()
+	var gotArgs []string
+	ag := &ClaudeCodeAgent{
+		CommandRunner: func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+			gotArgs = args
+			return exec.CommandContext(ctx, "sh", "-c", `printf '%s' '{"type":"result","result":"ok"}'`)
+		},
+	}
+
+	if _, err := ag.GenerateText(context.Background(), "prompt", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The subprocess must load user settings so API-billing auth (apiKeyHelper /
+	// ANTHROPIC_API_KEY approval in ~/.claude/settings.json) is available.
+	// Loading no sources ("") made claude report "Not logged in" for those users.
+	// See generate.go for the full rationale.
+	var settingSources string
+	found := false
+	for i, a := range gotArgs {
+		if a == "--setting-sources" && i+1 < len(gotArgs) {
+			settingSources = gotArgs[i+1]
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("--setting-sources flag missing from args: %v", gotArgs)
+	}
+	if settingSources != settingSourcesUser {
+		t.Fatalf("--setting-sources = %q, want %q (empty drops user auth settings)", settingSources, settingSourcesUser)
+	}
+}
+
 func TestGenerateText_ArrayResponse(t *testing.T) {
 	t.Parallel()
 	ag := &ClaudeCodeAgent{

@@ -12,6 +12,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
+// settingSourcesUser tells the claude CLI to load only the user's
+// ~/.claude/settings.json (see the rationale in GenerateText).
+const settingSourcesUser = "user"
+
 // GenerateText sends a prompt to the Claude CLI and returns the raw text response.
 // Implements the agent.TextGenerator interface.
 // The model parameter hints which model to use (e.g., "haiku", "sonnet").
@@ -35,9 +39,17 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 		commandRunner = exec.CommandContext
 	}
 
+	// --setting-sources user loads the user's ~/.claude/settings.json (where
+	// API-billing auth lives: apiKeyHelper and ANTHROPIC_API_KEY approval)
+	// while still excluding project and local settings. Passing "" here loaded
+	// no sources at all, which dropped that auth config and made claude report
+	// "Not logged in" for users authenticating via user settings — even though
+	// their plain `claude -p` worked. Project/local isolation is already
+	// guaranteed by cmd.Dir = os.TempDir() below, so "user" restores auth
+	// without reintroducing repo-scoped settings.
 	cmd := commandRunner(ctx, claudePath,
 		"--print", "--output-format", "json",
-		"--model", model, "--setting-sources", "")
+		"--model", model, "--setting-sources", settingSourcesUser)
 
 	// Isolate from the user's git repo to prevent recursive hook triggers
 	// and index pollution (matches agent.RunIsolatedTextGeneratorCLI behavior).
