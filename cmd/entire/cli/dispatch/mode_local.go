@@ -273,7 +273,23 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 		seen[idStr] = struct{}{}
 	}
 
+	// The second pass ranges over a map (randomized iteration order), so sort
+	// before returning to keep bullet order — and therefore the LLM-authored
+	// summary — stable across runs. Newest first, with the checkpoint ID as a
+	// deterministic tiebreak for equal timestamps.
+	sortCandidatesByRecency(candidates)
 	return candidates, nil
+}
+
+// sortCandidatesByRecency orders candidates most-recent-first by CreatedAt,
+// breaking ties by checkpoint ID so the order is fully deterministic.
+func sortCandidatesByRecency(candidates []candidate) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if !candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
+			return candidates[i].CreatedAt.After(candidates[j].CreatedAt)
+		}
+		return candidates[i].CheckpointID < candidates[j].CheckpointID
+	})
 }
 
 // readLocalSummaryTitle returns the latest session's outcome (falling back to

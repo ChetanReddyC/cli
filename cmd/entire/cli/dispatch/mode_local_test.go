@@ -880,6 +880,33 @@ func TestReachableCheckpointIDsInRange_KeepsInWindowTimeDespiteLaterCommit(t *te
 	}
 }
 
+// TestSortCandidatesByRecency covers the trail-review finding: because the
+// trailer fallback pass ranges over a map, candidates must be sorted before
+// returning so dispatch output is stable across runs. Newest first, ties broken
+// by checkpoint ID.
+func TestSortCandidatesByRecency(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	candidates := []candidate{
+		{CheckpointID: "ccc", CreatedAt: base},
+		{CheckpointID: "aaa", CreatedAt: base.Add(2 * time.Hour)},
+		{CheckpointID: "bbb", CreatedAt: base}, // same time as ccc → tiebreak by ID
+		{CheckpointID: "zzz", CreatedAt: base.Add(time.Hour)},
+	}
+	sortCandidatesByRecency(candidates)
+
+	got := make([]string, len(candidates))
+	for i, c := range candidates {
+		got[i] = c.CheckpointID
+	}
+	want := []string{"aaa", "zzz", "bbb", "ccc"} // newest first; bbb < ccc for the tie
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sortCandidatesByRecency order = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestLoadCommitSubjectsByCheckpoint_UsesSingleWindowedLogScan(t *testing.T) {
 	tmpDir := t.TempDir()
 	argsFile := filepath.Join(tmpDir, "git-args.txt")
