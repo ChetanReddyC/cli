@@ -22,7 +22,6 @@ import (
 
 func TestLocalMode_EnumeratesCheckpoints(t *testing.T) {
 	dir := t.TempDir()
-	stubGeneratedLocalDispatch(t)
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "a.txt", "x")
 	testutil.GitAdd(t, dir, "a.txt")
@@ -47,9 +46,10 @@ func TestLocalMode_EnumeratesCheckpoints(t *testing.T) {
 	t.Chdir(dir)
 
 	got, err := Run(context.Background(), Options{
-		Mode:     ModeLocal,
-		Since:    "7d",
-		Branches: []string{"main"},
+		Mode:          ModeLocal,
+		Since:         "7d",
+		Branches:      []string{"main"},
+		TextGenerator: stubGeneratedLocalDispatch(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,6 @@ func TestLocalMode_EnumeratesCheckpoints(t *testing.T) {
 func TestLocalMode_ExplicitRepoUsesTargetRepoCheckpointSettings(t *testing.T) {
 	cwdDir := t.TempDir()
 	targetDir := t.TempDir()
-	stubGeneratedLocalDispatch(t)
 
 	testutil.InitRepo(t, cwdDir)
 	if err := os.MkdirAll(filepath.Join(cwdDir, ".entire"), 0o755); err != nil {
@@ -112,10 +111,11 @@ func TestLocalMode_ExplicitRepoUsesTargetRepoCheckpointSettings(t *testing.T) {
 	t.Chdir(cwdDir)
 
 	got, err := Run(context.Background(), Options{
-		Mode:      ModeLocal,
-		RepoPaths: []string{targetDir},
-		Since:     "7d",
-		Branches:  []string{"main"},
+		Mode:          ModeLocal,
+		RepoPaths:     []string{targetDir},
+		Since:         "7d",
+		Branches:      []string{"main"},
+		TextGenerator: stubGeneratedLocalDispatch(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +130,6 @@ func TestLocalMode_ExplicitRepoUsesTargetRepoCheckpointSettings(t *testing.T) {
 
 func TestLocalMode_UsesUntilWindow(t *testing.T) {
 	dir := t.TempDir()
-	stubGeneratedLocalDispatch(t)
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "a.txt", "x")
 	testutil.GitAdd(t, dir, "a.txt")
@@ -155,10 +154,11 @@ func TestLocalMode_UsesUntilWindow(t *testing.T) {
 	t.Chdir(dir)
 
 	got, err := Run(context.Background(), Options{
-		Mode:     ModeLocal,
-		Since:    "7d",
-		Until:    now.Add(-time.Hour).Format(time.RFC3339),
-		Branches: []string{"main"},
+		Mode:          ModeLocal,
+		Since:         "7d",
+		Until:         now.Add(-time.Hour).Format(time.RFC3339),
+		Branches:      []string{"main"},
+		TextGenerator: stubGeneratedLocalDispatch(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +170,6 @@ func TestLocalMode_UsesUntilWindow(t *testing.T) {
 
 func TestLocalMode_FallsBackToCommitSubjectWhenSummaryMissing(t *testing.T) {
 	dir := t.TempDir()
-	stubGeneratedLocalDispatch(t)
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "a.txt", "x")
 	testutil.GitAdd(t, dir, "a.txt")
@@ -199,9 +198,10 @@ func TestLocalMode_FallsBackToCommitSubjectWhenSummaryMissing(t *testing.T) {
 	t.Chdir(dir)
 
 	got, err := Run(context.Background(), Options{
-		Mode:     ModeLocal,
-		Since:    "7d",
-		Branches: []string{"main"},
+		Mode:          ModeLocal,
+		Since:         "7d",
+		Branches:      []string{"main"},
+		TextGenerator: stubGeneratedLocalDispatch(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -232,29 +232,29 @@ func TestLocalMode_GenerateProducesInlineText(t *testing.T) {
 	})
 
 	oldNow := nowUTC
-	oldFactory := dispatchTextGeneratorFactory
 	nowUTC = func() time.Time { return createdAt.Add(2 * time.Hour) }
 	mock := &stubTextGenerator{text: "generated inline dispatch"}
-	dispatchTextGeneratorFactory = func() (dispatchTextGenerator, error) {
-		return mock, nil
-	}
 	t.Cleanup(func() {
 		nowUTC = oldNow
-		dispatchTextGeneratorFactory = oldFactory
 	})
 
 	t.Chdir(dir)
 
 	got, err := Run(context.Background(), Options{
-		Mode:     ModeLocal,
-		Since:    "7d",
-		Branches: []string{"main"},
+		Mode:          ModeLocal,
+		Since:         "7d",
+		Branches:      []string{"main"},
+		TextGenerator: mock,
+		Model:         "test-model",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.GeneratedText != "generated inline dispatch" {
 		t.Fatalf("expected generated text, got %q", got.GeneratedText)
+	}
+	if mock.model != "test-model" {
+		t.Fatalf("unexpected model: %q", mock.model)
 	}
 }
 
@@ -276,22 +276,18 @@ func TestLocalMode_FailsWhenGeneratedMarkdownIsEmpty(t *testing.T) {
 	})
 
 	oldNow := nowUTC
-	oldFactory := dispatchTextGeneratorFactory
 	nowUTC = func() time.Time { return createdAt.Add(2 * time.Hour) }
-	dispatchTextGeneratorFactory = func() (dispatchTextGenerator, error) {
-		return &stubTextGenerator{text: "  \n\t "}, nil
-	}
 	t.Cleanup(func() {
 		nowUTC = oldNow
-		dispatchTextGeneratorFactory = oldFactory
 	})
 
 	t.Chdir(dir)
 
 	_, err := Run(context.Background(), Options{
-		Mode:     ModeLocal,
-		Since:    "7d",
-		Branches: []string{"main"},
+		Mode:          ModeLocal,
+		Since:         "7d",
+		Branches:      []string{"main"},
+		TextGenerator: &stubTextGenerator{text: "  \n\t "},
 	})
 	if err == nil {
 		t.Fatal("expected error when local generation returns empty markdown")
@@ -303,7 +299,6 @@ func TestLocalMode_FailsWhenGeneratedMarkdownIsEmpty(t *testing.T) {
 
 func TestLocalMode_ImplicitCurrentBranchUsesHEADReachability(t *testing.T) {
 	dir := t.TempDir()
-	stubGeneratedLocalDispatch(t)
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "a.txt", "x")
 	testutil.GitAdd(t, dir, "a.txt")
@@ -360,6 +355,7 @@ func TestLocalMode_ImplicitCurrentBranchUsesHEADReachability(t *testing.T) {
 		Since:                 "7d",
 		Branches:              []string{"entire-dispatch-codex"},
 		ImplicitCurrentBranch: true,
+		TextGenerator:         stubGeneratedLocalDispatch(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -371,7 +367,6 @@ func TestLocalMode_ImplicitCurrentBranchUsesHEADReachability(t *testing.T) {
 
 func TestLocalMode_ExplicitBranchesRemainExact(t *testing.T) {
 	dir := t.TempDir()
-	stubGeneratedLocalDispatch(t)
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "a.txt", "x")
 	testutil.GitAdd(t, dir, "a.txt")
@@ -423,9 +418,10 @@ func TestLocalMode_ExplicitBranchesRemainExact(t *testing.T) {
 	t.Chdir(dir)
 
 	got, err := Run(context.Background(), Options{
-		Mode:     ModeLocal,
-		Since:    "7d",
-		Branches: []string{"entire-dispatch-codex"},
+		Mode:          ModeLocal,
+		Since:         "7d",
+		Branches:      []string{"entire-dispatch-codex"},
+		TextGenerator: stubGeneratedLocalDispatch(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -437,7 +433,6 @@ func TestLocalMode_ExplicitBranchesRemainExact(t *testing.T) {
 
 func TestLocalMode_ImplicitCurrentBranchUsesCheckpointBranchWithoutTrailerReachability(t *testing.T) {
 	dir := t.TempDir()
-	stubGeneratedLocalDispatch(t)
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "a.txt", "x")
 	testutil.GitAdd(t, dir, "a.txt")
@@ -468,6 +463,7 @@ func TestLocalMode_ImplicitCurrentBranchUsesCheckpointBranchWithoutTrailerReacha
 		Since:                 "7d",
 		Branches:              []string{"entire-dispatch-codex"},
 		ImplicitCurrentBranch: true,
+		TextGenerator:         stubGeneratedLocalDispatch(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -479,7 +475,6 @@ func TestLocalMode_ImplicitCurrentBranchUsesCheckpointBranchWithoutTrailerReacha
 
 func TestLocalMode_ImplicitCurrentBranchExcludesDefaultBranchHistory(t *testing.T) {
 	dir := t.TempDir()
-	stubGeneratedLocalDispatch(t)
 	testutil.InitRepo(t, dir)
 	addOriginRemote(t, dir)
 
@@ -522,6 +517,7 @@ func TestLocalMode_ImplicitCurrentBranchExcludesDefaultBranchHistory(t *testing.
 		Since:                 "7d",
 		Branches:              []string{"my-feature"},
 		ImplicitCurrentBranch: true,
+		TextGenerator:         stubGeneratedLocalDispatch(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -540,7 +536,6 @@ func TestLocalMode_ImplicitCurrentBranchExcludesDefaultBranchHistory(t *testing.
 
 func TestLocalMode_AllBranchesRestrictsToLocalBranches(t *testing.T) {
 	dir := t.TempDir()
-	stubGeneratedLocalDispatch(t)
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "a.txt", "x")
 	testutil.GitAdd(t, dir, "a.txt")
@@ -572,9 +567,10 @@ func TestLocalMode_AllBranchesRestrictsToLocalBranches(t *testing.T) {
 	t.Chdir(dir)
 
 	got, err := Run(context.Background(), Options{
-		Mode:        ModeLocal,
-		Since:       "7d",
-		AllBranches: true,
+		Mode:          ModeLocal,
+		Since:         "7d",
+		AllBranches:   true,
+		TextGenerator: stubGeneratedLocalDispatch(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -808,16 +804,8 @@ type seededCheckpoint struct {
 	outcome      string
 }
 
-func stubGeneratedLocalDispatch(t *testing.T) {
-	t.Helper()
-
-	oldFactory := dispatchTextGeneratorFactory
-	dispatchTextGeneratorFactory = func() (dispatchTextGenerator, error) {
-		return &stubTextGenerator{text: "generated dispatch"}, nil
-	}
-	t.Cleanup(func() {
-		dispatchTextGeneratorFactory = oldFactory
-	})
+func stubGeneratedLocalDispatch() TextGenerator {
+	return &stubTextGenerator{text: "generated dispatch"}
 }
 
 func seedCommittedCheckpoint(t *testing.T, repoDir string, cp seededCheckpoint) {

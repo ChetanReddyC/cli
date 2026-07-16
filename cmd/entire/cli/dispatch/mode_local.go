@@ -89,7 +89,7 @@ func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
 		},
 	}
 
-	text, err := generateLocalDispatch(ctx, dispatch, opts.Voice)
+	text, err := generateLocalDispatch(ctx, dispatch, opts.Voice, opts.TextGenerator, opts.Model)
 	if err != nil {
 		return nil, err
 	}

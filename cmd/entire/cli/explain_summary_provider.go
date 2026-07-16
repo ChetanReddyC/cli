@@ -20,14 +20,15 @@ import (
 )
 
 var (
-	loadSummarySettings            = LoadEntireSettings
-	loadSummarySettingsFromFile    = settings.LoadFromFile
-	saveLocalSummarySettings       = SaveEntireSettingsLocal
-	getSummaryAgent                = agent.Get
-	listRegisteredAgents           = agent.List
-	isSummaryCLIAvailable          = agent.IsSummaryCLIAvailable
-	discoverSummaryProviders       = external.DiscoverAndRegister
-	discoverSummaryProvidersAlways = external.DiscoverAndRegisterAlways
+	loadSummarySettings             = LoadEntireSettings
+	loadSummarySettingsFromFile     = settings.LoadFromFile
+	saveLocalSummarySettings        = SaveEntireSettingsLocal
+	getSummaryAgent                 = agent.Get
+	listRegisteredAgents            = agent.List
+	isSummaryCLIAvailable           = agent.IsSummaryCLIAvailable
+	discoverSummaryProviders        = external.DiscoverAndRegister
+	discoverSummaryProvidersAlways  = external.DiscoverAndRegisterAlways
+	discoverDispatchSummaryProvider = external.DiscoverAndRegisterNamedAlways
 )
 
 type checkpointSummaryProvider struct {
@@ -45,8 +46,10 @@ func resolveDispatchSummaryProvider(ctx context.Context, w io.Writer, override s
 	}
 
 	providerName := types.AgentName(override)
-	discoverSummaryProviderIfMissing(ctx, providerName)
-	if err := ensureSummaryProviderPresent(ctx, providerName); err != nil {
+	if _, err := getSummaryAgent(providerName); err != nil {
+		discoverDispatchSummaryProvider(ctx, providerName)
+	}
+	if err := validateSummaryProvider(override); err != nil {
 		return nil, err
 	}
 	return buildCheckpointSummaryProviderWithEffectiveModel(providerName, "")
@@ -238,7 +241,7 @@ func validateSummaryProvider(provider string) error {
 		return fmt.Errorf("agent %q does not support summary generation", provider)
 	}
 	if !isSummaryProviderAvailable(name, ag) {
-		return fmt.Errorf("summary provider %q is configured but its CLI binary is not on PATH; install it or choose another provider", provider)
+		return fmt.Errorf("summary provider %q CLI binary is not on PATH; install it or choose another provider", provider)
 	}
 	return nil
 }

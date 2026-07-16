@@ -86,6 +86,21 @@ type stubNonTextAgent struct {
 	agent.Agent
 }
 
+func writeInfoSentinelExternalAgentBinary(t *testing.T, dir, name string) {
+	t.Helper()
+
+	script := `#!/bin/sh
+if [ "$1" = "info" ]; then
+  : > "$ENTIRE_TEST_UNRELATED_INFO_SENTINEL"
+  exit 1
+fi
+echo '{}'
+`
+	if err := os.WriteFile(filepath.Join(dir, "entire-agent-"+name), []byte(script), 0o755); err != nil {
+		t.Fatalf("write unrelated external agent binary: %v", err)
+	}
+}
+
 func TestResolveCheckpointSummaryProvider_UsesConfiguredProvider(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and package-level var stubs
 	ctx := context.Background()
@@ -150,14 +165,14 @@ func TestResolveDispatchSummaryProvider_ExplicitCodexUsesDefaultModelWithoutPers
 	originalSave := saveLocalSummarySettings
 	originalGet := getSummaryAgent
 	originalCLI := isSummaryCLIAvailable
-	originalDiscover := discoverSummaryProvidersAlways
+	originalDiscover := discoverDispatchSummaryProvider
 	t.Cleanup(func() {
 		loadSummarySettings = originalLoad
 		loadSummarySettingsFromFile = originalLoadFile
 		saveLocalSummarySettings = originalSave
 		getSummaryAgent = originalGet
 		isSummaryCLIAvailable = originalCLI
-		discoverSummaryProvidersAlways = originalDiscover
+		discoverDispatchSummaryProvider = originalDiscover
 	})
 
 	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
@@ -181,7 +196,7 @@ func TestResolveDispatchSummaryProvider_ExplicitCodexUsesDefaultModelWithoutPers
 	isSummaryCLIAvailable = func(name types.AgentName) bool {
 		return name == agent.AgentNameCodex
 	}
-	discoverSummaryProvidersAlways = func(context.Context) {
+	discoverDispatchSummaryProvider = func(context.Context, types.AgentName) {
 		t.Fatal("registered explicit provider should not trigger external discovery")
 	}
 
@@ -327,12 +342,13 @@ func TestResolveDispatchSummaryProvider_ExplicitClaudePreservesEmptyModel(t *tes
 func TestResolveDispatchSummaryProvider_ExplicitValidationErrors(t *testing.T) {
 	// Cannot use t.Parallel(): subtests mutate package-level resolution seams.
 	tests := []struct {
-		name      string
-		override  string
-		agent     agent.Agent
-		getErr    error
-		available bool
-		wantError string
+		name          string
+		override      string
+		agent         agent.Agent
+		getErr        error
+		available     bool
+		wantError     string
+		unwantedError string
 	}{
 		{
 			name:      "unknown provider",
@@ -352,11 +368,12 @@ func TestResolveDispatchSummaryProvider_ExplicitValidationErrors(t *testing.T) {
 			wantError: "does not support summary generation",
 		},
 		{
-			name:      "CLI unavailable",
-			override:  string(agent.AgentNameCodex),
-			agent:     &stubTextAgent{name: agent.AgentNameCodex, kind: agent.AgentTypeCodex},
-			available: false,
-			wantError: "not on PATH",
+			name:          "CLI unavailable",
+			override:      string(agent.AgentNameCodex),
+			agent:         &stubTextAgent{name: agent.AgentNameCodex, kind: agent.AgentTypeCodex},
+			available:     false,
+			wantError:     "install it or choose another provider",
+			unwantedError: "configured",
 		},
 	}
 
@@ -364,11 +381,11 @@ func TestResolveDispatchSummaryProvider_ExplicitValidationErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			originalGet := getSummaryAgent
 			originalCLI := isSummaryCLIAvailable
-			originalDiscover := discoverSummaryProvidersAlways
+			originalDiscover := discoverDispatchSummaryProvider
 			t.Cleanup(func() {
 				getSummaryAgent = originalGet
 				isSummaryCLIAvailable = originalCLI
-				discoverSummaryProvidersAlways = originalDiscover
+				discoverDispatchSummaryProvider = originalDiscover
 			})
 
 			getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
@@ -378,7 +395,7 @@ func TestResolveDispatchSummaryProvider_ExplicitValidationErrors(t *testing.T) {
 				return tt.agent, nil
 			}
 			isSummaryCLIAvailable = func(types.AgentName) bool { return tt.available }
-			discoverSummaryProvidersAlways = func(context.Context) {}
+			discoverDispatchSummaryProvider = func(context.Context, types.AgentName) {}
 
 			_, err := resolveDispatchSummaryProvider(context.Background(), &bytes.Buffer{}, tt.override)
 			if err == nil {
@@ -386,6 +403,9 @@ func TestResolveDispatchSummaryProvider_ExplicitValidationErrors(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantError) {
 				t.Fatalf("resolveDispatchSummaryProvider(%q) error = %q, want substring %q", tt.override, err, tt.wantError)
+			}
+			if tt.unwantedError != "" && strings.Contains(err.Error(), tt.unwantedError) {
+				t.Fatalf("resolveDispatchSummaryProvider(%q) error = %q, do not want substring %q", tt.override, err, tt.unwantedError)
 			}
 		})
 	}
@@ -433,7 +453,12 @@ func TestResolveDispatchSummaryProvider_ExplicitExternalProviderDoesNotWriteLoca
 
 			externalDir := t.TempDir()
 			writeExternalSummaryAgentBinary(t, externalDir, tt.providerName)
+			writeInfoSentinelExternalAgentBinary(t, externalDir, tt.providerName+"-unrelated")
 			t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			unrelatedInfoSentinel := filepath.Join(t.TempDir(), "unrelated-info-called")
+			t.Setenv("ENTIRE_TEST_UNRELATED_INFO_SENTINEL", unrelatedInfoSentinel)
+			modelRecord := filepath.Join(t.TempDir(), "model-args")
+			t.Setenv("ENTIRE_TEST_EXTERNAL_MODEL_RECORD", modelRecord)
 
 			provider, err := resolveDispatchSummaryProvider(ctx, &bytes.Buffer{}, tt.providerName)
 			if err != nil {
@@ -447,6 +472,24 @@ func TestResolveDispatchSummaryProvider_ExplicitExternalProviderDoesNotWriteLoca
 			}
 			if provider.TextGenerator == nil {
 				t.Fatal("provider.TextGenerator = nil, want external raw generator")
+			}
+			if _, err := os.Stat(unrelatedInfoSentinel); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unrelated plugin info was invoked: stat error = %v", err)
+			}
+
+			generated, err := provider.TextGenerator.GenerateText(ctx, "generate a summary", provider.Model)
+			if err != nil {
+				t.Fatalf("provider.TextGenerator.GenerateText() error = %v", err)
+			}
+			if !strings.Contains(generated, `"intent":"Intent"`) {
+				t.Fatalf("provider.TextGenerator.GenerateText() = %q, want generated summary", generated)
+			}
+			modelArgs, err := os.ReadFile(modelRecord)
+			if err != nil {
+				t.Fatalf("read external model args: %v", err)
+			}
+			if string(modelArgs) != "--model\n\n" {
+				t.Fatalf("external generate-text args = %q, want empty model argument", modelArgs)
 			}
 
 			got, err := os.ReadFile(localPath)
