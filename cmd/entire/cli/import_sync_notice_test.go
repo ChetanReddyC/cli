@@ -2,8 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 )
 
 func TestWarnIfImportNotSynced(t *testing.T) {
@@ -36,4 +40,53 @@ func TestWarnIfImportNotSynced(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestImportLoggedIn exercises the default login heuristic's branching via the
+// local-read seams. The key case (#1773 review): a current context that exists
+// but has no stored token must NOT count as logged in, so the sync notice still
+// fires. Mutates package-level seams, so no t.Parallel.
+func TestImportLoggedIn(t *testing.T) {
+	origCtx, origTok := importListContexts, importTokenForContext
+	t.Cleanup(func() { importListContexts, importTokenForContext = origCtx, origTok })
+	// Ensure no env token leaks in from the environment for the context cases.
+	t.Setenv(auth.EnvTokenVar, "")
+
+	withCurrent := func() ([]*contexts.Context, string, error) {
+		return []*contexts.Context{{Name: "prod"}}, "prod", nil
+	}
+
+	t.Run("current context with a stored token is logged in", func(t *testing.T) {
+		importListContexts = withCurrent
+		importTokenForContext = func(*contexts.Context) (string, error) { return "stored-token", nil }
+		if !importLoggedIn() {
+			t.Fatal("context with a token should count as logged in")
+		}
+	})
+
+	t.Run("current context with a missing token is NOT logged in", func(t *testing.T) {
+		importListContexts = withCurrent
+		importTokenForContext = func(*contexts.Context) (string, error) {
+			return "", errors.New("no token stored")
+		}
+		if importLoggedIn() {
+			t.Fatal("context present but token missing must not count as logged in")
+		}
+	})
+
+	t.Run("no current context is not logged in", func(t *testing.T) {
+		importListContexts = func() ([]*contexts.Context, string, error) { return nil, "", nil }
+		importTokenForContext = func(*contexts.Context) (string, error) { return "stored-token", nil }
+		if importLoggedIn() {
+			t.Fatal("no current context should not count as logged in")
+		}
+	})
+
+	t.Run("env token counts as logged in even with no context", func(t *testing.T) {
+		t.Setenv(auth.EnvTokenVar, "env-token")
+		importListContexts = func() ([]*contexts.Context, string, error) { return nil, "", nil }
+		if !importLoggedIn() {
+			t.Fatal("ENTIRE_TOKEN should count as logged in")
+		}
+	})
 }
