@@ -3,23 +3,85 @@ package claudecode
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
-// settingSourcesUser tells the claude CLI to load only the user's
-// ~/.claude/settings.json (see the rationale in GenerateText).
-const settingSourcesUser = "user"
+// buildGenerateArgs assembles the claude CLI argv for a --print text-generation
+// call.
+//
+// The subprocess must stay isolated from the user's project/local AND user
+// settings: loading them would fire user-level hooks and, worse, honor
+// user-level tool permissions (e.g. permissions.defaultMode=bypassPermissions),
+// which would let prompt-injection in the untrusted dispatch data drive tool
+// execution. So we pass --setting-sources "" (load nothing).
+//
+// The one thing we genuinely need from the user settings is auth. Users on API
+// billing configure it with `apiKeyHelper` (a command that prints the key),
+// which lives in user settings and is therefore dropped by --setting-sources "".
+// Rather than load the whole settings file back (and re-inherit hooks and
+// permissions), we extract only apiKeyHelper and re-inject it via --settings, so
+// auth works while nothing else from the user's settings is loaded.
+//
+// apiKeyHelper is a command reference (not the key itself), so passing it in
+// argv does not leak a credential. Auth methods that do not live in user
+// settings — an exported ANTHROPIC_API_KEY (survives StripGitEnv) and
+// keychain/subscription credentials — keep working without any injection.
+func buildGenerateArgs(model, apiKeyHelper string) []string {
+	args := []string{
+		"--print", "--output-format", "json",
+		"--model", model,
+		"--setting-sources", "",
+	}
+	if strings.TrimSpace(apiKeyHelper) != "" {
+		if injected, err := json.Marshal(map[string]string{"apiKeyHelper": apiKeyHelper}); err == nil {
+			args = append(args, "--settings", string(injected))
+		}
+	}
+	return args
+}
 
-// disableHooksSettings is layered on top of the user settings via --settings so
-// user-level hooks (SessionStart/UserPromptSubmit/Stop) do not fire on these
-// internal --print calls (see the rationale in GenerateText).
-const disableHooksSettings = `{"disableAllHooks":true}`
+// userClaudeSettingsPath resolves the user's claude settings.json the same way
+// the claude CLI does: $CLAUDE_CONFIG_DIR/settings.json when set, otherwise
+// ~/.claude/settings.json.
+func userClaudeSettingsPath() (string, error) {
+	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
+		return filepath.Join(dir, "settings.json"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".claude", "settings.json"), nil
+}
+
+// readUserAPIKeyHelper returns the apiKeyHelper field from the user's claude
+// settings, or "" if absent. Best-effort: a missing file or malformed JSON
+// yields "" so we fall back to env/keychain auth rather than failing.
+func readUserAPIKeyHelper() string {
+	path, err := userClaudeSettingsPath()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // path is the user's own claude config, not attacker-controlled
+	if err != nil {
+		return ""
+	}
+	var settings struct {
+		APIKeyHelper string `json:"apiKeyHelper"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(settings.APIKeyHelper)
+}
 
 // GenerateText sends a prompt to the Claude CLI and returns the raw text response.
 // Implements the agent.TextGenerator interface.
@@ -44,26 +106,10 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 		commandRunner = exec.CommandContext
 	}
 
-	// --setting-sources user loads the user's ~/.claude/settings.json (where
-	// API-billing auth lives: apiKeyHelper and ANTHROPIC_API_KEY approval)
-	// while still excluding project and local settings. Passing "" here loaded
-	// no sources at all, which dropped that auth config and made claude report
-	// "Not logged in" for users authenticating via user settings — even though
-	// their plain `claude -p` worked. Project/local isolation is already
-	// guaranteed by cmd.Dir = os.TempDir() below, so "user" restores auth
-	// without reintroducing repo-scoped settings.
-	//
-	// Loading user settings also brings in any user-level hooks; --settings
-	// {"disableAllHooks":true} layers over them so SessionStart/UserPromptSubmit/
-	// Stop hooks do not fire (and cannot error or cause side effects) on these
-	// internal text-generation calls. This preserves the isolation intent of the
-	// os.TempDir()/StripGitEnv setup while keeping auth working. --settings does
-	// not affect auth resolution (verified: keychain/credentials, ANTHROPIC_API_KEY
-	// and apiKeyHelper all still authenticate).
-	cmd := commandRunner(ctx, claudePath,
-		"--print", "--output-format", "json",
-		"--model", model, "--setting-sources", settingSourcesUser,
-		"--settings", disableHooksSettings)
+	// Run isolated from all setting sources (see buildGenerateArgs), re-injecting
+	// only the user's apiKeyHelper so API-billing auth keeps working without
+	// re-inheriting user hooks or tool permissions.
+	cmd := commandRunner(ctx, claudePath, buildGenerateArgs(model, readUserAPIKeyHelper())...)
 
 	// Isolate from the user's git repo to prevent recursive hook triggers
 	// and index pollution (matches agent.RunIsolatedTextGeneratorCLI behavior).

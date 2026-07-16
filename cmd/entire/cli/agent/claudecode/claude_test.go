@@ -2,8 +2,11 @@ package claudecode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,49 +59,77 @@ func TestProtectedDirs(t *testing.T) {
 	}
 }
 
-func TestGenerateText_LoadsUserSettingsForAuth(t *testing.T) {
-	t.Parallel()
-	var gotArgs []string
-	ag := &ClaudeCodeAgent{
-		CommandRunner: func(ctx context.Context, _ string, args ...string) *exec.Cmd {
-			gotArgs = args
-			return exec.CommandContext(ctx, "sh", "-c", `printf '%s' '{"type":"result","result":"ok"}'`)
-		},
-	}
-
-	if _, err := ag.GenerateText(context.Background(), "prompt", ""); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	flagValue := func(name string) (string, bool) {
-		for i, a := range gotArgs {
-			if a == name && i+1 < len(gotArgs) {
-				return gotArgs[i+1], true
-			}
+func flagValue(args []string, name string) (string, bool) {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1], true
 		}
-		return "", false
+	}
+	return "", false
+}
+
+func TestBuildGenerateArgs_IsolatesSettingSources(t *testing.T) {
+	t.Parallel()
+	// Isolation is the security-critical invariant: --setting-sources must be
+	// empty so user-level hooks and tool permissions (e.g. bypassPermissions)
+	// are never loaded for this internal, injection-exposed call.
+	args := buildGenerateArgs("haiku", "")
+	got, ok := flagValue(args, "--setting-sources")
+	if !ok {
+		t.Fatalf("--setting-sources flag missing from args: %v", args)
+	}
+	if got != "" {
+		t.Fatalf("--setting-sources = %q, want %q (must load no sources)", got, "")
+	}
+	// With no apiKeyHelper, we inject nothing extra.
+	if _, ok := flagValue(args, "--settings"); ok {
+		t.Fatalf("--settings must be absent when there is no apiKeyHelper: %v", args)
+	}
+}
+
+func TestBuildGenerateArgs_InjectsOnlyAPIKeyHelper(t *testing.T) {
+	t.Parallel()
+	helper := `echo "sk-ant-x" && printf '%s'` // exercises quoting/escaping
+	args := buildGenerateArgs("haiku", helper)
+
+	// Sources still empty — we do not fall back to loading the whole file.
+	if got, _ := flagValue(args, "--setting-sources"); got != "" {
+		t.Fatalf("--setting-sources = %q, want empty", got)
 	}
 
-	// The subprocess must load user settings so API-billing auth (apiKeyHelper /
-	// ANTHROPIC_API_KEY approval in ~/.claude/settings.json) is available.
-	// Loading no sources ("") made claude report "Not logged in" for those users.
-	// See generate.go for the full rationale.
-	settingSources, ok := flagValue("--setting-sources")
+	raw, ok := flagValue(args, "--settings")
 	if !ok {
-		t.Fatalf("--setting-sources flag missing from args: %v", gotArgs)
+		t.Fatalf("--settings flag missing; apiKeyHelper was not injected: %v", args)
 	}
-	if settingSources != settingSourcesUser {
-		t.Fatalf("--setting-sources = %q, want %q (empty drops user auth settings)", settingSources, settingSourcesUser)
+	var injected map[string]any
+	if err := json.Unmarshal([]byte(raw), &injected); err != nil {
+		t.Fatalf("--settings is not valid JSON: %v (%q)", err, raw)
 	}
+	if injected["apiKeyHelper"] != helper {
+		t.Fatalf("injected apiKeyHelper = %v, want %q", injected["apiKeyHelper"], helper)
+	}
+	// Must inject ONLY auth — never hooks or permissions.
+	if len(injected) != 1 {
+		t.Fatalf("--settings must contain only apiKeyHelper, got %v", injected)
+	}
+}
 
-	// Loading user settings must not let user-level hooks fire on internal
-	// text-generation calls, so --settings disables them.
-	settings, ok := flagValue("--settings")
-	if !ok {
-		t.Fatalf("--settings flag missing from args: %v", gotArgs)
+func TestReadUserAPIKeyHelper_FromClaudeConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"),
+		[]byte(`{"apiKeyHelper":"echo secret-cmd","permissions":{"defaultMode":"bypassPermissions"}}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if settings != disableHooksSettings {
-		t.Fatalf("--settings = %q, want %q (must disable user hooks)", settings, disableHooksSettings)
+	if got := readUserAPIKeyHelper(); got != "echo secret-cmd" {
+		t.Fatalf("readUserAPIKeyHelper() = %q, want %q", got, "echo secret-cmd")
+	}
+}
+
+func TestReadUserAPIKeyHelper_MissingFileReturnsEmpty(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir()) // no settings.json inside
+	if got := readUserAPIKeyHelper(); got != "" {
+		t.Fatalf("readUserAPIKeyHelper() = %q, want empty for missing file", got)
 	}
 }
 
