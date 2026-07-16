@@ -27,25 +27,58 @@ import (
 // billing configure it with `apiKeyHelper` (a command that prints the key),
 // which lives in user settings and is therefore dropped by --setting-sources "".
 // Rather than load the whole settings file back (and re-inherit hooks and
-// permissions), we extract only apiKeyHelper and re-inject it via --settings, so
-// auth works while nothing else from the user's settings is loaded.
+// permissions), we extract only apiKeyHelper and re-inject it via a --settings
+// file (settingsPath), so auth works while nothing else from the user's settings
+// is loaded.
 //
-// apiKeyHelper is a command reference (not the key itself), so passing it in
-// argv does not leak a credential. Auth methods that do not live in user
-// settings — an exported ANTHROPIC_API_KEY (survives StripGitEnv) and
-// keychain/subscription credentials — keep working without any injection.
-func buildGenerateArgs(model, apiKeyHelper string) []string {
+// The injected settings are passed as a file path, not an inline JSON string:
+// apiKeyHelper can embed a literal key, and an inline value would land in the
+// process argv (visible via ps / /proc/<pid>/cmdline / EDR tooling). The file is
+// written 0600 (see writeAuthSettingsFile), matching settings.json's protection.
+//
+// Auth methods that do not live in user settings — an exported ANTHROPIC_API_KEY
+// (survives StripGitEnv) and keychain/subscription credentials — keep working
+// without any injection (settingsPath == "").
+func buildGenerateArgs(model, settingsPath string) []string {
 	args := []string{
 		"--print", "--output-format", "json",
 		"--model", model,
 		"--setting-sources", "",
 	}
-	if strings.TrimSpace(apiKeyHelper) != "" {
-		if injected, err := json.Marshal(map[string]string{"apiKeyHelper": apiKeyHelper}); err == nil {
-			args = append(args, "--settings", string(injected))
-		}
+	if settingsPath != "" {
+		args = append(args, "--settings", settingsPath)
 	}
 	return args
+}
+
+// writeAuthSettingsFile writes a minimal claude settings file containing only
+// the given apiKeyHelper and returns its path plus a cleanup func. The file is
+// created 0600 so the (possibly key-bearing) helper is no more exposed than the
+// user's own settings.json. Returns ("", nil, nil) when apiKeyHelper is empty.
+func writeAuthSettingsFile(apiKeyHelper string) (string, func(), error) {
+	if strings.TrimSpace(apiKeyHelper) == "" {
+		return "", nil, nil
+	}
+	data, err := json.Marshal(map[string]string{"apiKeyHelper": apiKeyHelper})
+	if err != nil {
+		return "", nil, fmt.Errorf("marshal auth settings: %w", err)
+	}
+	f, err := os.CreateTemp("", "entire-claude-auth-*.json") // 0600 by default
+	if err != nil {
+		return "", nil, fmt.Errorf("create auth settings file: %w", err)
+	}
+	path := f.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("write auth settings file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("close auth settings file: %w", err)
+	}
+	return path, cleanup, nil
 }
 
 // userClaudeSettingsPath resolves the user's claude settings.json the same way
@@ -107,9 +140,19 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 	}
 
 	// Run isolated from all setting sources (see buildGenerateArgs), re-injecting
-	// only the user's apiKeyHelper so API-billing auth keeps working without
-	// re-inheriting user hooks or tool permissions.
-	cmd := commandRunner(ctx, claudePath, buildGenerateArgs(model, readUserAPIKeyHelper())...)
+	// only the user's apiKeyHelper (via a 0600 file, never argv) so API-billing
+	// auth keeps working without re-inheriting user hooks or tool permissions.
+	// Best-effort: if extracting/writing the helper fails, fall back to running
+	// without it (env/keychain auth still work) rather than failing the call.
+	settingsPath, cleanup, err := writeAuthSettingsFile(readUserAPIKeyHelper())
+	if err != nil {
+		settingsPath = ""
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	cmd := commandRunner(ctx, claudePath, buildGenerateArgs(model, settingsPath)...)
 
 	// Isolate from the user's git repo to prevent recursive hook triggers
 	// and index pollution (matches agent.RunIsolatedTextGeneratorCLI behavior).

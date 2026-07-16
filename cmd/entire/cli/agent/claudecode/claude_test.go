@@ -81,36 +81,87 @@ func TestBuildGenerateArgs_IsolatesSettingSources(t *testing.T) {
 	if got != "" {
 		t.Fatalf("--setting-sources = %q, want %q (must load no sources)", got, "")
 	}
-	// With no apiKeyHelper, we inject nothing extra.
+	// With no settings path, we inject nothing extra.
 	if _, ok := flagValue(args, "--settings"); ok {
-		t.Fatalf("--settings must be absent when there is no apiKeyHelper: %v", args)
+		t.Fatalf("--settings must be absent when there is no settings path: %v", args)
 	}
 }
 
-func TestBuildGenerateArgs_InjectsOnlyAPIKeyHelper(t *testing.T) {
+func TestBuildGenerateArgs_PassesSettingsAsPath(t *testing.T) {
 	t.Parallel()
-	helper := `echo "sk-ant-x" && printf '%s'` // exercises quoting/escaping
-	args := buildGenerateArgs("haiku", helper)
+	// The injected settings must be passed as a file path, not inline JSON, so a
+	// key-bearing apiKeyHelper never lands in argv (ps / /proc/<pid>/cmdline).
+	path := "/tmp/entire-claude-auth-123.json"
+	args := buildGenerateArgs("haiku", path)
 
-	// Sources still empty — we do not fall back to loading the whole file.
 	if got, _ := flagValue(args, "--setting-sources"); got != "" {
 		t.Fatalf("--setting-sources = %q, want empty", got)
 	}
-
-	raw, ok := flagValue(args, "--settings")
+	got, ok := flagValue(args, "--settings")
 	if !ok {
-		t.Fatalf("--settings flag missing; apiKeyHelper was not injected: %v", args)
+		t.Fatalf("--settings flag missing: %v", args)
 	}
-	var injected map[string]any
-	if err := json.Unmarshal([]byte(raw), &injected); err != nil {
-		t.Fatalf("--settings is not valid JSON: %v (%q)", err, raw)
+	if got != path {
+		t.Fatalf("--settings = %q, want the file path %q", got, path)
 	}
-	if injected["apiKeyHelper"] != helper {
-		t.Fatalf("injected apiKeyHelper = %v, want %q", injected["apiKeyHelper"], helper)
+	// Guard against regressing to inline JSON in argv.
+	if strings.Contains(got, "{") {
+		t.Fatalf("--settings must be a path, not inline JSON: %q", got)
 	}
-	// Must inject ONLY auth — never hooks or permissions.
-	if len(injected) != 1 {
-		t.Fatalf("--settings must contain only apiKeyHelper, got %v", injected)
+}
+
+func TestWriteAuthSettingsFile_WritesOnlyAPIKeyHelper0600(t *testing.T) {
+	t.Parallel()
+	helper := `echo "sk-ant-secret"` // could embed a literal key
+	path, cleanup, err := writeAuthSettingsFile(helper)
+	if err != nil {
+		t.Fatalf("writeAuthSettingsFile: %v", err)
+	}
+	if cleanup == nil {
+		t.Fatal("cleanup func is nil")
+	}
+	defer cleanup()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat settings file: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("settings file perm = %o, want 0600", perm)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read settings file: %v", err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("settings file is not valid JSON: %v (%s)", err, data)
+	}
+	if settings["apiKeyHelper"] != helper {
+		t.Fatalf("apiKeyHelper = %v, want %q", settings["apiKeyHelper"], helper)
+	}
+	if len(settings) != 1 {
+		t.Fatalf("settings file must contain only apiKeyHelper, got %v", settings)
+	}
+
+	cleanup()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("cleanup did not remove settings file (stat err=%v)", err)
+	}
+}
+
+func TestWriteAuthSettingsFile_EmptyHelperNoFile(t *testing.T) {
+	t.Parallel()
+	path, cleanup, err := writeAuthSettingsFile("")
+	if err != nil {
+		t.Fatalf("writeAuthSettingsFile(\"\"): %v", err)
+	}
+	if path != "" {
+		t.Fatalf("path = %q, want empty for no apiKeyHelper", path)
+	}
+	if cleanup != nil {
+		t.Fatal("cleanup should be nil when no file is written")
 	}
 }
 
