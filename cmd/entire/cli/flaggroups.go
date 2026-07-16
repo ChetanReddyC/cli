@@ -31,15 +31,25 @@ func setFlagGroup(cmd *cobra.Command, group string, names ...string) {
 	}
 }
 
+// flagGroup is one help section: its name renders as "<Name> Flags:", and an
+// optional note renders once under the header — for a fact shared by every
+// flag in the group (e.g. "these run client-side"), instead of repeating it
+// in each flag's description.
+type flagGroup struct {
+	name string
+	note string
+}
+
 // useGroupedFlagHelp replaces the command's flat "Flags:" usage section with
-// one "<Group> Flags:" section per group, in the given order. Ungrouped
-// visible local flags (e.g. help) render under a plain "Flags:" section after
-// the groups; inherited flags keep their usual "Global Flags:" section.
-func useGroupedFlagHelp(cmd *cobra.Command, order ...string) {
+// one "<Group> Flags:" section per group, in the given order, each with its
+// optional group-level note. Ungrouped visible local flags (e.g. help) render
+// under a plain "Flags:" section after the groups; inherited flags keep their
+// usual "Global Flags:" section.
+func useGroupedFlagHelp(cmd *cobra.Command, groups ...flagGroup) {
 	cmd.SetUsageFunc(func(c *cobra.Command) error {
 		w := c.OutOrStderr()
 		fmt.Fprintf(w, "Usage:\n  %s\n", c.UseLine())
-		groups := make(map[string]*pflag.FlagSet, len(order)+1)
+		sets := make(map[string]*pflag.FlagSet, len(groups)+1)
 		c.LocalFlags().VisitAll(func(f *pflag.Flag) {
 			if f.Hidden {
 				return
@@ -48,19 +58,25 @@ func useGroupedFlagHelp(cmd *cobra.Command, order ...string) {
 			if a := f.Annotations[flagGroupAnnotation]; len(a) > 0 {
 				group = a[0]
 			}
-			fs, ok := groups[group]
+			fs, ok := sets[group]
 			if !ok {
 				fs = pflag.NewFlagSet(group, pflag.ContinueOnError)
-				groups[group] = fs
+				sets[group] = fs
 			}
 			fs.AddFlag(f)
 		})
-		for _, name := range order {
-			if fs, ok := groups[name]; ok {
-				fmt.Fprintf(w, "\n%s Flags:\n%s", name, fs.FlagUsages())
+		for _, g := range groups {
+			fs, ok := sets[g.name]
+			if !ok {
+				continue
 			}
+			fmt.Fprintf(w, "\n%s Flags:\n", g.name)
+			if g.note != "" {
+				fmt.Fprintf(w, "  %s\n", g.note)
+			}
+			fmt.Fprint(w, fs.FlagUsages())
 		}
-		if fs, ok := groups[""]; ok {
+		if fs, ok := sets[""]; ok {
 			fmt.Fprintf(w, "\nFlags:\n%s", fs.FlagUsages())
 		}
 		if c.HasAvailableInheritedFlags() {

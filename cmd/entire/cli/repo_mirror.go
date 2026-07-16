@@ -797,19 +797,18 @@ func newRepoMirrorListCmd() *cobra.Command {
 			})
 		},
 	}
-	// Only flags that actually run on the client carry this marker. Today
-	// /repos offers the server no filter or sort params, so that is every
-	// filter and --sort: they apply only to the rows the call fetched (the
-	// budget/--limit window, or one page in page mode). If a flag gains a
-	// server-side implementation, drop the marker from that flag.
-	const localWindow = "Client-side: applies only to the fetched rows; combine with --all to filter/sort the complete directory. "
-	cmd.Flags().StringVar(&cluster, "cluster", "", localWindow+"Keep only mirrors on this cluster, by slug or public host (drops onboardable candidates)")
-	cmd.Flags().StringVar(&owner, "owner", "", localWindow+"Filter by upstream owner login")
-	cmd.Flags().StringVar(&name, "name", "", localWindow+"Filter by owner/repo substring, matching the NAME column (case-insensitive)")
-	cmd.Flags().StringVar(&status, "status", "", localWindow+"Filter by exact STATUS (mirrors: ready/processing/failed/suspended; candidates: available/owner-only)")
-	cmd.Flags().StringVar(&access, "access", "", localWindow+"Filter by exact ACCESS (candidates only: read/write/admin)")
-	cmd.Flags().BoolVar(&private, "private", false, localWindow+"Filter by visibility: --private for private only, --private=false for public only (omit for all)")
-	cmd.Flags().StringVar(&sortSpec, "sort", "", localWindow+"Sort by column key (e.g. name, clone-url; prefix '-' for descending). Default: name ascending")
+	// Every flag in the Filtering & Sorting group runs on the client today
+	// (/repos offers the server no filter or sort params), so the shared
+	// client-side caveat renders once, as the group's note (see the
+	// useGroupedFlagHelp call below), not on each flag. A flag that gains a
+	// server-side implementation must leave the group.
+	cmd.Flags().StringVar(&cluster, "cluster", "", "Keep only mirrors on this cluster, by slug or public host (drops onboardable candidates)")
+	cmd.Flags().StringVar(&owner, "owner", "", "Filter by upstream owner login")
+	cmd.Flags().StringVar(&name, "name", "", "Filter by owner/repo substring, matching the NAME column (case-insensitive)")
+	cmd.Flags().StringVar(&status, "status", "", "Filter by exact STATUS (mirrors: ready/processing/failed/suspended; candidates: available/owner-only)")
+	cmd.Flags().StringVar(&access, "access", "", "Filter by exact ACCESS (candidates only: read/write/admin)")
+	cmd.Flags().BoolVar(&private, "private", false, "Filter by visibility: --private for private only, --private=false for public only (omit for all)")
+	cmd.Flags().StringVar(&sortSpec, "sort", "", "Sort by column key (e.g. name, clone-url; prefix '-' for descending). Default: name ascending")
 	cmd.Flags().IntVar(&limit, "limit", 0, "Show at most N rows, applied after the local filters and sort (0 shows all fetched)")
 	cmd.Flags().BoolVar(&all, "all", false, "Fetch the complete directory instead of the first "+strconv.Itoa(coreListFetchBudget)+" entries (slower on large orgs)")
 	cmd.Flags().BoolVar(&noPager, "no-pager", false, "Print directly to stdout instead of a pager for long output")
@@ -818,7 +817,11 @@ func newRepoMirrorListCmd() *cobra.Command {
 	setFlagGroup(cmd, flagGroupNavigation, "all", "limit", "page-size", "page-token")
 	setFlagGroup(cmd, flagGroupFiltering, "name", "owner", "cluster", "status", "access", "private", "sort")
 	setFlagGroup(cmd, flagGroupFormatting, "json", "no-pager")
-	useGroupedFlagHelp(cmd, flagGroupNavigation, flagGroupFiltering, flagGroupFormatting)
+	useGroupedFlagHelp(cmd,
+		flagGroup{name: flagGroupNavigation},
+		flagGroup{name: flagGroupFiltering, note: "Client-side: applied only to the fetched rows; combine with --all to filter/sort the complete directory."},
+		flagGroup{name: flagGroupFormatting},
+	)
 	return cmd
 }
 

@@ -251,7 +251,10 @@ func newRepoListCmd() *cobra.Command {
 	addJSONFlag(cmd)
 	setFlagGroup(cmd, flagGroupNavigation, "all", "limit", "page-size", "page-token")
 	setFlagGroup(cmd, flagGroupFormatting, "json", "no-pager")
-	useGroupedFlagHelp(cmd, flagGroupNavigation, flagGroupFiltering, flagGroupFormatting)
+	useGroupedFlagHelp(cmd,
+		flagGroup{name: flagGroupNavigation},
+		flagGroup{name: flagGroupFormatting},
+	)
 	return cmd
 }
 
