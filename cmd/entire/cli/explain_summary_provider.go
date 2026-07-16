@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
@@ -30,10 +31,25 @@ var (
 )
 
 type checkpointSummaryProvider struct {
-	Name        types.AgentName
-	DisplayName string
-	Model       string
-	Generator   summarize.Generator
+	Name          types.AgentName
+	DisplayName   string
+	Model         string
+	TextGenerator agent.TextGenerator
+	Generator     summarize.Generator
+}
+
+func resolveDispatchSummaryProvider(ctx context.Context, w io.Writer, override string) (*checkpointSummaryProvider, error) {
+	override = strings.TrimSpace(override)
+	if override == "" {
+		return resolveCheckpointSummaryProvider(ctx, w)
+	}
+
+	providerName := types.AgentName(override)
+	discoverSummaryProviderIfMissing(ctx, providerName)
+	if err := ensureSummaryProviderPresent(ctx, providerName); err != nil {
+		return nil, err
+	}
+	return buildCheckpointSummaryProviderWithEffectiveModel(providerName, "")
 }
 
 func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkpointSummaryProvider, error) {
@@ -167,6 +183,10 @@ func promptForSummaryProvider(providers []checkpointSummaryProvider) (types.Agen
 }
 
 func buildCheckpointSummaryProvider(name types.AgentName, model string) (*checkpointSummaryProvider, error) {
+	return buildCheckpointSummaryProviderWithEffectiveModel(name, summarize.ResolveModel(name, model))
+}
+
+func buildCheckpointSummaryProviderWithEffectiveModel(name types.AgentName, effectiveModel string) (*checkpointSummaryProvider, error) {
 	ag, err := getSummaryAgent(name)
 	if err != nil {
 		return nil, fmt.Errorf("loading summary provider %s: %w", name, err)
@@ -177,12 +197,11 @@ func buildCheckpointSummaryProvider(name types.AgentName, model string) (*checkp
 		return nil, fmt.Errorf("agent %s does not support summary generation", name)
 	}
 
-	effectiveModel := summarize.ResolveModel(name, model)
-
 	return &checkpointSummaryProvider{
-		Name:        name,
-		DisplayName: string(ag.Type()),
-		Model:       effectiveModel,
+		Name:          name,
+		DisplayName:   string(ag.Type()),
+		Model:         effectiveModel,
+		TextGenerator: textGenerator,
 		Generator: &summarize.TextGeneratorAdapter{
 			TextGenerator: textGenerator,
 			Model:         effectiveModel,
