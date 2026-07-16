@@ -586,12 +586,10 @@ func applyRepoDirLocal(f repoDirLocalFilters, rows []repoDirRow, hostBySlug map[
 	}
 	if f.cluster != "" {
 		// Candidates are cluster-agnostic, so --cluster keeps only onboarded
-		// rows on the named cluster (matching how the old --show-available
-		// ignored --cluster for candidates). Placements carry only a slug,
-		// but the clone URLs this command prints — and the old server-side
-		// --cluster — identify clusters by public host (e.g.
-		// aws-us-east-2.entire.io). Accept either form so a host copied from
-		// a clone URL still matches.
+		// rows on the named cluster. Placements carry only a slug, but the
+		// clone URLs this command prints identify clusters by public host
+		// (e.g. aws-us-east-2.entire.io). Accept either form so a host
+		// copied from a clone URL still matches.
 		rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
 			return !strings.EqualFold(r.Cluster, f.cluster) &&
 				!strings.EqualFold(hostBySlug[r.Cluster], f.cluster)
@@ -658,21 +656,14 @@ func newRepoMirrorListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List repos you can see: existing mirrors and GitHub repos you could onboard",
-		Long: "List repos visible from your active login in one directory: existing " +
-			"mirrors (with clone URL and clone STATUS) and onboardable GitHub repos " +
-			"(with ACCESS and an available/owner-only STATUS). Sparse cells show '-'.\n\n" +
-			"This replaces the former `--show-available` flag: both are one table now, " +
-			"served by GET /repos?scope=all.\n\n" +
-			"The server only pages the directory — it does not filter or sort. By " +
-			"default at most " + strconv.Itoa(coreListFetchBudget) + " entries are fetched (or --limit's value when " +
-			"larger); the client-side filter flags (--name, --owner, --cluster, " +
-			"--status, --access, --private) and --sort run locally over that fetched " +
-			"window only. When the directory has more entries a note on stderr says " +
-			"so — pass --all to fetch everything (slower on large orgs).\n\n" +
-			"For manual paging, --page-size/--page-token fetch exactly one page and " +
-			"report the cursor to resume from (--json wraps rows in an {items, " +
-			"nextPageToken} envelope); the local filters/sort then apply to just " +
-			"that page.",
+		Long: "List repos visible from your login in one table: existing mirrors " +
+			"(clone URL, clone status) and GitHub repos you could onboard " +
+			"(access, availability). Sparse cells show '-'.\n\n" +
+			"The first " + strconv.Itoa(coreListFetchBudget) + " entries are fetched by default, with a note on stderr " +
+			"when more exist. Filters and --sort apply to those fetched rows — add " +
+			"--all to work over the complete list, or --limit N for just the first N.\n\n" +
+			"For manual paging, --page-size/--page-token fetch one page at a time; " +
+			"with --json the rows come wrapped in an {items, nextPageToken} envelope.",
 		Args: cobra.NoArgs,
 		// Validate --sort before RunE so a bad column fails fast, without the
 		// network round-trip RunE would otherwise do first.
