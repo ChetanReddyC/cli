@@ -159,7 +159,8 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 }
 
 // formatSettingsStatusShort formats a short settings status line.
-// Output format: "● Enabled · branch main" or "○ Disabled"
+// Output format: "● Enabled · branch main" or "○ Disabled · branch main"
+// (the branch segment is appended whenever it can be resolved).
 func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statusStyles) string {
 	var b strings.Builder
 
