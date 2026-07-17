@@ -3915,7 +3915,6 @@ func TestRunEnableInteractive_FirstRunDefaultsToGitRefs(t *testing.T) {
 
 	t.Run("env override suppresses the first-run default", func(t *testing.T) {
 		setupTestRepo(t)
-		stubLadder(t)
 		// ENTIRE_CHECKPOINTS_PRIMARY fully replaces the settings block, so
 		// writing the refs default under it would persist config diverging
 		// from the backend actually in use (and break harnesses pinning
