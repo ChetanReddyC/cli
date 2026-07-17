@@ -1239,42 +1239,11 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	opts.applyStrategyOptions(settings)
 
-	// Checkpoint storage backend. An explicit --checkpoint-backend always
-	// wins. Otherwise a first interactive setup asks, with git-refs
-	// pre-selected as the recommendation (one Enter for most users);
-	// non-interactive/--yes first runs take the recommendation silently,
-	// and a cancelled prompt takes it with an explicit note (unless the
-	// command context itself was cancelled — then enable stops).
-	// Either way the choice is written explicitly into the new
-	// settings file, and the config-less runtime fallback stays git-branch
-	// so existing repos are untouched. The prompt is skipped while
-	// ENTIRE_CHECKPOINTS_PRIMARY is active (firstRunCheckpointBackendDefault
-	// returns ""): the env fully replaces settings, so an answer could not
-	// take effect and would only write diverging config.
-	if opts.CheckpointBackend == "" && firstRun && !opts.Yes &&
-		firstRunCheckpointBackendDefault() != "" && interactive.CanPromptInteractively() {
-		chosen, err := promptCheckpointBackend(ctx, w)
-		if err != nil {
-			return err
-		}
-		if ctx.Err() != nil {
-			// A cancelled command context (SIGINT/SIGTERM) surfaces as a
-			// form cancellation, but the user asked to stop: setup must not
-			// adopt a default and keep mutating the repo.
-			return fmt.Errorf("checkpoint storage selection: %w", ctx.Err())
-		}
-		if chosen == "" {
-			// Cancelled prompt: the recommendation is adopted, but never
-			// silently — every other cancelled setup prompt skips its
-			// action, so persisting a choice here must be disclosed.
-			fmt.Fprintln(w, "Using the recommended git-refs checkpoint storage.")
-		}
-		opts.CheckpointBackend = chosen // "" (cancelled) falls through to the recommendation
+	backend, err := resolveFirstRunCheckpointBackend(ctx, w, opts, firstRun)
+	if err != nil {
+		return err
 	}
-	if opts.CheckpointBackend == "" && firstRun {
-		opts.CheckpointBackend = firstRunCheckpointBackendDefault()
-	}
-	if err := applyCheckpointBackendFlag(settings, opts.CheckpointBackend); err != nil {
+	if err := applyCheckpointBackendFlag(settings, backend); err != nil {
 		return err
 	}
 
@@ -1384,6 +1353,46 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 		fmt.Fprintf(w, "Agents: %s\n", strings.Join(displayNames, ", "))
 	}
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
+}
+
+// resolveFirstRunCheckpointBackend decides the checkpoint storage backend
+// the setup flow writes. An explicit --checkpoint-backend always wins.
+// Otherwise a first interactive setup asks, with git-refs pre-selected as
+// the recommendation (one Enter for most users); non-interactive/--yes
+// first runs take the recommendation silently, and a cancelled prompt takes
+// it with an explicit note (unless the command context itself was cancelled
+// — then enable stops). Either way the choice is written explicitly into
+// the new settings file, and the config-less runtime fallback stays
+// git-branch so existing repos are untouched. The prompt is skipped while
+// ENTIRE_CHECKPOINTS_PRIMARY is active (firstRunCheckpointBackendDefault
+// returns ""): the env fully replaces settings, so an answer could not take
+// effect and would only write diverging config.
+func resolveFirstRunCheckpointBackend(ctx context.Context, w io.Writer, opts EnableOptions, firstRun bool) (string, error) {
+	backend := opts.CheckpointBackend
+	if backend == "" && firstRun && !opts.Yes &&
+		firstRunCheckpointBackendDefault() != "" && interactive.CanPromptInteractively() {
+		chosen, err := promptCheckpointBackend(ctx, w)
+		if err != nil {
+			return "", err
+		}
+		if ctx.Err() != nil {
+			// A cancelled command context (SIGINT/SIGTERM) surfaces as a
+			// form cancellation, but the user asked to stop: setup must not
+			// adopt a default and keep mutating the repo.
+			return "", fmt.Errorf("checkpoint storage selection: %w", ctx.Err())
+		}
+		if chosen == "" {
+			// Cancelled prompt: the recommendation is adopted, but never
+			// silently — every other cancelled setup prompt skips its
+			// action, so persisting a choice here must be disclosed.
+			fmt.Fprintln(w, "Using the recommended git-refs checkpoint storage.")
+		}
+		backend = chosen // "" (cancelled) falls through to the recommendation
+	}
+	if backend == "" && firstRun {
+		backend = firstRunCheckpointBackendDefault()
+	}
+	return backend, nil
 }
 
 // firstRunCheckpointBackendDefault is the backend written on first-time
