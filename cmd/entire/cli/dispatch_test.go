@@ -489,11 +489,15 @@ func TestNewDispatchCmd_LocalExplicitEmptyAgentFailsBeforeProviderOrDispatch(t *
 }
 
 func TestNewDispatchCmd_LocalAgentInjectsProviderAndKeepsOutputSeparated(t *testing.T) {
+	oldPrepare := prepareLocalDispatch
 	oldProvider := resolveDispatchProvider
 	oldRunDispatch := runDispatch
 	oldTerminalMode := dispatchTerminalMode
 	oldMarkdown := renderDispatchMarkdown
 	generator := &stubTextAgent{}
+	prepareLocalDispatch = func(_ context.Context, opts dispatchpkg.Options) (dispatchpkg.Options, error) {
+		return opts, nil
+	}
 	resolveDispatchProvider = func(_ context.Context, w io.Writer, override string) (*checkpointSummaryProvider, error) {
 		if override != string(agent.AgentNameCodex) {
 			t.Fatalf("provider override = %q, want codex", override)
@@ -518,6 +522,7 @@ func TestNewDispatchCmd_LocalAgentInjectsProviderAndKeepsOutputSeparated(t *test
 	dispatchTerminalMode = func(io.Writer) bool { return false }
 	renderDispatchMarkdown = func(*dispatchpkg.Dispatch) string { return testDispatchGeneratedMarkdown }
 	t.Cleanup(func() {
+		prepareLocalDispatch = oldPrepare
 		resolveDispatchProvider = oldProvider
 		runDispatch = oldRunDispatch
 		dispatchTerminalMode = oldTerminalMode
@@ -545,9 +550,13 @@ func TestNewDispatchCmd_LocalAgentInjectsProviderAndKeepsOutputSeparated(t *test
 }
 
 func TestNewDispatchCmd_LocalWithoutAgentResolvesConfiguredProvider(t *testing.T) {
+	oldPrepare := prepareLocalDispatch
 	oldProvider := resolveDispatchProvider
 	oldRunDispatch := runDispatch
 	oldTerminalMode := dispatchTerminalMode
+	prepareLocalDispatch = func(_ context.Context, opts dispatchpkg.Options) (dispatchpkg.Options, error) {
+		return opts, nil
+	}
 	resolveDispatchProvider = func(_ context.Context, _ io.Writer, override string) (*checkpointSummaryProvider, error) {
 		if override != "" {
 			t.Fatalf("provider override = %q, want empty", override)
@@ -559,6 +568,7 @@ func TestNewDispatchCmd_LocalWithoutAgentResolvesConfiguredProvider(t *testing.T
 	}
 	dispatchTerminalMode = func(io.Writer) bool { return false }
 	t.Cleanup(func() {
+		prepareLocalDispatch = oldPrepare
 		resolveDispatchProvider = oldProvider
 		runDispatch = oldRunDispatch
 		dispatchTerminalMode = oldTerminalMode
@@ -699,9 +709,13 @@ func TestNewDispatchCmd_CloudDispatchDoesNotResolveLocalProvider(t *testing.T) {
 }
 
 func TestNewDispatchCmd_ProviderErrorUsesStderrAndSkipsDispatch(t *testing.T) {
+	oldPrepare := prepareLocalDispatch
 	oldProvider := resolveDispatchProvider
 	oldRunDispatch := runDispatch
 	unexpectedCallErr := errors.New("unexpected dispatch call")
+	prepareLocalDispatch = func(_ context.Context, opts dispatchpkg.Options) (dispatchpkg.Options, error) {
+		return opts, nil
+	}
 	resolveDispatchProvider = func(_ context.Context, w io.Writer, override string) (*checkpointSummaryProvider, error) {
 		if override != string(agent.AgentNameCodex) {
 			t.Fatalf("provider override = %q, want codex", override)
@@ -716,6 +730,7 @@ func TestNewDispatchCmd_ProviderErrorUsesStderrAndSkipsDispatch(t *testing.T) {
 		return nil, unexpectedCallErr
 	}
 	t.Cleanup(func() {
+		prepareLocalDispatch = oldPrepare
 		resolveDispatchProvider = oldProvider
 		runDispatch = oldRunDispatch
 	})

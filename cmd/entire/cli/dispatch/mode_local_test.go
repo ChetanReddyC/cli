@@ -155,6 +155,64 @@ func TestRunLocal_UsesPreparedWindowAndRepoRoots(t *testing.T) {
 	}
 }
 
+func TestRunLocal_RepreparesWhenPreflightInputsChange(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, "a.txt", "x")
+	testutil.GitAdd(t, repoDir, "a.txt")
+	testutil.GitCommit(t, repoDir, "initial")
+	addOriginRemote(t, repoDir)
+	t.Chdir(repoDir)
+
+	tests := []struct {
+		name      string
+		mutate    func(*Options)
+		wantError string
+	}{
+		{
+			name: "since",
+			mutate: func(opts *Options) {
+				opts.Since = "definitely-not-a-time"
+			},
+			wantError: "unparseable time",
+		},
+		{
+			name: "until",
+			mutate: func(opts *Options) {
+				opts.Until = "definitely-not-a-time"
+			},
+			wantError: "unparseable time",
+		},
+		{
+			name: "repo paths",
+			mutate: func(opts *Options) {
+				opts.RepoPaths = []string{filepath.Join(t.TempDir(), "missing")}
+			},
+			wantError: "resolve repo root",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prepared, err := PrepareLocal(context.Background(), Options{
+				Mode:          ModeLocal,
+				Since:         "7d",
+				AllBranches:   true,
+				TextGenerator: stubGeneratedLocalDispatch(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			tt.mutate(&prepared)
+			_, err = Run(context.Background(), prepared)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("Run() error = %v, want error containing %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestLocalMode_EnumeratesCheckpoints(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)

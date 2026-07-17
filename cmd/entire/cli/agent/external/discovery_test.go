@@ -373,6 +373,27 @@ func TestDiscoverAndRegisterNamedAlways_MissingHelper(t *testing.T) {
 	}
 }
 
+func TestDiscoverAndRegisterNamedAlways_RejectsPathSeparators(t *testing.T) {
+	originalLookPath := lookPathExternalAgent
+	t.Cleanup(func() { lookPathExternalAgent = originalLookPath })
+
+	for _, name := range []types.AgentName{"foo/../../agent", `foo\bar`} {
+		lookedUp := false
+		lookPathExternalAgent = func(string) (string, error) {
+			lookedUp = true
+			return "", exec.ErrNotFound
+		}
+
+		err := DiscoverAndRegisterNamedAlways(context.Background(), name)
+		if err == nil || !strings.Contains(err.Error(), "path separators") {
+			t.Errorf("DiscoverAndRegisterNamedAlways(%q) error = %v, want path separator error", name, err)
+		}
+		if lookedUp {
+			t.Errorf("DiscoverAndRegisterNamedAlways(%q) called exec.LookPath for an invalid name", name)
+		}
+	}
+}
+
 func TestDiscoverAndRegisterNamedAlways_DeadlineWhileLookingUpMissingHelper(t *testing.T) {
 	name := types.AgentName("disc-named-lookup-deadline")
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -39,6 +40,16 @@ type localPreflight struct {
 	normalizedSince time.Time
 	normalizedUntil time.Time
 	repoRoots       []string
+	sinceInput      string
+	untilInput      string
+	repoPathsInput  []string
+}
+
+func (p *localPreflight) matches(opts Options) bool {
+	return p != nil &&
+		p.sinceInput == opts.Since &&
+		p.untilInput == opts.Until &&
+		slices.Equal(p.repoPathsInput, opts.RepoPaths)
 }
 
 // PrepareLocal validates and resolves the inputs needed before local dispatch
@@ -76,12 +87,15 @@ func PrepareLocal(ctx context.Context, opts Options) (Options, error) {
 		normalizedSince: normalizedSince,
 		normalizedUntil: normalizedUntil,
 		repoRoots:       repoRoots,
+		sinceInput:      opts.Since,
+		untilInput:      opts.Until,
+		repoPathsInput:  slices.Clone(opts.RepoPaths),
 	}
 	return opts, nil
 }
 
 func runLocal(ctx context.Context, opts Options) (*Dispatch, error) {
-	if opts.localPreflight == nil {
+	if !opts.localPreflight.matches(opts) {
 		prepared, err := PrepareLocal(ctx, opts)
 		if err != nil {
 			return nil, err
