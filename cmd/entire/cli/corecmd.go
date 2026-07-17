@@ -290,6 +290,16 @@ func pageModeFlags(cmd *cobra.Command, pageSize *int, pageToken *string) {
 	cmd.MarkFlagsMutuallyExclusive("page-token", "limit")
 }
 
+// pageModeRequested reports whether the caller opted into single-page mode:
+// either page flag was explicitly set. Checked by Changed, not value — a
+// script's resume loop naturally passes --page-token "" for its first page,
+// and a value check would silently reroute that call to the multi-page walk,
+// flipping the --json shape from the {items, nextPageToken} envelope to a
+// bare array (and the request count from one to many).
+func pageModeRequested(cmd *cobra.Command) bool {
+	return cmd.Flags().Changed("page-size") || cmd.Flags().Changed("page-token")
+}
+
 // validatePageSize rejects an explicitly set non-positive or
 // int32-overflowing --page-size; an unset flag passes.
 func validatePageSize(cmd *cobra.Command, pageSize int) error {

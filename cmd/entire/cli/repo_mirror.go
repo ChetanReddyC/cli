@@ -646,6 +646,16 @@ func fetchRepoDirCatalog(ctx context.Context, cmd *cobra.Command, c *coreapi.Cli
 	return clusterHostBySlug(clusters.Clusters), nil
 }
 
+// warnRepoDirTruncated discloses a server-side truncation with no cursor to
+// continue from (legacy server, or a hard directory cap): repos exist that no
+// further request can reach, so the output must not read as complete. Warns on
+// stderr rather than failing, and prints for --json too — a script acting on
+// silently truncated data is the worst outcome, and stderr never corrupts the
+// stdout JSON.
+func warnRepoDirTruncated(cmd *cobra.Command) {
+	fmt.Fprintln(cmd.ErrOrStderr(), "Warning: the repo directory was truncated by the server; some repos are not shown.")
+}
+
 func newRepoMirrorListCmd() *cobra.Command {
 	var cluster, owner, name, status, access string
 	var private bool
@@ -690,7 +700,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 					sortSpec: sortSpec,
 				}, rows, hostBySlug)
 			}
-			if pageSize > 0 || pageToken != "" {
+			if pageModeRequested(cmd) {
 				// Single-page cursor passthrough: one /repos request, cursor
 				// reported for resumption. The client-side local pipeline
 				// applies to just this page; the cursor survives filtering.
@@ -711,11 +721,18 @@ func newRepoMirrorListCmd() *cobra.Command {
 						if err != nil {
 							return err
 						}
+						next := out.NextPageToken.Or("")
+						// A truncated page the cursor can resume past needs no
+						// warning — the resume hint covers it. Truncated with no
+						// cursor means unreachable repos.
+						if out.Truncated && next == "" {
+							warnRepoDirTruncated(cmd)
+						}
 						rows, err := applyLocal(buildRepoDir(out.Repos, hostBySlug), hostBySlug)
 						if err != nil {
 							return err
 						}
-						return renderCoreListPage(cmd, "No repos found.", columnHeaders(repoDirColumns), repoDirCells, rows, out.NextPageToken.Or(""))
+						return renderCoreListPage(cmd, "No repos found.", columnHeaders(repoDirColumns), repoDirCells, rows, next)
 					})
 				})
 			}
@@ -760,8 +777,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 						return nil, err
 					}
 					if partial {
-						// Unlike the server-truncation warning below, this note is
-						// deliberate client behavior with an escape hatch, and a
+						// Deliberate client behavior with an escape hatch, and a
 						// script acting on silently partial data is the worst
 						// outcome — so it prints for --json too (stderr never
 						// corrupts the stdout JSON).
@@ -770,9 +786,8 @@ func newRepoMirrorListCmd() *cobra.Command {
 								"All filters and --sort are local to that window — pass --all to fetch the complete directory.\n",
 							len(repos))
 					}
-					// Warn on stderr (skipped for --json) rather than fail.
-					if truncated && !jsonRequested(cmd) {
-						fmt.Fprintln(cmd.ErrOrStderr(), "Warning: the repo directory was truncated by the server; some repos are not shown.")
+					if truncated {
+						warnRepoDirTruncated(cmd)
 					}
 					rows, err := applyLocal(buildRepoDir(repos, hostBySlug), hostBySlug)
 					if err != nil {

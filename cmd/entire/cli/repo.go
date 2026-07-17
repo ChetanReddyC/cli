@@ -175,7 +175,7 @@ func newRepoListCmd() *cobra.Command {
 			return validatePageSize(cmd, pageSize)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if pageSize > 0 || pageToken != "" {
+			if pageModeRequested(cmd) {
 				return flushThroughPager(cmd, noPager, func() error {
 					return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 						projID, err := resolveProjectRef(ctx, c, args[0])

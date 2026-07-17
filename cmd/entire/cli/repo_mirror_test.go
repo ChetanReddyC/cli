@@ -782,12 +782,15 @@ func TestRepoMirrorList_FetchBudget(t *testing.T) {
 		require.NotContains(t, stdout, "truncated")
 	})
 
-	t.Run("truncated warning is suppressed for --json", func(t *testing.T) {
+	t.Run("truncated warning reaches --json runs on stderr", func(t *testing.T) {
+		// Same rationale as the partial-window note: a script acting on
+		// silently truncated data is the worst outcome, and stderr never
+		// corrupts the stdout JSON.
 		serveRepoList(t, []coreapi.RepoIndexEntry{
 			onboardedEntry("acme/web", "private", "us"),
 		}, clusters, true)
 		stdout, stderr := runMirrorList(t, "--json")
-		require.NotContains(t, stderr, "truncated")
+		require.Contains(t, stderr, "truncated")
 		require.Contains(t, stdout, `"cloneUrl"`, "--json emits the flat directory rows")
 	})
 
@@ -1829,6 +1832,66 @@ func TestRepoMirrorList_PageMode(t *testing.T) {
 		require.Len(t, envelope.Items, 1, "the client-side --status filter applies to the fetched page")
 		require.Equal(t, "acme/marketing", envelope.Items[0].Repo)
 		require.Equal(t, "p2", envelope.NextPageToken, "the cursor survives local filtering")
+	})
+
+	t.Run("an explicitly empty --page-token still selects page mode", func(t *testing.T) {
+		// A script's resume loop naturally starts with an empty cursor; the
+		// output shape must not flip to the multi-page walk on the token's
+		// value — page mode is opted into by setting the flag.
+		recCh := serveRepoListPaged(t, []coreapi.ListReposOutputBody{
+			{
+				Repos:         []coreapi.RepoIndexEntry{onboardedEntry("acme/web", "private", "us")},
+				NextPageToken: coreapi.NewOptString("p2"),
+			},
+			{
+				Repos: []coreapi.RepoIndexEntry{onboardedEntry("tail/end", "private", "us")},
+			},
+		}, clusters)
+		stdout, stderr := runMirrorList(t, "--page-token", "")
+		rec := <-recCh
+		require.Empty(t, rec.query.Get("pageToken"), "an empty cursor addresses the first page")
+		select {
+		case rec := <-recCh:
+			t.Fatalf("page mode must make exactly one request, got a second with pageToken=%q", rec.query.Get("pageToken"))
+		default:
+		}
+		require.Contains(t, stdout, "acme/web")
+		require.NotContains(t, stdout, "tail/end")
+		require.Contains(t, stderr, "--page-token p2")
+	})
+
+	t.Run("a truncated page with no cursor warns on stderr, --json included", func(t *testing.T) {
+		// The server said the directory was cut short and offered no cursor to
+		// continue from: the page must not read as complete, in either output
+		// mode — a script acting on silently truncated data is the worst
+		// outcome, and stderr never corrupts the stdout JSON.
+		entries := []coreapi.RepoIndexEntry{onboardedEntry("acme/web", "private", "us")}
+		serveRepoList(t, entries, clusters, true)
+		_, stderr := runMirrorList(t, "--page-size", "5")
+		require.Contains(t, stderr, "truncated")
+
+		serveRepoList(t, entries, clusters, true)
+		stdout, stderr := runMirrorList(t, "--json", "--page-size", "5")
+		require.Contains(t, stderr, "truncated")
+		require.Contains(t, stdout, `"items"`, "the envelope still renders")
+	})
+
+	t.Run("a truncated page with a cursor to continue from does not warn", func(t *testing.T) {
+		// A capped page the cursor can walk past leaves nothing unreachable;
+		// the resume hint already tells the caller how to continue.
+		serveRepoListPaged(t, []coreapi.ListReposOutputBody{
+			{
+				Repos:         []coreapi.RepoIndexEntry{onboardedEntry("acme/web", "private", "us")},
+				NextPageToken: coreapi.NewOptString("p2"),
+				Truncated:     true,
+			},
+			{
+				Repos: []coreapi.RepoIndexEntry{onboardedEntry("tail/end", "private", "us")},
+			},
+		}, clusters)
+		_, stderr := runMirrorList(t, "--page-size", "1")
+		require.NotContains(t, stderr, "truncated")
+		require.Contains(t, stderr, "--page-token p2")
 	})
 
 	t.Run("page mode excludes the walk flags", func(t *testing.T) {

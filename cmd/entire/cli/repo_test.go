@@ -434,6 +434,31 @@ func TestRepoList_PageMode(t *testing.T) {
 		require.NotContains(t, stderr, "--page-token", "the last page carries no resume hint")
 	})
 
+	t.Run("an explicitly empty --page-token still selects page mode", func(t *testing.T) {
+		// A script's resume loop naturally starts with an empty cursor; the
+		// output shape (envelope vs the walk's bare array) must not flip on
+		// the token's value — page mode is opted into by setting the flag.
+		recCh := serveProjectRepos(t, []coreapi.ListProjectReposOutputBody{
+			{Repos: bulkRepos("page1", 2), NextPageToken: coreapi.NewOptString("p2")},
+			{Repos: bulkRepos("page2", 2)},
+		})
+		stdout, _, err := execRepoList(t, "--json", "--page-token", "")
+		require.NoError(t, err)
+		rec := <-recCh
+		require.Empty(t, rec.query.Get("pageToken"), "an empty cursor addresses the first page")
+		select {
+		case rec := <-recCh:
+			t.Fatalf("page mode must make exactly one request, got a second with pageToken=%q", rec.query.Get("pageToken"))
+		default:
+		}
+		var envelope struct {
+			Items         []coreapi.Repo `json:"items"`
+			NextPageToken string         `json:"nextPageToken"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(stdout), &envelope), "page mode emits the envelope, not the walk's bare array")
+		require.Equal(t, "p2", envelope.NextPageToken)
+	})
+
 	t.Run("--json page mode emits the envelope with nextPageToken", func(t *testing.T) {
 		serveProjectRepos(t, []coreapi.ListProjectReposOutputBody{
 			{Repos: bulkRepos("page1", 2), NextPageToken: coreapi.NewOptString("p2")},
