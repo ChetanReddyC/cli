@@ -2,11 +2,13 @@ package external
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -307,14 +309,128 @@ func TestDiscoverAndRegisterNamedAlways_TimesOutStalledInfo(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 
-	const timeout = 100 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
 	started := time.Now()
-	discoverAndRegisterNamed(context.Background(), name, timeout)
+	err = DiscoverAndRegisterNamedAlways(ctx, name)
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
-		t.Fatalf("named discovery took %v, want cancellation near %v", elapsed, timeout)
+		t.Fatalf("named discovery took %v, want cancellation near context deadline", elapsed)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %v, want context deadline exceeded", err)
 	}
 	if _, err := agent.Get(name); err == nil {
 		t.Fatal("stalled external agent was registered")
+	}
+}
+
+func TestDiscoverAndRegisterNamedAlways_CanceledContext(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	name := types.AgentName("disc-named-canceled")
+	dir := setupDiscoveryDir(t, string(name), makeInfoJSON(string(name)))
+	t.Setenv("PATH", dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := DiscoverAndRegisterNamedAlways(ctx, name)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %v, want context canceled", err)
+	}
+}
+
+func TestDiscoverAndRegisterNamedAlways_InvalidInfo(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	name := types.AgentName("disc-named-invalid-info")
+	dir := setupDiscoveryDir(t, string(name), "not json")
+	t.Setenv("PATH", dir)
+
+	err := DiscoverAndRegisterNamedAlways(context.Background(), name)
+	if err == nil {
+		t.Fatal("DiscoverAndRegisterNamedAlways() error = nil, want invalid info error")
+	}
+	if !strings.Contains(err.Error(), string(name)) {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %q, want agent name %q", err, name)
+	}
+	if !strings.Contains(err.Error(), "info: invalid JSON") {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %q, want invalid info context", err)
+	}
+}
+
+func TestDiscoverAndRegisterNamedAlways_MissingHelper(t *testing.T) {
+	name := types.AgentName("disc-named-missing")
+	t.Setenv("PATH", t.TempDir())
+
+	if err := DiscoverAndRegisterNamedAlways(context.Background(), name); err != nil {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %v, want nil for missing helper", err)
+	}
+}
+
+func TestDiscoverAndRegisterNamedAlways_StatError(t *testing.T) {
+	name := types.AgentName("disc-named-stat-error")
+	binPath := filepath.Join(t.TempDir(), binaryPrefix+string(name))
+	wantErr := errors.New("stat failed")
+
+	originalLookPath := lookPathExternalAgent
+	originalStat := statExternalAgent
+	t.Cleanup(func() {
+		lookPathExternalAgent = originalLookPath
+		statExternalAgent = originalStat
+	})
+	lookPathExternalAgent = func(string) (string, error) { return binPath, nil }
+	statExternalAgent = func(string) (os.FileInfo, error) { return nil, wantErr }
+
+	err := DiscoverAndRegisterNamedAlways(context.Background(), name)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %v, want stat error", err)
+	}
+	if !strings.Contains(err.Error(), string(name)) {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %q, want agent name %q", err, name)
+	}
+}
+
+func TestDiscoverAndRegisterNamedAlways_LookPathError(t *testing.T) {
+	name := types.AgentName("disc-named-lookpath-error")
+	wantErr := errors.New("lookup failed")
+
+	originalLookPath := lookPathExternalAgent
+	t.Cleanup(func() { lookPathExternalAgent = originalLookPath })
+	lookPathExternalAgent = func(string) (string, error) { return "", wantErr }
+
+	err := DiscoverAndRegisterNamedAlways(context.Background(), name)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %v, want lookup error", err)
+	}
+	if !strings.Contains(err.Error(), string(name)) {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %q, want agent name %q", err, name)
+	}
+}
+
+func TestDiscoverAndRegister_ContinuesAfterRegistrationError(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	badName := "disc-scan-a-invalid"
+	badDir := setupDiscoveryDir(t, badName, "not json")
+	goodName := "disc-scan-z-valid"
+	goodDir := setupDiscoveryDir(t, goodName, makeInfoJSON(goodName))
+	t.Setenv("PATH", badDir+string(os.PathListSeparator)+goodDir)
+
+	DiscoverAndRegisterAlways(context.Background())
+
+	if _, err := agent.Get(types.AgentName(badName)); err == nil {
+		t.Fatalf("invalid external agent %q was registered", badName)
+	}
+	if _, err := agent.Get(types.AgentName(goodName)); err != nil {
+		t.Fatalf("valid external agent %q was not registered after earlier failure: %v", goodName, err)
 	}
 }
 

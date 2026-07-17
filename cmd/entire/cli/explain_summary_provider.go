@@ -47,7 +47,9 @@ func resolveDispatchSummaryProvider(ctx context.Context, w io.Writer, override s
 
 	providerName := types.AgentName(override)
 	if _, err := getSummaryAgent(providerName); err != nil {
-		discoverDispatchSummaryProvider(ctx, providerName)
+		if err := discoverDispatchSummaryProvider(ctx, providerName); err != nil {
+			return nil, err
+		}
 	}
 	if err := validateSummaryProvider(override); err != nil {
 		return nil, err

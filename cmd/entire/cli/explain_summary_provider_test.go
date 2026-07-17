@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -196,8 +197,9 @@ func TestResolveDispatchSummaryProvider_ExplicitCodexUsesDefaultModelWithoutPers
 	isSummaryCLIAvailable = func(name types.AgentName) bool {
 		return name == agent.AgentNameCodex
 	}
-	discoverDispatchSummaryProvider = func(context.Context, types.AgentName) {
+	discoverDispatchSummaryProvider = func(context.Context, types.AgentName) error {
 		t.Fatal("registered explicit provider should not trigger external discovery")
+		return nil
 	}
 
 	provider, err := resolveDispatchSummaryProvider(ctx, &bytes.Buffer{}, "  codex  ")
@@ -339,6 +341,113 @@ func TestResolveDispatchSummaryProvider_ExplicitClaudeUsesSummaryDefaultModel(t 
 	}
 }
 
+func TestResolveDispatchSummaryProvider_PropagatesDiscoveryDeadline(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	providerName := types.AgentName("external-discovery-deadline")
+
+	originalGet := getSummaryAgent
+	originalDiscover := discoverDispatchSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverDispatchSummaryProvider = originalDiscover
+	})
+
+	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
+		return nil, errors.New("not registered")
+	}
+	discoverDispatchSummaryProvider = func(context.Context, types.AgentName) error {
+		return fmt.Errorf("discovering external agent %q: %w", providerName, context.DeadlineExceeded)
+	}
+
+	_, err := resolveDispatchSummaryProvider(context.Background(), &bytes.Buffer{}, string(providerName))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %v, want context deadline exceeded", err)
+	}
+	if strings.Contains(err.Error(), "unknown summary provider") {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %q, do not want unknown-provider rewrite", err)
+	}
+}
+
+func TestResolveDispatchSummaryProvider_PropagatesDiscoveryCancellation(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	providerName := types.AgentName("external-discovery-canceled")
+
+	originalGet := getSummaryAgent
+	originalDiscover := discoverDispatchSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverDispatchSummaryProvider = originalDiscover
+	})
+
+	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
+		return nil, errors.New("not registered")
+	}
+	discoverDispatchSummaryProvider = func(context.Context, types.AgentName) error {
+		return fmt.Errorf("discovering external agent %q: %w", providerName, context.Canceled)
+	}
+
+	_, err := resolveDispatchSummaryProvider(context.Background(), &bytes.Buffer{}, string(providerName))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %v, want context canceled", err)
+	}
+	if strings.Contains(err.Error(), "unknown summary provider") {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %q, do not want unknown-provider rewrite", err)
+	}
+}
+
+func TestResolveDispatchSummaryProvider_PropagatesInvalidExternalInfo(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	providerName := types.AgentName("external-discovery-invalid-info")
+	infoErr := errors.New("invalid helper info")
+
+	originalGet := getSummaryAgent
+	originalDiscover := discoverDispatchSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverDispatchSummaryProvider = originalDiscover
+	})
+
+	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
+		return nil, errors.New("not registered")
+	}
+	discoverDispatchSummaryProvider = func(context.Context, types.AgentName) error {
+		return fmt.Errorf("loading info for external agent %q: info: invalid JSON: %w", providerName, infoErr)
+	}
+
+	_, err := resolveDispatchSummaryProvider(context.Background(), &bytes.Buffer{}, string(providerName))
+	if !errors.Is(err, infoErr) {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %v, want invalid-info cause", err)
+	}
+	if !strings.Contains(err.Error(), string(providerName)) || !strings.Contains(err.Error(), "info: invalid JSON") {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %q, want provider and invalid-info context", err)
+	}
+	if strings.Contains(err.Error(), "unknown summary provider") {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %q, do not want unknown-provider rewrite", err)
+	}
+}
+
+func TestResolveDispatchSummaryProvider_MissingExternalKeepsUnknownProviderError(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	providerName := types.AgentName("external-discovery-missing")
+
+	originalGet := getSummaryAgent
+	originalDiscover := discoverDispatchSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverDispatchSummaryProvider = originalDiscover
+	})
+
+	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
+		return nil, errors.New("not registered")
+	}
+	discoverDispatchSummaryProvider = func(context.Context, types.AgentName) error { return nil }
+
+	_, err := resolveDispatchSummaryProvider(context.Background(), &bytes.Buffer{}, string(providerName))
+	if err == nil || !strings.Contains(err.Error(), "unknown summary provider") {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %v, want existing unknown-provider error", err)
+	}
+}
+
 func TestResolveDispatchSummaryProvider_ExplicitValidationErrors(t *testing.T) {
 	// Cannot use t.Parallel(): subtests mutate package-level resolution seams.
 	tests := []struct {
@@ -395,7 +504,7 @@ func TestResolveDispatchSummaryProvider_ExplicitValidationErrors(t *testing.T) {
 				return tt.agent, nil
 			}
 			isSummaryCLIAvailable = func(types.AgentName) bool { return tt.available }
-			discoverDispatchSummaryProvider = func(context.Context, types.AgentName) {}
+			discoverDispatchSummaryProvider = func(context.Context, types.AgentName) error { return nil }
 
 			_, err := resolveDispatchSummaryProvider(context.Background(), &bytes.Buffer{}, tt.override)
 			if err == nil {
