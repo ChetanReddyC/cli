@@ -20,6 +20,141 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
+func TestPrepareLocal_RejectsServerMode(t *testing.T) {
+	t.Parallel()
+
+	_, err := PrepareLocal(context.Background(), Options{Mode: ModeServer})
+	if err == nil || !strings.Contains(err.Error(), "local") {
+		t.Fatalf("expected local-mode error, got %v", err)
+	}
+}
+
+func TestPrepareLocal_RejectsInvalidSince(t *testing.T) {
+	t.Parallel()
+
+	_, err := PrepareLocal(context.Background(), Options{
+		Mode:  ModeLocal,
+		Since: "definitely-not-a-time",
+	})
+	if err == nil || !strings.Contains(err.Error(), "unparseable time") {
+		t.Fatalf("expected invalid --since error, got %v", err)
+	}
+}
+
+func TestPrepareLocal_RejectsInvalidUntil(t *testing.T) {
+	t.Parallel()
+
+	_, err := PrepareLocal(context.Background(), Options{
+		Mode:  ModeLocal,
+		Since: "2026-07-16T12:00:00Z",
+		Until: "definitely-not-a-time",
+	})
+	if err == nil || !strings.Contains(err.Error(), "unparseable time") {
+		t.Fatalf("expected invalid --until error, got %v", err)
+	}
+}
+
+func TestPrepareLocal_RejectsReversedNormalizedWindow(t *testing.T) {
+	t.Parallel()
+
+	_, err := PrepareLocal(context.Background(), Options{
+		Mode:  ModeLocal,
+		Since: "2026-07-17T12:01:00Z",
+		Until: "2026-07-17T12:00:00Z",
+	})
+	if err == nil || err.Error() != "--since must be before --until" {
+		t.Fatalf("expected reversed-window error, got %v", err)
+	}
+}
+
+func TestPrepareLocal_RejectsEqualNormalizedWindow(t *testing.T) {
+	t.Parallel()
+
+	_, err := PrepareLocal(context.Background(), Options{
+		Mode:  ModeLocal,
+		Since: "2026-07-17T12:00:00Z",
+		Until: "2026-07-17T12:00:00Z",
+	})
+	if err == nil || err.Error() != "--since must be before --until" {
+		t.Fatalf("expected equal-window error, got %v", err)
+	}
+}
+
+func TestPrepareLocal_ValidWindowOutsideGitFailsRepoResolution(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	_, err := PrepareLocal(context.Background(), Options{
+		Mode:  ModeLocal,
+		Since: "2026-07-16T12:00:00Z",
+		Until: "2026-07-17T12:00:00Z",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not in a git repository") {
+		t.Fatalf("expected repository-root error, got %v", err)
+	}
+}
+
+func TestPrepareLocal_RunAutoPreparesDirectCall(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	_, err := Run(context.Background(), Options{
+		Mode:          ModeLocal,
+		Since:         "2026-07-16T12:00:00Z",
+		Until:         "2026-07-17T12:00:00Z",
+		AllBranches:   true,
+		TextGenerator: stubGeneratedLocalDispatch(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "not in a git repository") {
+		t.Fatalf("expected direct Run to perform repository preflight, got %v", err)
+	}
+}
+
+func TestRunLocal_UsesPreparedWindowAndRepoRoots(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, "a.txt", "x")
+	testutil.GitAdd(t, repoDir, "a.txt")
+	testutil.GitCommit(t, repoDir, "initial")
+	addOriginRemote(t, repoDir)
+
+	preparedAt := time.Date(2026, 7, 17, 12, 34, 45, 0, time.UTC)
+	oldNow := nowUTC
+	nowUTC = func() time.Time { return preparedAt }
+	t.Cleanup(func() { nowUTC = oldNow })
+
+	t.Chdir(repoDir)
+	generator := stubGeneratedLocalDispatch()
+	prepared, err := PrepareLocal(context.Background(), Options{
+		Mode:          ModeLocal,
+		Since:         "1h",
+		AllBranches:   true,
+		TextGenerator: generator,
+		Model:         "prepared-model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.TextGenerator != generator || prepared.Model != "prepared-model" {
+		t.Fatal("preflight must preserve injected generation options")
+	}
+
+	nowUTC = func() time.Time { return preparedAt.Add(24 * time.Hour) }
+	t.Chdir(t.TempDir())
+	got, err := Run(context.Background(), prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantSince := time.Date(2026, 7, 17, 11, 34, 0, 0, time.UTC)
+	wantUntil := time.Date(2026, 7, 17, 12, 35, 0, 0, time.UTC)
+	if !got.Window.NormalizedSince.Equal(wantSince) || !got.Window.NormalizedUntil.Equal(wantUntil) {
+		t.Fatalf("prepared window was recomputed: got [%s, %s), want [%s, %s)",
+			got.Window.NormalizedSince, got.Window.NormalizedUntil, wantSince, wantUntil)
+	}
+	if got.GeneratedText != "generated dispatch" {
+		t.Fatalf("unexpected generated text: %q", got.GeneratedText)
+	}
+}
+
 func TestLocalMode_EnumeratesCheckpoints(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)

@@ -19,6 +19,7 @@ var renderDispatchMarkdown = dispatchpkg.RenderMarkdown
 var dispatchTerminalMode = interactive.IsTerminalWriter
 var runInteractiveDispatch = defaultRunInteractiveDispatch
 var renderTerminalMarkdown = defaultRenderTerminalMarkdown
+var prepareLocalDispatch = dispatchpkg.PrepareLocal
 var resolveDispatchProvider = resolveDispatchSummaryProvider
 
 func newDispatchCmd() *cobra.Command {
@@ -71,6 +72,10 @@ Examples:
 				return err
 			}
 			if opts.Mode == dispatchpkg.ModeLocal {
+				opts, err = prepareLocalDispatch(cmd.Context(), opts)
+				if err != nil {
+					return err
+				}
 				provider, err := resolveDispatchProvider(cmd.Context(), cmd.ErrOrStderr(), agentOverride)
 				if err != nil {
 					return err

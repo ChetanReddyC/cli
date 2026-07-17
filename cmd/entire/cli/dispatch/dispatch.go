@@ -39,6 +39,7 @@ type Options struct {
 	InsecureHTTPAuth      bool
 	TextGenerator         TextGenerator
 	Model                 string
+	localPreflight        *localPreflight
 }
 
 // CloudRepoLimit caps how many repos the cloud mode may query in one request.

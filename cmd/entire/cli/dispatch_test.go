@@ -229,6 +229,150 @@ func TestNewDispatchCmd_LongHelpIncludesLocalAgentExample(t *testing.T) {
 	}
 }
 
+func TestDispatchPreflight_InvalidTimeBeforeProvider(t *testing.T) {
+	oldProvider := resolveDispatchProvider
+	oldRunDispatch := runDispatch
+	providerCalled := false
+	resolveDispatchProvider = func(context.Context, io.Writer, string) (*checkpointSummaryProvider, error) {
+		providerCalled = true
+		return nil, errors.New("provider must not run")
+	}
+	runDispatch = func(context.Context, dispatchpkg.Options) (*dispatchpkg.Dispatch, error) {
+		t.Fatal("dispatch must not run after preflight fails")
+		return nil, errors.New("dispatch must not run")
+	}
+	t.Cleanup(func() {
+		resolveDispatchProvider = oldProvider
+		runDispatch = oldRunDispatch
+	})
+
+	cmd := newDispatchCmd()
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--local", "--all-branches", "--since", "not-a-time"})
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "unparseable time") {
+		t.Fatalf("expected invalid time preflight error, got %v", err)
+	}
+	if providerCalled {
+		t.Fatal("provider resolution ran before invalid time preflight returned")
+	}
+}
+
+func TestDispatchPreflight_RepositoryFailureBeforeProvider(t *testing.T) {
+	oldProvider := resolveDispatchProvider
+	oldRunDispatch := runDispatch
+	providerCalled := false
+	resolveDispatchProvider = func(context.Context, io.Writer, string) (*checkpointSummaryProvider, error) {
+		providerCalled = true
+		return nil, errors.New("provider must not run")
+	}
+	runDispatch = func(context.Context, dispatchpkg.Options) (*dispatchpkg.Dispatch, error) {
+		t.Fatal("dispatch must not run after preflight fails")
+		return nil, errors.New("dispatch must not run")
+	}
+	t.Cleanup(func() {
+		resolveDispatchProvider = oldProvider
+		runDispatch = oldRunDispatch
+	})
+	t.Chdir(t.TempDir())
+
+	cmd := newDispatchCmd()
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{
+		"--local", "--all-branches",
+		"--since", "2026-07-16T12:00:00Z",
+		"--until", "2026-07-17T12:00:00Z",
+	})
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "not in a git repository") {
+		t.Fatalf("expected repository preflight error, got %v", err)
+	}
+	if providerCalled {
+		t.Fatal("provider resolution ran before repository preflight returned")
+	}
+}
+
+func TestDispatchProvider_LocalRunsAfterPreflightAndInjectsOptions(t *testing.T) {
+	oldPrepare := prepareLocalDispatch
+	oldProvider := resolveDispatchProvider
+	oldRunDispatch := runDispatch
+	oldTerminalMode := dispatchTerminalMode
+	oldMarkdown := renderDispatchMarkdown
+	var calls []string
+	generator := &stubTextAgent{}
+	prepareLocalDispatch = func(_ context.Context, opts dispatchpkg.Options) (dispatchpkg.Options, error) {
+		calls = append(calls, "prepare")
+		return opts, nil
+	}
+	resolveDispatchProvider = func(context.Context, io.Writer, string) (*checkpointSummaryProvider, error) {
+		calls = append(calls, "provider")
+		return &checkpointSummaryProvider{TextGenerator: generator, Model: "ordered-model"}, nil
+	}
+	runDispatch = func(_ context.Context, opts dispatchpkg.Options) (*dispatchpkg.Dispatch, error) {
+		calls = append(calls, "dispatch")
+		if opts.TextGenerator != generator || opts.Model != "ordered-model" {
+			t.Fatalf("provider options not passed to dispatch: generator=%T model=%q", opts.TextGenerator, opts.Model)
+		}
+		return &dispatchpkg.Dispatch{}, nil
+	}
+	dispatchTerminalMode = func(io.Writer) bool { return false }
+	renderDispatchMarkdown = func(*dispatchpkg.Dispatch) string { return "" }
+	t.Cleanup(func() {
+		prepareLocalDispatch = oldPrepare
+		resolveDispatchProvider = oldProvider
+		runDispatch = oldRunDispatch
+		dispatchTerminalMode = oldTerminalMode
+		renderDispatchMarkdown = oldMarkdown
+	})
+
+	cmd := newDispatchCmd()
+	cmd.SetArgs([]string{"--local", "--all-branches"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(calls, ","); got != "prepare,provider,dispatch" {
+		t.Fatalf("call order = %q, want prepare,provider,dispatch", got)
+	}
+}
+
+func TestDispatchPreflight_CloudSkipsLocalPreparationAndProvider(t *testing.T) {
+	oldPrepare := prepareLocalDispatch
+	oldProvider := resolveDispatchProvider
+	oldRunDispatch := runDispatch
+	oldTerminalMode := dispatchTerminalMode
+	prepareLocalDispatch = func(context.Context, dispatchpkg.Options) (dispatchpkg.Options, error) {
+		t.Fatal("cloud dispatch must not run local preflight")
+		return dispatchpkg.Options{}, errors.New("local preflight must not run")
+	}
+	resolveDispatchProvider = func(context.Context, io.Writer, string) (*checkpointSummaryProvider, error) {
+		t.Fatal("cloud dispatch must not resolve a local provider")
+		return nil, errors.New("provider must not run")
+	}
+	runDispatch = func(_ context.Context, opts dispatchpkg.Options) (*dispatchpkg.Dispatch, error) {
+		if opts.Mode != dispatchpkg.ModeServer {
+			t.Fatalf("mode = %v, want server", opts.Mode)
+		}
+		return &dispatchpkg.Dispatch{}, nil
+	}
+	dispatchTerminalMode = func(io.Writer) bool { return false }
+	t.Cleanup(func() {
+		prepareLocalDispatch = oldPrepare
+		resolveDispatchProvider = oldProvider
+		runDispatch = oldRunDispatch
+		dispatchTerminalMode = oldTerminalMode
+	})
+
+	cmd := newDispatchCmd()
+	cmd.SetArgs([]string{"--repos", "entireio/cli"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNewDispatchCmd_CloudAgentFailsBeforeProviderOrDispatch(t *testing.T) {
 	oldProvider := resolveDispatchProvider
 	oldRunDispatch := runDispatch
