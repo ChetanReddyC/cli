@@ -227,28 +227,15 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				Branch:      branchFlag,
 			}
 
-			// ENT-1055: when the semantic-search-v4 flag is on and the search
-			// is scoped to the current repo, route it through the v4
-			// query-serve path (entire-api cell gateway) instead of the v3
-			// Cloudflare worker. Broader searches (repo:*, --all-repos, or a
-			// different explicit repo) stay on v3 until the cross-repo v4 route
-			// lands (ENT-1054). The v3 token/URL above stay populated so those
-			// broader searches — including a TUI re-search that changes scope —
-			// still work.
-			if settings.IsSemanticSearchV4Enabled(ctx) {
-				if searchScopedToCurrentRepo(repos, owner, repoName, allRepos) {
-					cellClient, repoID, err := resolveSemanticSearchV4(ctx, owner, repoName, insecureHTTPAuth)
-					if err != nil {
-						return err
-					}
-					searchCfg.UseV4 = true
-					searchCfg.CellClient = cellClient
-					searchCfg.RepoID = repoID
-					searchCfg.V4RepoSlug = owner + "/" + repoName
-					logging.Debug(ctx, "semantic-search-v4 routing enabled", "repo", searchCfg.V4RepoSlug, "repo_id", repoID)
-				} else {
-					logging.Debug(ctx, "semantic-search-v4 flag on but search is not scoped to a single repo; using v3 (cross-repo v4 is ENT-1054)")
-				}
+			// ENT-1055: the semantic-search-v4 flag routes semantic search
+			// through the v4 query-serve path (entire-api cell gateway) instead
+			// of the v3 Cloudflare worker — for every scope (current repo,
+			// explicit repo, or repo:* / --all-repos), via a cross-cell fan-out
+			// in runSemanticSearchV4. The v3 token/URL above stay populated so a
+			// flag-off search (and the TUI's v3 path) is byte-identical to today.
+			useV4 := settings.IsSemanticSearchV4Enabled(ctx)
+			if useV4 {
+				logging.Debug(ctx, "semantic-search-v4 routing enabled", "all_repos", allRepos, "repos", repos)
 			}
 
 			// Use wildcard query when only filters are provided
@@ -261,6 +248,8 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				searchCfg.Limit = search.DefaultLimit
 				styles := newStatusStyles(w)
 				model := newSearchModel(nil, "", 0, searchCfg, styles, buildCodeSearchOpts(ctx, owner, repoName, nil, false, insecureHTTPAuth))
+				model.useV4 = useV4
+				model.insecureHTTP = insecureHTTPAuth
 				model.mode = modeSearch
 				model.input.Focus()
 				model.codeLoading = false // don't fetch until a query is entered
@@ -279,7 +268,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			searchCfg.Limit = search.DefaultLimit
 			searchCfg.Page = 0 // let API default to page 1
 
-			resp, err := search.Search(ctx, searchCfg)
+			resp, err := runSemanticSearch(ctx, searchCfg, useV4, insecureHTTPAuth)
 			if err != nil {
 				return fmt.Errorf("search failed: %w", err)
 			}
@@ -319,6 +308,8 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				}
 			}
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles, codeOpts)
+			model.useV4 = useV4
+			model.insecureHTTP = insecureHTTPAuth
 			p := tea.NewProgram(model)
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("TUI error: %w", err)
@@ -366,51 +357,6 @@ func resolveSearchToken(ctx context.Context, serviceURL string, insecureHTTPAuth
 		return "", fmt.Errorf("reading credentials: %w", err)
 	}
 	return token, nil
-}
-
-// searchScopedToCurrentRepo reports whether the search targets exactly the
-// current repo (owner/repoName) — the only scope the v4 query-serve path
-// supports today. A repo:* / --all-repos search, or an explicit filter naming
-// a different repo, is not (those stay on v3 until ENT-1054). An explicit
-// filter naming the current repo (case-insensitively) still counts.
-func searchScopedToCurrentRepo(repos []string, owner, repoName string, allRepos bool) bool {
-	if allRepos {
-		return false
-	}
-	switch len(repos) {
-	case 0:
-		return true // defaults to the current repo
-	case 1:
-		if repos[0] == search.AllReposFilter {
-			return false
-		}
-		return strings.EqualFold(repos[0], owner+"/"+repoName)
-	default:
-		return false
-	}
-}
-
-// resolveSemanticSearchV4 resolves the v4 query-serve backend for the current
-// repo: its Entire ULID (sent as the v4 repo= param) and an authenticated
-// client aimed at the entire-api cell that hosts it (carrying a jurisdictional
-// identity token). It reuses NewAuthenticatedEntireAPICellClient — the same
-// repo-scoped cell resolution the experts commands use — so the call lands in
-// the region that owns the repo, falling back to the home cell only when the
-// placement can't be resolved.
-//
-// It errors clearly on any failure: the flag is opt-in, so masking v4 breakage
-// behind a silent v3 fallback would defeat the rollout's visibility.
-func resolveSemanticSearchV4(ctx context.Context, owner, repoName string, insecureHTTP bool) (*api.Client, string, error) {
-	fullName := owner + "/" + repoName
-	repoID, _ := currentRepoRef(ctx)
-	if repoID == "" {
-		return nil, "", fmt.Errorf("semantic-search-v4: could not resolve an Entire repository ID for %s (is it mirrored to Entire?); unset the semantic-search-v4 flag to use v3", fullName)
-	}
-	client, err := NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, repoID)
-	if err != nil {
-		return nil, "", fmt.Errorf("semantic-search-v4: %w", err)
-	}
-	return client, repoID, nil
 }
 
 // completeRepoFlag returns shell-completion suggestions for the search

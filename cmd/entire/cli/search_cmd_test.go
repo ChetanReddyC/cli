@@ -888,32 +888,3 @@ func TestMergeSearchResults_AllCellsFail(t *testing.T) {
 		t.Errorf("error = %q, want containing 'code search failed'", err.Error())
 	}
 }
-
-// TestSearchScopedToCurrentRepo verifies the predicate that gates v4 routing:
-// only a search targeting exactly the current repo is v4-eligible (ENT-1055).
-func TestSearchScopedToCurrentRepo(t *testing.T) {
-	t.Parallel()
-	const owner, repo = "entireio", "cli"
-	tests := []struct {
-		name     string
-		repos    []string
-		allRepos bool
-		want     bool
-	}{
-		{"default (no filter) is current repo", nil, false, true},
-		{"explicit current repo", []string{"entireio/cli"}, false, true},
-		{"explicit current repo, different case", []string{"EntireIO/CLI"}, false, true},
-		{"--all-repos is broader", nil, true, false},
-		{"repo:* is broader", []string{search.AllReposFilter}, false, false},
-		{"explicit different repo", []string{"entireio/entire.io"}, false, false},
-		{"multiple repos", []string{"entireio/cli", "entireio/entire.io"}, false, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := searchScopedToCurrentRepo(tt.repos, owner, repo, tt.allRepos); got != tt.want {
-				t.Errorf("searchScopedToCurrentRepo(%v, allRepos=%v) = %v, want %v", tt.repos, tt.allRepos, got, tt.want)
-			}
-		})
-	}
-}

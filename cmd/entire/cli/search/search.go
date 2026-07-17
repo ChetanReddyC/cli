@@ -41,6 +41,11 @@ const (
 	TypeCheckpoint = "checkpoint"
 	TypeCommit     = "commit"
 	TypeSession    = "session"
+	// TypeRepo and TypePR are returned by the backend but have no typed struct
+	// (decoded via rawData). They're named so the cross-cell v4 merge can bucket
+	// and tally them without string literals.
+	TypeRepo = "repo"
+	TypePR   = "pr"
 )
 
 // MaxLimit is the maximum number of results the search API will return per request.
@@ -349,74 +354,6 @@ type Config struct {
 	Date        string // Filter by time period: "week" or "month"
 	Branch      string // Filter by branch name
 	Page        int    // 1-based page number (0 means omit, API defaults to 1)
-
-	// v4 query-serve backend (ENT-1055). These are populated by the command
-	// layer only when the semantic-search-v4 flag is on AND the search is
-	// scoped to a single repo whose owning cell + ULID could be resolved. When
-	// they select the v4 path (see useV4), the request goes to the entire-api
-	// cell gateway carrying a jurisdictional identity token instead of the v3
-	// Cloudflare worker. All zero (the default) means the v3 path, so a
-	// flag-off search is byte-identical to today.
-
-	// UseV4 gates the v4 path on. Even when true, the v4 branch is taken only
-	// for a search scoped to exactly V4RepoSlug (useV4); anything broader
-	// (repo:*, --all-repos, a different explicit repo) falls back to v3, since
-	// cross-repo v4 is a separate change (ENT-1054).
-	UseV4 bool
-	// CellClient is an authenticated client aimed at the entire-api cell that
-	// hosts the v4 repo (bearer = jurisdictional identity token). nil ⇒ v3.
-	CellClient *api.Client
-	// RepoID is the repo ULID sent as the v4 repo= param (the v4 route is
-	// per-repo and keys on the ULID, not the owner/name slug).
-	RepoID string
-	// V4RepoSlug is the owner/name this v4 backend was resolved for. The v4
-	// path is used only when the request's effective single-repo scope matches
-	// it (case-insensitive), so a TUI re-search that changes repo scope cannot
-	// send the wrong repo's ULID to the cell.
-	V4RepoSlug string
-}
-
-// effectiveSingleRepoSlug returns the owner/name the search is scoped to, or ""
-// when the search is unscoped (repo:* / --all-repos) or targets more than one
-// repo. An explicit repo filter wins over the current-repo default, mirroring
-// the v3 repo-param selection below.
-func (c Config) effectiveSingleRepoSlug() string {
-	if c.AllRepos {
-		return ""
-	}
-	var explicit string
-	n := 0
-	for _, r := range c.Repos {
-		if r == AllReposFilter {
-			return "" // repo:* → unscoped
-		}
-		explicit = r
-		n++
-	}
-	if n > 1 {
-		return "" // multi-repo (rejected upstream by ValidateRepoFilters anyway)
-	}
-	if n == 1 {
-		return explicit
-	}
-	if c.Owner != "" && c.Repo != "" {
-		return c.Owner + "/" + c.Repo
-	}
-	return ""
-}
-
-// useV4 reports whether this specific request should go to the v4 query-serve
-// path. It requires the flag on, a resolved cell client + ULID, and — crucially
-// — that the request's effective scope is still the single repo the v4 backend
-// was resolved for. This keeps the TUI correct: a re-search that broadens or
-// switches repos transparently falls back to v3 rather than querying the wrong
-// cell/namespace.
-func (c Config) useV4() bool {
-	if !c.UseV4 || c.CellClient == nil || c.RepoID == "" || c.V4RepoSlug == "" {
-		return false
-	}
-	slug := c.effectiveSingleRepoSlug()
-	return slug != "" && strings.EqualFold(slug, c.V4RepoSlug)
 }
 
 // HasFilters reports whether any filter fields are set on the config.
@@ -563,25 +500,14 @@ func appendUnique(existing []string, values ...string) []string {
 
 var httpClient = &http.Client{}
 
-// Search calls the search service to perform a hybrid search. It dispatches to
-// the v4 query-serve path when the config selects it (see Config.useV4),
-// otherwise the v3 Cloudflare-worker path. Both share the same request timeout
-// and response decoding, so the two backends are interchangeable to callers
-// (including the interactive TUI, which reuses one Config across re-searches
-// and pagination).
+// Search calls the v3 Cloudflare-worker search service. The v4 query-serve
+// path is orchestrated in the cli layer (per-cell fan-out over CellV4),
+// so this function is unchanged from the pre-ENT-1055 behavior — a flag-off
+// search is byte-identical to today.
 func Search(ctx context.Context, cfg Config) (*Response, error) {
 	ctx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
 
-	if cfg.useV4() {
-		return searchV4(ctx, cfg)
-	}
-	return searchV3(ctx, cfg)
-}
-
-// searchV3 performs the search against the v3 Cloudflare worker. This is the
-// pre-ENT-1055 behavior, kept byte-for-byte so a flag-off search is unchanged.
-func searchV3(ctx context.Context, cfg Config) (*Response, error) {
 	serviceURL := cfg.ServiceURL
 	if serviceURL == "" {
 		serviceURL = DefaultServiceURL
@@ -643,19 +569,31 @@ func searchV3(ctx context.Context, cfg Config) (*Response, error) {
 	return parseSearchResponse(resp.StatusCode, body)
 }
 
-// searchV4 performs the search against the v4 query-serve path via the
-// entire-api cell gateway. The response shape mirrors v3, so decoding is
-// shared. The repo is passed as a ULID (the v4 route is per-repo), and auth /
-// host routing is handled by the pre-built cell client (jurisdictional identity
-// token). No v3 fallback here by design: when the flag selects v4, a v4 failure
-// surfaces as an error rather than silently masking rollout breakage.
-func searchV4(ctx context.Context, cfg Config) (*Response, error) {
+// CellV4 performs a v4 query-serve search against a single entire-api
+// cell, via the pre-authenticated client (bearer = jurisdictional identity
+// token; host = the cell). repoIDs are repo ULIDs to scope to (the v4 route is
+// per-repo and keys on ULIDs, not owner/name slugs); an empty repoIDs means
+// "every repo the caller can access in this cell" — query-serve fans out across
+// those namespaces itself. The cross-cell fan-out and merge live in the cli
+// layer (mirroring code search), so this is the single-cell primitive it calls.
+//
+// The response shape mirrors v3, so decoding is shared with Search. No v3
+// fallback: a v4 failure surfaces as an error rather than masking rollout
+// breakage.
+func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []string) (*Response, error) {
+	ctx, cancel := context.WithTimeout(ctx, apiTimeout)
+	defer cancel()
+
 	q := url.Values{}
 	q.Set("q", cfg.Query)
-	q.Set("repo", cfg.RepoID)
+	for _, id := range repoIDs {
+		if id != "" {
+			q.Add("repo", id)
+		}
+	}
 	addCommonSearchParams(q, cfg)
 
-	resp, err := cfg.CellClient.Get(ctx, v4ServicePath+"?"+q.Encode())
+	resp, err := client.Get(ctx, v4ServicePath+"?"+q.Encode())
 	if err != nil {
 		return nil, fmt.Errorf("calling search service: %w", err)
 	}

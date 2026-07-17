@@ -144,6 +144,12 @@ type searchModel struct {
 	filterType   typeFilter         // active type tab filter
 	counts       *search.TypeCounts // per-type counts from API
 
+	// useV4 routes checkpoint search through the v4 query-serve fan-out
+	// (ENT-1055) instead of the v3 worker; insecureHTTP is threaded into the
+	// cell auth for local-dev http hosts. Both are set by the command layer.
+	useV4        bool
+	insecureHTTP bool
+
 	// darkBg is captured once before bubbletea takes over the terminal so the
 	// snippet renderer never re-queries the terminal via OSC during the Update
 	// loop (which would race against bubbletea's stdin reader and stall).
@@ -477,7 +483,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			cfg.Branch = parsed.Branch
 			cfg.Repos = parsed.Repos
 			m.searchCfg = cfg
-			cmds = append(cmds, performSearch(cfg))
+			cmds = append(cmds, m.performSearch(cfg))
 		}
 
 		m.mode = modeBrowse
@@ -583,7 +589,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			if m.filterType != typeFilterCode && start >= len(m.filteredResults()) && !m.fetchingMore {
 				m.fetchingMore = true
 				m = m.refreshBrowseContent()
-				return m, fetchMoreResults(m.searchCfg, m.apiPage+1)
+				return m, m.fetchMoreResults(m.searchCfg, m.apiPage+1)
 			}
 			m = m.refreshBrowseContent()
 		}
@@ -641,9 +647,10 @@ func (m searchModel) updateDetailMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	return m, cmd
 }
 
-func performSearch(cfg search.Config) tea.Cmd {
+func (m searchModel) performSearch(cfg search.Config) tea.Cmd {
+	useV4, insecure := m.useV4, m.insecureHTTP
 	return func() tea.Msg {
-		resp, err := search.Search(context.Background(), cfg)
+		resp, err := runSemanticSearch(context.Background(), cfg, useV4, insecure)
 		if err != nil {
 			return searchResultsMsg{err: err}
 		}
@@ -658,7 +665,14 @@ func performCodeSearch(opts codeSearchOpts, gen uint64) tea.Cmd {
 	}
 }
 
-func fetchMoreResults(cfg search.Config, page int) tea.Cmd {
+func (m searchModel) fetchMoreResults(cfg search.Config, page int) tea.Cmd {
+	// The v4 path fetches a full page up front and paginates client-side (like
+	// code search) rather than incrementally server-paging a cross-cell merge,
+	// so signal "no more results" and let the model cap the total to what's
+	// loaded. v3 keeps its incremental server pagination.
+	if m.useV4 {
+		return func() tea.Msg { return searchMoreResultsMsg{} }
+	}
 	return func() tea.Msg {
 		cfg.Page = page
 		resp, err := search.Search(context.Background(), cfg)
