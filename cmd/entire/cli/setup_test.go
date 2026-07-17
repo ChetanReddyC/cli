@@ -3913,6 +3913,20 @@ func TestRunEnableInteractive_FirstRunDefaultsToGitRefs(t *testing.T) {
 		}
 	})
 
+	t.Run("env override suppresses the first-run default", func(t *testing.T) {
+		setupTestRepo(t)
+		stubLadder(t)
+		// ENTIRE_CHECKPOINTS_PRIMARY fully replaces the settings block, so
+		// writing the refs default under it would persist config diverging
+		// from the backend actually in use (and break harnesses pinning
+		// git-branch via the env).
+		t.Setenv(settings.EnvCheckpointsPrimary, "git-branch")
+		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true})
+		if cfg != nil {
+			t.Errorf("Checkpoints = %+v, want none written under the env override", cfg)
+		}
+	})
+
 	t.Run("re-run of an existing config-less repo stays config-less", func(t *testing.T) {
 		setupTestRepo(t)
 		// A repo set up before this change: settings.json exists, no

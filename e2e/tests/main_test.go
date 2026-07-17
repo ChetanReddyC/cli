@@ -44,8 +44,11 @@ func TestMain(m *testing.M) {
 	// Select the checkpoint storage backend for the whole suite. E2E_CHECKPOINT_STORE
 	// (e.g. "git-refs") maps to the ENTIRE_CHECKPOINTS_PRIMARY override the spawned
 	// binary honors, so every condensation/read/push in the run exercises that
-	// backend. Unset or "git-branch" leaves the default branch backend in place.
-	if store := os.Getenv("E2E_CHECKPOINT_STORE"); store != "" && store != "git-branch" {
+	// backend. "git-branch" is mapped explicitly too — first-run enable defaults
+	// new setups to git-refs, so the branch mode must be pinned rather than
+	// relying on the product default (the env also suppresses that first-run
+	// settings write). Unset leaves the product defaults in place.
+	if store := os.Getenv("E2E_CHECKPOINT_STORE"); store != "" {
 		os.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", store)
 	}
 

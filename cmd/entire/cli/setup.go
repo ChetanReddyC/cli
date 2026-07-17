@@ -1245,7 +1245,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	// during first-time setup (the old wizard prompt), and the config-less
 	// runtime default stays git-branch so existing repos are untouched.
 	if opts.CheckpointBackend == "" && firstRun {
-		opts.CheckpointBackend = checkpointBackendRefsAlias
+		opts.CheckpointBackend = firstRunCheckpointBackendDefault()
 	}
 	if err := applyCheckpointBackendFlag(settings, opts.CheckpointBackend); err != nil {
 		return err
@@ -1357,6 +1357,20 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 		fmt.Fprintf(w, "Agents: %s\n", strings.Join(displayNames, ", "))
 	}
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
+}
+
+// firstRunCheckpointBackendDefault is the backend written on first-time
+// setups when --checkpoint-backend wasn't passed: the git-refs store (a
+// storage-topology question is unanswerable during first-time setup). Empty —
+// write nothing — while the ENTIRE_CHECKPOINTS_PRIMARY override is active:
+// the env fully replaces any settings block, so persisting a default here
+// would write config that diverges from the backend actually in use (and
+// break harnesses that pin git-branch via the env).
+func firstRunCheckpointBackendDefault() string {
+	if os.Getenv(settings.EnvCheckpointsPrimary) != "" {
+		return ""
+	}
+	return checkpointBackendRefsAlias
 }
 
 // runEnable flips the enabled flag to true in the scope chosen by the caller
@@ -1865,7 +1879,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	// runs otherwise get the git-refs backend written explicitly, matching the
 	// interactive setup path (runEnableInteractive).
 	if opts.CheckpointBackend == "" && firstRun {
-		opts.CheckpointBackend = checkpointBackendRefsAlias
+		opts.CheckpointBackend = firstRunCheckpointBackendDefault()
 	}
 	if err := applyCheckpointBackendFlag(targetSettings, opts.CheckpointBackend); err != nil {
 		return err
