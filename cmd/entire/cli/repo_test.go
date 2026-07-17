@@ -504,6 +504,17 @@ func TestRepoList_PageMode(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "--page-size")
 	})
+
+	t.Run("a --page-size above the API maximum fails fast, naming the limit", func(t *testing.T) {
+		// The endpoints cap pageSize at 500 (OpenAPI maximum); validating
+		// locally turns a server 4xx about the wire param into an error
+		// naming the flag and the limit.
+		serveProjectRepos(t, nil)
+		_, _, err := execRepoList(t, "--page-size", "501")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "--page-size")
+		require.Contains(t, err.Error(), "500")
+	})
 }
 
 // TestRepoList_GroupedFlagHelp pins the grouped help layout on `repo list`:

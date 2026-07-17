@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
+	"strconv"
 	"strings"
 
 	"charm.land/huh/v2"
@@ -282,7 +282,7 @@ func renderCoreListPage[T any](cmd *cobra.Command, empty string, headers []strin
 // one request, so a walk bound makes no sense alongside them. Callers validate
 // pageSize positivity in PreRunE via validatePageSize.
 func pageModeFlags(cmd *cobra.Command, pageSize *int, pageToken *string) {
-	cmd.Flags().IntVar(pageSize, "page-size", 0, "Fetch a single page of at most N entries (the server may cap N) and print the resume cursor")
+	cmd.Flags().IntVar(pageSize, "page-size", 0, "Fetch a single page of at most N entries (1-"+strconv.Itoa(coreListPageSizeMax)+"; the server may cap N further) and print the resume cursor")
 	cmd.Flags().StringVar(pageToken, "page-token", "", "Fetch the single page at this cursor (from a previous run's nextPageToken)")
 	cmd.MarkFlagsMutuallyExclusive("page-size", "all")
 	cmd.MarkFlagsMutuallyExclusive("page-token", "all")
@@ -300,11 +300,18 @@ func pageModeRequested(cmd *cobra.Command) bool {
 	return cmd.Flags().Changed("page-size") || cmd.Flags().Changed("page-token")
 }
 
-// validatePageSize rejects an explicitly set non-positive or
-// int32-overflowing --page-size; an unset flag passes.
+// coreListPageSizeMax mirrors the OpenAPI `maximum: 500` on the list
+// endpoints' pageSize param (see internal/coreapi/spec). The generated client
+// does not validate params, so without this local bound an oversized
+// --page-size goes on the wire and comes back as a server 4xx naming the wire
+// param instead of the flag.
+const coreListPageSizeMax = 500
+
+// validatePageSize rejects an explicitly set out-of-range --page-size; an
+// unset flag passes.
 func validatePageSize(cmd *cobra.Command, pageSize int) error {
-	if cmd.Flags().Changed("page-size") && (pageSize <= 0 || pageSize > math.MaxInt32) {
-		return fmt.Errorf("--page-size must be a positive int32, got %d", pageSize)
+	if cmd.Flags().Changed("page-size") && (pageSize <= 0 || pageSize > coreListPageSizeMax) {
+		return fmt.Errorf("--page-size must be between 1 and %d, got %d", coreListPageSizeMax, pageSize)
 	}
 	return nil
 }
