@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"strings"
 )
 
 func TestResolveCheckpointBackendType(t *testing.T) {

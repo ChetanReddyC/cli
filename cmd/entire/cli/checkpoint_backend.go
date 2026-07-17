@@ -77,7 +77,8 @@ func applyCheckpointBackendFlag(s *EntireSettings, backend string) error {
 }
 
 // checkpointBackendChoices returns the storage picker's options — git-refs
-// first, pre-selected, labeled recommended — and the recommended default.
+// first, labeled recommended — and the recommended value the caller
+// pre-selects.
 // Split from promptCheckpointBackend so the ordering/labeling contract is
 // unit-testable without a TTY.
 func checkpointBackendChoices() (opts []huh.Option[string], recommended string) {
@@ -91,8 +92,9 @@ func checkpointBackendChoices() (opts []huh.Option[string], recommended string) 
 // during first-time interactive setup, with the git-refs backend pre-selected
 // as the recommendation — most users should just press Enter. It returns the
 // chosen canonical backend type; cancellation (Ctrl+C or a cancelled ctx)
-// returns "" so the caller falls through to the recommended default, matching
-// the optional-prompt behavior elsewhere in setup. Callers must gate this on
+// prints a cancellation note and returns "" (a soft skip, nil error, like
+// other setup prompts) so the caller falls through to the recommended
+// default. Callers must gate this on
 // an interactive terminal (and skip it when ENTIRE_CHECKPOINTS_PRIMARY is
 // active — the env fully replaces settings, so an answer could not take
 // effect and would only write diverging config).
