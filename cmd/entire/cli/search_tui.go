@@ -145,9 +145,8 @@ type searchModel struct {
 	counts       *search.TypeCounts // per-type counts from API
 
 	// semanticSearch performs checkpoint searches (initial, re-search, and
-	// pagination). Defaults to the v3 search.Search; the command layer
-	// overrides it with the session's semanticSearcher so the v4 query-serve
-	// backend (ENT-1055) — and its discovery cache — is honored everywhere.
+	// pagination). The command layer injects its session searcher so every
+	// TUI search shares the invocation's discovery cache.
 	semanticSearch semanticSearcher
 
 	// darkBg is captured once before bubbletea takes over the terminal so the
@@ -295,8 +294,8 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 		styles:         styles,
 		browseVP:       viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
 		darkBg:         termenv.HasDarkBackground(),
-		filterType:     typeFilterCheckpoints, // default the results table to checkpoints
-		semanticSearch: search.Search,         // command layer overrides with the session searcher
+		filterType:     typeFilterCheckpoints,      // default the results table to checkpoints
+		semanticSearch: newSemanticSearcher(false), // command layer overrides with its session searcher
 	}
 	if codeOpts != nil {
 		m.codeSearchOpts = *codeOpts
@@ -673,9 +672,9 @@ func performCodeSearch(opts codeSearchOpts, gen uint64) tea.Cmd {
 }
 
 func (m searchModel) fetchMoreResults(cfg search.Config, page int) tea.Cmd {
-	// Both backends page server-side: v3 forwards Page to the worker, and the
-	// v4 fan-out forwards it to every cell (each cell's page N is interleaved
-	// by the merge), so results past the first fetch stay reachable.
+	// Pages server-side: the fan-out forwards Page to every cell (each cell's
+	// page N is interleaved by the merge), so results past the first fetch
+	// stay reachable.
 	searcher := m.semanticSearch
 	return func() tea.Msg {
 		cfg.Page = page

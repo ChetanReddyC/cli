@@ -19,7 +19,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/search"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/spf13/cobra"
@@ -198,46 +197,22 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				return fmt.Errorf("parsing remote URL: %w", err)
 			}
 
-			serviceURL := os.Getenv("ENTIRE_SEARCH_URL")
-			if serviceURL == "" {
-				// Search lives on the data API host. Fall back to
-				// api.BaseURL() so ENTIRE_API_BASE_URL applies; the search
-				// package's DefaultServiceURL is only consulted by callers
-				// that bypass this entry point.
-				serviceURL = api.BaseURL()
-			}
-
-			// ENT-1055: the semantic-search-v4 settings flag routes semantic
-			// search through the v4 query-serve path (entire-api cell gateway)
-			// instead of the v3 Cloudflare worker, for every scope, via
-			// newSemanticSearcher. v4 mints its own per-cell identity tokens,
-			// so the v3 data-API token is resolved only on the v3 path — a v3
-			// auth outage must not block v4, and flag-off stays byte-identical.
-			useV4 := settings.IsSemanticSearchV4Enabled(ctx)
-			var ghToken string
-			if useV4 {
-				logging.Debug(ctx, "semantic-search-v4 routing enabled", "all_repos", allRepos, "repos", repos)
-			} else {
-				ghToken, err = resolveSearchToken(ctx, serviceURL, insecureHTTPAuth)
-				if err != nil {
-					return err
-				}
-			}
-			searcher := newSemanticSearcher(useV4, insecureHTTPAuth)
+			// Semantic search goes to the v4 query-serve path (entire-api
+			// cell gateway) via newSemanticSearcher, which fans out across
+			// cells and mints per-cell identity tokens itself (ENT-1055).
+			searcher := newSemanticSearcher(insecureHTTPAuth)
 
 			searchCfg := search.Config{
-				ServiceURL:  serviceURL,
-				GitHubToken: ghToken,
-				Owner:       owner,
-				Repo:        repoName,
-				Repos:       repos,
-				AllRepos:    allRepos,
-				Query:       query,
-				Limit:       limitFlag,
-				Page:        pageFlag,
-				Author:      authorFlag,
-				Date:        dateFlag,
-				Branch:      branchFlag,
+				Owner:    owner,
+				Repo:     repoName,
+				Repos:    repos,
+				AllRepos: allRepos,
+				Query:    query,
+				Limit:    limitFlag,
+				Page:     pageFlag,
+				Author:   authorFlag,
+				Date:     dateFlag,
+				Branch:   branchFlag,
 			}
 
 			// Use wildcard query when only filters are provided
@@ -339,27 +314,6 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	cmd.RegisterFlagCompletionFunc("repo", completeRepoFlag) //nolint:errcheck,gosec // only fails if the flag isn't defined; defined directly above
 
 	return cmd
-}
-
-// resolveSearchToken returns a bearer scoped to the search service host.
-// In split-host deployments this triggers an RFC 8693 exchange so the bearer
-// carries the data-API audience rather than the auth-host one; single-host
-// setups hit the same-host shortcut and return the core token unchanged.
-// insecureHTTPAuth opts into non-loopback http:// resources at the
-// tokenmanager layer, matching the per-command --insecure-http-auth pattern
-// used by NewAuthenticatedAPIClient and newRecapClient.
-func resolveSearchToken(ctx context.Context, serviceURL string, insecureHTTPAuth bool) (string, error) {
-	if insecureHTTPAuth {
-		auth.EnableInsecureHTTP()
-	}
-	token, err := auth.ResolveDataAPIToken(ctx, serviceURL)
-	if errors.Is(err, auth.ErrNotLoggedIn) {
-		return "", loginHintErr(err)
-	}
-	if err != nil {
-		return "", fmt.Errorf("reading credentials: %w", err)
-	}
-	return token, nil
 }
 
 // completeRepoFlag returns shell-completion suggestions for the search

@@ -27,18 +27,13 @@ const semanticSearchControlPlaneTimeout = 10 * time.Second
 // semanticSearcher performs one semantic search. The command layer builds one
 // per invocation (newSemanticSearcher) and every entry point — the one-shot
 // command, the TUI's initial fetch, interactive re-searches, and pagination —
-// calls through it, so all of them honor the same backend and share one
-// discovery cache.
+// calls through it, so all of them share one discovery cache.
 type semanticSearcher func(ctx context.Context, cfg search.Config) (*search.Response, error)
 
-// newSemanticSearcher returns the semantic-search entry for this invocation:
-// v3 (search.Search, the default) or, when the semantic-search-v4 settings
-// flag is on, a v4 query-serve session (ENT-1055) that fans out across
-// entire-api cells and caches control-plane discovery across calls.
-func newSemanticSearcher(useV4, insecureHTTP bool) semanticSearcher {
-	if !useV4 {
-		return search.Search
-	}
+// newSemanticSearcher returns the semantic-search entry for this invocation: a
+// v4 query-serve session (ENT-1055) that fans out across entire-api cells and
+// caches control-plane discovery across calls.
+func newSemanticSearcher(insecureHTTP bool) semanticSearcher {
 	s := &semanticSearchV4Session{insecureHTTP: insecureHTTP}
 	return s.search
 }
@@ -71,12 +66,12 @@ type semanticSearchV4Session struct {
 
 // search performs a v4 query-serve search across every cell that hosts the
 // caller's in-scope repos, then merges the per-cell responses into one
-// v3-shaped response. It is the cli-layer counterpart to search.Search (v3)
-// and the semantic sibling of searchAllCells (code): resolve scope → group by
-// hosting cell → one query-serve call per cell → tiered merge.
+// response. It is the semantic sibling of searchAllCells (code): resolve
+// scope → group by hosting cell → one query-serve call per cell → tiered
+// merge.
 //
-// Scope follows Config.ScopeSlugs — the same precedence as the v3 repo param,
-// so an explicit repo filter wins over --all-repos on both backends:
+// Scope follows Config.ScopeSlugs — an explicit repo filter wins over
+// --all-repos (the more specific filter scopes the search):
 //   - unfiltered (repo:* / --all-repos with no explicit filter) → every cell
 //     is queried with NO repo param, so query-serve returns everything the
 //     caller's token authorizes there (matching the BFF and keeping the query
@@ -85,17 +80,19 @@ type semanticSearchV4Session struct {
 //     resolved via truncation-proof exact-match lookups and each cell is
 //     scoped to the ULIDs it hosts.
 //
-// Any resolution failure is a clear error rather than a silent v3 fallback:
-// the flag is opt-in, so v4 breakage must stay visible during rollout.
 // Completeness caveats (truncated index, failed regions) are returned as
 // Response.Warnings for the caller to surface.
 func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config) (*search.Response, error) {
+	if err := search.ValidateRepoFilters(cfg.Repos); err != nil {
+		return nil, err //nolint:wrapcheck // user-facing validation message
+	}
+
 	coreClient, err := s.client()
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
 			return nil, loginHintErr(err)
 		}
-		return nil, fmt.Errorf("semantic-search-v4: resolving control-plane client: %w", err)
+		return nil, fmt.Errorf("semantic search: resolving control-plane client: %w", err)
 	}
 
 	slugs, allRepos := cfg.ScopeSlugs()
@@ -104,7 +101,7 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 	scoped := !allRepos
 	if scoped {
 		if len(slugs) == 0 {
-			return nil, errors.New("semantic-search-v4: could not determine the repository to search")
+			return nil, errors.New("semantic search: could not determine the repository to search")
 		}
 		entries, err := s.resolveScope(ctx, slugs)
 		if err != nil {
@@ -114,10 +111,10 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 	} else {
 		index, err := s.listFullIndex(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("semantic-search-v4: listing repos for cell discovery: %w", err)
+			return nil, fmt.Errorf("semantic search: listing repos for cell discovery: %w", err)
 		}
 		if index.Truncated {
-			logging.Warn(ctx, "semantic-search-v4: repo index truncated; cross-repo results may be incomplete")
+			logging.Warn(ctx, "semantic search: repo index truncated; cross-repo results may be incomplete")
 			warnings = append(warnings, "repo index truncated; cross-repo results may be incomplete")
 		}
 		cells = groupReposByCell(index.Repos)
@@ -143,7 +140,7 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 		if errors.Is(err, auth.ErrNotLoggedIn) {
 			return nil, loginHintErr(err)
 		}
-		return nil, fmt.Errorf("semantic-search-v4: %w", err)
+		return nil, fmt.Errorf("semantic search: %w", err)
 	}
 
 	resp, err := mergeSemanticV4Responses(ctx, cfg.Limit, cfg.Page, results)
@@ -191,9 +188,8 @@ func (s *semanticSearchV4Session) listFullIndex(ctx context.Context) (*coreapi.L
 // to index entries, deduped by repo ID. owner/name slugs use the exact-match
 // ListRepos filter — immune to index truncation on large accounts — while raw
 // IDs (no slash) fall back to matching against the full index. Zero matches
-// is a clear error (no silent v3 fallback); a partially matched multi-repo
-// filter proceeds with the matches, like resolveRepoFilters does for code
-// search.
+// is a clear error; a partially matched multi-repo filter proceeds with the
+// matches, like resolveRepoFilters does for code search.
 func (s *semanticSearchV4Session) resolveScope(ctx context.Context, slugs []string) ([]coreapi.RepoIndexEntry, error) {
 	var entries []coreapi.RepoIndexEntry
 	seen := make(map[string]bool, len(slugs))
@@ -210,7 +206,7 @@ func (s *semanticSearchV4Session) resolveScope(ctx context.Context, slugs []stri
 		}
 	}
 	if len(entries) == 0 {
-		return nil, fmt.Errorf("semantic-search-v4: no matching repositories found for %v (is the repo mirrored to Entire?); unset the semantic-search-v4 flag to use v3", slugs)
+		return nil, fmt.Errorf("no matching repositories found for %v (is the repo mirrored to Entire?)", slugs)
 	}
 	return entries, nil
 }
@@ -234,7 +230,7 @@ func (s *semanticSearchV4Session) lookupFilter(ctx context.Context, filter strin
 		defer cancel()
 		out, err := s.coreClient.ListRepos(lookupCtx, coreapi.ListReposParams{Filter: coreapi.NewOptString(slug)})
 		if err != nil {
-			return nil, fmt.Errorf("semantic-search-v4: resolving repository %q: %w", filter, err)
+			return nil, fmt.Errorf("semantic search: resolving repository %q: %w", filter, err)
 		}
 		matched = out.Repos
 	} else {
@@ -242,7 +238,7 @@ func (s *semanticSearchV4Session) lookupFilter(ctx context.Context, filter strin
 		// match by ID against the full index.
 		index, err := s.listFullIndex(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("semantic-search-v4: resolving repository %q: %w", filter, err)
+			return nil, fmt.Errorf("semantic search: resolving repository %q: %w", filter, err)
 		}
 		_, matched = resolveRepoFilters([]string{filter}, index.Repos)
 	}
@@ -373,13 +369,13 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 	}
 	if len(pages) == 0 {
 		if lastErr != nil {
-			return nil, fmt.Errorf("semantic-search-v4: %w", lastErr)
+			return nil, fmt.Errorf("semantic search: %w", lastErr)
 		}
 		return &search.Response{Results: []search.Result{}, Page: 1}, nil
 	}
 	var warnings []string
 	if len(failed) > 0 {
-		logging.Warn(ctx, "semantic-search-v4: partial failure; results may be incomplete",
+		logging.Warn(ctx, "semantic search: partial failure; results may be incomplete",
 			"succeeded", len(pages), "total", len(results), "failed_cells", failed)
 		warnings = append(warnings, fmt.Sprintf("search failed in %d of %d regions; results may be incomplete", len(failed), len(results)))
 	}

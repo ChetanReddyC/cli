@@ -124,12 +124,6 @@ type EntireSettings struct {
 	// plugins (entire-agent-* binaries on $PATH). Defaults to false.
 	ExternalAgents bool `json:"external_agents,omitempty"`
 
-	// SemanticSearchV4 gates the `semantic-search-v4` flag: when true,
-	// `entire search` (semantic) queries the v4 query-serve path via the
-	// entire-api cell gateway instead of the v3 Cloudflare worker.
-	// Defaults to false (v3). See ENT-1055.
-	SemanticSearchV4 bool `json:"semantic_search_v4,omitempty"`
-
 	// SummaryGeneration stores provider preferences for explain --generate.
 	// This is separate from strategy_options.summarize, which controls
 	// checkpoint auto-summarize behavior.
@@ -980,9 +974,6 @@ func mergeScalarFields(settings *EntireSettings, raw map[string]json.RawMessage)
 	if err := mergeRawBool(raw, "external_agents", &settings.ExternalAgents); err != nil {
 		return err
 	}
-	if err := mergeRawBool(raw, "semantic_search_v4", &settings.SemanticSearchV4); err != nil {
-		return err
-	}
 	if err := mergeRawBool(raw, "vercel", &settings.Vercel); err != nil {
 		return err
 	}
@@ -1486,18 +1477,6 @@ func IsExternalAgentsEnabled(ctx context.Context) bool {
 		return false
 	}
 	return s.ExternalAgents
-}
-
-// IsSemanticSearchV4Enabled reports whether `entire search` (semantic) should
-// use the v4 query-serve path. Opt-in via the semantic_search_v4 settings bool
-// (settings.local.json for per-developer rollout). Off by default — a flag-off
-// search is byte-identical to the v3 behavior. See ENT-1055.
-func IsSemanticSearchV4Enabled(ctx context.Context) bool {
-	s, err := Load(ctx)
-	if err != nil {
-		return false
-	}
-	return s.SemanticSearchV4
 }
 
 // IsSignCheckpointCommitsEnabled returns true if checkpoint commits should be signed.

@@ -366,8 +366,8 @@ func TestMergeSemanticV4Responses_AllCellsFail(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when every cell failed")
 	}
-	if !strings.Contains(err.Error(), "semantic-search-v4") {
-		t.Errorf("error = %q, want it labeled semantic-search-v4", err.Error())
+	if !strings.Contains(err.Error(), "semantic search") {
+		t.Errorf("error = %q, want it labeled semantic search", err.Error())
 	}
 }
 
@@ -428,15 +428,17 @@ func TestMergeSemanticV4Responses_NilCountsBodiesTolerated(t *testing.T) {
 
 // --- searcher construction -------------------------------------------------------
 
-// TestNewSemanticSearcher_V3Default confirms the flag-off searcher is exactly
-// the v3 entry point, so a flag-off search cannot pick up v4 behavior.
-func TestNewSemanticSearcher_V3Default(t *testing.T) {
+// TestNewSemanticSearcher_RejectsMultipleRepoFilters confirms the searcher
+// validates repo filters up front (previously the v3 request builder's job),
+// so a TUI re-search typing several repo: filters errors before any network.
+func TestNewSemanticSearcher_RejectsMultipleRepoFilters(t *testing.T) {
 	t.Parallel()
-	if newSemanticSearcher(false, false) == nil {
-		t.Fatal("nil searcher")
-	}
-	// The v4 session searcher must be distinct per invocation (own cache).
-	if newSemanticSearcher(true, false) == nil {
-		t.Fatal("nil v4 searcher")
+	searcher := newSemanticSearcher(false)
+	_, err := searcher(context.Background(), search.Config{
+		Query: "q",
+		Repos: []string{"a/b", "c/d", "e/f"},
+	})
+	if err == nil {
+		t.Fatal("expected a validation error before any network access")
 	}
 }
