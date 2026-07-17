@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -312,16 +313,15 @@ func (env *TestEnv) gitConfigPath() string {
 var gitConfigGuardRepositoryFormatVersionRE = regexp.MustCompile(`(?m)^([ \t]*)repositoryformatversion = [01]$`)
 
 var gitConfigGuardTransportPromisorRemoteRE = regexp.MustCompile(
-	`(?m)^\[remote "(?:(?:https?|ssh|file)://|/|[A-Za-z]:[\\/]|[^"\n]+@[^"\n]+:[^"\n]+).+"\]\n(?:[ \t]+(?:promisor = true|partialclonefilter = blob:none|skipFetchAll = true|skipDefaultUpdate = true)\n?){2,4}`,
+	`(?m)^\[remote "(?:(?:https?|ssh|file)://|/|[A-Za-z]:[\\/]|[^"\n]+@[^"\n]+:[^"\n]+).+"\]\n(?:[ \t]+(?:promisor = true|partialclonefilter = blob:none|skipFetchAll = true)\n?){2,3}`,
 )
 
 func normalizeGitConfigForGuard(content string) string {
 	content = gitConfigGuardRepositoryFormatVersionRE.ReplaceAllString(content, `${1}repositoryformatversion = <normalized>`)
 	// Deliberately ignore only the URL-keyed remote sections written during
 	// filtered fetches: git's promisor+partialclonefilter pair plus the
-	// skipFetchAll/skipDefaultUpdate stamp the CLI adds so bulk fetches skip
-	// the entry. A section without the full promisor pair (or with any other
-	// key) still fails loudly.
+	// skipFetchAll stamp the CLI adds so bulk fetches skip the entry. A section
+	// without the full promisor pair (or with any other key) still fails loudly.
 	content = gitConfigGuardTransportPromisorRemoteRE.ReplaceAllStringFunc(content, func(section string) string {
 		if strings.Contains(section, "promisor = true") && strings.Contains(section, "partialclonefilter = blob:none") {
 			return ""
@@ -702,6 +702,70 @@ func (env *TestEnv) GetCurrentBranch() string {
 	}
 
 	return head.Name().Short()
+}
+
+// RewindPoint mirrors strategy.RewindPoint for test assertions.
+type RewindPoint struct {
+	ID               string
+	Message          string
+	MetadataDir      string
+	Date             time.Time
+	IsTaskCheckpoint bool
+	ToolUseID        string
+	IsLogsOnly       bool
+	CondensationID   string
+}
+
+// GetRewindPoints returns available rewind points using the CLI.
+func (env *TestEnv) GetRewindPoints() []RewindPoint {
+	env.T.Helper()
+
+	// Run `checkpoint list --pending --json` using the shared binary. This is
+	// the drop-in replacement for the deprecated `rewind --list` bridge; the JSON shape is
+	// identical. Parse stdout only — any notice goes to stderr.
+	cmd := exec.Command(getTestBinary(), "checkpoint", "list", "--pending", "--json")
+	cmd.Dir = env.RepoDir
+	cmd.Env = env.cliEnv()
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		env.T.Fatalf("checkpoint list --pending --json failed: %v\nOutput: %s\nStderr: %s", err, output, stderr.String())
+	}
+
+	// Parse JSON output
+	var jsonPoints []struct {
+		ID               string `json:"id"`
+		Message          string `json:"message"`
+		MetadataDir      string `json:"metadata_dir"`
+		Date             string `json:"date"`
+		IsTaskCheckpoint bool   `json:"is_task_checkpoint"`
+		ToolUseID        string `json:"tool_use_id"`
+		IsLogsOnly       bool   `json:"is_logs_only"`
+		CondensationID   string `json:"condensation_id"`
+	}
+
+	if err := json.Unmarshal(output, &jsonPoints); err != nil {
+		env.T.Fatalf("failed to parse rewind points: %v\nOutput: %s", err, output)
+	}
+
+	points := make([]RewindPoint, len(jsonPoints))
+	for i, jp := range jsonPoints {
+		date, _ := time.Parse(time.RFC3339, jp.Date)
+		points[i] = RewindPoint{
+			ID:               jp.ID,
+			Message:          jp.Message,
+			MetadataDir:      jp.MetadataDir,
+			Date:             date,
+			IsTaskCheckpoint: jp.IsTaskCheckpoint,
+			ToolUseID:        jp.ToolUseID,
+			IsLogsOnly:       jp.IsLogsOnly,
+			CondensationID:   jp.CondensationID,
+		}
+	}
+
+	return points
 }
 
 // BranchExists checks if a branch exists in the repository.
@@ -1685,6 +1749,25 @@ func (env *TestEnv) SetupBareRemote() string {
 // multiple remotes.
 func (env *TestEnv) SetupNamedBareRemote(remoteName string) string {
 	env.T.Helper()
+	bareDir := env.SetupEmptyNamedBareRemote(remoteName)
+
+	// Push HEAD to the remote.
+	cmd := exec.CommandContext(env.T.Context(), "git", "push", "--no-verify", "-u", remoteName, "HEAD")
+	cmd.Dir = env.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		env.T.Fatalf("failed to push to %s: %v\n%s", remoteName, err, output)
+	}
+
+	env.setGitConfigBaseline()
+
+	return bareDir
+}
+
+// SetupEmptyNamedBareRemote creates a bare git repository and adds it as a
+// remote without pushing a branch. Use this to exercise first-push behavior.
+func (env *TestEnv) SetupEmptyNamedBareRemote(remoteName string) string {
+	env.T.Helper()
 
 	ctx := env.T.Context()
 
@@ -1707,14 +1790,6 @@ func (env *TestEnv) SetupNamedBareRemote(remoteName string) string {
 	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		env.T.Fatalf("failed to add remote %s: %v\n%s", remoteName, err, output)
-	}
-
-	// Push HEAD to the remote
-	cmd = exec.CommandContext(ctx, "git", "push", "--no-verify", "-u", remoteName, "HEAD")
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		env.T.Fatalf("failed to push to %s: %v\n%s", remoteName, err, output)
 	}
 
 	env.setGitConfigBaseline()

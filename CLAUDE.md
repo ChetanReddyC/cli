@@ -24,8 +24,18 @@ This repo contains the CLI for Entire.
 
 The visible CLI is organized around a set of noun groups plus a small set of
 top-level verbs. The groups are the canonical home for each verb. Newer
-experimental command families are discoverable through `entire labs` and may
-remain hidden from root help while their canonical paths are still runnable.
+experimental command families are discoverable through `entire labs` and
+their canonical paths are always runnable.
+
+Experimental commands are gated by a build-time visibility flag (the
+`cmd/entire/cli/experimental` package): they are shown — grouped under an
+"Experimental commands:" help section — in developer and nightly builds, and
+hidden in stable release builds. Visibility is toggled by `experimental.Visible`
+(default `"true"`), which GoReleaser stamps `"false"` only on stable tags
+(`.Prerelease` empty); nightly (`vX.Y.Z-nightly.*`) and local builds leave it at
+the default. Register a command as experimental with `experimental.Register(parent,
+child)` instead of `parent.AddCommand(child)`. Gating only controls visibility —
+the commands are always runnable in every build.
 
 - `session` (alias: `sessions`): `list`, `info`, `tokens`, `stop`, `attach`, `adopt`, `resume`, `current`.
   `resume` with a branch arg switches to it and resumes its session; with no arg
@@ -62,9 +72,12 @@ remain hidden from root help while their canonical paths are still runnable.
 - `grant`: manage access grants and org membership — `org`, `project`, and `repo`
   each support `add` / `list` / `remove`
 
-Experimental command families advertised through `entire labs`:
-
-- `tokens`: `profile` (hidden from root help while token diagnostics mature)
+Experimental commands (gated by the build-time visibility flag above — visible
+and grouped under "Experimental commands:" in developer/nightly builds, hidden
+in stable releases, always runnable): `tokens`, `import`, `review`,
+`investigate`, `blame`, `why`, the top-level `search` shortcut, `experts`,
+`runner`, and `checkpoint policy`. `tokens` is also advertised through `entire
+labs`. The canonical `checkpoint search` is not gated and stays visible.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
@@ -87,7 +100,10 @@ one command's current flags; `--json` emits structured output. It is the single
 source of truth the first-turn context injection and the `--agent-help-skill`
 skill point agents at, instead of enumerating a surface that goes stale.
 Hidden commands opt into being advertised here by setting
-`Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`).
+`Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`). Because `agent-help`
+renders live and lists non-hidden commands, the experimental commands appear in
+`agent-help` in developer/nightly builds and are absent in stable releases — the
+advertised surface is build-dependent, matching what `entire help` shows.
 No-channel agents (Cursor, Copilot CLI, Factory Droid, MCP hosts — no
 context-injection channel and no agent-help skill template) reach it without an
 active push. All of them can discover it passively: it is visible in `entire
@@ -100,7 +116,9 @@ Enabling a no-channel agent with `--agent-help-skill` reports the skill
 unsupported and points the agent at this passive path instead.
 
 Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
-`checkpoint`. The `search` top-level remains hidden without a hint.
+`checkpoint`. The `search` top-level is experimental (see the visibility gate
+above), so it follows the build-dependent visibility rather than being
+unconditionally hidden.
 
 Hidden infrastructure commands: `hooks`, `trail`,
 `curl-bash-post-install`, `__send_analytics`, `mcp` (MCP stdio server for
@@ -590,6 +608,7 @@ The phase state machine, metadata directory layout, sharded checkpoint format, m
 
 - [Sessions and Checkpoints](docs/architecture/sessions-and-checkpoints.md) - domain model, storage layout, checkpoint ID linking, commit trailers, package structure
 - [Checkpoint Scenarios](docs/architecture/checkpoint-scenarios.md) - phase state machine and worked condensation scenarios
+- [Ref-Based Checkpoint Backend](docs/architecture/ref-checkpoint-backend.md) - git-refs backend: primary/mirror taxonomy, ref layout + sharding, push-discovery queue, read routing, config + rollout
 
 #### When Modifying the Strategy
 
