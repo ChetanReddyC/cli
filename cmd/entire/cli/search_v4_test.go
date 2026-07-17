@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -38,8 +39,21 @@ func v4Commit(sha string, tier int, meta search.Meta) search.Result {
 	}
 }
 
-func v4Repo(score float64) search.Result {
-	return search.Result{Type: search.TypeRepo, Meta: search.Meta{Score: score}}
+// v4RepoRow builds a repo-type result via the wire format, since repo rows
+// have no typed struct (payload lives in rawData).
+func v4RepoRow(t *testing.T, id string, score float64) search.Result {
+	t.Helper()
+	raw := `{"type":"repo","data":{"id":"` + id + `","name":"x"},"searchMeta":{"score":` + jsonFloat(score) + `}}`
+	var r search.Result
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatalf("building repo row: %v", err)
+	}
+	return r
+}
+
+func jsonFloat(f float64) string {
+	b, _ := json.Marshal(f) //nolint:errcheck,errchkjson // float64 cannot fail to marshal
+	return string(b)
 }
 
 func v4CellOK(resp *search.Response) cellCallResult[*search.Response] {
@@ -54,66 +68,9 @@ func v4ResultIDs(t *testing.T, results []search.Result) []string {
 	t.Helper()
 	ids := make([]string, len(results))
 	for i := range results {
-		if results[i].Type == search.TypeRepo {
-			ids[i] = search.TypeRepo
-			continue
-		}
 		ids[i] = results[i].ResultID()
 	}
 	return ids
-}
-
-// --- scope helpers -----------------------------------------------------------
-
-func TestSemanticSearchUnfiltered(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		cfg  search.Config
-		want bool
-	}{
-		{"all-repos flag", search.Config{AllRepos: true}, true},
-		{"repo:* filter", search.Config{Repos: []string{search.AllReposFilter}}, true},
-		{"explicit repo", search.Config{Repos: []string{"o/r"}}, false},
-		{"current-repo default", search.Config{Owner: "o", Repo: "r"}, false},
-		{"repo:* among others is not unfiltered", search.Config{Repos: []string{"o/r", search.AllReposFilter}}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := semanticSearchUnfiltered(tt.cfg); got != tt.want {
-				t.Errorf("semanticSearchUnfiltered(%+v) = %v, want %v", tt.cfg, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestSemanticSearchSlugs(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		cfg  search.Config
-		want []string
-	}{
-		{"explicit filters win over current repo", search.Config{Repos: []string{"a/b", "c/d"}, Owner: "o", Repo: "r"}, []string{"a/b", "c/d"}},
-		{"current-repo default", search.Config{Owner: "o", Repo: "r"}, []string{"o/r"}},
-		{"no scope", search.Config{}, nil},
-		{"owner without repo is no scope", search.Config{Owner: "o"}, nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := semanticSearchSlugs(tt.cfg)
-			if len(got) != len(tt.want) {
-				t.Fatalf("semanticSearchSlugs(%+v) = %v, want %v", tt.cfg, got, tt.want)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("slug[%d] = %q, want %q", i, got[i], tt.want[i])
-				}
-			}
-		})
-	}
 }
 
 // --- merge: tier ordering ------------------------------------------------------
@@ -132,20 +89,20 @@ func TestMergeSemanticV4Responses_TierOrdering(t *testing.T) {
 		v4Ckpt("a-t2", 2, search.Meta{ANNScore: fptr(0.30)}),
 	}, Total: 3}
 	cellB := &search.Response{Results: []search.Result{
-		v4Repo(0.9),
+		v4RepoRow(t, "repo-1", 0.9),
 		v4Ckpt("b-t0-low", 0, search.Meta{BM25Score: fptr(3.0)}),
 		v4Ckpt("b-t1-high", 1, search.Meta{Score: 0.8}),
 		v4Ckpt("b-t2", 2, search.Meta{ANNScore: fptr(0.10)}),
 	}, Total: 4}
 
-	resp, err := mergeSemanticV4Responses(context.Background(), 0, []cellCallResult[*search.Response]{
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
 		v4CellOK(cellA), v4CellOK(cellB),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	want := []string{search.TypeRepo, "a-t0-high", "b-t0-low", "b-t1-high", "a-t1-low", "b-t2", "a-t2"}
+	want := []string{"repo-1", "a-t0-high", "b-t0-low", "b-t1-high", "a-t1-low", "b-t2", "a-t2"}
 	got := v4ResultIDs(t, resp.Results)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("merged order = %v, want %v", got, want)
@@ -155,6 +112,24 @@ func TestMergeSemanticV4Responses_TierOrdering(t *testing.T) {
 	}
 	if resp.Page != 1 {
 		t.Errorf("page = %d, want 1", resp.Page)
+	}
+}
+
+// TestMergeSemanticV4Responses_PagePassthrough confirms the requested page is
+// reflected in the merged response (the TUI's fetch-more pages server-side).
+func TestMergeSemanticV4Responses_PagePassthrough(t *testing.T) {
+	t.Parallel()
+
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 3, []cellCallResult[*search.Response]{
+		v4CellOK(&search.Response{Results: []search.Result{
+			v4Ckpt("a", 1, search.Meta{Score: 0.9}),
+		}, Total: 21}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Page != 3 {
+		t.Errorf("page = %d, want the requested page 3", resp.Page)
 	}
 }
 
@@ -171,7 +146,7 @@ func TestMergeSemanticV4Responses_ANNFallback(t *testing.T) {
 			search.Meta{ANNScore: fptr(float64(i) / 100)},
 		))
 	}
-	resp, err := mergeSemanticV4Responses(context.Background(), 0, []cellCallResult[*search.Response]{
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
 		v4CellOK(&search.Response{Results: results, Total: len(results)}),
 	})
 	if err != nil {
@@ -188,21 +163,55 @@ func TestMergeSemanticV4Responses_ANNFallback(t *testing.T) {
 	}
 }
 
+// TestMergeSemanticV4Responses_FallbackCapAfterDedup guards the cap ordering:
+// cross-cell duplicates in the fallback tail must not shrink the visible page
+// below mergedTier2Max when enough unique results exist.
+func TestMergeSemanticV4Responses_FallbackCapAfterDedup(t *testing.T) {
+	t.Parallel()
+
+	// Two cells return the same 20 ANN-only checkpoints (mirrored repo).
+	mk := func() []search.Result {
+		var rs []search.Result
+		for i := range mergedTier2Max + 5 {
+			rs = append(rs, v4Ckpt(
+				"c-"+string(rune('a'+i)), -1,
+				search.Meta{ANNScore: fptr(float64(i) / 100)},
+			))
+		}
+		return rs
+	}
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellOK(&search.Response{Results: mk(), Total: mergedTier2Max + 5}),
+		v4CellOK(&search.Response{Results: mk(), Total: mergedTier2Max + 5}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != mergedTier2Max {
+		t.Errorf("fallback results = %d, want the full cap %d despite duplicates (dedup must run before the cap)", len(resp.Results), mergedTier2Max)
+	}
+}
+
 // TestMergeSemanticV4Responses_FallbackDroppedWhenUpperTiersExist documents
 // that a cell whose page is entirely tier-2 (its ANN fallback) contributes
 // nothing when another cell produced tier 0/1 — matching how query-serve only
-// shows the fallback tail when there is nothing better.
+// shows the fallback tail when there is nothing better. Its Total must be
+// excluded too: those matches are unreachable, so they must not be advertised.
 func TestMergeSemanticV4Responses_FallbackDroppedWhenUpperTiersExist(t *testing.T) {
 	t.Parallel()
 
-	upper := &search.Response{Results: []search.Result{
-		v4Ckpt("good", 1, search.Meta{Score: 0.7}),
-	}, Total: 1}
-	fallbackOnly := &search.Response{Results: []search.Result{
-		v4Ckpt("ann-only", 2, search.Meta{ANNScore: fptr(0.2)}),
-	}, Total: 1}
+	upper := &search.Response{
+		Results: []search.Result{v4Ckpt("good", 1, search.Meta{Score: 0.7})},
+		Total:   1,
+		Counts:  &search.TypeCounts{Checkpoints: 1},
+	}
+	fallbackOnly := &search.Response{
+		Results: []search.Result{v4Ckpt("ann-only", 2, search.Meta{ANNScore: fptr(0.2)})},
+		Total:   500,
+		Counts:  &search.TypeCounts{Checkpoints: 500},
+	}
 
-	resp, err := mergeSemanticV4Responses(context.Background(), 0, []cellCallResult[*search.Response]{
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
 		v4CellOK(upper), v4CellOK(fallbackOnly),
 	})
 	if err != nil {
@@ -211,6 +220,12 @@ func TestMergeSemanticV4Responses_FallbackDroppedWhenUpperTiersExist(t *testing.
 	got := v4ResultIDs(t, resp.Results)
 	if len(got) != 1 || got[0] != "good" {
 		t.Errorf("results = %v, want only [good] (all-tier-2 cell's fallback dropped)", got)
+	}
+	if resp.Total != 1 {
+		t.Errorf("total = %d, want 1 — the discarded cell's 500 unreachable matches must not be advertised", resp.Total)
+	}
+	if resp.Counts.Checkpoints != 1 {
+		t.Errorf("counts.Checkpoints = %d, want 1", resp.Counts.Checkpoints)
 	}
 }
 
@@ -238,7 +253,7 @@ func TestMergeSemanticV4Responses_DedupAdjustsTotalsAndCounts(t *testing.T) {
 		Counts: &search.TypeCounts{Checkpoints: 1},
 	}
 
-	resp, err := mergeSemanticV4Responses(context.Background(), 0, []cellCallResult[*search.Response]{
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
 		v4CellOK(cellA), v4CellOK(cellB),
 	})
 	if err != nil {
@@ -261,12 +276,51 @@ func TestMergeSemanticV4Responses_DedupAdjustsTotalsAndCounts(t *testing.T) {
 	}
 }
 
+// TestMergeSemanticV4Responses_RepoRowsDedupAcrossCells verifies the mirrored-
+// repo case the fan-out exists for: both cells return the same logical repo
+// row, which must appear once (repo rows carry their id in the raw payload).
+func TestMergeSemanticV4Responses_RepoRowsDedupAcrossCells(t *testing.T) {
+	t.Parallel()
+
+	mk := func(score float64) *search.Response {
+		return &search.Response{
+			Results: []search.Result{
+				v4RepoRow(t, "repo-dup", score),
+				v4Ckpt("ck-"+jsonFloat(score), 1, search.Meta{Score: score}),
+			},
+			Total:  2,
+			Counts: &search.TypeCounts{Repos: 1, Checkpoints: 1},
+		}
+	}
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellOK(mk(0.9)), v4CellOK(mk(0.4)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoRows := 0
+	for _, r := range resp.Results {
+		if r.Type == search.TypeRepo {
+			repoRows++
+		}
+	}
+	if repoRows != 1 {
+		t.Errorf("repo rows = %d, want 1 (mirrored repo deduped across cells)", repoRows)
+	}
+	if resp.Counts.Repos != 1 {
+		t.Errorf("counts.Repos = %d, want 1 after dedup", resp.Counts.Repos)
+	}
+	if resp.Total != 3 {
+		t.Errorf("total = %d, want 3 (4 rows - 1 repo dupe)", resp.Total)
+	}
+}
+
 // TestMergeSemanticV4Responses_SameIDDifferentTypeNotDeduped guards the dedup
 // key: a commit and a checkpoint sharing an id string are distinct results.
 func TestMergeSemanticV4Responses_SameIDDifferentTypeNotDeduped(t *testing.T) {
 	t.Parallel()
 
-	resp, err := mergeSemanticV4Responses(context.Background(), 0, []cellCallResult[*search.Response]{
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
 		v4CellOK(&search.Response{Results: []search.Result{
 			v4Ckpt("x", 1, search.Meta{Score: 0.9}),
 			v4Commit("x", 1, search.Meta{Score: 0.8}),
@@ -282,10 +336,10 @@ func TestMergeSemanticV4Responses_SameIDDifferentTypeNotDeduped(t *testing.T) {
 
 // --- merge: failures, limits, empties -------------------------------------------
 
-func TestMergeSemanticV4Responses_PartialFailureMergesSurvivors(t *testing.T) {
+func TestMergeSemanticV4Responses_PartialFailureMergesSurvivorsWithWarning(t *testing.T) {
 	t.Parallel()
 
-	resp, err := mergeSemanticV4Responses(context.Background(), 0, []cellCallResult[*search.Response]{
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
 		v4CellErr(errors.New("cell down")),
 		v4CellOK(&search.Response{Results: []search.Result{
 			v4Ckpt("ok", 1, search.Meta{Score: 0.5}),
@@ -297,12 +351,15 @@ func TestMergeSemanticV4Responses_PartialFailureMergesSurvivors(t *testing.T) {
 	if len(resp.Results) != 1 || resp.Results[0].ResultID() != "ok" {
 		t.Errorf("results = %v, want [ok]", v4ResultIDs(t, resp.Results))
 	}
+	if len(resp.Warnings) != 1 || !strings.Contains(resp.Warnings[0], "1 of 2 regions") {
+		t.Errorf("warnings = %v, want a visible partial-failure warning naming 1 of 2 regions", resp.Warnings)
+	}
 }
 
 func TestMergeSemanticV4Responses_AllCellsFail(t *testing.T) {
 	t.Parallel()
 
-	_, err := mergeSemanticV4Responses(context.Background(), 0, []cellCallResult[*search.Response]{
+	_, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
 		v4CellErr(errors.New("cell a down")),
 		v4CellErr(errors.New("cell b down")),
 	})
@@ -317,7 +374,7 @@ func TestMergeSemanticV4Responses_AllCellsFail(t *testing.T) {
 func TestMergeSemanticV4Responses_NoCells(t *testing.T) {
 	t.Parallel()
 
-	resp, err := mergeSemanticV4Responses(context.Background(), 0, nil)
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +389,7 @@ func TestMergeSemanticV4Responses_NoCells(t *testing.T) {
 func TestMergeSemanticV4Responses_LimitCapsResults(t *testing.T) {
 	t.Parallel()
 
-	resp, err := mergeSemanticV4Responses(context.Background(), 2, []cellCallResult[*search.Response]{
+	resp, err := mergeSemanticV4Responses(context.Background(), 2, 0, []cellCallResult[*search.Response]{
 		v4CellOK(&search.Response{Results: []search.Result{
 			v4Ckpt("a", 1, search.Meta{Score: 0.9}),
 			v4Ckpt("b", 1, search.Meta{Score: 0.8}),
@@ -353,7 +410,7 @@ func TestMergeSemanticV4Responses_LimitCapsResults(t *testing.T) {
 func TestMergeSemanticV4Responses_NilCountsBodiesTolerated(t *testing.T) {
 	t.Parallel()
 
-	resp, err := mergeSemanticV4Responses(context.Background(), 0, []cellCallResult[*search.Response]{
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
 		v4CellOK(&search.Response{Results: []search.Result{
 			v4Ckpt("a", 1, search.Meta{Score: 0.9}),
 		}, Total: 1}), // no Counts
@@ -366,5 +423,20 @@ func TestMergeSemanticV4Responses_NilCountsBodiesTolerated(t *testing.T) {
 	}
 	if resp.Counts == nil || resp.Counts.Commits != 1 || resp.Counts.Checkpoints != 0 {
 		t.Errorf("counts = %+v, want commits=1 from the one counted body", resp.Counts)
+	}
+}
+
+// --- searcher construction -------------------------------------------------------
+
+// TestNewSemanticSearcher_V3Default confirms the flag-off searcher is exactly
+// the v3 entry point, so a flag-off search cannot pick up v4 behavior.
+func TestNewSemanticSearcher_V3Default(t *testing.T) {
+	t.Parallel()
+	if newSemanticSearcher(false, false) == nil {
+		t.Fatal("nil searcher")
+	}
+	// The v4 session searcher must be distinct per invocation (own cache).
+	if newSemanticSearcher(true, false) == nil {
+		t.Fatal("nil v4 searcher")
 	}
 }

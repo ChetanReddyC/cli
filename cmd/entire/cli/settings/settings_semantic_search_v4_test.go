@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// These tests use setupSettingsDir (t.Chdir) and t.Setenv, both process-global,
-// so they cannot run in parallel.
+// These tests use setupSettingsDir (t.Chdir), which is process-global, so they
+// cannot run in parallel.
 
 func TestIsSemanticSearchV4Enabled_DefaultsFalse(t *testing.T) {
 	setupSettingsDir(t, `{"enabled": true}`, "")
@@ -19,22 +19,6 @@ func TestIsSemanticSearchV4Enabled_FileEnabled(t *testing.T) {
 	setupSettingsDir(t, `{"enabled": true, "semantic_search_v4": true}`, "")
 	if !IsSemanticSearchV4Enabled(context.Background()) {
 		t.Error("semantic_search_v4: true should enable the v4 path")
-	}
-}
-
-func TestIsSemanticSearchV4Enabled_EnvOverride(t *testing.T) {
-	setupSettingsDir(t, `{"enabled": true}`, "")
-	t.Setenv("ENTIRE_SEMANTIC_SEARCH_V4", "1")
-	if !IsSemanticSearchV4Enabled(context.Background()) {
-		t.Error("ENTIRE_SEMANTIC_SEARCH_V4=1 should enable the v4 path regardless of settings")
-	}
-}
-
-func TestIsSemanticSearchV4Enabled_EnvOverrideTrue(t *testing.T) {
-	setupSettingsDir(t, `{"enabled": true}`, "")
-	t.Setenv("ENTIRE_SEMANTIC_SEARCH_V4", "true")
-	if !IsSemanticSearchV4Enabled(context.Background()) {
-		t.Error("ENTIRE_SEMANTIC_SEARCH_V4=true should enable the v4 path")
 	}
 }
 

@@ -144,11 +144,11 @@ type searchModel struct {
 	filterType   typeFilter         // active type tab filter
 	counts       *search.TypeCounts // per-type counts from API
 
-	// useV4 routes checkpoint search through the v4 query-serve fan-out
-	// (ENT-1055) instead of the v3 worker; insecureHTTP is threaded into the
-	// cell auth for local-dev http hosts. Both are set by the command layer.
-	useV4        bool
-	insecureHTTP bool
+	// semanticSearch performs checkpoint searches (initial, re-search, and
+	// pagination). Defaults to the v3 search.Search; the command layer
+	// overrides it with the session's semanticSearcher so the v4 query-serve
+	// backend (ENT-1055) — and its discovery cache — is honored everywhere.
+	semanticSearch semanticSearcher
 
 	// darkBg is captured once before bubbletea takes over the terminal so the
 	// snippet renderer never re-queries the terminal via OSC during the Update
@@ -285,17 +285,18 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	}
 
 	m := searchModel{
-		results:    results,
-		total:      total,
-		width:      ss.width,
-		mode:       modeBrowse,
-		input:      ti,
-		searchCfg:  cfg,
-		apiPage:    apiPage,
-		styles:     styles,
-		browseVP:   viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
-		darkBg:     termenv.HasDarkBackground(),
-		filterType: typeFilterCheckpoints, // default the results table to checkpoints
+		results:        results,
+		total:          total,
+		width:          ss.width,
+		mode:           modeBrowse,
+		input:          ti,
+		searchCfg:      cfg,
+		apiPage:        apiPage,
+		styles:         styles,
+		browseVP:       viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
+		darkBg:         termenv.HasDarkBackground(),
+		filterType:     typeFilterCheckpoints, // default the results table to checkpoints
+		semanticSearch: search.Search,         // command layer overrides with the session searcher
 	}
 	if codeOpts != nil {
 		m.codeSearchOpts = *codeOpts
@@ -351,8 +352,14 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		if len(msg.results) > 0 {
 			m.results = append(m.results, msg.results...)
 		} else {
-			// API returned no more results — cap total to what we have
+			// API returned no more results — cap total to what we have, and
+			// pull the display page back into range (paging forward advanced
+			// it optimistically before the fetch came back empty).
 			m.total = len(m.results)
+			if last := m.totalPages() - 1; m.page > last {
+				m.page = last
+				m.cursor = 0
+			}
 		}
 		m = m.refreshBrowseContent()
 		return m, nil
@@ -648,9 +655,9 @@ func (m searchModel) updateDetailMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 }
 
 func (m searchModel) performSearch(cfg search.Config) tea.Cmd {
-	useV4, insecure := m.useV4, m.insecureHTTP
+	searcher := m.semanticSearch
 	return func() tea.Msg {
-		resp, err := runSemanticSearch(context.Background(), cfg, useV4, insecure)
+		resp, err := searcher(context.Background(), cfg)
 		if err != nil {
 			return searchResultsMsg{err: err}
 		}
@@ -666,16 +673,13 @@ func performCodeSearch(opts codeSearchOpts, gen uint64) tea.Cmd {
 }
 
 func (m searchModel) fetchMoreResults(cfg search.Config, page int) tea.Cmd {
-	// The v4 path fetches a full page up front and paginates client-side (like
-	// code search) rather than incrementally server-paging a cross-cell merge,
-	// so signal "no more results" and let the model cap the total to what's
-	// loaded. v3 keeps its incremental server pagination.
-	if m.useV4 {
-		return func() tea.Msg { return searchMoreResultsMsg{} }
-	}
+	// Both backends page server-side: v3 forwards Page to the worker, and the
+	// v4 fan-out forwards it to every cell (each cell's page N is interleaved
+	// by the merge), so results past the first fetch stay reachable.
+	searcher := m.semanticSearch
 	return func() tea.Msg {
 		cfg.Page = page
-		resp, err := search.Search(context.Background(), cfg)
+		resp, err := searcher(context.Background(), cfg)
 		if err != nil {
 			return searchMoreResultsMsg{err: err}
 		}

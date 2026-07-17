@@ -207,10 +207,23 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				serviceURL = api.BaseURL()
 			}
 
-			ghToken, err := resolveSearchToken(ctx, serviceURL, insecureHTTPAuth)
-			if err != nil {
-				return err
+			// ENT-1055: the semantic-search-v4 settings flag routes semantic
+			// search through the v4 query-serve path (entire-api cell gateway)
+			// instead of the v3 Cloudflare worker, for every scope, via
+			// newSemanticSearcher. v4 mints its own per-cell identity tokens,
+			// so the v3 data-API token is resolved only on the v3 path — a v3
+			// auth outage must not block v4, and flag-off stays byte-identical.
+			useV4 := settings.IsSemanticSearchV4Enabled(ctx)
+			var ghToken string
+			if useV4 {
+				logging.Debug(ctx, "semantic-search-v4 routing enabled", "all_repos", allRepos, "repos", repos)
+			} else {
+				ghToken, err = resolveSearchToken(ctx, serviceURL, insecureHTTPAuth)
+				if err != nil {
+					return err
+				}
 			}
+			searcher := newSemanticSearcher(useV4, insecureHTTPAuth)
 
 			searchCfg := search.Config{
 				ServiceURL:  serviceURL,
@@ -227,17 +240,6 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				Branch:      branchFlag,
 			}
 
-			// ENT-1055: the semantic-search-v4 flag routes semantic search
-			// through the v4 query-serve path (entire-api cell gateway) instead
-			// of the v3 Cloudflare worker — for every scope (current repo,
-			// explicit repo, or repo:* / --all-repos), via a cross-cell fan-out
-			// in runSemanticSearchV4. The v3 token/URL above stay populated so a
-			// flag-off search (and the TUI's v3 path) is byte-identical to today.
-			useV4 := settings.IsSemanticSearchV4Enabled(ctx)
-			if useV4 {
-				logging.Debug(ctx, "semantic-search-v4 routing enabled", "all_repos", allRepos, "repos", repos)
-			}
-
 			// Use wildcard query when only filters are provided
 			if query == "" && searchCfg.HasFilters() {
 				searchCfg.Query = search.WildcardQuery
@@ -248,8 +250,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				searchCfg.Limit = search.DefaultLimit
 				styles := newStatusStyles(w)
 				model := newSearchModel(nil, "", 0, searchCfg, styles, buildCodeSearchOpts(ctx, owner, repoName, nil, false, insecureHTTPAuth))
-				model.useV4 = useV4
-				model.insecureHTTP = insecureHTTPAuth
+				model.semanticSearch = searcher
 				model.mode = modeSearch
 				model.input.Focus()
 				model.codeLoading = false // don't fetch until a query is entered
@@ -268,9 +269,12 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			searchCfg.Limit = search.DefaultLimit
 			searchCfg.Page = 0 // let API default to page 1
 
-			resp, err := runSemanticSearch(ctx, searchCfg, useV4, insecureHTTPAuth)
+			resp, err := searcher(ctx, searchCfg)
 			if err != nil {
 				return fmt.Errorf("search failed: %w", err)
+			}
+			for _, warning := range resp.Warnings {
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+warning)
 			}
 
 			// JSON output: explicit flag or piped/redirected stdout
@@ -308,8 +312,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				}
 			}
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles, codeOpts)
-			model.useV4 = useV4
-			model.insecureHTTP = insecureHTTPAuth
+			model.semanticSearch = searcher
 			p := tea.NewProgram(model)
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("TUI error: %w", err)
@@ -351,7 +354,7 @@ func resolveSearchToken(ctx context.Context, serviceURL string, insecureHTTPAuth
 	}
 	token, err := auth.ResolveDataAPIToken(ctx, serviceURL)
 	if errors.Is(err, auth.ErrNotLoggedIn) {
-		return "", errors.New("not authenticated. Run 'entire login' to authenticate")
+		return "", loginHintErr(err)
 	}
 	if err != nil {
 		return "", fmt.Errorf("reading credentials: %w", err)
@@ -533,7 +536,7 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 	coreClient, err := coreapi.New()
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
-			return nil, errors.New("not authenticated. Run 'entire login' to authenticate")
+			return nil, loginHintErr(err)
 		}
 		return nil, fmt.Errorf("resolving control-plane client: %w", err)
 	}
@@ -597,7 +600,7 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 	})
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
-			return nil, errors.New("not authenticated. Run 'entire login' to authenticate")
+			return nil, loginHintErr(err)
 		}
 		return nil, fmt.Errorf("code search: %w", err)
 	}

@@ -278,12 +278,26 @@ func (r *Result) ResultAuthor() string {
 		})
 }
 
-// ResultID returns the primary ID for any result type.
+// ResultID returns the primary ID for any result type. Types without a typed
+// struct (repo, pr) fall back to the "id" field of the raw payload, so a
+// cross-cell merge can still identify the same logical result returned by two
+// cells (e.g. a repo mirrored in both).
 func (r *Result) ResultID() string {
-	return resultField(r,
+	if id := resultField(r,
 		func(c *CheckpointResult) string { return c.ID },
 		func(c *CommitResult) string { return c.CommitSHA },
-		func(s *SessionResult) string { return s.SessionID })
+		func(s *SessionResult) string { return s.SessionID }); id != "" {
+		return id
+	}
+	if len(r.rawData) > 0 {
+		var d struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(r.rawData, &d); err == nil {
+			return d.ID
+		}
+	}
+	return ""
 }
 
 // ResultTitle returns the primary display text for any result type.
@@ -338,6 +352,11 @@ type Response struct {
 	Timing   *Timing     `json:"timing,omitempty"`
 	Reranked *bool       `json:"reranked,omitempty"`
 	Counts   *TypeCounts `json:"counts,omitempty"`
+
+	// Warnings are client-side completeness notes (e.g. a truncated repo
+	// index or a failed region in a cross-cell fan-out) surfaced to the user
+	// on stderr. Never part of the wire format.
+	Warnings []string `json:"-"`
 }
 
 // Config holds the configuration for a search request.
@@ -354,6 +373,32 @@ type Config struct {
 	Date        string // Filter by time period: "week" or "month"
 	Branch      string // Filter by branch name
 	Page        int    // 1-based page number (0 means omit, API defaults to 1)
+}
+
+// ScopeSlugs resolves the repo scope of a search: the explicit repo filters
+// (an explicit owner/name filter always scopes the search, even when
+// --all-repos is also set — the more specific filter wins), else allRepos for
+// an unfiltered repo:* / --all-repos search, else the current-repo default.
+// slugs empty with allRepos false means no scope could be determined.
+//
+// Both backends derive scope from here — the v3 repo params in Search and the
+// v4 cell fan-out in the cli layer — so their scoping rules cannot diverge.
+func (c Config) ScopeSlugs() (slugs []string, allRepos bool) {
+	for _, repo := range c.Repos {
+		if repo != AllReposFilter {
+			slugs = append(slugs, repo)
+		}
+	}
+	if len(slugs) > 0 {
+		return slugs, false
+	}
+	if c.AllRepos || (len(c.Repos) == 1 && c.Repos[0] == AllReposFilter) {
+		return nil, true
+	}
+	if c.Owner != "" && c.Repo != "" {
+		return []string{c.Owner + "/" + c.Repo}, false
+	}
+	return nil, false
 }
 
 // HasFilters reports whether any filter fields are set on the config.
@@ -524,27 +569,11 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 	if err := ValidateRepoFilters(cfg.Repos); err != nil {
 		return nil, err
 	}
-	allRepos := cfg.AllRepos || (len(cfg.Repos) == 1 && cfg.Repos[0] == AllReposFilter)
-	hasExplicitRepo := false
-	for _, repo := range cfg.Repos {
-		if repo != AllReposFilter {
-			hasExplicitRepo = true
-			break
-		}
-	}
-	switch {
-	case hasExplicitRepo:
-		// An explicit owner/name filter always scopes the search, even when
-		// --all-repos is also set (the more specific filter wins).
-		for _, repo := range cfg.Repos {
-			if repo != AllReposFilter {
-				q.Add("repo", repo)
-			}
-		}
-	case allRepos:
-		// No repo scoping — search every accessible repo.
-	case cfg.Owner != "" && cfg.Repo != "":
-		q.Set("repo", cfg.Owner+"/"+cfg.Repo)
+	// slugs empty with allRepos true means no repo scoping — search every
+	// accessible repo.
+	slugs, _ := cfg.ScopeSlugs()
+	for _, repo := range slugs {
+		q.Add("repo", repo)
 	}
 	addCommonSearchParams(q, cfg)
 	u.RawQuery = q.Encode()

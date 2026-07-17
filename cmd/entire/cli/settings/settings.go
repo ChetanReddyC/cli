@@ -124,11 +124,10 @@ type EntireSettings struct {
 	// plugins (entire-agent-* binaries on $PATH). Defaults to false.
 	ExternalAgents bool `json:"external_agents,omitempty"`
 
-	// SemanticSearchV4 gates the `semantic-search-v4` flag: when true, a
-	// single-repo `entire search` (semantic) queries the v4 query-serve path
-	// via the entire-api cell gateway instead of the v3 Cloudflare worker.
-	// Defaults to false (v3). Also toggleable per-invocation with the
-	// ENTIRE_SEMANTIC_SEARCH_V4 env var. See ENT-1055.
+	// SemanticSearchV4 gates the `semantic-search-v4` flag: when true,
+	// `entire search` (semantic) queries the v4 query-serve path via the
+	// entire-api cell gateway instead of the v3 Cloudflare worker.
+	// Defaults to false (v3). See ENT-1055.
 	SemanticSearchV4 bool `json:"semantic_search_v4,omitempty"`
 
 	// SummaryGeneration stores provider preferences for explain --generate.
@@ -1490,14 +1489,10 @@ func IsExternalAgentsEnabled(ctx context.Context) bool {
 }
 
 // IsSemanticSearchV4Enabled reports whether `entire search` (semantic) should
-// use the v4 query-serve path for single-repo searches. Opt-in via the
-// semantic_search_v4 settings bool, or the ENTIRE_SEMANTIC_SEARCH_V4=1 env
-// override (handy for rollout/testing). Off by default — a flag-off search is
-// byte-identical to the v3 behavior. See ENT-1055.
+// use the v4 query-serve path. Opt-in via the semantic_search_v4 settings bool
+// (settings.local.json for per-developer rollout). Off by default — a flag-off
+// search is byte-identical to the v3 behavior. See ENT-1055.
 func IsSemanticSearchV4Enabled(ctx context.Context) bool {
-	if v := os.Getenv("ENTIRE_SEMANTIC_SEARCH_V4"); v == "1" || v == "true" {
-		return true
-	}
 	s, err := Load(ctx)
 	if err != nil {
 		return false

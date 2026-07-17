@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -18,120 +20,288 @@ import (
 // the query-serve call), mirroring codeSearchCellTimeout.
 const semanticSearchV4CellTimeout = 30 * time.Second
 
-// runSemanticSearch dispatches a semantic search to the v4 query-serve path
-// (cross-cell fan-out) when useV4 is set, else the v3 Cloudflare worker. It is
-// the single entry the command and the TUI share, so both honor the flag
-// identically across the initial fetch, re-search, and pagination.
-func runSemanticSearch(ctx context.Context, cfg search.Config, useV4, insecureHTTP bool) (*search.Response, error) {
-	if useV4 {
-		return runSemanticSearchV4(ctx, cfg, insecureHTTP)
+// semanticSearchControlPlaneTimeout bounds each control-plane discovery call
+// (repo index / repo lookup) on the v4 path.
+const semanticSearchControlPlaneTimeout = 10 * time.Second
+
+// semanticSearcher performs one semantic search. The command layer builds one
+// per invocation (newSemanticSearcher) and every entry point — the one-shot
+// command, the TUI's initial fetch, interactive re-searches, and pagination —
+// calls through it, so all of them honor the same backend and share one
+// discovery cache.
+type semanticSearcher func(ctx context.Context, cfg search.Config) (*search.Response, error)
+
+// newSemanticSearcher returns the semantic-search entry for this invocation:
+// v3 (search.Search, the default) or, when the semantic-search-v4 settings
+// flag is on, a v4 query-serve session (ENT-1055) that fans out across
+// entire-api cells and caches control-plane discovery across calls.
+func newSemanticSearcher(useV4, insecureHTTP bool) semanticSearcher {
+	if !useV4 {
+		return search.Search
 	}
-	return search.Search(ctx, cfg) //nolint:wrapcheck // v3 errors are already user-facing ("search service ...")
+	s := &semanticSearchV4Session{insecureHTTP: insecureHTTP}
+	return s.search
 }
 
-// mergedTier2Max mirrors query-serve's maxTier2 and the BFF's MERGED_TIER2_MAX:
-// the ANN-only fallback tail is capped when it's all there is.
-const mergedTier2Max = 15
+// loginHintErr maps auth.ErrNotLoggedIn to the standard login hint; other
+// errors pass through unchanged.
+func loginHintErr(err error) error {
+	if errors.Is(err, auth.ErrNotLoggedIn) {
+		return errors.New("not authenticated. Run 'entire login' to authenticate")
+	}
+	return err
+}
 
-// runSemanticSearchV4 performs a v4 query-serve search across every cell that
-// hosts the caller's in-scope repos, then merges the per-cell responses into one
-// v3-shaped response. It is the cli-layer counterpart to search.Search (v3) and
-// the semantic sibling of searchAllCells (code): list the repo index → resolve
-// scope → group by hosting cell → one query-serve call per cell → tiered merge.
+// semanticSearchV4Session holds per-invocation state for the v4 query-serve
+// path. Control-plane discovery (the repo index, per-slug repo lookups, the
+// cluster catalog) is stable for the life of one command, so it is resolved
+// once and reused across TUI re-searches and pagination instead of paying
+// several network round trips per keystroke-search. Identity tokens are NOT
+// cached here — fanOutCells mints them per search (at most one per
+// jurisdiction), which keeps expiry handling in the auth layer.
+type semanticSearchV4Session struct {
+	insecureHTTP bool
+
+	mu         sync.Mutex
+	coreClient *coreapi.Client
+	clusters   *cachedClusterClient
+	fullIndex  *coreapi.ListReposOutputBody        // unfiltered index, fetched at most once
+	slugRepos  map[string][]coreapi.RepoIndexEntry // per-filter exact-match lookups
+}
+
+// search performs a v4 query-serve search across every cell that hosts the
+// caller's in-scope repos, then merges the per-cell responses into one
+// v3-shaped response. It is the cli-layer counterpart to search.Search (v3)
+// and the semantic sibling of searchAllCells (code): resolve scope → group by
+// hosting cell → one query-serve call per cell → tiered merge.
 //
-// Scope follows the same rules as the v3 repo param:
-//   - AllRepos / repo:* → unfiltered: every cell is queried with NO repo param,
-//     so query-serve returns everything the caller's token authorizes there
-//     (keeping the query small for users with many repos, matching the BFF).
-//   - explicit repo filter(s) or the current-repo default → those slugs are
-//     resolved to ULIDs and each cell is scoped to the ULIDs it hosts.
+// Scope follows Config.ScopeSlugs — the same precedence as the v3 repo param,
+// so an explicit repo filter wins over --all-repos on both backends:
+//   - unfiltered (repo:* / --all-repos with no explicit filter) → every cell
+//     is queried with NO repo param, so query-serve returns everything the
+//     caller's token authorizes there (matching the BFF and keeping the query
+//     small for users with many repos).
+//   - explicit repo filter(s) or the current-repo default → the slugs are
+//     resolved via truncation-proof exact-match lookups and each cell is
+//     scoped to the ULIDs it hosts.
 //
-// Any resolution failure is a clear error rather than a silent v3 fallback: the
-// flag is opt-in, so v4 breakage must stay visible during rollout.
-func runSemanticSearchV4(ctx context.Context, cfg search.Config, insecureHTTP bool) (*search.Response, error) {
-	coreClient, err := coreapi.New()
+// Any resolution failure is a clear error rather than a silent v3 fallback:
+// the flag is opt-in, so v4 breakage must stay visible during rollout.
+// Completeness caveats (truncated index, failed regions) are returned as
+// Response.Warnings for the caller to surface.
+func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config) (*search.Response, error) {
+	coreClient, err := s.client()
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
-			return nil, errors.New("not authenticated. Run 'entire login' to authenticate")
+			return nil, loginHintErr(err)
 		}
 		return nil, fmt.Errorf("semantic-search-v4: resolving control-plane client: %w", err)
 	}
 
-	reposCtx, reposCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer reposCancel()
-	repoIndex, err := coreClient.ListRepos(reposCtx, coreapi.ListReposParams{})
-	if err != nil {
-		return nil, fmt.Errorf("semantic-search-v4: listing repos for cell discovery: %w", err)
-	}
-
-	unfiltered := semanticSearchUnfiltered(cfg)
-	indexRepos := repoIndex.Repos
-	var filtered bool
-	if !unfiltered {
-		slugs := semanticSearchSlugs(cfg)
+	slugs, allRepos := cfg.ScopeSlugs()
+	var cells []cellGroup
+	var warnings []string
+	scoped := !allRepos
+	if scoped {
 		if len(slugs) == 0 {
 			return nil, errors.New("semantic-search-v4: could not determine the repository to search")
 		}
-		resolved, matched := resolveRepoFilters(slugs, repoIndex.Repos)
-		if len(resolved) == 0 {
-			hint := ""
-			if repoIndex.Truncated {
-				hint = " (repo index was truncated — the repo may exist but was not included)"
-			}
-			return nil, fmt.Errorf("semantic-search-v4: no matching repositories found for %v%s; unset the semantic-search-v4 flag to use v3", slugs, hint)
+		entries, err := s.resolveScope(ctx, slugs)
+		if err != nil {
+			return nil, err
 		}
-		indexRepos = matched
-		filtered = true
-	} else if repoIndex.Truncated {
-		logging.Warn(ctx, "semantic-search-v4: repo index truncated; cross-repo results may be incomplete")
+		cells = groupReposByCell(entries)
+	} else {
+		index, err := s.listFullIndex(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("semantic-search-v4: listing repos for cell discovery: %w", err)
+		}
+		if index.Truncated {
+			logging.Warn(ctx, "semantic-search-v4: repo index truncated; cross-repo results may be incomplete")
+			warnings = append(warnings, "repo index truncated; cross-repo results may be incomplete")
+		}
+		cells = groupReposByCell(index.Repos)
 	}
 
-	cells := groupReposByCell(indexRepos)
 	if len(cells) == 0 {
-		return &search.Response{Results: []search.Result{}}, nil
+		return &search.Response{Results: []search.Result{}, Page: 1, Warnings: warnings}, nil
 	}
-	resolveCellBaseURLs(ctx, coreClient, cells)
+	resolveCellBaseURLs(ctx, s.clusterClient(coreClient), cells)
 
-	results, err := fanOutCells(ctx, insecureHTTP, semanticSearchV4CellTimeout, cells, func(ctx context.Context, group cellGroup, client *api.Client) (*search.Response, error) {
-		// Filtered: scope the cell to the ULIDs it hosts. Unfiltered: send no
-		// repo param and let query-serve search everything the token authorizes
-		// in that cell (avoids the 100-repo filter cap for large accounts).
+	results, err := fanOutCells(ctx, s.insecureHTTP, semanticSearchV4CellTimeout, cells, func(ctx context.Context, group cellGroup, client *api.Client) (*search.Response, error) {
+		// Scoped: restrict the cell to the ULIDs it hosts. Unfiltered: send no
+		// repo param and let query-serve search everything the token
+		// authorizes in that cell (avoids per-request repo-filter caps for
+		// large accounts).
 		var repoIDs []string
-		if filtered {
+		if scoped {
 			repoIDs = group.repoIDs
 		}
 		return search.CellV4(ctx, client, cfg, repoIDs)
 	})
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
-			return nil, errors.New("not authenticated. Run 'entire login' to authenticate")
+			return nil, loginHintErr(err)
 		}
 		return nil, fmt.Errorf("semantic-search-v4: %w", err)
 	}
 
-	return mergeSemanticV4Responses(ctx, cfg.Limit, results)
+	resp, err := mergeSemanticV4Responses(ctx, cfg.Limit, cfg.Page, results)
+	if err != nil {
+		return nil, err
+	}
+	resp.Warnings = append(warnings, resp.Warnings...)
+	return resp, nil
 }
 
-// semanticSearchUnfiltered reports whether the search covers every accessible
-// repo (repo:* or --all-repos), mirroring search.Search's v3 allRepos logic.
-func semanticSearchUnfiltered(cfg search.Config) bool {
-	if cfg.AllRepos {
-		return true
+// client returns the cached control-plane client, creating it on first use.
+func (s *semanticSearchV4Session) client() (*coreapi.Client, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.coreClient != nil {
+		return s.coreClient, nil
 	}
-	return len(cfg.Repos) == 1 && cfg.Repos[0] == search.AllReposFilter
+	c, err := coreapi.New()
+	if err != nil {
+		return nil, err
+	}
+	s.coreClient = c
+	return c, nil
 }
 
-// semanticSearchSlugs returns the owner/name slugs to resolve for a scoped
-// search: the explicit repo filters, or the current-repo default.
-func semanticSearchSlugs(cfg search.Config) []string {
-	if len(cfg.Repos) > 0 {
-		return cfg.Repos
+// listFullIndex fetches (once) and caches the caller's full repo index, used
+// for unfiltered searches and raw-ID filter matching.
+func (s *semanticSearchV4Session) listFullIndex(ctx context.Context) (*coreapi.ListReposOutputBody, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fullIndex != nil {
+		return s.fullIndex, nil
 	}
-	if cfg.Owner != "" && cfg.Repo != "" {
-		return []string{cfg.Owner + "/" + cfg.Repo}
+	reposCtx, cancel := context.WithTimeout(ctx, semanticSearchControlPlaneTimeout)
+	defer cancel()
+	index, err := s.coreClient.ListRepos(reposCtx, coreapi.ListReposParams{})
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	s.fullIndex = index
+	return index, nil
 }
+
+// resolveScope resolves explicit repo filters (or the current-repo default)
+// to index entries, deduped by repo ID. owner/name slugs use the exact-match
+// ListRepos filter — immune to index truncation on large accounts — while raw
+// IDs (no slash) fall back to matching against the full index. Zero matches
+// is a clear error (no silent v3 fallback); a partially matched multi-repo
+// filter proceeds with the matches, like resolveRepoFilters does for code
+// search.
+func (s *semanticSearchV4Session) resolveScope(ctx context.Context, slugs []string) ([]coreapi.RepoIndexEntry, error) {
+	var entries []coreapi.RepoIndexEntry
+	seen := make(map[string]bool, len(slugs))
+	for _, f := range slugs {
+		matched, err := s.lookupFilter(ctx, f)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range matched {
+			if !seen[e.ID] {
+				seen[e.ID] = true
+				entries = append(entries, e)
+			}
+		}
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("semantic-search-v4: no matching repositories found for %v (is the repo mirrored to Entire?); unset the semantic-search-v4 flag to use v3", slugs)
+	}
+	return entries, nil
+}
+
+// lookupFilter resolves one repo filter to index entries, cached per session.
+// Matching mirrors resolveRepoFilters: a gh/ prefix is stripped, owner/name
+// matches full_name (case-insensitive, server-side exact match), and a raw
+// ULID matches the index entry's ID.
+func (s *semanticSearchV4Session) lookupFilter(ctx context.Context, filter string) ([]coreapi.RepoIndexEntry, error) {
+	s.mu.Lock()
+	if cached, ok := s.slugRepos[filter]; ok {
+		s.mu.Unlock()
+		return cached, nil
+	}
+	s.mu.Unlock()
+
+	slug := strings.TrimPrefix(filter, "gh/")
+	var matched []coreapi.RepoIndexEntry
+	if strings.Contains(slug, "/") {
+		lookupCtx, cancel := context.WithTimeout(ctx, semanticSearchControlPlaneTimeout)
+		defer cancel()
+		out, err := s.coreClient.ListRepos(lookupCtx, coreapi.ListReposParams{Filter: coreapi.NewOptString(slug)})
+		if err != nil {
+			return nil, fmt.Errorf("semantic-search-v4: resolving repository %q: %w", filter, err)
+		}
+		matched = out.Repos
+	} else {
+		// Raw repo ID — the exact-match filter only matches full_name, so
+		// match by ID against the full index.
+		index, err := s.listFullIndex(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("semantic-search-v4: resolving repository %q: %w", filter, err)
+		}
+		_, matched = resolveRepoFilters([]string{filter}, index.Repos)
+	}
+
+	s.mu.Lock()
+	if s.slugRepos == nil {
+		s.slugRepos = make(map[string][]coreapi.RepoIndexEntry)
+	}
+	s.slugRepos[filter] = matched
+	s.mu.Unlock()
+	return matched, nil
+}
+
+// clusterClient returns a cellCoreClient whose ListClusters is memoized for
+// the session, so re-searches don't refetch the (stable) cluster catalog.
+func (s *semanticSearchV4Session) clusterClient(inner *coreapi.Client) cellCoreClient {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.clusters == nil {
+		s.clusters = &cachedClusterClient{inner: inner}
+	}
+	return s.clusters
+}
+
+// cachedClusterClient is a cellCoreClient that caches a successful
+// ListClusters result; failures are not cached, so the next call retries.
+// The other methods delegate unchanged.
+type cachedClusterClient struct {
+	inner cellCoreClient
+
+	mu       sync.Mutex
+	clusters *coreapi.ListClustersOutputBody
+}
+
+func (c *cachedClusterClient) ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.clusters != nil {
+		return c.clusters, nil
+	}
+	out, err := c.inner.ListClusters(ctx)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // transparent delegation
+	}
+	c.clusters = out
+	return out, nil
+}
+
+func (c *cachedClusterClient) GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.Repo, error) {
+	return c.inner.GetRepo(ctx, params) //nolint:wrapcheck // transparent delegation
+}
+
+func (c *cachedClusterClient) ListMirrors(ctx context.Context, params coreapi.ListMirrorsParams) (*coreapi.ListMirrorsOutputBody, error) {
+	return c.inner.ListMirrors(ctx, params) //nolint:wrapcheck // transparent delegation
+}
+
+// mergedTier2Max mirrors query-serve's maxTier2 and the BFF's MERGED_TIER2_MAX:
+// the ANN-only fallback tail is capped when it's all there is.
+const mergedTier2Max = 15
 
 // tierOf returns a result's tier, or -1 when unset (treated as the ANN-only
 // fallback tier).
@@ -150,7 +320,8 @@ func bm25Of(r search.Result) float64 {
 }
 
 // annOrScoreOf prefers the raw ANN score, falling back to the overall score —
-// the ordering key query-serve/BFF use for the tier-2 ANN fallback.
+// the ordering key query-serve/BFF use for the tier-2 ANN fallback (for
+// tier-2 rows Score is itself ANN-derived, so lower is better in both cases).
 func annOrScoreOf(r search.Result) float64 {
 	if r.Meta.ANNScore != nil {
 		return *r.Meta.ANNScore
@@ -162,12 +333,24 @@ func annOrScoreOf(r search.Result) float64 {
 // applying the SAME ordering query-serve uses within a cell (and the BFF uses
 // across cells): repos first, then tier-0 by BM25 desc, then tier-1 by rerank
 // score desc, then promoted tier-2 by ANN asc; when no cell produced tier 0/1
-// the ANN-only fallback tail is shown (capped). Results are deduped by
-// type+id and capped to limit. Rerank scores share a space across cells (same
-// Cohere model), so interleaving is meaningful. All-cells-failed is an error;
-// a partial failure is logged and the surviving cells are merged.
-func mergeSemanticV4Responses(ctx context.Context, limit int, results []cellCallResult[*search.Response]) (*search.Response, error) {
-	var bodies []*search.Response
+// the ANN-only fallback tail is shown (deduped, then capped). Results are
+// deduped by type+id and capped to limit. Rerank scores share a space across
+// cells (same Cohere model), so interleaving is meaningful.
+//
+// Totals/counts include only cells whose results were actually mergeable: a
+// cell whose entire page was its ANN fallback (dropped because another cell
+// had tier 0/1) contributes nothing to Total, so the reported total doesn't
+// advertise results the merge can never surface.
+//
+// All-cells-failed is an error; a partial failure is logged, noted in
+// Warnings, and the surviving cells are merged.
+func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []cellCallResult[*search.Response]) (*search.Response, error) {
+	type cellPage struct {
+		body     *search.Response
+		hasUpper bool // any non-repo tier-0/1 row
+		hasRepo  bool // any repo-type row
+	}
+	var pages []cellPage
 	var failed []string
 	var lastErr error
 	for _, r := range results {
@@ -176,34 +359,46 @@ func mergeSemanticV4Responses(ctx context.Context, limit int, results []cellCall
 			lastErr = r.err
 			failed = append(failed, r.group.label())
 		case r.value != nil:
-			bodies = append(bodies, r.value)
+			p := cellPage{body: r.value}
+			for _, res := range r.value.Results {
+				switch {
+				case res.Type == search.TypeRepo:
+					p.hasRepo = true
+				case tierOf(res) == 0 || tierOf(res) == 1:
+					p.hasUpper = true
+				}
+			}
+			pages = append(pages, p)
 		}
 	}
-	if len(bodies) == 0 {
+	if len(pages) == 0 {
 		if lastErr != nil {
 			return nil, fmt.Errorf("semantic-search-v4: %w", lastErr)
 		}
-		return &search.Response{Results: []search.Result{}}, nil
+		return &search.Response{Results: []search.Result{}, Page: 1}, nil
 	}
+	var warnings []string
 	if len(failed) > 0 {
 		logging.Warn(ctx, "semantic-search-v4: partial failure; results may be incomplete",
-			"succeeded", len(bodies), "total", len(results), "failed_cells", failed)
+			"succeeded", len(pages), "total", len(results), "failed_cells", failed)
+		warnings = append(warnings, fmt.Sprintf("search failed in %d of %d regions; results may be incomplete", len(failed), len(results)))
+	}
+
+	globalUpper := false
+	for _, p := range pages {
+		if p.hasUpper {
+			globalUpper = true
+			break
+		}
 	}
 
 	var repos, tier0, tier1, promotedTier2, fallbackTier2 []search.Result
-	for _, b := range bodies {
+	for _, p := range pages {
 		// Tier-2 results arriving alongside tier 0/1 from the same cell were
 		// deliberately promoted by query-serve (they keep the tier:2 tag). A
 		// cell whose page is entirely tier 2 had nothing better — its ANN
 		// fallback, only shown globally when tiers 0/1 are empty everywhere.
-		cellHasUpperTiers := false
-		for _, r := range b.Results {
-			if r.Type != search.TypeRepo && (tierOf(r) == 0 || tierOf(r) == 1) {
-				cellHasUpperTiers = true
-				break
-			}
-		}
-		for _, r := range b.Results {
+		for _, r := range p.body.Results {
 			switch {
 			case r.Type == search.TypeRepo:
 				repos = append(repos, r)
@@ -211,7 +406,7 @@ func mergeSemanticV4Responses(ctx context.Context, limit int, results []cellCall
 				tier0 = append(tier0, r)
 			case tierOf(r) == 1:
 				tier1 = append(tier1, r)
-			case cellHasUpperTiers:
+			case p.hasUpper:
 				promotedTier2 = append(promotedTier2, r)
 			default:
 				fallbackTier2 = append(fallbackTier2, r)
@@ -224,27 +419,23 @@ func mergeSemanticV4Responses(ctx context.Context, limit int, results []cellCall
 	sort.SliceStable(promotedTier2, func(i, j int) bool { return annOrScoreOf(promotedTier2[i]) < annOrScoreOf(promotedTier2[j]) })
 
 	var merged []search.Result
-	if len(tier0) == 0 && len(tier1) == 0 {
-		sort.SliceStable(fallbackTier2, func(i, j int) bool { return annOrScoreOf(fallbackTier2[i]) < annOrScoreOf(fallbackTier2[j]) })
-		if len(fallbackTier2) > mergedTier2Max {
-			fallbackTier2 = fallbackTier2[:mergedTier2Max]
-		}
-		merged = append(merged, repos...)
-		merged = append(merged, fallbackTier2...)
-	} else {
+	if globalUpper {
 		merged = append(merged, repos...)
 		merged = append(merged, tier0...)
 		merged = append(merged, tier1...)
 		merged = append(merged, promotedTier2...)
+	} else {
+		sort.SliceStable(fallbackTier2, func(i, j int) bool { return annOrScoreOf(fallbackTier2[i]) < annOrScoreOf(fallbackTier2[j]) })
+		merged = append(merged, repos...)
+		merged = append(merged, fallbackTier2...)
 	}
 
-	// Dedup by type+id (a repo mirrored across cells can return the same logical
-	// result); keep the first (higher-ranked). Results without an id (e.g. repo
-	// rows) are always kept.
+	// Dedup by type+id (a repo mirrored across cells returns the same logical
+	// result from each); keep the first (higher-ranked). Results without an
+	// id are always kept.
 	seen := make(map[string]bool, len(merged))
 	dupesByType := make(map[string]int)
 	deduped := merged[:0]
-	dupes := 0
 	for _, r := range merged {
 		id := r.ResultID()
 		if id == "" {
@@ -253,7 +444,6 @@ func mergeSemanticV4Responses(ctx context.Context, limit int, results []cellCall
 		}
 		key := r.Type + "\x00" + id
 		if seen[key] {
-			dupes++
 			dupesByType[r.Type]++
 			continue
 		}
@@ -262,6 +452,21 @@ func mergeSemanticV4Responses(ctx context.Context, limit int, results []cellCall
 	}
 	merged = deduped
 
+	// Cap the ANN-only fallback tail AFTER dedup (repos always precede it),
+	// so cross-cell duplicates don't shrink the visible page below the cap.
+	if !globalUpper {
+		nRepos := 0
+		for _, r := range merged {
+			if r.Type != search.TypeRepo {
+				break
+			}
+			nRepos++
+		}
+		if len(merged) > nRepos+mergedTier2Max {
+			merged = merged[:nRepos+mergedTier2Max]
+		}
+	}
+
 	if limit > 0 && len(merged) > limit {
 		merged = merged[:limit]
 	}
@@ -269,28 +474,41 @@ func mergeSemanticV4Responses(ctx context.Context, limit int, results []cellCall
 		merged = []search.Result{}
 	}
 
+	dupes := 0
+	for _, n := range dupesByType {
+		dupes += n
+	}
 	total := -dupes
 	counts := &search.TypeCounts{}
-	for _, b := range bodies {
-		total += b.Total
-		if b.Counts != nil {
-			counts.Repos += b.Counts.Repos
-			counts.Checkpoints += b.Counts.Checkpoints
-			counts.Commits += b.Counts.Commits
-			counts.PRs += b.Counts.PRs
-			counts.Sessions += b.Counts.Sessions
+	for _, p := range pages {
+		if globalUpper && !p.hasUpper && !p.hasRepo {
+			// This cell's whole page was its ANN fallback and was discarded —
+			// its matches are unreachable, so don't advertise them.
+			continue
+		}
+		total += p.body.Total
+		if p.body.Counts != nil {
+			counts.Repos += p.body.Counts.Repos
+			counts.Checkpoints += p.body.Counts.Checkpoints
+			counts.Commits += p.body.Counts.Commits
+			counts.PRs += p.body.Counts.PRs
+			counts.Sessions += p.body.Counts.Sessions
 		}
 	}
 	subtractDupeCounts(counts, dupesByType)
 	if total < 0 {
 		total = 0
 	}
+	if page < 1 {
+		page = 1
+	}
 
 	return &search.Response{
-		Results: merged,
-		Total:   total,
-		Page:    1,
-		Counts:  counts,
+		Results:  merged,
+		Total:    total,
+		Page:     page,
+		Counts:   counts,
+		Warnings: warnings,
 	}, nil
 }
 
