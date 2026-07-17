@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	"charm.land/huh/v2"
+
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -72,6 +74,44 @@ func applyCheckpointBackendFlag(s *EntireSettings, backend string) error {
 	}
 	applyCheckpointBackend(s, typ)
 	return nil
+}
+
+// checkpointBackendChoices returns the storage picker's options — git-refs
+// first, pre-selected, labeled recommended — and the recommended default.
+// Split from promptCheckpointBackend so the ordering/labeling contract is
+// unit-testable without a TTY.
+func checkpointBackendChoices() (opts []huh.Option[string], recommended string) {
+	return []huh.Option[string]{
+		huh.NewOption("Refs — one git ref per checkpoint (recommended)", checkpoint.BackendTypeGitRefs),
+		huh.NewOption("Branch — one shared branch, entire/checkpoints/v1", checkpoint.BackendTypeGitBranch),
+	}, checkpoint.BackendTypeGitRefs
+}
+
+// promptCheckpointBackend asks the user to choose a checkpoint storage backend
+// during first-time interactive setup, with the git-refs backend pre-selected
+// as the recommendation — most users should just press Enter. It returns the
+// chosen canonical backend type; cancellation (Ctrl+C or a cancelled ctx)
+// returns "" so the caller falls through to the recommended default, matching
+// the optional-prompt behavior elsewhere in setup. Callers must gate this on
+// an interactive terminal (and skip it when ENTIRE_CHECKPOINTS_PRIMARY is
+// active — the env fully replaces settings, so an answer could not take
+// effect and would only write diverging config).
+func promptCheckpointBackend(ctx context.Context, w io.Writer) (string, error) {
+	opts, recommended := checkpointBackendChoices()
+	choice := recommended
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Checkpoint storage").
+				Description("How Entire stores committed session checkpoints in your repo.").
+				Options(opts...).
+				Value(&choice),
+		),
+	)
+	if err := form.RunWithContext(ctx); err != nil {
+		return "", handleFormCancellation(w, "Checkpoint storage selection", err)
+	}
+	return choice, nil
 }
 
 // updateCheckpointBackend persists opts.CheckpointBackend to the target settings

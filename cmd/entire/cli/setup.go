@@ -785,7 +785,7 @@ Examples:
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Reinstall the Entire git hook")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; default for new setups) or branch (shared entire/checkpoints/v1 branch)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
 	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, pi, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears (falls back to 5m default).")
@@ -931,7 +931,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; default for new setups) or branch (shared entire/checkpoints/v1 branch)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
@@ -1239,11 +1239,24 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	opts.applyStrategyOptions(settings)
 
-	// Checkpoint storage backend. An explicit --checkpoint-backend always wins.
-	// Otherwise every first run gets the git-refs backend, written explicitly
-	// into the new settings file: a storage-topology question is unanswerable
-	// during first-time setup (the old wizard prompt), and the config-less
-	// runtime default stays git-branch so existing repos are untouched.
+	// Checkpoint storage backend. An explicit --checkpoint-backend always
+	// wins. Otherwise a first interactive setup asks, with git-refs
+	// pre-selected as the recommendation (one Enter for most users);
+	// non-interactive/--yes/cancelled first runs take the recommendation
+	// silently. Either way the choice is written explicitly into the new
+	// settings file, and the config-less runtime fallback stays git-branch
+	// so existing repos are untouched. The prompt is skipped while
+	// ENTIRE_CHECKPOINTS_PRIMARY is active (firstRunCheckpointBackendDefault
+	// returns ""): the env fully replaces settings, so an answer could not
+	// take effect and would only write diverging config.
+	if opts.CheckpointBackend == "" && firstRun && !opts.Yes &&
+		firstRunCheckpointBackendDefault() != "" && interactive.CanPromptInteractively() {
+		chosen, err := promptCheckpointBackend(ctx, w)
+		if err != nil {
+			return err
+		}
+		opts.CheckpointBackend = chosen // "" (cancelled) falls through to the recommendation
+	}
 	if opts.CheckpointBackend == "" && firstRun {
 		opts.CheckpointBackend = firstRunCheckpointBackendDefault()
 	}
