@@ -785,7 +785,7 @@ Examples:
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Reinstall the Entire git hook")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: branch (default) or refs (one git ref per checkpoint)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; default for new setups) or branch (shared entire/checkpoints/v1 branch)")
 	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, pi, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears (falls back to 5m default).")
@@ -931,7 +931,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: branch (default) or refs (one git ref per checkpoint)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; default for new setups) or branch (shared entire/checkpoints/v1 branch)")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
@@ -1240,14 +1240,12 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	opts.applyStrategyOptions(settings)
 
 	// Checkpoint storage backend. An explicit --checkpoint-backend always wins.
-	// Otherwise, on the first interactive setup, offer a choice (default: branch).
-	// Non-interactive or --yes first runs keep the default git-branch backend.
-	if opts.CheckpointBackend == "" && firstRun && !opts.Yes && interactive.CanPromptInteractively() {
-		chosen, err := promptCheckpointBackend(ctx, w)
-		if err != nil {
-			return err
-		}
-		opts.CheckpointBackend = chosen // "" keeps the default (or cancelled) backend
+	// Otherwise every first run gets the git-refs backend, written explicitly
+	// into the new settings file: a storage-topology question is unanswerable
+	// during first-time setup (the old wizard prompt), and the config-less
+	// runtime default stays git-branch so existing repos are untouched.
+	if opts.CheckpointBackend == "" && firstRun {
+		opts.CheckpointBackend = firstRunCheckpointBackendDefault()
 	}
 	if err := applyCheckpointBackendFlag(settings, opts.CheckpointBackend); err != nil {
 		return err
@@ -1359,6 +1357,20 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 		fmt.Fprintf(w, "Agents: %s\n", strings.Join(displayNames, ", "))
 	}
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
+}
+
+// firstRunCheckpointBackendDefault is the backend written on first-time
+// setups when --checkpoint-backend wasn't passed: the git-refs store (a
+// storage-topology question is unanswerable during first-time setup). Empty —
+// write nothing — while the ENTIRE_CHECKPOINTS_PRIMARY override is active:
+// the env fully replaces any settings block, so persisting a default here
+// would write config that diverges from the backend actually in use (and
+// break harnesses that pin git-branch via the env).
+func firstRunCheckpointBackendDefault() string {
+	if os.Getenv(settings.EnvCheckpointsPrimary) != "" {
+		return ""
+	}
+	return checkpointBackendRefsAlias
 }
 
 // runEnable flips the enabled flag to true in the scope chosen by the caller
@@ -1863,7 +1875,12 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	opts.applyStrategyOptions(targetSettings)
 
-	// Apply an explicit --checkpoint-backend (no prompt on this non-interactive path).
+	// Checkpoint storage backend: an explicit --checkpoint-backend wins; first
+	// runs otherwise get the git-refs backend written explicitly, matching the
+	// interactive setup path (runEnableInteractive).
+	if opts.CheckpointBackend == "" && firstRun {
+		opts.CheckpointBackend = firstRunCheckpointBackendDefault()
+	}
 	if err := applyCheckpointBackendFlag(targetSettings, opts.CheckpointBackend); err != nil {
 		return err
 	}
