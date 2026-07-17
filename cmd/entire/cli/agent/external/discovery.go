@@ -74,14 +74,23 @@ func discoverAndRegisterNamed(ctx context.Context, name types.AgentName, timeout
 
 	binName := binaryPrefix + string(name)
 	binPath, err := lookPathExternalAgent(binName)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("looking up external agent %q binary %q: %w", name, binName, ctxErr)
+	}
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
 			return nil
 		}
 		return fmt.Errorf("looking up external agent %q binary %q: %w", name, binName, err)
 	}
-	_, err = registerExternalAgent(ctx, binPath, name)
-	return err
+	registered, err := registerExternalAgent(ctx, binPath, name)
+	if err != nil {
+		return err
+	}
+	if !registered {
+		return fmt.Errorf("external agent %q binary %q was found but could not be registered", name, binPath)
+	}
+	return nil
 }
 
 // discoverAndRegister contains the shared scanning logic for external agent discovery.

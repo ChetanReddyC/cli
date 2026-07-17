@@ -373,6 +373,49 @@ func TestDiscoverAndRegisterNamedAlways_MissingHelper(t *testing.T) {
 	}
 }
 
+func TestDiscoverAndRegisterNamedAlways_DeadlineWhileLookingUpMissingHelper(t *testing.T) {
+	name := types.AgentName("disc-named-lookup-deadline")
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	originalLookPath := lookPathExternalAgent
+	t.Cleanup(func() { lookPathExternalAgent = originalLookPath })
+	lookPathExternalAgent = func(string) (string, error) {
+		<-ctx.Done()
+		return "", exec.ErrNotFound
+	}
+
+	err := DiscoverAndRegisterNamedAlways(ctx, name)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestDiscoverAndRegisterNamedAlways_HelperDisappearsAfterLookup(t *testing.T) {
+	name := types.AgentName("disc-named-helper-disappeared")
+	binPath := filepath.Join(t.TempDir(), binaryPrefix+string(name))
+
+	originalLookPath := lookPathExternalAgent
+	originalStat := statExternalAgent
+	t.Cleanup(func() {
+		lookPathExternalAgent = originalLookPath
+		statExternalAgent = originalStat
+	})
+	lookPathExternalAgent = func(string) (string, error) { return binPath, nil }
+	statExternalAgent = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+
+	err := DiscoverAndRegisterNamedAlways(context.Background(), name)
+	if err == nil {
+		t.Fatal("DiscoverAndRegisterNamedAlways() error = nil, want helper-disappeared error")
+	}
+	if !strings.Contains(err.Error(), string(name)) || !strings.Contains(err.Error(), binPath) {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %q, want agent and binary context", err)
+	}
+	if !strings.Contains(err.Error(), "was found but could not be registered") {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %q, want actionable registration context", err)
+	}
+}
+
 func TestDiscoverAndRegisterNamedAlways_StatError(t *testing.T) {
 	name := types.AgentName("disc-named-stat-error")
 	binPath := filepath.Join(t.TempDir(), binaryPrefix+string(name))
