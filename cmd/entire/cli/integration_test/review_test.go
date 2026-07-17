@@ -184,7 +184,7 @@ func TestReviewAttach_TagsAttachedSessionAsReview(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	output := env.RunCLI("attach", "--review", sessionID, "--force", "--agent", "claude-code", "--skills", "/pr-review-toolkit:review-pr")
+	output := env.RunCLI("session", "attach", "--review", sessionID, "--force", "--agent", "claude-code", "--skills", "/pr-review-toolkit:review-pr")
 	if !strings.Contains(output, "Attached session") {
 		t.Fatalf("expected attached session output, got:\n%s", output)
 	}
