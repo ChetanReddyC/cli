@@ -9,7 +9,10 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/spf13/cobra"
 )
 
@@ -565,6 +568,104 @@ func TestNewDispatchCmd_LocalWithoutAgentResolvesConfiguredProvider(t *testing.T
 	cmd.SetArgs([]string{"--local", "--all-branches"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDispatchWizard_LocalWithoutConfiguredAgentPromptsAndPersistsSelection(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	t.Chdir(repoDir)
+
+	oldShouldRunWizard := shouldRunDispatchWizardForCommand
+	oldRunWizard := runDispatchWizardForCommand
+	oldLoad := loadSummarySettings
+	oldLoadFile := loadSummarySettingsFromFile
+	oldSave := saveLocalSummarySettings
+	oldDiscover := discoverSummaryProvidersAlways
+	oldList := listRegisteredAgents
+	oldGet := getSummaryAgent
+	oldAvailable := isSummaryCLIAvailable
+	oldCanPrompt := canPromptForSummaryProvider
+	oldPrompt := promptSummaryProvider
+	oldRunDispatch := runDispatch
+	oldTerminalMode := dispatchTerminalMode
+	oldMarkdown := renderDispatchMarkdown
+	t.Cleanup(func() {
+		shouldRunDispatchWizardForCommand = oldShouldRunWizard
+		runDispatchWizardForCommand = oldRunWizard
+		loadSummarySettings = oldLoad
+		loadSummarySettingsFromFile = oldLoadFile
+		saveLocalSummarySettings = oldSave
+		discoverSummaryProvidersAlways = oldDiscover
+		listRegisteredAgents = oldList
+		getSummaryAgent = oldGet
+		isSummaryCLIAvailable = oldAvailable
+		canPromptForSummaryProvider = oldCanPrompt
+		promptSummaryProvider = oldPrompt
+		runDispatch = oldRunDispatch
+		dispatchTerminalMode = oldTerminalMode
+		renderDispatchMarkdown = oldMarkdown
+	})
+
+	var calls []string
+	shouldRunDispatchWizardForCommand = func(int, bool, bool) bool { return true }
+	runDispatchWizardForCommand = func(*cobra.Command) (dispatchpkg.Options, error) {
+		calls = append(calls, "wizard")
+		return dispatchpkg.Options{Mode: dispatchpkg.ModeLocal, Since: "7d", AllBranches: true}, nil
+	}
+	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
+		return &settings.EntireSettings{Enabled: true}, nil
+	}
+	loadSummarySettingsFromFile = func(string) (*settings.EntireSettings, error) {
+		return &settings.EntireSettings{}, nil
+	}
+	discoverSummaryProvidersAlways = func(context.Context) {}
+	listRegisteredAgents = func() []types.AgentName {
+		return []types.AgentName{agent.AgentNameCodex, agent.AgentNameGemini}
+	}
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		kind := agent.AgentTypeCodex
+		if name == agent.AgentNameGemini {
+			kind = agent.AgentTypeGemini
+		}
+		return &stubTextAgent{name: name, kind: kind}, nil
+	}
+	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
+	canPromptForSummaryProvider = func() bool { return true }
+	promptSummaryProvider = func(providers []checkpointSummaryProvider) (types.AgentName, error) {
+		calls = append(calls, "picker")
+		if len(providers) != 2 || providers[0].Name != agent.AgentNameCodex || providers[1].Name != agent.AgentNameGemini {
+			t.Fatalf("picker providers = %+v, want enabled codex and gemini", providers)
+		}
+		return agent.AgentNameGemini, nil
+	}
+	var persistedProvider string
+	saveLocalSummarySettings = func(_ context.Context, s *settings.EntireSettings) error {
+		if s.SummaryGeneration != nil {
+			persistedProvider = s.SummaryGeneration.Provider
+		}
+		return nil
+	}
+	runDispatch = func(_ context.Context, opts dispatchpkg.Options) (*dispatchpkg.Dispatch, error) {
+		calls = append(calls, "dispatch")
+		selected, ok := opts.TextGenerator.(*stubTextAgent)
+		if !ok || selected.name != agent.AgentNameGemini {
+			t.Fatalf("dispatch generator = %#v, want selected gemini agent", opts.TextGenerator)
+		}
+		return &dispatchpkg.Dispatch{}, nil
+	}
+	dispatchTerminalMode = func(io.Writer) bool { return false }
+	renderDispatchMarkdown = func(*dispatchpkg.Dispatch) string { return "" }
+
+	cmd := newDispatchCmd()
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(calls, ","); got != "wizard,picker,dispatch" {
+		t.Fatalf("call order = %q, want wizard,picker,dispatch", got)
+	}
+	if persistedProvider != string(agent.AgentNameGemini) {
+		t.Fatalf("persisted provider = %q, want %q", persistedProvider, agent.AgentNameGemini)
 	}
 }
 

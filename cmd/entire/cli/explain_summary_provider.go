@@ -29,6 +29,8 @@ var (
 	discoverSummaryProviders        = external.DiscoverAndRegister
 	discoverSummaryProvidersAlways  = external.DiscoverAndRegisterAlways
 	discoverDispatchSummaryProvider = external.DiscoverAndRegisterNamedAlways
+	canPromptForSummaryProvider     = interactive.CanPromptInteractively
+	promptSummaryProvider           = promptForSummaryProvider
 )
 
 type checkpointSummaryProvider struct {
@@ -86,11 +88,11 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 	case 1:
 		return autoSelectSummaryProvider(ctx, w, candidates[0].Name, "non-interactive auto-select: single installed provider")
 	default:
-		if !interactive.CanPromptInteractively() {
+		if !canPromptForSummaryProvider() {
 			return autoSelectSummaryProvider(ctx, w, candidates[0].Name, "non-interactive auto-select: first detected of multiple")
 		}
 
-		selected, err := promptForSummaryProvider(candidates)
+		selected, err := promptSummaryProvider(candidates)
 		if err != nil {
 			return nil, err
 		}

@@ -19,6 +19,8 @@ var renderDispatchMarkdown = dispatchpkg.RenderMarkdown
 var dispatchTerminalMode = interactive.IsTerminalWriter
 var runInteractiveDispatch = defaultRunInteractiveDispatch
 var renderTerminalMarkdown = defaultRenderTerminalMarkdown
+var shouldRunDispatchWizardForCommand = shouldRunDispatchWizard
+var runDispatchWizardForCommand = runDispatchWizard
 var prepareLocalDispatch = dispatchpkg.PrepareLocal
 var resolveDispatchProvider = resolveDispatchSummaryProvider
 
@@ -60,8 +62,8 @@ Examples:
 				err  error
 			)
 
-			if shouldRunDispatchWizard(cmd.Flags().NFlag(), isTerminalStdin(os.Stdin), interactive.IsTerminalWriter(cmd.OutOrStdout())) {
-				opts, err = runDispatchWizard(cmd)
+			if shouldRunDispatchWizardForCommand(cmd.Flags().NFlag(), isTerminalStdin(os.Stdin), interactive.IsTerminalWriter(cmd.OutOrStdout())) {
+				opts, err = runDispatchWizardForCommand(cmd)
 			} else {
 				opts, err = parseDispatchFlags(cmd, flagLocal, flagSince, flagUntil, flagAllBranches, flagRepos, flagVoice, flagInsecureHTTPAuth)
 			}
