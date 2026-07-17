@@ -52,7 +52,7 @@ func resolveDispatchSummaryProvider(ctx context.Context, w io.Writer, override s
 	if err := validateSummaryProvider(override); err != nil {
 		return nil, err
 	}
-	return buildCheckpointSummaryProviderWithEffectiveModel(providerName, "")
+	return buildCheckpointSummaryProvider(providerName, "")
 }
 
 func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkpointSummaryProvider, error) {

@@ -2,11 +2,13 @@ package external
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -287,6 +289,32 @@ func TestDiscoverAndRegisterAlways_FindsAgentWithoutSettings(t *testing.T) {
 	}
 	if string(ag.Name()) != name {
 		t.Errorf("agent Name() = %q, want %q", ag.Name(), name)
+	}
+}
+
+func TestDiscoverAndRegisterNamedAlways_TimesOutStalledInfo(t *testing.T) {
+	sleepPath, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("sleep not available")
+	}
+
+	name := types.AgentName("disc-named-timeout")
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, binaryPrefix+string(name))
+	script := fmt.Sprintf("#!/bin/sh\nexec %q 60\n", sleepPath)
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stalled mock binary: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	const timeout = 100 * time.Millisecond
+	started := time.Now()
+	discoverAndRegisterNamed(context.Background(), name, timeout)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("named discovery took %v, want cancellation near %v", elapsed, timeout)
+	}
+	if _, err := agent.Get(name); err == nil {
+		t.Fatal("stalled external agent was registered")
 	}
 }
 

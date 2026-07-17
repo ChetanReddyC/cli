@@ -302,7 +302,7 @@ func TestResolveDispatchSummaryProvider_ExplicitProviderIgnoresSavedProviderAndM
 	}
 }
 
-func TestResolveDispatchSummaryProvider_ExplicitClaudePreservesEmptyModel(t *testing.T) {
+func TestResolveDispatchSummaryProvider_ExplicitClaudeUsesSummaryDefaultModel(t *testing.T) {
 	// Cannot use t.Parallel(): mutates package-level resolution seams.
 	ctx := context.Background()
 	claude := &stubTextAgent{name: agent.AgentNameClaudeCode, kind: agent.AgentTypeClaudeCode}
@@ -321,7 +321,7 @@ func TestResolveDispatchSummaryProvider_ExplicitClaudePreservesEmptyModel(t *tes
 		loadCalls++
 		return &settings.EntireSettings{SummaryGeneration: &settings.SummaryGenerationSettings{
 			Provider: string(agent.AgentNameClaudeCode),
-			Model:    "sonnet",
+			Model:    "opus",
 		}}, nil
 	}
 	getSummaryAgent = func(types.AgentName) (agent.Agent, error) { return claude, nil }
@@ -334,8 +334,8 @@ func TestResolveDispatchSummaryProvider_ExplicitClaudePreservesEmptyModel(t *tes
 	if loadCalls != 0 {
 		t.Fatalf("loadSummarySettings calls = %d, want 0 for explicit override", loadCalls)
 	}
-	if provider.Model != "" {
-		t.Fatalf("provider.Model = %q, want Claude CLI default rather than saved/summary default", provider.Model)
+	if provider.Model != summarize.DefaultModel {
+		t.Fatalf("provider.Model = %q, want summary default %q", provider.Model, summarize.DefaultModel)
 	}
 }
 

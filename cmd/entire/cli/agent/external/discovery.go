@@ -48,12 +48,19 @@ func DiscoverAndRegisterAlways(ctx context.Context) {
 // agent binary matching name. It bypasses the external_agents setting for
 // explicit, one-invocation selections without executing unrelated plugins.
 func DiscoverAndRegisterNamedAlways(ctx context.Context, name types.AgentName) {
+	discoverAndRegisterNamed(ctx, name, discoveryTimeout)
+}
+
+func discoverAndRegisterNamed(ctx context.Context, name types.AgentName, timeout time.Duration) {
 	if name == "" {
 		return
 	}
 	if _, err := agent.Get(name); err == nil {
 		return
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	binPath, err := exec.LookPath(binaryPrefix + string(name))
 	if err != nil {
