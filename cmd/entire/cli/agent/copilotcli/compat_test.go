@@ -156,24 +156,29 @@ func TestParseHookEnvelope_AcceptsFloatTimestamp(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		raw  string
+		name       string
+		raw        string
+		wantMillis int64
 	}{
 		{
-			name: "sessionStart",
-			raw:  `{"sessionId":"sess-123","timestamp":1784283185447.0,"cwd":"/tmp/repo","source":"new","initialPrompt":"hi"}`,
+			name:       "sessionStart",
+			raw:        `{"sessionId":"sess-123","timestamp":1784283185447.0,"cwd":"/tmp/repo","source":"new","initialPrompt":"hi"}`,
+			wantMillis: 1784283185447,
 		},
 		{
-			name: "userPromptSubmitted",
-			raw:  `{"sessionId":"sess-123","timestamp":1784283185370.0,"cwd":"/tmp/repo","prompt":"hi"}`,
+			name:       "userPromptSubmitted",
+			raw:        `{"sessionId":"sess-123","timestamp":1784283185370.0,"cwd":"/tmp/repo","prompt":"hi"}`,
+			wantMillis: 1784283185370,
 		},
 		{
-			name: "agentStop",
-			raw:  `{"sessionId":"sess-123","timestamp":1784283190710.0,"cwd":"/tmp/repo","transcriptPath":"/tmp/events.jsonl","stopReason":"end_turn"}`,
+			name:       "agentStop",
+			raw:        `{"sessionId":"sess-123","timestamp":1784283190710.0,"cwd":"/tmp/repo","transcriptPath":"/tmp/events.jsonl","stopReason":"end_turn"}`,
+			wantMillis: 1784283190710,
 		},
 		{
-			name: "sessionEnd",
-			raw:  `{"sessionId":"sess-123","timestamp":1784283190784.0,"cwd":"/tmp/repo","reason":"complete"}`,
+			name:       "sessionEnd",
+			raw:        `{"sessionId":"sess-123","timestamp":1784283190784.0,"cwd":"/tmp/repo","reason":"complete"}`,
+			wantMillis: 1784283190784,
 		},
 	}
 
@@ -188,8 +193,8 @@ func TestParseHookEnvelope_AcceptsFloatTimestamp(t *testing.T) {
 			if env.Host != HostCopilotCLI {
 				t.Fatalf("Host = %q, want %q", env.Host, HostCopilotCLI)
 			}
-			if got := env.Timestamp.UnixMilli(); got < 1784283185000 || got > 1784283191000 {
-				t.Fatalf("Timestamp.UnixMilli() = %d, want the payload's epoch-millis value", got)
+			if got := env.Timestamp.UnixMilli(); got != tt.wantMillis {
+				t.Fatalf("Timestamp.UnixMilli() = %d, want %d", got, tt.wantMillis)
 			}
 			if env.SessionID != "sess-123" {
 				t.Fatalf("SessionID = %q, want %q", env.SessionID, "sess-123")
@@ -207,6 +212,30 @@ func TestParseTimestamp_FloatMillis(t *testing.T) {
 	}
 	if got := ts.UnixMilli(); got != 1784283185447 {
 		t.Fatalf("UnixMilli() = %d, want 1784283185447", got)
+	}
+}
+
+func TestParseTimestamp_SubMillisecondFloatIsMissing(t *testing.T) {
+	t.Parallel()
+
+	// 0.4 truncates to 0 ms — must be treated as "missing" (zero time),
+	// not as the Unix epoch.
+	ts, err := ParseTimestamp(json.RawMessage(`0.4`))
+	if err != nil {
+		t.Fatalf("ParseTimestamp() error = %v", err)
+	}
+	if !ts.IsZero() {
+		t.Fatalf("ParseTimestamp(0.4) = %v, want zero time", ts)
+	}
+}
+
+func TestParseTimestamp_OutOfRangeFloatErrors(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{`1e300`, `-1e300`} {
+		if _, err := ParseTimestamp(json.RawMessage(raw)); err == nil {
+			t.Fatalf("ParseTimestamp(%s) expected out-of-range error, got nil", raw)
+		}
 	}
 }
 
