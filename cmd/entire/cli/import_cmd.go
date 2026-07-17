@@ -35,7 +35,8 @@ func newImportAgentCmd(imp agentimport.Importer) *cobra.Command {
 		Use:   imp.Name(),
 		Short: fmt.Sprintf("Import existing %s transcripts as read-only checkpoints", imp.AgentType()),
 		Long: fmt.Sprintf(`Import pre-existing %s transcripts for this repo (the past month) as
-read-only checkpoints. Imported history is searchable and explainable.
+read-only checkpoints. Imported history is searchable and explainable, but
+read-only: imported sessions cannot be resumed.
 
 Import honors checkpoint policy before scanning transcripts. If the configured
 checkpoint_version or checkpoint_min_version is unsupported by this CLI, import
