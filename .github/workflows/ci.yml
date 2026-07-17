@@ -67,12 +67,23 @@ jobs:
           E2E_CHECKPOINT_STORE: ${{ matrix.checkpoint_store }}
         run: mise run test:e2e:canary
 
+  test-windows-external-discovery:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
+      - name: Named external-agent discovery
+        run: go test ./cmd/entire/cli/agent/external -run '^TestDiscoverAndRegisterNamedAlways_RegistersBatOnWindows$' -count=1
+
   test:
     runs-on: ubuntu-latest
     needs:
       - test-core
       - test-integration
       - test-canary
+      - test-windows-external-discovery
     if: ${{ always() }}
     steps:
       - name: Check dependencies
@@ -80,3 +91,4 @@ jobs:
           [ "${{ needs.test-core.result }}" = "success" ]
           [ "${{ needs.test-integration.result }}" = "success" ]
           [ "${{ needs.test-canary.result }}" = "success" ]
+          [ "${{ needs.test-windows-external-discovery.result }}" = "success" ]

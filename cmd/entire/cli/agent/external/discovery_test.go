@@ -598,3 +598,35 @@ func TestDiscoverAndRegister_RegistersBatOnWindows(t *testing.T) {
 		t.Errorf("agent Name() = %q, want %q", ag.Name(), name)
 	}
 }
+
+// TestDiscoverAndRegisterNamedAlways_RegistersBatOnWindows covers the explicit
+// named-discovery path, which uses exec.LookPath and therefore depends on
+// Windows PATHEXT handling rather than the scan-all filepath.Glob path above.
+func TestDiscoverAndRegisterNamedAlways_RegistersBatOnWindows(t *testing.T) {
+	if runtime.GOOS != osWindows {
+		t.Skip("this test only applies on Windows")
+	}
+
+	name := types.AgentName("disc-named-bat")
+	infoJSON := `{"protocol_version":1,"name":"` + string(name) + `","type":"` + string(name) + ` Agent","description":"Named Windows agent","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{}}`
+	script := "@echo off\r\nif not \"%1\"==\"info\" goto :notinfo\r\necho " + infoJSON + "\r\ngoto :eof\r\n:notinfo\r\necho unknown subcommand: %1 1>&2\r\nexit /b 1\r\n"
+
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, binaryPrefix+string(name)+".bat")
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write mock binary: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+
+	if err := DiscoverAndRegisterNamedAlways(context.Background(), name); err != nil {
+		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %v", err)
+	}
+	ag, err := agent.Get(name)
+	if err != nil {
+		t.Fatalf("expected named .bat agent %q to be registered: %v", name, err)
+	}
+	if ag.Name() != name {
+		t.Fatalf("agent Name() = %q, want %q", ag.Name(), name)
+	}
+}
