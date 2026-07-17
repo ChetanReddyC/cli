@@ -12,13 +12,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
 const apiTimeout = 30 * time.Second
 
-// DefaultServiceURL is the production search service URL.
+// DefaultServiceURL is the production search service URL (v3 Cloudflare worker).
 const DefaultServiceURL = "https://entire.io"
+
+// v3ServicePath is the v3 Cloudflare-worker route on the search host.
+const v3ServicePath = "/search/v1/search"
+
+// v4ServicePath is the per-repo v4 query-serve route exposed by the entire-api
+// cell gateway. It takes repo=<ULID> and mirrors the v3 response shape. The BFF
+// (entire.io /api/v1/search) forwards to this same path; the CLI dials the cell
+// directly with a jurisdictional identity token, skipping the BFF hop.
+const v4ServicePath = "/api/v1/semantic-search/search/v1/search"
 
 // WildcardQuery is the query string used when only filters are provided (no search terms).
 const WildcardQuery = "*"
@@ -339,6 +349,74 @@ type Config struct {
 	Date        string // Filter by time period: "week" or "month"
 	Branch      string // Filter by branch name
 	Page        int    // 1-based page number (0 means omit, API defaults to 1)
+
+	// v4 query-serve backend (ENT-1055). These are populated by the command
+	// layer only when the semantic-search-v4 flag is on AND the search is
+	// scoped to a single repo whose owning cell + ULID could be resolved. When
+	// they select the v4 path (see useV4), the request goes to the entire-api
+	// cell gateway carrying a jurisdictional identity token instead of the v3
+	// Cloudflare worker. All zero (the default) means the v3 path, so a
+	// flag-off search is byte-identical to today.
+
+	// UseV4 gates the v4 path on. Even when true, the v4 branch is taken only
+	// for a search scoped to exactly V4RepoSlug (useV4); anything broader
+	// (repo:*, --all-repos, a different explicit repo) falls back to v3, since
+	// cross-repo v4 is a separate change (ENT-1054).
+	UseV4 bool
+	// CellClient is an authenticated client aimed at the entire-api cell that
+	// hosts the v4 repo (bearer = jurisdictional identity token). nil ⇒ v3.
+	CellClient *api.Client
+	// RepoID is the repo ULID sent as the v4 repo= param (the v4 route is
+	// per-repo and keys on the ULID, not the owner/name slug).
+	RepoID string
+	// V4RepoSlug is the owner/name this v4 backend was resolved for. The v4
+	// path is used only when the request's effective single-repo scope matches
+	// it (case-insensitive), so a TUI re-search that changes repo scope cannot
+	// send the wrong repo's ULID to the cell.
+	V4RepoSlug string
+}
+
+// effectiveSingleRepoSlug returns the owner/name the search is scoped to, or ""
+// when the search is unscoped (repo:* / --all-repos) or targets more than one
+// repo. An explicit repo filter wins over the current-repo default, mirroring
+// the v3 repo-param selection below.
+func (c Config) effectiveSingleRepoSlug() string {
+	if c.AllRepos {
+		return ""
+	}
+	var explicit string
+	n := 0
+	for _, r := range c.Repos {
+		if r == AllReposFilter {
+			return "" // repo:* → unscoped
+		}
+		explicit = r
+		n++
+	}
+	if n > 1 {
+		return "" // multi-repo (rejected upstream by ValidateRepoFilters anyway)
+	}
+	if n == 1 {
+		return explicit
+	}
+	if c.Owner != "" && c.Repo != "" {
+		return c.Owner + "/" + c.Repo
+	}
+	return ""
+}
+
+// useV4 reports whether this specific request should go to the v4 query-serve
+// path. It requires the flag on, a resolved cell client + ULID, and — crucially
+// — that the request's effective scope is still the single repo the v4 backend
+// was resolved for. This keeps the TUI correct: a re-search that broadens or
+// switches repos transparently falls back to v3 rather than querying the wrong
+// cell/namespace.
+func (c Config) useV4() bool {
+	if !c.UseV4 || c.CellClient == nil || c.RepoID == "" || c.V4RepoSlug == "" {
+		return false
+	}
+	slug := c.effectiveSingleRepoSlug()
+	return slug != "" && strings.EqualFold(slug, c.V4RepoSlug)
 }
 
 // HasFilters reports whether any filter fields are set on the config.
@@ -485,11 +563,25 @@ func appendUnique(existing []string, values ...string) []string {
 
 var httpClient = &http.Client{}
 
-// Search calls the search service to perform a hybrid search.
+// Search calls the search service to perform a hybrid search. It dispatches to
+// the v4 query-serve path when the config selects it (see Config.useV4),
+// otherwise the v3 Cloudflare-worker path. Both share the same request timeout
+// and response decoding, so the two backends are interchangeable to callers
+// (including the interactive TUI, which reuses one Config across re-searches
+// and pagination).
 func Search(ctx context.Context, cfg Config) (*Response, error) {
 	ctx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
 
+	if cfg.useV4() {
+		return searchV4(ctx, cfg)
+	}
+	return searchV3(ctx, cfg)
+}
+
+// searchV3 performs the search against the v3 Cloudflare worker. This is the
+// pre-ENT-1055 behavior, kept byte-for-byte so a flag-off search is unchanged.
+func searchV3(ctx context.Context, cfg Config) (*Response, error) {
 	serviceURL := cfg.ServiceURL
 	if serviceURL == "" {
 		serviceURL = DefaultServiceURL
@@ -499,7 +591,7 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing service URL: %w", err)
 	}
-	u.Path = "/search/v1/search"
+	u.Path = v3ServicePath
 
 	q := u.Query()
 	q.Set("q", cfg.Query)
@@ -528,22 +620,7 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 	case cfg.Owner != "" && cfg.Repo != "":
 		q.Set("repo", cfg.Owner+"/"+cfg.Repo)
 	}
-	// Don't set types — let the API return all types (checkpoints, commits, sessions, etc.)
-	if cfg.Limit > 0 {
-		q.Set("limit", strconv.Itoa(cfg.Limit))
-	}
-	if cfg.Author != "" {
-		q.Set("author", cfg.Author)
-	}
-	if cfg.Date != "" {
-		q.Set("date", cfg.Date)
-	}
-	if cfg.Branch != "" {
-		q.Set("branch", cfg.Branch)
-	}
-	if cfg.Page > 0 {
-		q.Set("page", strconv.Itoa(cfg.Page))
-	}
+	addCommonSearchParams(q, cfg)
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -563,15 +640,67 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
+	return parseSearchResponse(resp.StatusCode, body)
+}
 
-	if resp.StatusCode != http.StatusOK {
+// searchV4 performs the search against the v4 query-serve path via the
+// entire-api cell gateway. The response shape mirrors v3, so decoding is
+// shared. The repo is passed as a ULID (the v4 route is per-repo), and auth /
+// host routing is handled by the pre-built cell client (jurisdictional identity
+// token). No v3 fallback here by design: when the flag selects v4, a v4 failure
+// surfaces as an error rather than silently masking rollout breakage.
+func searchV4(ctx context.Context, cfg Config) (*Response, error) {
+	q := url.Values{}
+	q.Set("q", cfg.Query)
+	q.Set("repo", cfg.RepoID)
+	addCommonSearchParams(q, cfg)
+
+	resp, err := cfg.CellClient.Get(ctx, v4ServicePath+"?"+q.Encode())
+	if err != nil {
+		return nil, fmt.Errorf("calling search service: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+	return parseSearchResponse(resp.StatusCode, body)
+}
+
+// addCommonSearchParams sets the query params shared by v3 and v4 (everything
+// except the repo scoping, which differs: v3 uses the owner/name slug, v4 the
+// ULID). types is deliberately never sent — both backends return all types.
+func addCommonSearchParams(q url.Values, cfg Config) {
+	if cfg.Limit > 0 {
+		q.Set("limit", strconv.Itoa(cfg.Limit))
+	}
+	if cfg.Author != "" {
+		q.Set("author", cfg.Author)
+	}
+	if cfg.Date != "" {
+		q.Set("date", cfg.Date)
+	}
+	if cfg.Branch != "" {
+		q.Set("branch", cfg.Branch)
+	}
+	if cfg.Page > 0 {
+		q.Set("page", strconv.Itoa(cfg.Page))
+	}
+}
+
+// parseSearchResponse decodes a search response body shared by both backends,
+// preserving the v3 error wording so callers (and error-message assertions) are
+// unchanged.
+func parseSearchResponse(statusCode int, body []byte) (*Response, error) {
+	if statusCode != http.StatusOK {
 		var errResp struct {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("search service error (%d): %s", resp.StatusCode, errResp.Error)
+			return nil, fmt.Errorf("search service error (%d): %s", statusCode, errResp.Error)
 		}
-		return nil, fmt.Errorf("search service returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("search service returned %d: %s", statusCode, string(body))
 	}
 
 	var result Response
