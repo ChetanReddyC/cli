@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -136,5 +137,23 @@ func TestCellV4_ErrorForwarded(t *testing.T) {
 	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
 	if err == nil {
 		t.Fatal("expected an error for a 400 response")
+	}
+}
+
+// TestCellV4_RouteNotFoundIsErrCellUnavailable confirms a route-level 404 (the
+// gateway has no semantic-search route — query-serve not deployed in the cell)
+// maps to the ErrCellUnavailable sentinel so fan-out callers can skip the cell
+// quietly.
+func TestCellV4_RouteNotFoundIsErrCellUnavailable(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.NotFound(w, nil)
+	}))
+	defer srv.Close()
+
+	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
+	if !errors.Is(err, ErrCellUnavailable) {
+		t.Fatalf("err = %v, want ErrCellUnavailable", err)
 	}
 }

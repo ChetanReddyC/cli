@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 )
 
@@ -353,6 +355,64 @@ func TestMergeSemanticV4Responses_PartialFailureMergesSurvivorsWithWarning(t *te
 	}
 	if len(resp.Warnings) != 1 || !strings.Contains(resp.Warnings[0], "1 of 2 regions") {
 		t.Errorf("warnings = %v, want a visible partial-failure warning naming 1 of 2 regions", resp.Warnings)
+	}
+}
+
+// TestMergeSemanticV4Responses_UnavailableCellsSkippedQuietly covers the
+// rollout reality: cells without query-serve deployed 404 on every search.
+// Those cells must not produce a user-facing warning — only real failures do,
+// and the warning's denominator counts only cells that have the route.
+func TestMergeSemanticV4Responses_UnavailableCellsSkippedQuietly(t *testing.T) {
+	t.Parallel()
+
+	ok := &search.Response{Results: []search.Result{
+		v4Ckpt("ok", 1, search.Meta{Score: 0.5}),
+	}, Total: 1}
+
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellErr(fmt.Errorf("cell gateway: %w", search.ErrCellUnavailable)),
+		v4CellErr(fmt.Errorf("resolving cell: %w", auth.ErrNoCellForJurisdiction)),
+		v4CellOK(ok),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none for an undeployed cell", resp.Warnings)
+	}
+	if len(resp.Results) != 1 {
+		t.Errorf("results = %d, want 1", len(resp.Results))
+	}
+
+	// A real failure alongside an undeployed cell warns — and counts only the
+	// cells that could actually serve (1 of 2, not 2 of 3).
+	resp, err = mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellErr(search.ErrCellUnavailable),
+		v4CellErr(errors.New("cell down")),
+		v4CellOK(ok),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Warnings) != 1 || !strings.Contains(resp.Warnings[0], "1 of 2 regions") {
+		t.Errorf("warnings = %v, want a warning naming 1 of 2 regions", resp.Warnings)
+	}
+}
+
+// TestMergeSemanticV4Responses_AllCellsUnavailable verifies the clear error
+// when no queried cell has query-serve deployed at all.
+func TestMergeSemanticV4Responses_AllCellsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	_, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellErr(search.ErrCellUnavailable),
+		v4CellErr(search.ErrCellUnavailable),
+	})
+	if err == nil {
+		t.Fatal("expected an error when every cell lacks query-serve")
+	}
+	if !strings.Contains(err.Error(), "not yet available") {
+		t.Errorf("error = %q, want a 'not yet available' explanation", err.Error())
 	}
 }
 

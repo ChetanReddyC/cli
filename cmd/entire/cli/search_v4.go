@@ -114,7 +114,10 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 			return nil, fmt.Errorf("semantic search: listing repos for cell discovery: %w", err)
 		}
 		if index.Truncated {
-			logging.Warn(ctx, "semantic search: repo index truncated; cross-repo results may be incomplete")
+			// Debug, not Warn: the user-facing channel is the Warnings entry;
+			// slog's default handler would print a Warn straight to stderr on
+			// commands that never ran logging.Init.
+			logging.Debug(ctx, "semantic search: repo index truncated; cross-repo results may be incomplete")
 			warnings = append(warnings, "repo index truncated; cross-repo results may be incomplete")
 		}
 		cells = groupReposByCell(index.Repos)
@@ -325,37 +328,30 @@ func annOrScoreOf(r search.Result) float64 {
 	return r.Meta.Score
 }
 
-// mergeSemanticV4Responses interleaves per-cell query-serve responses into one,
-// applying the SAME ordering query-serve uses within a cell (and the BFF uses
-// across cells): repos first, then tier-0 by BM25 desc, then tier-1 by rerank
-// score desc, then promoted tier-2 by ANN asc; when no cell produced tier 0/1
-// the ANN-only fallback tail is shown (deduped, then capped). Results are
-// deduped by type+id and capped to limit. Rerank scores share a space across
-// cells (same Cohere model), so interleaving is meaningful.
-//
-// Totals/counts include only cells whose results were actually mergeable: a
-// cell whose entire page was its ANN fallback (dropped because another cell
-// had tier 0/1) contributes nothing to Total, so the reported total doesn't
-// advertise results the merge can never surface.
-//
-// All-cells-failed is an error; a partial failure is logged, noted in
-// Warnings, and the surviving cells are merged.
-func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []cellCallResult[*search.Response]) (*search.Response, error) {
-	type cellPage struct {
-		body     *search.Response
-		hasUpper bool // any non-repo tier-0/1 row
-		hasRepo  bool // any repo-type row
-	}
-	var pages []cellPage
-	var failed []string
-	var lastErr error
+// semanticCellPage is one cell's successful response plus the classification
+// bits the merge keys on.
+type semanticCellPage struct {
+	body     *search.Response
+	hasUpper bool // any non-repo tier-0/1 row
+	hasRepo  bool // any repo-type row
+}
+
+// classifySemanticCells splits per-cell outcomes into successful pages, hard
+// failures, and quietly-skipped cells. A cell is skipped — not failed — when
+// it can't serve the search yet: its gateway has no query-serve route, or the
+// cluster catalog doesn't expose the placement's jurisdiction at all (a cell
+// mid-onboarding). Neither is worth warning the user about on every search.
+func classifySemanticCells(ctx context.Context, results []cellCallResult[*search.Response]) (pages []semanticCellPage, failed []string, lastErr error) {
+	var skipped []string
 	for _, r := range results {
 		switch {
+		case errors.Is(r.err, search.ErrCellUnavailable), errors.Is(r.err, auth.ErrNoCellForJurisdiction):
+			skipped = append(skipped, r.group.label())
 		case r.err != nil:
 			lastErr = r.err
 			failed = append(failed, r.group.label())
 		case r.value != nil:
-			p := cellPage{body: r.value}
+			p := semanticCellPage{body: r.value}
 			for _, res := range r.value.Results {
 				switch {
 				case res.Type == search.TypeRepo:
@@ -367,20 +363,26 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 			pages = append(pages, p)
 		}
 	}
-	if len(pages) == 0 {
-		if lastErr != nil {
-			return nil, fmt.Errorf("semantic search: %w", lastErr)
-		}
-		return &search.Response{Results: []search.Result{}, Page: 1}, nil
+	if len(skipped) > 0 {
+		logging.Debug(ctx, "semantic search: cells without query-serve skipped", "skipped_cells", skipped)
 	}
-	var warnings []string
-	if len(failed) > 0 {
-		logging.Warn(ctx, "semantic search: partial failure; results may be incomplete",
-			"succeeded", len(pages), "total", len(results), "failed_cells", failed)
-		warnings = append(warnings, fmt.Sprintf("search failed in %d of %d regions; results may be incomplete", len(failed), len(results)))
+	if len(pages) == 0 && lastErr == nil && len(skipped) > 0 {
+		lastErr = errNoRegionAvailable
 	}
+	return pages, failed, lastErr
+}
 
-	globalUpper := false
+// errNoRegionAvailable is returned when every queried cell lacks query-serve.
+var errNoRegionAvailable = errors.New("semantic search is not yet available in the region(s) hosting this search")
+
+// rankSemanticResults buckets every page's rows and applies the ordering
+// query-serve uses within a cell (and the BFF uses across cells): repos first,
+// then tier-0 by BM25 desc, tier-1 by rerank score desc, promoted tier-2 by
+// ANN asc. Tier-2 rows arriving alongside tier 0/1 from the same cell were
+// deliberately promoted by query-serve; a cell whose page is entirely tier 2
+// had nothing better — its ANN fallback, shown (uncapped here) only when tiers
+// 0/1 are empty everywhere.
+func rankSemanticResults(pages []semanticCellPage) (merged []search.Result, globalUpper bool) {
 	for _, p := range pages {
 		if p.hasUpper {
 			globalUpper = true
@@ -390,10 +392,6 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 
 	var repos, tier0, tier1, promotedTier2, fallbackTier2 []search.Result
 	for _, p := range pages {
-		// Tier-2 results arriving alongside tier 0/1 from the same cell were
-		// deliberately promoted by query-serve (they keep the tier:2 tag). A
-		// cell whose page is entirely tier 2 had nothing better — its ANN
-		// fallback, only shown globally when tiers 0/1 are empty everywhere.
 		for _, r := range p.body.Results {
 			switch {
 			case r.Type == search.TypeRepo:
@@ -410,25 +408,26 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 		}
 	}
 	sort.SliceStable(repos, func(i, j int) bool { return repos[i].Meta.Score > repos[j].Meta.Score })
-	sort.SliceStable(tier0, func(i, j int) bool { return bm25Of(tier0[i]) > bm25Of(tier0[j]) })
-	sort.SliceStable(tier1, func(i, j int) bool { return tier1[i].Meta.Score > tier1[j].Meta.Score })
-	sort.SliceStable(promotedTier2, func(i, j int) bool { return annOrScoreOf(promotedTier2[i]) < annOrScoreOf(promotedTier2[j]) })
-
-	var merged []search.Result
+	merged = append(merged, repos...)
 	if globalUpper {
-		merged = append(merged, repos...)
+		sort.SliceStable(tier0, func(i, j int) bool { return bm25Of(tier0[i]) > bm25Of(tier0[j]) })
+		sort.SliceStable(tier1, func(i, j int) bool { return tier1[i].Meta.Score > tier1[j].Meta.Score })
+		sort.SliceStable(promotedTier2, func(i, j int) bool { return annOrScoreOf(promotedTier2[i]) < annOrScoreOf(promotedTier2[j]) })
 		merged = append(merged, tier0...)
 		merged = append(merged, tier1...)
 		merged = append(merged, promotedTier2...)
 	} else {
 		sort.SliceStable(fallbackTier2, func(i, j int) bool { return annOrScoreOf(fallbackTier2[i]) < annOrScoreOf(fallbackTier2[j]) })
-		merged = append(merged, repos...)
 		merged = append(merged, fallbackTier2...)
 	}
+	return merged, globalUpper
+}
 
-	// Dedup by type+id (a repo mirrored across cells returns the same logical
-	// result from each); keep the first (higher-ranked). Results without an
-	// id are always kept.
+// dedupSemanticResults removes cross-cell duplicates by type+id (a repo
+// mirrored across cells returns the same logical result from each), keeping
+// the first (higher-ranked) copy. Results without an id are always kept. The
+// per-type dupe tally feeds the total/count corrections.
+func dedupSemanticResults(merged []search.Result) ([]search.Result, map[string]int) {
 	seen := make(map[string]bool, len(merged))
 	dupesByType := make(map[string]int)
 	deduped := merged[:0]
@@ -446,7 +445,66 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 		seen[key] = true
 		deduped = append(deduped, r)
 	}
-	merged = deduped
+	return deduped, dupesByType
+}
+
+// aggregateSemanticTotals sums per-cell totals and counts, minus dedup, and
+// excluding cells whose entire page was a discarded ANN fallback — their
+// matches are unreachable, so they must not be advertised.
+func aggregateSemanticTotals(pages []semanticCellPage, globalUpper bool, dupesByType map[string]int) (int, *search.TypeCounts) {
+	dupes := 0
+	for _, n := range dupesByType {
+		dupes += n
+	}
+	total := -dupes
+	counts := &search.TypeCounts{}
+	for _, p := range pages {
+		if globalUpper && !p.hasUpper && !p.hasRepo {
+			continue
+		}
+		total += p.body.Total
+		if p.body.Counts != nil {
+			counts.Repos += p.body.Counts.Repos
+			counts.Checkpoints += p.body.Counts.Checkpoints
+			counts.Commits += p.body.Counts.Commits
+			counts.PRs += p.body.Counts.PRs
+			counts.Sessions += p.body.Counts.Sessions
+		}
+	}
+	subtractDupeCounts(counts, dupesByType)
+	return max(total, 0), counts
+}
+
+// mergeSemanticV4Responses interleaves per-cell query-serve responses into one,
+// applying the SAME ordering query-serve uses within a cell (see
+// rankSemanticResults); when no cell produced tier 0/1 the ANN-only fallback
+// tail is shown (deduped, then capped). Results are deduped by type+id and
+// capped to limit. Rerank scores share a space across cells (same Cohere
+// model), so interleaving is meaningful.
+//
+// Totals/counts include only cells whose results were actually mergeable (see
+// aggregateSemanticTotals). All-cells-failed is an error; a partial failure is
+// noted in Warnings and the surviving cells are merged.
+func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []cellCallResult[*search.Response]) (*search.Response, error) {
+	pages, failed, lastErr := classifySemanticCells(ctx, results)
+	if len(pages) == 0 {
+		if lastErr != nil {
+			return nil, fmt.Errorf("semantic search: %w", lastErr)
+		}
+		return &search.Response{Results: []search.Result{}, Page: 1}, nil
+	}
+	var warnings []string
+	if len(failed) > 0 {
+		// Debug, not Warn: the warning below already reaches the user via
+		// Response.Warnings, and slog's default handler would print a Warn
+		// straight to stderr on commands that never ran logging.Init.
+		logging.Debug(ctx, "semantic search: partial failure; results may be incomplete",
+			"succeeded", len(pages), "total", len(results), "failed_cells", failed)
+		warnings = append(warnings, fmt.Sprintf("search failed in %d of %d regions; results may be incomplete", len(failed), len(pages)+len(failed)))
+	}
+
+	merged, globalUpper := rankSemanticResults(pages)
+	merged, dupesByType := dedupSemanticResults(merged)
 
 	// Cap the ANN-only fallback tail AFTER dedup (repos always precede it),
 	// so cross-cell duplicates don't shrink the visible page below the cap.
@@ -462,7 +520,6 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 			merged = merged[:nRepos+mergedTier2Max]
 		}
 	}
-
 	if limit > 0 && len(merged) > limit {
 		merged = merged[:limit]
 	}
@@ -470,39 +527,11 @@ func mergeSemanticV4Responses(ctx context.Context, limit, page int, results []ce
 		merged = []search.Result{}
 	}
 
-	dupes := 0
-	for _, n := range dupesByType {
-		dupes += n
-	}
-	total := -dupes
-	counts := &search.TypeCounts{}
-	for _, p := range pages {
-		if globalUpper && !p.hasUpper && !p.hasRepo {
-			// This cell's whole page was its ANN fallback and was discarded —
-			// its matches are unreachable, so don't advertise them.
-			continue
-		}
-		total += p.body.Total
-		if p.body.Counts != nil {
-			counts.Repos += p.body.Counts.Repos
-			counts.Checkpoints += p.body.Counts.Checkpoints
-			counts.Commits += p.body.Counts.Commits
-			counts.PRs += p.body.Counts.PRs
-			counts.Sessions += p.body.Counts.Sessions
-		}
-	}
-	subtractDupeCounts(counts, dupesByType)
-	if total < 0 {
-		total = 0
-	}
-	if page < 1 {
-		page = 1
-	}
-
+	total, counts := aggregateSemanticTotals(pages, globalUpper, dupesByType)
 	return &search.Response{
 		Results:  merged,
 		Total:    total,
-		Page:     page,
+		Page:     max(page, 1),
 		Counts:   counts,
 		Warnings: warnings,
 	}, nil

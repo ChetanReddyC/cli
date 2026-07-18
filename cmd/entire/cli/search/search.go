@@ -23,6 +23,13 @@ const apiTimeout = 30 * time.Second
 // jurisdictional identity token, skipping the BFF hop.
 const v4ServicePath = "/api/v1/semantic-search/search/v1/search"
 
+// ErrCellUnavailable reports that a cell's gateway does not expose the
+// semantic-search route at all (HTTP 404 at the route level) — query-serve is
+// not deployed in that cell yet. Callers fanning out across cells match it
+// with errors.Is and skip the cell quietly instead of warning the user about
+// a "failed" region.
+var ErrCellUnavailable = errors.New("semantic search is not available in this cell")
+
 // WildcardQuery is the query string used when only filters are provided (no search terms).
 const WildcardQuery = "*"
 
@@ -560,6 +567,13 @@ func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []strin
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		// The gateway has no semantic-search route (plain "404 page not
+		// found") — query-serve isn't deployed in this cell. Deployed cells
+		// answer unknown repos with an empty 200, so a route-level 404 is
+		// distinctive.
+		return nil, ErrCellUnavailable
 	}
 	return parseSearchResponse(resp.StatusCode, body)
 }
