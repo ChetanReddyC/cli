@@ -3,9 +3,12 @@ package checkpoint
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"sort"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // kindRoutingStore resolves id-keyed reads across the two git backends so a repo
@@ -24,7 +27,8 @@ import (
 // kind-routed: they go to the configured primary (+ mirrors) via writer, since
 // a new checkpoint's ID is already minted to match the primary's format (see
 // checkpoint.GenerateCheckpointID). Backfills update an existing checkpoint,
-// so they follow the same store order as reads — see Write.
+// so they follow the same store order as reads, though only
+// ErrCheckpointNotFound falls through (stricter than reads) — see Write.
 type kindRoutingStore struct {
 	writer      PersistentStore // configured primary + mirrors (fanout); handles Write
 	branch      PersistentStore // git-branch store; serves hex reads
@@ -190,6 +194,14 @@ func (s *kindRoutingStore) ReadSessionMetadataAndPrompts(ctx context.Context, ch
 // which — like reads — may live in either git backend (e.g. a pre-migration hex
 // checkpoint still on the v1 branch under a git-refs primary), so they follow
 // the read order, falling through to the next store on ErrCheckpointNotFound.
+//
+// The fallthrough is deliberately stricter than read routing's firstResolved
+// (which falls through on absent OR any error): only the not-found sentinel
+// falls through here. Redirecting a write to another backend after a transient
+// primary failure could fork the data, so a hard error aborts and surfaces.
+// Note the stores' backfill absence probes are local-only (the refs store's
+// refBase does not on-demand fetch like its read path does); a checkpoint
+// whose ref exists only remotely backfills to the fallback store.
 func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
 	checkpointID, isBackfill := backfillTarget(req)
 	if !isBackfill {
@@ -197,10 +209,26 @@ func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
 	}
 	stores := s.backfillOrder(checkpointID)
 	var err error
-	for _, st := range stores {
+	for i, st := range stores {
 		err = st.Write(ctx, req)
 		if !errors.Is(err, ErrCheckpointNotFound) {
+			if err == nil && i > 0 {
+				// The most consequential routing decision here: the data landed
+				// somewhere other than the configured primary, and mirrors
+				// (which follow the primary) were skipped. Record it so "why is
+				// this backfill on the v1 branch and not in refs / the mirror"
+				// stays diagnosable.
+				logging.Info(ctx, "checkpoint: backfill served by fallback store; absent from primary, mirrors skipped",
+					slog.String("checkpoint_id", checkpointID.String()),
+					slog.String("request_type", fmt.Sprintf("%T", req)))
+			}
 			return err //nolint:wrapcheck // in-package store error surfaced verbatim
+		}
+		if i < len(stores)-1 {
+			logging.Debug(ctx, "checkpoint: backfill target absent in store, trying next",
+				slog.String("checkpoint_id", checkpointID.String()),
+				slog.String("request_type", fmt.Sprintf("%T", req)),
+				slog.Int("store_index", i))
 		}
 	}
 	return err //nolint:wrapcheck // ErrCheckpointNotFound from the final store, surfaced verbatim
@@ -209,6 +237,11 @@ func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
 // backfillTarget returns the checkpoint ID a backfill request updates.
 // ok is false for Session (a create) and unknown request types, which are not
 // kind-routed.
+//
+// WriteRequest is a closed union: any new backfill-shaped request type MUST be
+// added to this switch, or it silently gets create routing — primary-only, no
+// fallback — which for a pre-migration checkpoint reintroduces the discarded-
+// write bug this routing exists to prevent.
 func backfillTarget(req WriteRequest) (id.CheckpointID, bool) {
 	switch r := req.(type) {
 	case SessionTranscript:
@@ -248,6 +281,8 @@ func (s *kindRoutingStore) isPrimary(st PersistentStore) bool {
 	case BackendTypeGitRefs:
 		return st == s.refs
 	default:
+		// Not a real configuration today (buildPrimary only accepts the git
+		// backends); backfills would bypass writer and therefore mirrors.
 		return false
 	}
 }

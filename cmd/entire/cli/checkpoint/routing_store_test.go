@@ -330,6 +330,90 @@ func TestKindRoutingStore_BackfillMirrorFanout(t *testing.T) {
 	})
 }
 
+func TestKindRoutingStore_BackfillDoesNotCreateSessionsBranchOnMiss(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// A refs-only repo has no v1 branch. Probing the branch store for a hex
+	// checkpoint that exists nowhere (e.g. a typo'd `explain --generate <hex>`)
+	// must report not-found WITHOUT creating the sessions branch as a side
+	// effect — the branch would otherwise become live (List union, pre-push).
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := newGitRefsStore(repo)
+
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+
+	err := router.Write(ctx, SessionSummary{
+		CheckpointID: id.MustCheckpointID("a1b2c3d4e5f6"),
+		Summary:      &Summary{Intent: "orphan"},
+	})
+	require.ErrorIs(t, err, ErrCheckpointNotFound)
+
+	_, refErr := repo.Reference(DefaultV1Refs().Primary, true)
+	require.ErrorIs(t, refErr, plumbing.ErrReferenceNotFound,
+		"a backfill miss must not create the sessions branch")
+}
+
+func TestKindRoutingStore_BackfillHardErrorAbortsFallthrough(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// Only ErrCheckpointNotFound may fall through — deliberately stricter than
+	// read routing, which falls through on any error. Redirecting a write to
+	// another backend after a transient primary failure could fork the data:
+	// the checkpoint also exists on the branch here, and the backfill must NOT
+	// reach it when the primary failed hard.
+	hexID := id.MustCheckpointID("a1b2c3d4e5f6")
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
+
+	failing := &fakePrimary{writeErr: errors.New("refs backend io error")}
+	router := newKindRoutingStore(failing, branch, failing, BackendTypeGitRefs)
+
+	err := router.Write(ctx, SessionSummary{
+		CheckpointID: hexID,
+		Summary:      &Summary{Intent: "must not land"},
+	})
+	require.ErrorContains(t, err, "refs backend io error", "a hard primary error must surface verbatim")
+
+	meta, readErr := branch.ReadSessionMetadata(ctx, hexID, 0)
+	require.NoError(t, readErr)
+	require.Nil(t, meta.Summary, "the fallback store must not receive a write after a hard primary error")
+}
+
+func TestKindRoutingStore_BackfillPrefersRefsWhenInBothBackends(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// A migrated hex checkpoint can coexist in both backends. The backfill must
+	// land on refs (read order under a refs primary), because refs-first reads
+	// would never surface a summary written to the branch copy.
+	hexID := id.MustCheckpointID("a1b2c3d4e5f6")
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := newGitRefsStore(repo)
+	writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
+	writeRoutingCheckpoint(t, refs, hexID, "hex-migrated-to-refs")
+
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+
+	require.NoError(t, router.Write(ctx, SessionSummary{
+		CheckpointID: hexID,
+		Summary:      &Summary{Intent: "lands on refs"},
+	}))
+
+	meta, err := router.ReadSessionMetadata(ctx, hexID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, meta.Summary, "refs-first reads must see the backfilled summary")
+	assert.Equal(t, "lands on refs", meta.Summary.Intent)
+
+	branchMeta, err := branch.ReadSessionMetadata(ctx, hexID, 0)
+	require.NoError(t, err)
+	assert.Nil(t, branchMeta.Summary, "the branch copy must not have received the backfill")
+}
+
 func TestKindRoutingStore_GetCheckpointAuthorRoutes(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
