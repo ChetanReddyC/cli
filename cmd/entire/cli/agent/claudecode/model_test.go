@@ -62,6 +62,22 @@ func TestExtractModel_NoModelField(t *testing.T) {
 	}
 }
 
+func TestExtractModel_IgnoresNonInitSystemEnvelope(t *testing.T) {
+	t.Parallel()
+	// A "system" line that is not the init envelope must not be mistaken for the
+	// init-model fallback, even if it happens to carry a "model" field.
+	transcript := `{"type":"system","subtype":"compact_boundary","model":"stale-model"}
+{"type":"user","message":{"role":"user","content":"hi"}}`
+
+	model, err := (&ClaudeCodeAgent{}).ExtractModel([]byte(transcript))
+	if err != nil {
+		t.Fatalf("ExtractModel returned error: %v", err)
+	}
+	if model != "" {
+		t.Errorf("expected empty model for non-init system envelope, got %q", model)
+	}
+}
+
 func TestExtractModel_IgnoresMalformedLines(t *testing.T) {
 	t.Parallel()
 	// A corrupt/partial line (e.g. from an incompletely-flushed transcript) must

@@ -7,9 +7,11 @@ import (
 
 // modelScanLine captures the two places a Claude Code transcript records the
 // model: the top-level "model" on the system/init line, and "message.model" on
-// each assistant message.
+// each assistant message. Subtype distinguishes the init envelope from other
+// "system" envelopes.
 type modelScanLine struct {
 	Type    string `json:"type"`
+	Subtype string `json:"subtype"`
 	Model   string `json:"model"`
 	Message struct {
 		Model string `json:"model"`
@@ -48,7 +50,7 @@ func (c *ClaudeCodeAgent) ExtractModel(transcriptData []byte) (string, error) {
 				assistantModel = line.Message.Model
 			}
 		case "system":
-			if initModel == "" && line.Model != "" {
+			if line.Subtype == "init" && initModel == "" && line.Model != "" {
 				initModel = line.Model
 			}
 		}
