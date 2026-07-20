@@ -459,7 +459,22 @@ func aggregateSemanticTotals(pages []semanticCellPage, globalUpper bool, dupesBy
 	total := -dupes
 	counts := &search.TypeCounts{}
 	for _, p := range pages {
-		if globalUpper && !p.hasUpper && !p.hasRepo {
+		if globalUpper && !p.hasUpper {
+			// This page's non-repo rows were its ANN fallback and were
+			// dropped by the merge — those matches are unreachable, so only
+			// its repo rows (which are always merged) may be counted.
+			repoRows := 0
+			if p.body.Counts != nil {
+				repoRows = p.body.Counts.Repos
+			} else {
+				for _, r := range p.body.Results {
+					if r.Type == search.TypeRepo {
+						repoRows++
+					}
+				}
+			}
+			total += repoRows
+			counts.Repos += repoRows
 			continue
 		}
 		total += p.body.Total

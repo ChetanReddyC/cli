@@ -231,6 +231,46 @@ func TestMergeSemanticV4Responses_FallbackDroppedWhenUpperTiersExist(t *testing.
 	}
 }
 
+// TestMergeSemanticV4Responses_RepoOnlyPageCountsJustRepos covers a cell whose
+// page mixes a repo hit with tier-2-only rows while another cell has tier 0/1:
+// the tier-2 rows are dropped by the merge, so only the repo rows may count
+// toward Total/Counts (trail finding 019f807e-60a3).
+func TestMergeSemanticV4Responses_RepoOnlyPageCountsJustRepos(t *testing.T) {
+	t.Parallel()
+
+	upper := &search.Response{
+		Results: []search.Result{v4Ckpt("good", 1, search.Meta{Score: 0.7})},
+		Total:   1,
+		Counts:  &search.TypeCounts{Checkpoints: 1},
+	}
+	repoPlusFallback := &search.Response{
+		Results: []search.Result{
+			v4RepoRow(t, "repo-1", 0.9),
+			v4Ckpt("ann-only", 2, search.Meta{ANNScore: fptr(0.2)}),
+		},
+		Total:  50,
+		Counts: &search.TypeCounts{Repos: 1, Checkpoints: 49},
+	}
+
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellOK(upper), v4CellOK(repoPlusFallback),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := v4ResultIDs(t, resp.Results)
+	want := []string{"repo-1", "good"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("results = %v, want %v (repo row merged, ann-only dropped)", got, want)
+	}
+	if resp.Total != 2 {
+		t.Errorf("total = %d, want 2 (1 upper + 1 repo row; the 49 dropped tier-2 matches are unreachable)", resp.Total)
+	}
+	if resp.Counts.Checkpoints != 1 || resp.Counts.Repos != 1 {
+		t.Errorf("counts = %+v, want checkpoints=1 repos=1", resp.Counts)
+	}
+}
+
 // --- merge: dedup ---------------------------------------------------------------
 
 // TestMergeSemanticV4Responses_DedupAdjustsTotalsAndCounts verifies a result

@@ -1515,3 +1515,27 @@ func TestSearchModel_ComputeTypeCounts_UsesAPICounts(t *testing.T) {
 		t.Errorf("sessions = %d, want 3", ss)
 	}
 }
+
+// TestSearchModel_WarningShownInStatusRow pins the TUI counterpart of the
+// one-shot path's stderr warnings: a completeness note arriving with search
+// results (partial cell failure, truncated index) must be visible in the
+// status row, and a fresh warning-free search must clear it.
+func TestSearchModel_WarningShownInStatusRow(t *testing.T) {
+	t.Parallel()
+	m := testModel()
+
+	m = updateModel(t, m, searchResultsMsg{
+		results:  testResults(),
+		total:    2,
+		warnings: []string{"search failed in 1 of 2 regions; results may be incomplete"},
+	})
+	view := m.View().Content
+	if !strings.Contains(view, "1 of 2 regions") {
+		t.Errorf("view should surface the completeness warning, got:\n%s", view)
+	}
+
+	m = updateModel(t, m, searchResultsMsg{results: testResults(), total: 2})
+	if view := m.View().Content; strings.Contains(view, "1 of 2 regions") {
+		t.Error("a warning-free search must clear the previous warning")
+	}
+}

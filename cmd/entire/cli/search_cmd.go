@@ -288,6 +288,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			}
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles, codeOpts)
 			model.semanticSearch = searcher
+			model.warning = strings.Join(resp.Warnings, "; ")
 			p := tea.NewProgram(model)
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("TUI error: %w", err)

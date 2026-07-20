@@ -35,16 +35,18 @@ const (
 
 // searchResultsMsg is sent when a search API call completes.
 type searchResultsMsg struct {
-	results []search.Result
-	total   int
-	counts  *search.TypeCounts
-	err     error
+	results  []search.Result
+	total    int
+	counts   *search.TypeCounts
+	warnings []string
+	err      error
 }
 
 // searchMoreResultsMsg is sent when a fetch-more-results call completes.
 type searchMoreResultsMsg struct {
-	results []search.Result
-	err     error
+	results  []search.Result
+	warnings []string
+	err      error
 }
 
 // codeSearchResultsMsg is sent when an async code search call completes.
@@ -148,6 +150,11 @@ type searchModel struct {
 	// pagination). The command layer injects its session searcher so every
 	// TUI search shares the invocation's discovery cache.
 	semanticSearch semanticSearcher
+
+	// warning is the current search's completeness note (partial cell
+	// failure, truncated repo index), shown in the status row — the TUI
+	// counterpart of the one-shot path's stderr warnings.
+	warning string
 
 	// darkBg is captured once before bubbletea takes over the terminal so the
 	// snippet renderer never re-queries the terminal via OSC during the Update
@@ -333,6 +340,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		m.results = msg.results
 		m.total = msg.total
 		m.counts = msg.counts
+		m.warning = strings.Join(msg.warnings, "; ")
 		m.apiPage = 1
 		m.cursor = 0
 		m.page = 0
@@ -346,6 +354,9 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 			m.searchErr = msg.err.Error()
 			m = m.refreshBrowseContent()
 			return m, nil
+		}
+		if len(msg.warnings) > 0 {
+			m.warning = strings.Join(msg.warnings, "; ")
 		}
 		m.apiPage++
 		if len(msg.results) > 0 {
@@ -660,7 +671,7 @@ func (m searchModel) performSearch(cfg search.Config) tea.Cmd {
 		if err != nil {
 			return searchResultsMsg{err: err}
 		}
-		return searchResultsMsg{results: resp.Results, total: resp.Total, counts: resp.Counts}
+		return searchResultsMsg{results: resp.Results, total: resp.Total, counts: resp.Counts, warnings: resp.Warnings}
 	}
 }
 
@@ -682,7 +693,7 @@ func (m searchModel) fetchMoreResults(cfg search.Config, page int) tea.Cmd {
 		if err != nil {
 			return searchMoreResultsMsg{err: err}
 		}
-		return searchMoreResultsMsg{results: resp.Results}
+		return searchMoreResultsMsg{results: resp.Results, warnings: resp.Warnings}
 	}
 }
 
@@ -999,6 +1010,9 @@ func (m searchModel) viewListStatusRow() string {
 	right := fmt.Sprintf("%d results", n)
 	if pages := m.totalPages(); pages > 1 {
 		right = fmt.Sprintf("page %d/%d · %d results", m.page+1, pages, n)
+	}
+	if m.warning != "" {
+		right = "⚠ " + m.warning + " · " + right
 	}
 	if lipgloss.Width(right) > contentWidth {
 		right = stringutil.TruncateRunes(right, contentWidth, "…")
