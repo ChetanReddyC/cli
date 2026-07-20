@@ -20,10 +20,11 @@ import (
 //     a git-branch primary the branch is authoritative for hex, so refs is not
 //     consulted.
 //
-// List unions both backends (disjoint ID spaces). Writes are NOT kind-routed:
-// they go to the configured primary (+ mirrors) via writer, since a new
-// checkpoint's ID is already minted to match the primary's format
-// (see checkpoint.GenerateCheckpointID).
+// List unions both backends (disjoint ID spaces). Creates (Session) are NOT
+// kind-routed: they go to the configured primary (+ mirrors) via writer, since
+// a new checkpoint's ID is already minted to match the primary's format (see
+// checkpoint.GenerateCheckpointID). Backfills update an existing checkpoint,
+// so they follow the same store order as reads — see Write.
 type kindRoutingStore struct {
 	writer      PersistentStore // configured primary + mirrors (fanout); handles Write
 	branch      PersistentStore // git-branch store; serves hex reads
@@ -183,9 +184,72 @@ func (s *kindRoutingStore) ReadSessionMetadataAndPrompts(ctx context.Context, ch
 	return mp.meta, mp.prompts, err
 }
 
-// Write is not kind-routed: it targets the configured primary (+ mirrors).
+// Write routes a create (Session) to the configured primary (+ mirrors): a new
+// checkpoint's ID is already minted to match the primary's format (see
+// checkpoint.GenerateCheckpointID). Backfills target an EXISTING checkpoint,
+// which — like reads — may live in either git backend (e.g. a pre-migration hex
+// checkpoint still on the v1 branch under a git-refs primary), so they follow
+// the read order, falling through to the next store on ErrCheckpointNotFound.
 func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
-	return s.writer.Write(ctx, req) //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
+	checkpointID, isBackfill := backfillTarget(req)
+	if !isBackfill {
+		return s.writer.Write(ctx, req) //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
+	}
+	stores := s.backfillOrder(checkpointID)
+	var err error
+	for _, st := range stores {
+		err = st.Write(ctx, req)
+		if !errors.Is(err, ErrCheckpointNotFound) {
+			return err //nolint:wrapcheck // in-package store error surfaced verbatim
+		}
+	}
+	return err //nolint:wrapcheck // ErrCheckpointNotFound from the final store, surfaced verbatim
+}
+
+// backfillTarget returns the checkpoint ID a backfill request updates.
+// ok is false for Session (a create) and unknown request types, which are not
+// kind-routed.
+func backfillTarget(req WriteRequest) (id.CheckpointID, bool) {
+	switch r := req.(type) {
+	case SessionTranscript:
+		return r.CheckpointID, true
+	case SessionSummary:
+		return r.CheckpointID, true
+	case CheckpointAttribution:
+		return r.CheckpointID, true
+	default:
+		return id.EmptyCheckpointID, false
+	}
+}
+
+// backfillOrder returns the write targets for a backfill of checkpointID, in
+// the same priority order reads use. The store that is the configured primary
+// is replaced by writer, so a backfill landing on the primary still fans out to
+// mirrors; a backfill landing on a fallback store deliberately skips mirrors
+// (mirrors follow the primary).
+func (s *kindRoutingStore) backfillOrder(checkpointID id.CheckpointID) []PersistentStore {
+	order := s.readOrder(checkpointID)
+	targets := make([]PersistentStore, len(order))
+	for i, st := range order {
+		if s.isPrimary(st) {
+			targets[i] = s.writer
+		} else {
+			targets[i] = st
+		}
+	}
+	return targets
+}
+
+// isPrimary reports whether st is the configured primary's read store.
+func (s *kindRoutingStore) isPrimary(st PersistentStore) bool {
+	switch s.primaryType {
+	case BackendTypeGitBranch:
+		return st == s.branch
+	case BackendTypeGitRefs:
+		return st == s.refs
+	default:
+		return false
+	}
 }
 
 // kindRoutingStoreWithAuthor adds the optional AuthorReader capability, routing

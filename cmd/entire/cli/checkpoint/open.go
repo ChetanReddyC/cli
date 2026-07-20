@@ -80,10 +80,11 @@ func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores,
 	}
 	writer := newFanoutStore(primary, mirrors)
 
-	// Read routing: resolve id-keyed reads by the checkpoint's format across both
-	// git backends (a ULID lives in refs, a hex ID on the branch or a migrated
-	// ref), so a coexisting / mid-migration repo reads either format without
-	// reconfiguring. Writes still go through writer (configured primary + mirrors).
+	// Kind routing: resolve id-keyed reads and backfill writes by the
+	// checkpoint's format across both git backends (a ULID lives in refs, a hex
+	// ID on the branch or a migrated ref), so a coexisting / mid-migration repo
+	// handles either format without reconfiguring. Creates still go through
+	// writer (configured primary + mirrors).
 	branchStore, refsStore, err := buildKindReadStores(ctx, env, primaryType, primary)
 	if err != nil {
 		return nil, err

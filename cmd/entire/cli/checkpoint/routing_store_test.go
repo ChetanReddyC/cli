@@ -194,6 +194,142 @@ func TestKindRoutingStore_ListDedupesAcrossBackends(t *testing.T) {
 	assert.Equal(t, 1, count, "a checkpoint present in both backends should appear once")
 }
 
+func TestKindRoutingStore_SummaryBackfillFallsBackToBranch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// Regression: `entire checkpoint explain --generate <hex-id>` under a
+	// git-refs primary. The checkpoint resolves via the branch read fallback,
+	// but the summary write went only to the refs primary, which has no ref
+	// for it, so the generated summary was discarded with ErrCheckpointNotFound.
+	hexID := id.MustCheckpointID("a1b2c3d4e5f6")
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := newGitRefsStore(repo)
+	writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
+
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+
+	err := router.Write(ctx, SessionSummary{
+		CheckpointID: hexID,
+		Summary:      &Summary{Intent: "test intent", Outcome: "test outcome"},
+	})
+	require.NoError(t, err, "summary backfill for a pre-migration hex checkpoint must fall back to the branch store")
+
+	meta, err := router.ReadSessionMetadata(ctx, hexID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, meta.Summary, "backfilled summary should be readable back through the router")
+	assert.Equal(t, "test intent", meta.Summary.Intent)
+}
+
+func TestKindRoutingStore_TranscriptAndAttributionBackfillsFallBackToBranch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	hexID := id.MustCheckpointID("a1b2c3d4e5f6")
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := newGitRefsStore(repo)
+	writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
+
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+
+	err := router.Write(ctx, SessionTranscript{
+		CheckpointID: hexID,
+		SessionID:    "hex-on-branch",
+		Transcript:   redact.AlreadyRedacted([]byte("finalized transcript")),
+	})
+	require.NoError(t, err, "transcript backfill for a hex checkpoint on the branch must fall back to the branch store")
+
+	err = router.Write(ctx, CheckpointAttribution{
+		CheckpointID: hexID,
+		Attribution:  &Attribution{AgentLines: 7},
+	})
+	require.NoError(t, err, "attribution backfill for a hex checkpoint on the branch must fall back to the branch store")
+}
+
+func TestKindRoutingStore_BackfillULIDRoutesToRefs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// A ULID checkpoint only ever lives in refs, so its backfill must reach the
+	// refs store even when the configured primary is git-branch.
+	ulidID := id.MustCheckpointID(routingSampleULID)
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := newGitRefsStore(repo)
+	writeRoutingCheckpoint(t, refs, ulidID, "ulid-in-refs")
+
+	router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch)
+
+	err := router.Write(ctx, SessionSummary{
+		CheckpointID: ulidID,
+		Summary:      &Summary{Intent: "ulid intent"},
+	})
+	require.NoError(t, err, "summary backfill for a ULID checkpoint must route to refs under a git-branch primary")
+
+	meta, err := router.ReadSessionMetadata(ctx, ulidID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, meta.Summary)
+	assert.Equal(t, "ulid intent", meta.Summary.Intent)
+}
+
+func TestKindRoutingStore_BackfillMissingEverywhereReturnsNotFound(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := newGitRefsStore(repo)
+
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+
+	err := router.Write(ctx, SessionSummary{
+		CheckpointID: id.MustCheckpointID("a1b2c3d4e5f6"),
+		Summary:      &Summary{Intent: "orphan"},
+	})
+	require.ErrorIs(t, err, ErrCheckpointNotFound, "a backfill for a checkpoint absent from every backend still reports not-found")
+}
+
+func TestKindRoutingStore_BackfillMirrorFanout(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	hexID := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	t.Run("backfill landing on the primary still fans out to mirrors", func(t *testing.T) {
+		t.Parallel()
+		_, repo, _ := newTestRepo(t)
+		branch := NewGitStore(repo, DefaultV1Refs())
+		refs := newGitRefsStore(repo)
+		writeRoutingCheckpoint(t, refs, hexID, "hex-migrated-to-refs")
+
+		mirror := &fakeMirror{}
+		writer := newFanoutStore(refs, []Writer{mirror})
+		router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs)
+
+		req := SessionSummary{CheckpointID: hexID, Summary: &Summary{Intent: "mirrored"}}
+		require.NoError(t, router.Write(ctx, req))
+		assert.Len(t, mirror.writes, 1, "a backfill served by the primary should reach mirrors")
+	})
+
+	t.Run("backfill falling back to the branch skips mirrors", func(t *testing.T) {
+		t.Parallel()
+		_, repo, _ := newTestRepo(t)
+		branch := NewGitStore(repo, DefaultV1Refs())
+		refs := newGitRefsStore(repo)
+		writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
+
+		mirror := &fakeMirror{}
+		writer := newFanoutStore(refs, []Writer{mirror})
+		router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs)
+
+		req := SessionSummary{CheckpointID: hexID, Summary: &Summary{Intent: "not mirrored"}}
+		require.NoError(t, router.Write(ctx, req))
+		assert.Empty(t, mirror.writes, "a backfill served by a fallback store must not fan out to mirrors (mirrors follow the primary)")
+	})
+}
+
 func TestKindRoutingStore_GetCheckpointAuthorRoutes(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
