@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConfirmControlPlaneDeletion covers the non-TTY decision paths of the
@@ -111,6 +114,96 @@ func TestFetchAllPages(t *testing.T) {
 			t.Fatal("expected error on non-advancing cursor, got nil")
 		}
 	})
+}
+
+// TestFetchPagesBounded covers the budget branch fetchAllPages delegates to:
+// the walk stops once the budget is reached (never splitting a page, so it can
+// overshoot) and reports that entries remain; budget<=0 walks to the end.
+func TestFetchPagesBounded(t *testing.T) {
+	t.Parallel()
+
+	// Three pages keyed by the cursor the previous page returned.
+	pages := map[string][]string{"": {"a", "b"}, "c1": {"c", "d"}, "c2": {"e"}}
+	nexts := map[string]string{"": "c1", "c1": "c2", "c2": ""}
+
+	t.Run("stops at the budget and reports the partial walk", func(t *testing.T) {
+		t.Parallel()
+		got, partial, err := fetchPagesBounded(context.Background(), 3, func(_ context.Context, cursor string) ([]string, string, error) {
+			return pages[cursor], nexts[cursor], nil
+		})
+		require.NoError(t, err)
+		// Budget 3 is reached after the second page (4 items), which is not
+		// split — so the result overshoots to 4 and the walk stops there.
+		require.Equal(t, []string{"a", "b", "c", "d"}, got)
+		require.True(t, partial, "a cursor still remained, so entries are unseen")
+	})
+
+	t.Run("a zero budget walks to the empty cursor", func(t *testing.T) {
+		t.Parallel()
+		got, partial, err := fetchPagesBounded(context.Background(), 0, func(_ context.Context, cursor string) ([]string, string, error) {
+			return pages[cursor], nexts[cursor], nil
+		})
+		require.NoError(t, err)
+		require.Equal(t, []string{"a", "b", "c", "d", "e"}, got)
+		require.False(t, partial, "the chain ended, nothing left unseen")
+	})
+}
+
+// newPageModeTestCmd wires the walk (--all/--limit) and single-page
+// (--page-size/--page-token) flags the way the real list commands do, so the
+// shared flag helpers can be unit-tested without a command surface.
+func newPageModeTestCmd() *cobra.Command {
+	var pageSize, limit int
+	var pageToken string
+	var all bool
+	cmd := &cobra.Command{Use: "x", RunE: func(*cobra.Command, []string) error { return nil }}
+	cmd.Flags().IntVar(&limit, "limit", 0, "")
+	cmd.Flags().BoolVar(&all, "all", false, "")
+	pageModeFlags(cmd, &pageSize, &pageToken)
+	return cmd
+}
+
+// TestValidatePageSize covers the local bound the list commands enforce in
+// PreRunE: an unset flag passes, and an explicit value outside 1..max fails
+// naming the flag (and the max), turning a would-be server 4xx into a
+// flag-named error.
+func TestValidatePageSize(t *testing.T) {
+	t.Parallel()
+	check := func(args ...string) error {
+		cmd := newPageModeTestCmd()
+		require.NoError(t, cmd.Flags().Parse(args))
+		ps, err := cmd.Flags().GetInt("page-size")
+		require.NoError(t, err)
+		return validatePageSize(cmd, ps)
+	}
+	require.NoError(t, check(), "unset --page-size passes")
+	require.NoError(t, check("--page-size", "1"))
+	require.NoError(t, check("--page-size", "500"))
+
+	err := check("--page-size", "0")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--page-size")
+
+	err = check("--page-size", "501")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "500")
+}
+
+// TestPageModeRequested pins that page mode is opted into by SETTING either
+// page flag, not by its value: an explicitly empty --page-token (a resume
+// loop's natural first call) still selects page mode, so the output shape does
+// not flip to the walk's bare array on an empty cursor.
+func TestPageModeRequested(t *testing.T) {
+	t.Parallel()
+	mode := func(args ...string) bool {
+		cmd := newPageModeTestCmd()
+		require.NoError(t, cmd.Flags().Parse(args))
+		return pageModeRequested(cmd)
+	}
+	require.False(t, mode(), "no page flag → walk mode")
+	require.True(t, mode("--page-size", "5"))
+	require.True(t, mode("--page-token", "p2"))
+	require.True(t, mode("--page-token", ""), "an explicit empty cursor still selects page mode")
 }
 
 // printTable/printFields render plain (no color/escape) when the writer

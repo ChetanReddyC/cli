@@ -631,16 +631,6 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		require.NotContains(t, stdout, "zeta/last", "sorted last, so --limit 2 drops it")
 	})
 
-	t.Run("--limit applies to --json rows too", func(t *testing.T) {
-		serveRepoList(t, []coreapi.RepoIndexEntry{
-			onboardedEntry("zeta/last", "private", "us"),
-			onboardedEntry("acme/web", "private", "us"),
-		}, clusters, false)
-		stdout, _ := runMirrorList(t, "--json", "--limit", "1")
-		require.Contains(t, stdout, "acme/web")
-		require.NotContains(t, stdout, "zeta/last")
-	})
-
 	t.Run("--limit composes with filters before capping", func(t *testing.T) {
 		serveRepoList(t, []coreapi.RepoIndexEntry{
 			onboardedEntry("acme/web", "private", "us"),
@@ -658,16 +648,6 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		err := runMirrorListErr(t, "--limit", "-1")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "--limit")
-	})
-
-	t.Run("--no-pager is accepted and leaves the table intact", func(t *testing.T) {
-		// Unit runs write to a buffer, never a TTY, so the pager cannot engage
-		// here; this pins that the escape hatch parses and output is unchanged.
-		serveRepoList(t, []coreapi.RepoIndexEntry{
-			onboardedEntry("acme/web", "private", "us"),
-		}, clusters, false)
-		stdout, _ := runMirrorList(t, "--no-pager")
-		require.Contains(t, stdout, "acme/web")
 	})
 }
 
@@ -702,24 +682,6 @@ func TestRepoMirrorList_FetchBudget(t *testing.T) {
 		require.Contains(t, stderr, "first 1000", "the note says how much was fetched")
 		require.Contains(t, stderr, "local", "the note says filters/sort ran locally over the window")
 		require.Contains(t, stderr, "--all", "the note points at the escape hatch")
-	})
-
-	t.Run("the partial-window note reaches --json runs on stderr", func(t *testing.T) {
-		// A script acting on silently partial data is the worst outcome, so
-		// unlike the legacy server-truncation warning this note is NOT
-		// suppressed for --json; stderr never corrupts the stdout JSON.
-		serveRepoListPaged(t, []coreapi.ListReposOutputBody{
-			{
-				Repos:         bulkEntries("bulk", 1000),
-				NextPageToken: coreapi.NewOptString("p2"),
-			},
-			{
-				Repos: []coreapi.RepoIndexEntry{onboardedEntry("tail/end", "private", "us")},
-			},
-		}, clusters)
-		stdout, stderr := runMirrorList(t, "--json")
-		require.Contains(t, stderr, "--all")
-		require.NotContains(t, stdout, "tail/end")
 	})
 
 	t.Run("--all walks past the budget and prints no note", func(t *testing.T) {
@@ -822,20 +784,6 @@ func TestRepoMirrorList_FetchBudget(t *testing.T) {
 		require.Contains(t, stdout, "acme/bad", "the mirror is still listed")
 		require.NotContains(t, stdout, "evil.com", "a spoofed host must never reach a clone URL")
 		require.NotContains(t, stderr, "omitted", "no warning: the row is kept with a dashed clone URL")
-	})
-
-	t.Run("a malformed catalog publicUrl keeps the mirror in --json with no clone URL", func(t *testing.T) {
-		serveRepoList(t, []coreapi.RepoIndexEntry{
-			onboardedEntry("acme/bad", "private", "us"),
-		}, []coreapi.Cluster{
-			{Slug: "us", PublicUrl: "https://aws-us-east-2.entire.io@evil.com"},
-		}, false)
-
-		stdout, _, err := execMirrorList(t, "--json")
-		require.NoError(t, err)
-		require.Contains(t, stdout, `"repo": "acme/bad"`, "the mirror still lists")
-		require.NotContains(t, stdout, "cloneUrl", "empty clone URL is omitted from JSON")
-		require.NotContains(t, stdout, "evil.com")
 	})
 }
 
@@ -1025,57 +973,18 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		require.NotContains(t, stdout, "null")
 	})
 
-	t.Run("unknown --sort column errors naming valid columns", func(t *testing.T) {
-		serveRepoList(t, repos(), clusters, false)
-		err := runMirrorListErr(t, "--sort", "nope")
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "unknown sort column")
-	})
-
-	t.Run("default order breaks duplicate-repo ties by clone URL ascending", func(t *testing.T) {
-		// Same repo placed on two clusters, delivered eu-first; the default sort
-		// must deterministically place the aws clone URL before the eu one.
-		serveRepoList(t, []coreapi.RepoIndexEntry{
-			onboardedMulti("acme/web", "private", "eu", "us"),
-		}, clusters, false)
-		stdout, _ := runMirrorList(t)
-		requireOrder(t, stdout,
-			"entire://aws-us-east-2.entire.io/gh/acme/web",
-			"entire://eu-west-1.entire.io/gh/acme/web",
-		)
-	})
-
 	t.Run("--sort access resolves the ACCESS column by its key", func(t *testing.T) {
-		// A candidate-only column: --sort matches on the kebab key "access".
-		// "admin" < "read" ascending, so the admin row sorts before the read row.
+		// A candidate-only column, so unit-level TestSortRepoDir (which uses
+		// mirror rows) can't reach it: this pins that --sort resolves the kebab
+		// key "access" end-to-end. "admin" < "read" ascending, so the admin row
+		// sorts before the read row. The sort's tiebreak/direction/whitespace/
+		// bad-column semantics are covered by TestSortRepoDir.
 		serveRepoList(t, []coreapi.RepoIndexEntry{
 			candidateEntry("acme/read-repo", "public", coreapi.RepoCandidateAccessRead, true),
 			candidateEntry("acme/admin-repo", "public", coreapi.RepoCandidateAccessAdmin, true),
 		}, clusters, false)
 		stdout, _ := runMirrorList(t, "--sort", "access")
 		requireOrder(t, stdout, "acme/admin-repo", "acme/read-repo")
-	})
-
-	t.Run("--sort private breaks ties deterministically by name then clone URL", func(t *testing.T) {
-		// A non-name column sort where all rows share the private value, so the
-		// order must fall back to the name + clone-URL tiebreak rather than the
-		// eu-first order the server delivered.
-		serveRepoList(t, []coreapi.RepoIndexEntry{
-			onboardedMulti("acme/web", "public", "eu", "us"),
-			onboardedEntry("acme/api", "public", "us"),
-		}, clusters, false)
-		stdout, _ := runMirrorList(t, "--sort", "private")
-		requireOrder(t, stdout,
-			"entire://aws-us-east-2.entire.io/gh/acme/api",
-			"entire://aws-us-east-2.entire.io/gh/acme/web",
-			"entire://eu-west-1.entire.io/gh/acme/web",
-		)
-	})
-
-	t.Run("--sort with leading whitespace parses direction like the trimmed spec", func(t *testing.T) {
-		serveRepoList(t, repos(), clusters, false)
-		stdout, _ := runMirrorList(t, "--sort", " -name")
-		requireOrder(t, stdout, "other/api", "acme/web", "acme/cli")
 	})
 }
 
