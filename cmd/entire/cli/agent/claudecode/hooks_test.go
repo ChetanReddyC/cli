@@ -3,6 +3,7 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -546,8 +547,8 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse PostToolUse hooks: %v", err)
 		}
 		assertHookExists(t, matchers, "Write", "echo user wrote file", "user Write hook")
-		assertHookExists(t, matchers, "Task", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "Entire Task hook")
-		assertHookExists(t, matchers, "TodoWrite", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "Entire TodoWrite hook")
+		assertHookExists(t, matchers, "Agent", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "Entire Agent (subagent) hook")
+		assertHookExists(t, matchers, "TaskCreate|TaskUpdate", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "Entire task-list hook")
 	})
 }
 
@@ -703,4 +704,129 @@ func TestUninstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 			t.Errorf("Stop hook should have been removed")
 		}
 	}
+}
+
+// entireMatchersFor returns the matcher names under which an Entire-managed hook
+// with the given command appears.
+func entireMatchersFor(matchers []ClaudeHookMatcher, command string) []string {
+	var found []string
+	for _, m := range matchers {
+		for _, h := range m.Hooks {
+			if h.Command == command {
+				found = append(found, m.Matcher)
+			}
+		}
+	}
+	return found
+}
+
+// TestInstallHooks_UsesCurrentToolMatchers pins the tool-use matchers to Claude
+// Code's current tool names. The subagent tool is "Agent" (there was never a
+// "Task" tool) and "TodoWrite" was deprecated for TaskCreate/TaskUpdate; a bad
+// matcher is a silent no-op in Claude Code, so this is the only guard against
+// the hooks silently ceasing to fire. See:
+//   - https://code.claude.com/docs/en/tools-reference.md
+//   - https://code.claude.com/docs/en/hooks.md
+func TestInstallHooks_UsesCurrentToolMatchers(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+	assertHookExists(t, settings.Hooks.PreToolUse, "Agent",
+		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task"), "pre-task subagent hook")
+	assertHookExists(t, settings.Hooks.PostToolUse, "Agent",
+		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "post-task subagent hook")
+	assertHookExists(t, settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate",
+		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "post-todo task-list hook")
+}
+
+// TestInstallHooks_MigratesStaleToolMatchers verifies that re-running enable
+// (without --force) moves Entire hooks off the outdated "Task"/"TodoWrite"
+// matchers onto the current ones, so already-configured users self-heal.
+func TestInstallHooks_MigratesStaleToolMatchers(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	// Simulate settings written by an older CLI version, using the production
+	// wrapper form real installs store (so migration must unwrap to detect them).
+	stalePre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+	stalePost := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	staleTodo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "PreToolUse": [
+      {"matcher": "Task", "hooks": [{"type": "command", "command": %q}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "Task", "hooks": [{"type": "command", "command": %q}]},
+      {"matcher": "TodoWrite", "hooks": [{"type": "command", "command": %q}]}
+    ]
+  }
+}`, stalePre, stalePost, staleTodo))
+
+	a := &ClaudeCodeAgent{}
+	count, err := a.InstallHooks(context.Background(), false, false)
+	if err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	if count == 0 {
+		t.Error("migration should have installed hooks under the current matchers")
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+
+	// Current matchers now carry the Entire hooks.
+	assertHookExists(t, settings.Hooks.PreToolUse, "Agent",
+		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task"), "migrated pre-task hook")
+	assertHookExists(t, settings.Hooks.PostToolUse, "Agent",
+		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "migrated post-task hook")
+	assertHookExists(t, settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate",
+		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "migrated post-todo hook")
+
+	// The Entire hooks live under exactly one (current) matcher — the stale
+	// Task/TodoWrite entries were removed, not left as dead duplicates.
+	preTaskCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+	if got := entireMatchersFor(settings.Hooks.PreToolUse, preTaskCmd); !slices.Equal(got, []string{"Agent"}) {
+		t.Errorf("pre-task hook matchers = %v, want [Agent]", got)
+	}
+	postTaskCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	if got := entireMatchersFor(settings.Hooks.PostToolUse, postTaskCmd); !slices.Equal(got, []string{"Agent"}) {
+		t.Errorf("post-task hook matchers = %v, want [Agent]", got)
+	}
+}
+
+// TestInstallHooks_MigrationPreservesUserToolHooks verifies migration only
+// removes Entire-managed entries under the stale matcher, leaving a user's own
+// hook under "Task" intact.
+func TestInstallHooks_MigrationPreservesUserToolHooks(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	writeSettingsFile(t, tempDir, `{
+  "hooks": {
+    "PreToolUse": [
+      {"matcher": "Task", "hooks": [
+        {"type": "command", "command": "echo user-task-hook"},
+        {"type": "command", "command": "entire hooks claude-code pre-task"}
+      ]}
+    ]
+  }
+}`)
+
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+	// User's own Task hook survives.
+	assertHookExists(t, settings.Hooks.PreToolUse, "Task", "echo user-task-hook", "user Task hook")
+	// Ours moved to Agent.
+	assertHookExists(t, settings.Hooks.PreToolUse, "Agent",
+		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task"), "migrated pre-task hook")
 }
