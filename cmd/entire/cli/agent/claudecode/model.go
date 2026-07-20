@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 )
 
+// syntheticModel is the placeholder Claude Code writes to message.model for
+// synthetic (API-error) assistant entries; it is not a real model identifier.
+const syntheticModel = "<synthetic>"
+
 // modelScanLine captures the two places a Claude Code transcript records the
 // model: the top-level "model" on the system/init line, and "message.model" on
 // each assistant message. Subtype distinguishes the init envelope from other
@@ -46,7 +50,10 @@ func (c *ClaudeCodeAgent) ExtractModel(transcriptData []byte) (string, error) {
 		}
 		switch line.Type {
 		case envelopeTypeAssistant:
-			if line.Message.Model != "" {
+			// Claude Code sets message.model to "<synthetic>" on API-error
+			// entries; skip it so the placeholder doesn't replace the last
+			// genuine model.
+			if line.Message.Model != "" && line.Message.Model != syntheticModel {
 				assistantModel = line.Message.Model
 			}
 		case "system":

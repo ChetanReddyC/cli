@@ -20,6 +20,22 @@ func TestExtractModel_MostRecentAssistantMessageWins(t *testing.T) {
 	}
 }
 
+func TestExtractModel_SkipsSyntheticPlaceholder(t *testing.T) {
+	t.Parallel()
+	// Claude Code sets message.model to "<synthetic>" on API-error assistant
+	// entries. That placeholder must not replace the last genuine model.
+	transcript := `{"type":"assistant","message":{"model":"claude-opus-4-8","id":"m1","role":"assistant","content":[]}}
+{"type":"assistant","message":{"model":"<synthetic>","id":"m2","role":"assistant","content":[]}}`
+
+	model, err := (&ClaudeCodeAgent{}).ExtractModel([]byte(transcript))
+	if err != nil {
+		t.Fatalf("ExtractModel returned error: %v", err)
+	}
+	if model != "claude-opus-4-8" {
+		t.Errorf("expected last genuine model %q, got %q", "claude-opus-4-8", model)
+	}
+}
+
 func TestExtractModel_FallsBackToSystemInit(t *testing.T) {
 	t.Parallel()
 	// No assistant message yet (very short/early transcript): recover the model
