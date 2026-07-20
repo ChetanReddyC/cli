@@ -27,6 +27,24 @@ const (
 	HookNamePostTodo         = "post-todo"
 )
 
+// Claude Code tool-name matchers for Entire's PreToolUse/PostToolUse hooks.
+//
+// The subagent dispatch tool is "Agent" (Claude Code never exposed a tool named
+// "Task"), and the "TodoWrite" tool was disabled by default in v2.1.142 in favor
+// of the Task* tools. "TaskCreate|TaskUpdate" is a matcher list of exact tool
+// names (Claude Code treats a matcher containing only letters/digits/_/-/spaces/
+// ,/| as exact strings, not a regex). See:
+//   - https://code.claude.com/docs/en/tools-reference.md (Agent, TodoWrite entries)
+//   - https://code.claude.com/docs/en/hooks.md (matcher evaluation rules)
+//
+// Configs written by older CLI versions used the outdated matchers "Task" and
+// "TodoWrite", where the hooks silently never fired. Those are not rewritten in
+// place on a normal `entire enable`; run with --force to strip and reinstall.
+const (
+	subagentToolMatcher = "Agent"
+	taskToolMatcher     = "TaskCreate|TaskUpdate"
+)
+
 // ClaudeSettingsFileName is the settings file used by Claude Code.
 // This is Claude-specific and not shared with other agents.
 const ClaudeSettingsFileName = "settings.json"
@@ -166,16 +184,16 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 		userPromptSubmit = addHookToMatcher(userPromptSubmit, "", userPromptSubmitCmd)
 		count++
 	}
-	if !hookCommandExistsWithMatcher(preToolUse, "Task", preTaskCmd) {
-		preToolUse = addHookToMatcher(preToolUse, "Task", preTaskCmd)
+	if !hookCommandExistsWithMatcher(preToolUse, subagentToolMatcher, preTaskCmd) {
+		preToolUse = addHookToMatcher(preToolUse, subagentToolMatcher, preTaskCmd)
 		count++
 	}
-	if !hookCommandExistsWithMatcher(postToolUse, "Task", postTaskCmd) {
-		postToolUse = addHookToMatcher(postToolUse, "Task", postTaskCmd)
+	if !hookCommandExistsWithMatcher(postToolUse, subagentToolMatcher, postTaskCmd) {
+		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd)
 		count++
 	}
-	if !hookCommandExistsWithMatcher(postToolUse, "TodoWrite", postTodoCmd) {
-		postToolUse = addHookToMatcher(postToolUse, "TodoWrite", postTodoCmd)
+	if !hookCommandExistsWithMatcher(postToolUse, taskToolMatcher, postTodoCmd) {
+		postToolUse = addHookToMatcher(postToolUse, taskToolMatcher, postTodoCmd)
 		count++
 	}
 
@@ -500,7 +518,7 @@ func removeEntireHooks(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
 }
 
 // removeEntireHooksFromMatchers removes Entire hooks from tool-use matchers (PreToolUse, PostToolUse)
-// This handles the nested structure where hooks are grouped by tool matcher (e.g., "Task", "TodoWrite")
+// This handles the nested structure where hooks are grouped by tool matcher (e.g., "Agent", "TaskCreate|TaskUpdate")
 func removeEntireHooksFromMatchers(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
 	// Same logic as removeEntireHooks - both work on the same structure
 	return removeEntireHooks(matchers)
