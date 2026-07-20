@@ -579,6 +579,9 @@ func TestRunExplainAuto_TemporaryCheckpointRendersIdentityBullet(t *testing.T) {
 	if !strings.Contains(output, "Temporary checkpoints can be summarized after commit") {
 		t.Errorf("expected 'after commit' affordance in temporary output, got:\n%s", output)
 	}
+	if !strings.Contains(output, "entire checkpoint explain --generate") {
+		t.Errorf("expected canonical `entire checkpoint explain --generate` hint in temporary output, got:\n%s", output)
+	}
 }
 
 // collidingShaPrefix creates commits until two share a 2-char SHA prefix
@@ -2427,8 +2430,8 @@ func TestFormatCheckpointOutput_Short(t *testing.T) {
 	if !strings.Contains(output, "## Summary") {
 		t.Errorf("expected '## Summary' heading in no-color output, got:\n%s", output)
 	}
-	if !strings.Contains(output, "entire explain --generate") {
-		t.Errorf("expected --generate hint in summary affordance, got:\n%s", output)
+	if !strings.Contains(output, "entire checkpoint explain --generate") {
+		t.Errorf("expected canonical `entire checkpoint explain --generate` hint in summary affordance, got:\n%s", output)
 	}
 	// Should NOT show full file list in default mode
 	if strings.Contains(output, "main.go") {

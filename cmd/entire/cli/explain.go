@@ -253,9 +253,9 @@ By default, shows checkpoints on the current branch. Pass a checkpoint ID or
 commit SHA as a positional argument to explain a specific item, or use flags.
 
 Viewing specific items:
-  entire explain <id-or-sha>           Auto-detects checkpoint ID or commit SHA
-  entire explain --checkpoint <id>     Force interpretation as checkpoint ID
-  entire explain --commit <ref>        Force interpretation as commit ref
+  entire checkpoint explain <id-or-sha>           Auto-detects checkpoint ID or commit SHA
+  entire checkpoint explain --checkpoint <id>     Force interpretation as checkpoint ID
+  entire checkpoint explain --commit <ref>        Force interpretation as commit ref
 
 Filtering the list view:
   --session      Filter checkpoints by session ID (or prefix)
@@ -903,7 +903,7 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 	if content.Metadata.Summary != nil && !force {
 		return renderExplainFailure(errW, "Summary already exists", []explainRow{
 			{Label: "id", Value: checkpointID.String()},
-			{Label: "try", Value: fmt.Sprintf("entire explain --generate --force %s", checkpointID)},
+			{Label: "try", Value: fmt.Sprintf("entire checkpoint explain --generate --force %s", checkpointID)},
 		}, fmt.Errorf("checkpoint %s already has a summary", checkpointID))
 	}
 
@@ -1289,7 +1289,7 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 	sb.WriteString(styles.renderIdentity(label, "", rows))
 
 	intent := extractIntent(nil, sessionPrompt)
-	hint := "Not generated. Temporary checkpoints can be summarized after commit. Run `entire explain --generate` on the resulting commit."
+	hint := "Not generated. Temporary checkpoints can be summarized after commit. Run `entire checkpoint explain --generate` on the resulting commit."
 	sb.WriteString(renderExplainBody(w, buildNoSummaryMarkdown(intent, nil, hint)))
 
 	// Transcript section: full shows entire session, verbose shows checkpoint scope
@@ -1661,7 +1661,7 @@ func formatCheckpointOutput(ctx context.Context, summary *checkpoint.CheckpointS
 			files = meta.FilesTouched
 		}
 
-		hint := fmt.Sprintf("Not generated yet. Run `entire explain --generate %s` to create an AI summary.", checkpointID)
+		hint := fmt.Sprintf("Not generated yet. Run `entire checkpoint explain --generate %s` to create an AI summary.", checkpointID)
 		if summary != nil && summary.Imported {
 			// Imported history is read-only; --generate is refused for it, so
 			// don't point users at a command that will error out.
