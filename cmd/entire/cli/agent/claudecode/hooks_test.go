@@ -731,6 +731,52 @@ func TestInstallHooks_UsesCurrentToolMatchers(t *testing.T) {
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "post-todo task-list hook")
 }
 
+func TestCheckHookConfig_Absent(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	if got := CheckHookConfig(context.Background()); got != HooksAbsent {
+		t.Errorf("CheckHookConfig() = %v, want HooksAbsent", got)
+	}
+}
+
+func TestCheckHookConfig_Current(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	if got := CheckHookConfig(context.Background()); got != HooksCurrent {
+		t.Errorf("CheckHookConfig() = %v, want HooksCurrent", got)
+	}
+}
+
+func TestCheckHookConfig_Outdated(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	// Config from an older CLI version: Entire installed (Stop present) but the
+	// tool-use hooks sit under the outdated Task/TodoWrite matchers.
+	stop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
+    "PreToolUse": [{"matcher": "Task", "hooks": [{"type": "command", "command": %q}]}],
+    "PostToolUse": [
+      {"matcher": "Task", "hooks": [{"type": "command", "command": %q}]},
+      {"matcher": "TodoWrite", "hooks": [{"type": "command", "command": %q}]}
+    ]
+  }
+}`, stop, pre, post, todo))
+
+	if got := CheckHookConfig(context.Background()); got != HooksOutdated {
+		t.Errorf("CheckHookConfig() = %v, want HooksOutdated", got)
+	}
+}
+
 // TestInstallHooks_Force_ReinstallsStaleToolMatchers verifies that `--force`
 // strips Entire hooks left under the outdated "Task"/"TodoWrite" matchers by
 // older CLI versions and reinstalls them under the current matchers. (A normal

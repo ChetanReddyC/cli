@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -190,6 +191,13 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 			b.WriteString(sty.render(sty.dim, "  Agents · "))
 
 			b.WriteString(strings.Join(displayNames, ", "))
+		}
+
+		// Warn when installed hooks are out of date (read-only; fix is manual).
+		if claudecode.CheckHookConfig(ctx) == claudecode.HooksOutdated {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.yellow, "  ! Claude Code hooks out of date"))
+			b.WriteString(sty.render(sty.dim, " · run 'entire enable --force'"))
 		}
 	}
 
@@ -589,7 +597,10 @@ type statusJSON struct {
 	// `entire status --json` instead of the human footer. Set only on the
 	// success path (mirrors writeAgentHelpHint, which only renders when set up).
 	AgentHelp string `json:"agent_help,omitempty"`
-	Error     string `json:"error,omitempty"`
+	// HooksOutdated lists agents whose installed hook config is out of date and
+	// should be refreshed with `entire enable --force`.
+	HooksOutdated []string `json:"hooks_outdated,omitempty"`
+	Error         string   `json:"error,omitempty"`
 }
 
 type sessionBriefJSON struct {
@@ -644,6 +655,10 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 	if s.Enabled {
 		if names := InstalledAgentDisplayNames(ctx); len(names) > 0 {
 			result.Agents = names
+		}
+
+		if claudecode.CheckHookConfig(ctx) == claudecode.HooksOutdated {
+			result.HooksOutdated = append(result.HooksOutdated, "claude-code")
 		}
 
 		if store, err := session.NewStateStore(ctx); err == nil {

@@ -400,8 +400,9 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	return nil
 }
 
-// AreHooksInstalled checks if Entire hooks are installed.
-func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
+// loadClaudeSettings reads and parses .claude/settings.json from the repo root.
+// Returns ok=false when the file is missing or unparseable.
+func loadClaudeSettings(ctx context.Context) (ClaudeSettings, bool) {
 	// Use repo root to find .claude directory when run from a subdirectory
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -410,16 +411,57 @@ func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
 	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
-		return false
+		return ClaudeSettings{}, false
 	}
 
 	var settings ClaudeSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
+		return ClaudeSettings{}, false
+	}
+	return settings, true
+}
+
+// AreHooksInstalled checks if Entire hooks are installed.
+func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
+	settings, ok := loadClaudeSettings(ctx)
+	if !ok {
 		return false
 	}
-
 	// Check for at least one of our hooks (new, wrapped, or legacy format)
 	return hasEntireHook(settings.Hooks.Stop)
+}
+
+// HookConfigState describes how Entire's Claude Code hooks compare to what
+// InstallHooks would write today.
+type HookConfigState int
+
+const (
+	// HooksAbsent means Entire hooks are not installed in this repo.
+	HooksAbsent HookConfigState = iota
+	// HooksCurrent means the installed hooks match the current config.
+	HooksCurrent
+	// HooksOutdated means Entire hooks are installed but the current tool-use
+	// matchers no longer carry them (e.g. an older CLI wrote them under the now
+	// non-firing "Task"/"TodoWrite" matchers). Fix: `entire enable --force`.
+	HooksOutdated
+)
+
+// CheckHookConfig reports whether Entire's Claude Code hooks are absent,
+// current, or outdated. It is a read-only diagnostic used by `entire status`
+// and `entire doctor`; it never modifies settings. Outdated is detected on the
+// positive spec: Entire is installed (Stop hook present) yet one of the current
+// tool-use matchers does not carry its Entire hook.
+func CheckHookConfig(ctx context.Context) HookConfigState {
+	settings, ok := loadClaudeSettings(ctx)
+	if !ok || !hasEntireHook(settings.Hooks.Stop) {
+		return HooksAbsent
+	}
+	if !hasEntireHookUnderMatcher(settings.Hooks.PreToolUse, subagentToolMatcher) ||
+		!hasEntireHookUnderMatcher(settings.Hooks.PostToolUse, subagentToolMatcher) ||
+		!hasEntireHookUnderMatcher(settings.Hooks.PostToolUse, taskToolMatcher) {
+		return HooksOutdated
+	}
+	return HooksCurrent
 }
 
 // Helper functions for hook management
@@ -437,6 +479,22 @@ func hookCommandExists(matchers []ClaudeHookMatcher, command string) bool {
 
 func hasEntireHook(matchers []ClaudeHookMatcher) bool {
 	for _, matcher := range matchers {
+		for _, hook := range matcher.Hooks {
+			if isEntireHook(hook.Command) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasEntireHookUnderMatcher reports whether an Entire hook is installed under a
+// matcher with the exact given name.
+func hasEntireHookUnderMatcher(matchers []ClaudeHookMatcher, matcherName string) bool {
+	for _, matcher := range matchers {
+		if matcher.Matcher != matcherName {
+			continue
+		}
 		for _, hook := range matcher.Hooks {
 			if isEntireHook(hook.Command) {
 				return true
