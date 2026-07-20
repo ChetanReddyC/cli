@@ -329,11 +329,10 @@ func annOrScoreOf(r search.Result) float64 {
 }
 
 // semanticCellPage is one cell's successful response plus the classification
-// bits the merge keys on.
+// bit the merge keys on.
 type semanticCellPage struct {
 	body     *search.Response
 	hasUpper bool // any non-repo tier-0/1 row
-	hasRepo  bool // any repo-type row
 }
 
 // classifySemanticCells splits per-cell outcomes into successful pages, hard
@@ -353,11 +352,11 @@ func classifySemanticCells(ctx context.Context, results []cellCallResult[*search
 		case r.value != nil:
 			p := semanticCellPage{body: r.value}
 			for _, res := range r.value.Results {
-				switch {
-				case res.Type == search.TypeRepo:
-					p.hasRepo = true
-				case tierOf(res) == 0 || tierOf(res) == 1:
+				// Repo rows never count as an upper tier — they're always
+				// merged regardless of the cell's checkpoint/commit tiers.
+				if res.Type != search.TypeRepo && (tierOf(res) == 0 || tierOf(res) == 1) {
 					p.hasUpper = true
+					break
 				}
 			}
 			pages = append(pages, p)
