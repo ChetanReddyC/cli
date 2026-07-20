@@ -36,17 +36,13 @@ const (
 // ,/| as exact strings, not a regex). See:
 //   - https://code.claude.com/docs/en/tools-reference.md (Agent, TodoWrite entries)
 //   - https://code.claude.com/docs/en/hooks.md (matcher evaluation rules)
+//
+// Configs written by older CLI versions used the outdated matchers "Task" and
+// "TodoWrite", where the hooks silently never fired. Those are not rewritten in
+// place on a normal `entire enable`; run with --force to strip and reinstall.
 const (
 	subagentToolMatcher = "Agent"
 	taskToolMatcher     = "TaskCreate|TaskUpdate"
-)
-
-// staleSubagentMatcher and staleTaskMatcher are the outdated matcher names that
-// older CLI versions wrote. `entire enable` migrates Entire hooks off these onto
-// the current matchers above (see migrateEntireToolMatcher).
-const (
-	staleSubagentMatcher = "Task"
-	staleTaskMatcher     = "TodoWrite"
 )
 
 // ClaudeSettingsFileName is the settings file used by Claude Code.
@@ -149,17 +145,6 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 		postToolUse = removeEntireHooksFromMatchers(postToolUse)
 	}
 
-	// Migrate Entire hooks off the outdated tool matchers that older CLI versions
-	// wrote (Task->Agent rename; TodoWrite deprecated for TaskCreate/TaskUpdate).
-	// This runs on every enable, not just --force, so existing users self-heal by
-	// re-running `entire enable`. User-owned hooks under these matchers are kept
-	// (removal keys on the Entire command prefix, not the matcher name). Force mode
-	// already stripped all Entire hooks above, so these are no-ops there.
-	migrated := false
-	preToolUse, migrated = migrateEntireToolMatcher(preToolUse, staleSubagentMatcher, subagentToolMatcher, migrated)
-	postToolUse, migrated = migrateEntireToolMatcher(postToolUse, staleSubagentMatcher, subagentToolMatcher, migrated)
-	postToolUse, migrated = migrateEntireToolMatcher(postToolUse, staleTaskMatcher, taskToolMatcher, migrated)
-
 	// Define hook commands
 	var sessionStartCmd, sessionEndCmd, stopCmd, userPromptSubmitCmd, preTaskCmd, postTaskCmd, postTodoCmd string
 	if localDev {
@@ -230,8 +215,8 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 		permissionsChanged = true
 	}
 
-	if count == 0 && !permissionsChanged && !migrated {
-		return 0, nil // All hooks and permissions already installed, nothing to migrate
+	if count == 0 && !permissionsChanged {
+		return 0, nil // All hooks and permissions already installed
 	}
 
 	// Marshal modified hook types back to rawHooks
@@ -537,37 +522,4 @@ func removeEntireHooks(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
 func removeEntireHooksFromMatchers(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
 	// Same logic as removeEntireHooks - both work on the same structure
 	return removeEntireHooks(matchers)
-}
-
-// migrateEntireToolMatcher removes Entire-managed hook entries that live under a
-// stale tool matcher (e.g. "Task", "TodoWrite") so InstallHooks can re-add them
-// under the current tool name. Non-Entire hooks under the stale matcher are
-// preserved. Returns the (possibly modified) matchers and changed, OR'd with the
-// incoming changed so callers can chain calls. A no-op when staleMatcher equals
-// currentMatcher (nothing to migrate).
-func migrateEntireToolMatcher(matchers []ClaudeHookMatcher, staleMatcher, currentMatcher string, changed bool) ([]ClaudeHookMatcher, bool) {
-	if staleMatcher == currentMatcher {
-		return matchers, changed
-	}
-	result := make([]ClaudeHookMatcher, 0, len(matchers))
-	for _, matcher := range matchers {
-		if matcher.Matcher != staleMatcher {
-			result = append(result, matcher)
-			continue
-		}
-		kept := make([]ClaudeHookEntry, 0, len(matcher.Hooks))
-		for _, hook := range matcher.Hooks {
-			if isEntireHook(hook.Command) {
-				changed = true
-				continue
-			}
-			kept = append(kept, hook)
-		}
-		// Only keep the matcher if user hooks remain under it.
-		if len(kept) > 0 {
-			matcher.Hooks = kept
-			result = append(result, matcher)
-		}
-	}
-	return result, changed
 }

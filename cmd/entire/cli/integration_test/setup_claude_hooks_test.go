@@ -146,7 +146,7 @@ func TestSetupClaudeHooks_PreservesExistingSettings(t *testing.T) {
 		t.Error("existing CustomTool hook should be preserved")
 	}
 
-	// User's Task hook should be preserved (migration only removes Entire hooks)
+	// User's own Task hook should be preserved (enable never removes non-Entire hooks)
 	taskHooks := getAllHookCommands(settings.Hooks.PreToolUse, "Task")
 	if !containsCommand(taskHooks, "echo user-task-hook") {
 		t.Errorf("user's Task hook should be preserved, got: %v", taskHooks)

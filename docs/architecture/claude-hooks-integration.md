@@ -18,8 +18,10 @@ Entire integrates with Claude Code through six hooks that fire at different poin
 > **Tool matcher note.** Claude Code's subagent dispatch tool is `Agent` (there
 > was never a `Task` tool), and the `TodoWrite` tool was disabled by default in
 > v2.1.142 in favor of `TaskCreate`/`TaskUpdate`. Older CLI versions installed
-> these hooks under `Task`/`TodoWrite`, where they silently never fired.
-> Re-running `entire enable` migrates them onto the matchers above. See
+> these hooks under `Task`/`TodoWrite`, where they silently never fired. A normal
+> `entire enable` does not rewrite existing hook config in place; re-run with
+> `--force` (`entire enable --force`) to strip the stale entries and reinstall
+> under the matchers above. See
 > [tools-reference](https://code.claude.com/docs/en/tools-reference.md) and
 > [hooks matcher rules](https://code.claude.com/docs/en/hooks.md).
 >
