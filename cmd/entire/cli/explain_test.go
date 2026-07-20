@@ -476,6 +476,64 @@ func TestRunExplainAuto_CommitWithoutTrailer(t *testing.T) {
 	}
 }
 
+// TestShouldFallBackToCommitResolution pins runExplainAuto's fallback
+// decision: commit resolution may run ONLY when the positional target matched
+// no committed or temporary checkpoint. A failure from a step AFTER a
+// successful match that merely wraps checkpoint.ErrCheckpointNotFound (in the
+// field: "failed to save summary: checkpoint not found", from a summary
+// backfill against a backend missing the checkpoint) must NOT trigger the
+// fallback — it was masked as `no checkpoint or commit found matching ...`
+// for a checkpoint the same command had just resolved.
+func TestShouldFallBackToCommitResolution(t *testing.T) {
+	runExplainAutoTestRepo(t)
+
+	// A genuine target miss, produced by the real checkpoint path.
+	var out, errOut bytes.Buffer
+	missErr := runExplainCheckpoint(context.Background(), &out, &errOut, "abababababab", false, false, false, false, false, false, false, 0)
+	require.Error(t, missErr)
+	require.True(t, shouldFallBackToCommitResolution(missErr),
+		"a genuine target miss must fall back to commit resolution")
+	require.ErrorIs(t, missErr, checkpoint.ErrCheckpointNotFound,
+		"the target-miss error must keep wrapping the public sentinel")
+
+	// A post-resolution failure that wraps the same sentinel must not.
+	saveErr := fmt.Errorf("failed to save summary: %w", checkpoint.ErrCheckpointNotFound)
+	require.False(t, shouldFallBackToCommitResolution(saveErr),
+		"a post-resolution failure wrapping ErrCheckpointNotFound must surface verbatim, not be masked by the commit fallback")
+
+	require.False(t, shouldFallBackToCommitResolution(errors.New("network down")),
+		"unrelated errors never fall back")
+}
+
+// TestRunExplainAuto_PostResolutionErrorSurfacesVerbatim guards the adjacent
+// contract end-to-end: when the target RESOLVES via the committed-checkpoint
+// prefix match but a later read step fails hard (here: the git-refs on-demand
+// ref fetch failing in a repo with no reachable remote), runExplainAuto must
+// surface that failure instead of running the commit fallback.
+func TestRunExplainAuto_PostResolutionErrorSurfacesVerbatim(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	ctx := context.Background()
+
+	ulidID := id.MustCheckpointID("01KVBJCWYA4YW6J5M9GP655HZN")
+	require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(ctx, checkpoint.Session{
+		CheckpointID: ulidID,
+		SessionID:    "session-stray-ulid",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}))
+
+	var out, errOut bytes.Buffer
+	err := runExplainAuto(ctx, &out, &errOut, ulidID.String(), true, false, false, false, true, false, false, 0)
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to read checkpoint",
+		"the post-resolution failure must surface as-is")
+	require.NotContains(t, err.Error(), "no checkpoint or commit found",
+		"a post-resolution failure must not be masked by the commit fallback")
+}
+
 // TestRunExplainCheckpoint_NotFoundSentinels verifies the typed-error
 // contract runExplainAuto depends on: non-matching targets return an error
 // wrapping checkpoint.ErrCheckpointNotFound (for errors.Is detection),

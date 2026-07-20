@@ -452,12 +452,36 @@ func runExplain(ctx context.Context, w, errW io.Writer, sessionID, commitRef, ch
 	return runExplainBranchWithFilter(ctx, w, errW, noPager, sessionID)
 }
 
+// explainTargetNotFoundError reports that the positional target matched no
+// committed or temporary checkpoint. It unwraps to
+// checkpoint.ErrCheckpointNotFound so callers' errors.Is contracts keep
+// working, while runExplainAuto can distinguish this resolution miss from a
+// failure AFTER a successful match that happens to wrap the same sentinel
+// (e.g. "failed to save summary: checkpoint not found" from a backfill
+// against a backend missing the checkpoint) — those must surface verbatim,
+// not be masked by the commit fallback's "no checkpoint or commit found".
+type explainTargetNotFoundError struct{ target string }
+
+func (e *explainTargetNotFoundError) Error() string {
+	return fmt.Sprintf("%s: %s", checkpoint.ErrCheckpointNotFound, e.target)
+}
+
+func (e *explainTargetNotFoundError) Unwrap() error { return checkpoint.ErrCheckpointNotFound }
+
+// shouldFallBackToCommitResolution reports whether the checkpoint path's error
+// means "the target matched nothing", the only outcome that may fall through
+// to git commit resolution.
+func shouldFallBackToCommitResolution(err error) bool {
+	var targetMiss *explainTargetNotFoundError
+	return errors.As(err, &targetMiss)
+}
+
 // runExplainAuto resolves a positional target as either a checkpoint ID
 // (or prefix) or a git commit ref. Ordering: checkpoint path first (which
 // also handles shadow-branch temp checkpoints), falling back to commit
-// resolution only on checkpoint.ErrCheckpointNotFound. --generate runs
-// an ambiguity pre-check to avoid writing a summary to the wrong
-// checkpoint on short-prefix collisions.
+// resolution only on the target-miss error (explainTargetNotFoundError).
+// --generate runs an ambiguity pre-check to avoid writing a summary to the
+// wrong checkpoint on short-prefix collisions.
 func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool, summaryTimeoutSeconds int) error {
 	stop := startSpinner(errW, "Loading checkpoints")
 	lookup, lookupErr := newExplainCheckpointLookup(ctx)
@@ -475,11 +499,15 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		return nil
 	}
 	// Fall back to commit resolution ONLY when nothing (committed or temp)
-	// matched the target. errCannotGenerateTemporaryCheckpoint signals that
-	// we DID match a temp checkpoint but --generate is unsupported for it;
-	// falling back to commit in that case would produce a misleading
+	// matched the target. Errors from steps AFTER a successful match — even
+	// ones wrapping checkpoint.ErrCheckpointNotFound, like a summary backfill
+	// failing against a backend missing the checkpoint — surface verbatim;
+	// falling back would misreport them as "no checkpoint or commit found"
+	// for a target that DID resolve. errCannotGenerateTemporaryCheckpoint
+	// likewise signals we matched a temp checkpoint but --generate is
+	// unsupported for it; a commit fallback there would produce a misleading
 	// "no trailer" error for the shadow-branch commit.
-	if !errors.Is(checkpointErr, checkpoint.ErrCheckpointNotFound) {
+	if !shouldFallBackToCommitResolution(checkpointErr) {
 		return checkpointErr
 	}
 	logging.Debug(ctx, "explain auto: checkpoint lookup failed, trying commit fallback",
@@ -608,7 +636,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		// Check temp checkpoints BEFORE returning errCannotGenerateTemporaryCheckpoint
 		// so runExplainAuto can distinguish:
 		//   - target matched a real temp checkpoint (sentinel returned, no fallback)
-		//   - target matched nothing (ErrCheckpointNotFound, safe to fall back to commit)
+		//   - target matched nothing (explainTargetNotFoundError, safe to fall back to commit)
 		// Previously the --generate path bailed before checking temp checkpoints,
 		// which made runExplainAuto fall back to commit resolution for temp
 		// checkpoint SHAs and produce a misleading "no trailer" error.
@@ -632,7 +660,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 			outputExplainContent(w, output, noPager)
 			return nil
 		}
-		return fmt.Errorf("%w: %s", checkpoint.ErrCheckpointNotFound, checkpointIDPrefix)
+		return &explainTargetNotFoundError{target: checkpointIDPrefix}
 	case 1:
 		fullCheckpointID = matches[0]
 	default:
