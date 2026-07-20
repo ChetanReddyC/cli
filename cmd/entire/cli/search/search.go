@@ -48,9 +48,6 @@ const (
 	TypePR   = "pr"
 )
 
-// MaxLimit is the maximum number of results the search API will return per request.
-const MaxLimit = 200
-
 // DefaultLimit is the default number of results to fetch per request, matching the UI.
 const DefaultLimit = 100
 
