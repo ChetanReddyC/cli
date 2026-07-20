@@ -819,7 +819,10 @@ func TestTrailEnablementCache_ReadsClonePreference(t *testing.T) {
 
 	currentAuthKey := prefs.TrailsEnabledAuthKey
 	prefs.TrailsEnabledAuthKey = currentAuthKey + "-other"
-	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+		*p = *prefs
+		return nil
+	}); err != nil {
 		t.Fatalf("save auth-mismatched prefs: %v", err)
 	}
 	if trailsEnabledForCurrentRepo(ctx) {
@@ -828,13 +831,19 @@ func TestTrailEnablementCache_ReadsClonePreference(t *testing.T) {
 	prefs.TrailsEnabledAuthKey = currentAuthKey
 	fresh := time.Now()
 	prefs.TrailsEnabledCheckedAt = &fresh
-	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+		*p = *prefs
+		return nil
+	}); err != nil {
 		t.Fatalf("restore auth-matched prefs: %v", err)
 	}
 
 	stale := time.Now().Add(-trailEnablementCacheTTL - time.Minute)
 	prefs.TrailsEnabledCheckedAt = &stale
-	if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+		*p = *prefs
+		return nil
+	}); err != nil {
 		t.Fatalf("save stale prefs: %v", err)
 	}
 	if trailsEnabledForCurrentRepo(ctx) {

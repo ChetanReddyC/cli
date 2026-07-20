@@ -22,6 +22,16 @@ const (
 	gitCmdConfig = "config"
 )
 
+// runGitHubBootstrapWith runs the full bootstrap (init + finalize) in one
+// call, used by tests that don't need to assert phasing. The real caller
+// runs the two phases around agent setup.
+func runGitHubBootstrapWith(ctx context.Context, w, errW io.Writer, opts GitHubBootstrapOptions, runner bootstrapRunner) error {
+	state, err := runGitHubBootstrapInitWith(ctx, w, errW, opts, runner)
+	if err != nil {
+		return err
+	}
+	return runGitHubBootstrapFinalize(ctx, w, state)
+}
 func TestSlugifyRepoName(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
