@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -456,9 +457,11 @@ func CheckHookConfig(ctx context.Context) HookConfigState {
 	if !ok || !hasEntireHook(settings.Hooks.Stop) {
 		return HooksAbsent
 	}
-	if !hasEntireHookUnderMatcher(settings.Hooks.PreToolUse, subagentToolMatcher) ||
-		!hasEntireHookUnderMatcher(settings.Hooks.PostToolUse, subagentToolMatcher) ||
-		!hasEntireHookUnderMatcher(settings.Hooks.PostToolUse, taskToolMatcher) {
+	subagentTools := splitMatcherTools(subagentToolMatcher)
+	taskTools := splitMatcherTools(taskToolMatcher)
+	if !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
+		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) ||
+		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, taskTools) {
 		return HooksOutdated
 	}
 	return HooksCurrent
@@ -488,11 +491,36 @@ func hasEntireHook(matchers []ClaudeHookMatcher) bool {
 	return false
 }
 
-// hasEntireHookUnderMatcher reports whether an Entire hook is installed under a
-// matcher with the exact given name.
-func hasEntireHookUnderMatcher(matchers []ClaudeHookMatcher, matcherName string) bool {
+// splitMatcherTools splits a Claude Code tool matcher into its exact tool
+// names. Matchers that InstallHooks writes are `|`-separated lists (Claude Code
+// also accepts `,`); whitespace around separators is ignored. Returns the tools
+// in order, dropping empties.
+func splitMatcherTools(matcher string) []string {
+	parts := strings.FieldsFunc(matcher, func(r rune) bool { return r == '|' || r == ',' })
+	tools := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			tools = append(tools, t)
+		}
+	}
+	return tools
+}
+
+// hasEntireHookCoveringTools reports whether an Entire hook is installed under a
+// matcher that covers every tool in want. A widened matcher still counts: a
+// matcher of "TaskCreate|TaskUpdate|TaskGet" covers {TaskCreate, TaskUpdate},
+// so users who broaden a matcher aren't falsely flagged as outdated.
+func hasEntireHookCoveringTools(matchers []ClaudeHookMatcher, want []string) bool {
 	for _, matcher := range matchers {
-		if matcher.Matcher != matcherName {
+		have := splitMatcherTools(matcher.Matcher)
+		coversAll := true
+		for _, w := range want {
+			if !slices.Contains(have, w) {
+				coversAll = false
+				break
+			}
+		}
+		if !coversAll {
 			continue
 		}
 		for _, hook := range matcher.Hooks {

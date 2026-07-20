@@ -777,6 +777,36 @@ func TestCheckHookConfig_Outdated(t *testing.T) {
 	}
 }
 
+// TestCheckHookConfig_SupersetMatchersAreCurrent verifies that widening a
+// matcher beyond what we install (still covering the required tools) is not
+// flagged as drift — matchers are |-lists of exact tool names, so a superset
+// still fires for the required tools.
+func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	stop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	// "Agent|Foo" still covers Agent; "TaskCreate|TaskUpdate|TaskGet" still
+	// covers TaskCreate and TaskUpdate.
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
+    "PreToolUse": [{"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]}],
+    "PostToolUse": [
+      {"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]},
+      {"matcher": "TaskCreate|TaskUpdate|TaskGet", "hooks": [{"type": "command", "command": %q}]}
+    ]
+  }
+}`, stop, pre, post, todo))
+
+	if got := CheckHookConfig(context.Background()); got != HooksCurrent {
+		t.Errorf("CheckHookConfig() = %v, want HooksCurrent (superset matcher)", got)
+	}
+}
+
 // TestInstallHooks_Force_ReinstallsStaleToolMatchers verifies that `--force`
 // strips Entire hooks left under the outdated "Task"/"TodoWrite" matchers by
 // older CLI versions and reinstalls them under the current matchers. (A normal
