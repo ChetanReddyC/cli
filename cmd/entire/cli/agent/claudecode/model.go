@@ -50,6 +50,12 @@ func (c *ClaudeCodeAgent) ExtractModel(transcriptData []byte) (string, error) {
 		}
 		switch line.Type {
 		case envelopeTypeAssistant:
+			// All assistant lines are considered, including subagent
+			// (isSidechain) messages: the whole session shares one model, and
+			// on a mid-session switch the most recent line — sidechain or not —
+			// reflects the current one. This matches the rest of the package,
+			// which does not distinguish sidechains when scanning transcripts.
+			//
 			// Claude Code sets message.model to "<synthetic>" on API-error
 			// entries; skip it so the placeholder doesn't replace the last
 			// genuine model.
