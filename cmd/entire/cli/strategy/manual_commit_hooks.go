@@ -1068,7 +1068,7 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	// exists remotely but not locally. Bounded budget + the store's failure
 	// memo keep a dead network from stalling the post-commit hook.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
-		RefFetcher: remote.BoundedCheckpointRefFetcher(remote.WriteProbeFetchBudget),
+		RefFetcher: remote.HookCheckpointRefFetcher(),
 	})
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
@@ -2908,7 +2908,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// sessions). Bounded budget + the store's failure memo keep a dead
 	// network from stalling the stop hook N times.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
-		RefFetcher: remote.BoundedCheckpointRefFetcher(remote.WriteProbeFetchBudget),
+		RefFetcher: remote.HookCheckpointRefFetcher(),
 	})
 	if err != nil {
 		logging.Warn(logCtx, "finalize: failed to open checkpoint store",

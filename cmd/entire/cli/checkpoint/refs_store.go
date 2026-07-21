@@ -38,9 +38,12 @@ type gitRefsStore struct {
 
 	// fetchFailureMu guards fetchFailure: the first transport-level ref-fetch
 	// failure, memoized for the store's lifetime so a loop over N missing refs
-	// (e.g. a stop hook finalizing every checkpoint of a turn) pays a dead
-	// network once instead of N times. Genuine remote absence is per-ref and
-	// is never memoized.
+	// (e.g. a stop hook finalizing every checkpoint of a turn) pays a dead —
+	// or too-slow-for-the-budget — network once instead of N times. Genuine
+	// remote absence is per-ref and
+	// is never memoized. The memo never clears — safe because every
+	// fetcher-wired store today is opened per command/hook invocation; a
+	// long-lived fetcher-wired store would need an expiry before reusing this.
 	fetchFailureMu sync.Mutex
 	fetchFailure   error
 }
@@ -339,7 +342,9 @@ func (s *gitRefsStore) resolveRefMaybeFetch(ctx context.Context, cid id.Checkpoi
 	priorFailure := s.fetchFailure
 	s.fetchFailureMu.Unlock()
 	if priorFailure != nil {
-		return nil, fmt.Errorf("fetch checkpoint ref %s: skipping after earlier fetch failure: %w", refName, priorFailure)
+		// Note the cause may name a DIFFERENT ref — it is the first failure
+		// of this operation, remembered so the outage is paid once.
+		return nil, fmt.Errorf("fetch checkpoint ref %s: skipped, an earlier checkpoint-ref fetch already failed in this operation: %w", refName, priorFailure)
 	}
 	if fetchErr := s.refFetcher(ctx, refName); fetchErr != nil {
 		if errors.Is(fetchErr, plumbing.ErrReferenceNotFound) {
@@ -350,11 +355,16 @@ func (s *gitRefsStore) resolveRefMaybeFetch(ctx context.Context, cid id.Checkpoi
 				slog.String("ref", refName.String()))
 			return nil, plumbing.ErrReferenceNotFound
 		}
-		s.fetchFailureMu.Lock()
-		if s.fetchFailure == nil {
-			s.fetchFailure = fetchErr
+		// Memoize only network verdicts: a cancellation originating from the
+		// CALLER's context says nothing about the remote and must not poison
+		// later fetches on this store.
+		if ctx.Err() == nil {
+			s.fetchFailureMu.Lock()
+			if s.fetchFailure == nil {
+				s.fetchFailure = fetchErr
+			}
+			s.fetchFailureMu.Unlock()
 		}
-		s.fetchFailureMu.Unlock()
 		logging.Debug(ctx, "git-refs: on-demand checkpoint ref fetch failed",
 			slog.String("ref", refName.String()), slog.String("error", fetchErr.Error()))
 		return nil, fmt.Errorf("fetch checkpoint ref %s: %w", refName, fetchErr)

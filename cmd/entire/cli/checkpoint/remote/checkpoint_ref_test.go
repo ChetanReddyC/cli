@@ -65,6 +65,23 @@ func TestFetchCheckpointRef_PresentRefFetches(t *testing.T) {
 	require.NoError(t, err, "fetched ref must exist locally: %s", out)
 }
 
+// TestFetchCheckpointRef_FallbackTargetNeverClassifiesAbsence: when a
+// checkpoint_remote is configured but cannot be resolved (unknown provider +
+// an origin whose protocol can't be mapped), the probe runs against an origin
+// FALLBACK that never hosts the configured checkpoint refs. Emptiness there
+// must be a failure, not absence — absence would silently drop backfills for
+// checkpoints that exist on the real checkpoint remote.
+func TestFetchCheckpointRef_FallbackTargetNeverClassifiesAbsence(t *testing.T) {
+	workDir, ref := checkpointRefFixture(t, false)
+	testutil.WriteFile(t, workDir, ".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "bogusforge", "repo": "acme/checkpoints"}}}`)
+
+	err := FetchCheckpointRef(context.Background(), ref)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"emptiness on a non-authoritative fallback target must not classify as absence")
+}
+
 // TestFetchCheckpointRef_UnreachableRemoteIsFailure: a transport-level
 // failure (unreachable remote) must NOT classify as absence.
 func TestFetchCheckpointRef_UnreachableRemoteIsFailure(t *testing.T) {

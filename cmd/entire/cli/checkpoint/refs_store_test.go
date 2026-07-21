@@ -306,6 +306,36 @@ func TestGitRefsStore_FetchFailureMemoized(t *testing.T) {
 		assert.Equal(t, 1, calls, "the outage must be paid once, not per checkpoint")
 	})
 
+	t.Run("caller cancellation not memoized", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		calls := 0
+		cancelCtx, cancel := context.WithCancel(context.Background())
+		store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+			calls++
+			cancel() // the CALLER's context dies mid-fetch (e.g. Ctrl-C)
+			return context.Canceled
+		})
+		err := store.Write(cancelCtx, SessionSummary{
+			CheckpointID: id.MustCheckpointID("aaaaaaaaaaaa"),
+			Summary:      &Summary{Intent: "x"},
+		})
+		require.Error(t, err)
+
+		// A later fetch on the same store must still run: the cancellation
+		// said nothing about the network.
+		store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+			calls++
+			return assert.AnError
+		})
+		err = store.Write(context.Background(), SessionSummary{
+			CheckpointID: id.MustCheckpointID("bbbbbbbbbbbb"),
+			Summary:      &Summary{Intent: "x"},
+		})
+		require.ErrorIs(t, err, assert.AnError)
+		assert.Equal(t, 2, calls, "a caller cancellation must not be memoized as a network failure")
+	})
+
 	t.Run("remote absence not memoized", func(t *testing.T) {
 		t.Parallel()
 		store := newRefsStore(t)

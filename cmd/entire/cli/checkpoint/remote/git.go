@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -461,6 +462,15 @@ func lsRemote(ctx context.Context, dir, remote string, patterns ...string) ([]by
 	disableTerminalPrompt(cmd)
 	out, err := cmd.Output()
 	if err != nil {
+		// Fold git's stderr into the error (redacted): a bare "exit status
+		// 128" leaves auth, DNS, and missing-repo failures indistinguishable.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if msg := strings.TrimSpace(string(exitErr.Stderr)); msg != "" {
+				msg = strings.ReplaceAll(msg, remote, RedactURL(remote))
+				return out, fmt.Errorf("git ls-remote: %w: %s", err, msg)
+			}
+		}
 		return out, fmt.Errorf("git ls-remote: %w", err)
 	}
 	return out, nil

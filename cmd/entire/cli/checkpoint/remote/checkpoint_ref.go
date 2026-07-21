@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -27,11 +28,20 @@ const readFetchTimeout = 2 * time.Minute
 // resolution fails, it falls back to the origin remote name so callers can
 // still attempt a fetch.
 func CheckpointFetchTarget(ctx context.Context) string {
-	url, err := FetchURL(ctx)
+	target, _ := checkpointFetchTarget(ctx)
+	return target
+}
+
+// checkpointFetchTarget is CheckpointFetchTarget plus whether the target is
+// authoritative for checkpoint refs (see fetchURLAuthoritative). The bare
+// "origin" fallbacks are non-authoritative: they exist so a fetch can still
+// be attempted, not to certify where checkpoint refs live.
+func checkpointFetchTarget(ctx context.Context) (string, bool) {
+	url, authoritative, err := fetchURLAuthoritative(ctx)
 	if err == nil && url != "" {
-		return url
+		return url, authoritative
 	}
-	return "origin"
+	return "origin", false
 }
 
 // FetchCheckpointRef fetches a single per-checkpoint ref
@@ -52,7 +62,7 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 	ctx, cancel := context.WithTimeout(ctx, readFetchTimeout)
 	defer cancel()
 
-	fetchTarget := CheckpointFetchTarget(ctx)
+	fetchTarget, authoritative := checkpointFetchTarget(ctx)
 
 	out, err := LsRemoteInDir(ctx, "", fetchTarget, ref.String())
 	if err != nil {
@@ -61,18 +71,45 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 		return fmt.Errorf("probe checkpoint ref %s on %s: %w", ref, RedactURL(fetchTarget), err)
 	}
 	if len(bytes.TrimSpace(out)) == 0 {
+		if !authoritative {
+			// The probe hit an origin FALLBACK while a checkpoint_remote is
+			// configured (or undeterminable) — a remote that may simply never
+			// host the configured checkpoint refs. Emptiness there proves
+			// nothing; classifying it as absence would silently drop backfills
+			// for checkpoints that exist on the real checkpoint remote.
+			return fmt.Errorf("checkpoint ref %s not visible on fallback remote %s, and the configured checkpoint remote could not be resolved; refusing to treat this as absence", ref, RedactURL(fetchTarget))
+		}
 		return fmt.Errorf("checkpoint ref %s not found on %s: %w", ref, RedactURL(fetchTarget), plumbing.ErrReferenceNotFound)
 	}
 
 	refSpec := "+" + ref.String() + ":" + ref.String()
-	if _, err := Fetch(ctx, FetchOptions{
+	if fetchOut, err := Fetch(ctx, FetchOptions{
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
 	}); err != nil {
+		// Fold git's own output into the error (redacted): a bare
+		// "exit status 128" is undebuggable in hook Warn logs.
+		msg := strings.TrimSpace(string(fetchOut))
+		msg = strings.ReplaceAll(msg, fetchTarget, RedactURL(fetchTarget))
+		if msg != "" {
+			return fmt.Errorf("fetch checkpoint ref %s from %s: %s: %w", ref, RedactURL(fetchTarget), msg, err)
+		}
 		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, RedactURL(fetchTarget), err)
 	}
 	return nil
+}
+
+// HookCheckpointRefFetcher returns the write-probe fetcher for git-hook
+// contexts (post-commit attribution, stop-time transcript finalize): the
+// bounded budget plus BatchMode SSH, so a passphrase-protected key can never
+// prompt — or invisibly hang — inside a hook the user's git command is
+// waiting on.
+func HookCheckpointRefFetcher() func(context.Context, plumbing.ReferenceName) error {
+	bounded := BoundedCheckpointRefFetcher(WriteProbeFetchBudget)
+	return func(ctx context.Context, ref plumbing.ReferenceName) error {
+		return bounded(WithNonInteractiveSSH(ctx), ref)
+	}
 }
 
 // BoundedCheckpointRefFetcher returns a RefFetchFunc-shaped fetcher whose
