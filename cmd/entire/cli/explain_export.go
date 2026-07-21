@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -128,12 +130,27 @@ func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explai
 				_ = lookup.Close()
 				return cpID, freshLookup, nil
 			}
+			// Only "the target isn't a commit at all" is a genuine miss that
+			// keeps the checkpoint-not-found report below. Everything else —
+			// unreadable commit, missing trailer, ambiguous ref, lookup
+			// failure — happened AFTER the target resolved to something;
+			// masking those as not-found is the conflation fixed for the
+			// prose path in runExplainAuto (issue #1814).
+			if !errors.Is(commitErr, errExportTargetNotCommit) {
+				return id.CheckpointID(""), lookup, commitErr
+			}
 		}
 		return id.CheckpointID(""), lookup, fmt.Errorf("%w: %s", checkpoint.ErrCheckpointNotFound, prefix)
 	default:
 		return id.CheckpointID(""), lookup, fmt.Errorf("%w: %s matches %d checkpoints", errAmbiguousCommitPrefix, prefix, len(matches))
 	}
 }
+
+// errExportTargetNotCommit marks resolveCheckpointFromCommitRef's genuine
+// "target does not resolve to any commit" outcome, so
+// resolveExplainCheckpointID can fall through to its checkpoint-not-found
+// report only for that case and surface every other failure verbatim.
+var errExportTargetNotCommit = errors.New("commit not found")
 
 // resolveCheckpointFromCommitRef opens the repo, resolves a git commit-ish,
 // and extracts the Entire-Checkpoint trailer. If the resolved checkpoint
@@ -149,7 +166,12 @@ func resolveCheckpointFromCommitRef(ctx context.Context, errW io.Writer, commitR
 	defer repo.Close()
 	hash, _, err := resolveCommitUnambiguous(repo, commitRef)
 	if err != nil {
-		return id.CheckpointID(""), nil, fmt.Errorf("commit not found: %s: %w", commitRef, err)
+		if errors.Is(err, errAmbiguousCommitPrefix) {
+			// The target IS commit-like (several commits match); reporting it
+			// as not-found would misdirect. Surface the ambiguity.
+			return id.CheckpointID(""), nil, fmt.Errorf("ambiguous commit ref %s: %w", commitRef, err)
+		}
+		return id.CheckpointID(""), nil, fmt.Errorf("%w: %s: %w", errExportTargetNotCommit, commitRef, err)
 	}
 	commit, err := repo.CommitObject(hash)
 	if err != nil {
@@ -216,12 +238,23 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 			fetchErr := FetchCheckpointRef(ctx, refName)
 			stop(false)
 			if fetchErr == nil {
-				if fresh, freshErr := newExplainCheckpointLookup(ctx); freshErr == nil {
+				fresh, freshErr := newExplainCheckpointLookup(ctx)
+				if freshErr == nil {
 					if m := matchCheckpointPrefix(fresh, prefix); len(m) > 0 {
 						return m, fresh
 					}
 					_ = fresh.Close()
+				} else {
+					// The collapse to "no match" below reads to the user as
+					// "doesn't exist"; record what actually failed (issue #1815).
+					logging.Debug(ctx, "explain: lookup rebuild after checkpoint ref fetch failed; treating as no match",
+						slog.String("prefix", prefix),
+						slog.String("error", freshErr.Error()))
 				}
+			} else {
+				logging.Debug(ctx, "explain: on-demand checkpoint ref fetch failed; treating as no match",
+					slog.String("ref", refName.String()),
+					slog.String("error", fetchErr.Error()))
 			}
 		}
 		return nil, lookup
@@ -234,10 +267,16 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 	}
 	stop(false)
 	if v1Err != nil {
+		logging.Debug(ctx, "explain: metadata branch fetch failed; treating as no match",
+			slog.String("prefix", prefix),
+			slog.String("error", v1Err.Error()))
 		return nil, lookup
 	}
 	fresh, freshErr := newExplainCheckpointLookup(ctx)
 	if freshErr != nil {
+		logging.Debug(ctx, "explain: lookup rebuild after metadata fetch failed; treating as no match",
+			slog.String("prefix", prefix),
+			slog.String("error", freshErr.Error()))
 		return nil, lookup
 	}
 	return matchCheckpointPrefix(fresh, prefix), fresh

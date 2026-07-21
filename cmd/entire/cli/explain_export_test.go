@@ -191,6 +191,48 @@ func TestRunExplainExport_JSONUsesMetadataOnlyReader(t *testing.T) {
 	require.Empty(t, envelope.Sessions[0].Error, "well-formed v1 read must not surface a per-session error")
 }
 
+// TestRunExplainExport_CommitWithoutTrailerSurfacesTrailerError (issue #1814):
+// a positional target that resolves to a real commit without an
+// Entire-Checkpoint trailer must surface that fact — not be masked as
+// `checkpoint not found: <sha>`, which reads as a typo and hides that the
+// commit was found. Same conflation class fixed for the prose path in #1812.
+func TestRunExplainExport_CommitWithoutTrailerSurfacesTrailerError(t *testing.T) {
+	repo := setupExportRepo(t)
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       head.Hash().String(),
+		json:         true,
+		sessionIndex: -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "has no Entire-Checkpoint trailer",
+		"a trailer-less commit target must surface the trailer failure")
+	require.NotContains(t, err.Error(), "checkpoint not found",
+		"a resolved commit must not be masked as an unknown checkpoint")
+}
+
+// TestRunExplainExport_UnknownTargetStillReportsNotFound pins the genuine-miss
+// contract around the #1814 fix: a target that is neither a checkpoint prefix
+// nor a commit keeps the plain not-found report.
+func TestRunExplainExport_UnknownTargetStillReportsNotFound(t *testing.T) {
+	setupExportRepo(t)
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       "abababababab",
+		json:         true,
+		sessionIndex: -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, checkpoint.ErrCheckpointNotFound)
+	require.ErrorContains(t, err, "checkpoint not found: abababababab")
+}
+
 func TestRunExplainExport_JSONNeverEmbedsTranscript(t *testing.T) {
 	repo := setupExportRepo(t)
 
