@@ -203,12 +203,21 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 			return "", classifyEnvelopeError(result, env.APIErrorStatus, exitCode)
 		}
 		// No structured signal on stdout — ctx cancellation is next most
-		// informative, since the rest is a guess.
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", context.DeadlineExceeded
-		}
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return "", context.Canceled
+		// informative, since the rest is a guess. Wrap the sentinel in a
+		// *agent.TextGenerationError (like the streaming path and every other
+		// provider) so the explain timeout diagnostic still gets captured
+		// stderr and the stdout byte count when this path is reached via the
+		// old-CLI streaming fallback.
+		if ctxErr := ctx.Err(); ctxErr != nil && (errors.Is(ctxErr, context.DeadlineExceeded) || errors.Is(ctxErr, context.Canceled)) {
+			sentinel := context.Canceled
+			if errors.Is(ctxErr, context.DeadlineExceeded) {
+				sentinel = context.DeadlineExceeded
+			}
+			return "", &agent.TextGenerationError{
+				Err:         sentinel,
+				Stderr:      strings.TrimSpace(stderr.String()),
+				StdoutBytes: stdout.Len(),
+			}
 		}
 		if isExecNotFound(err) {
 			return "", &ClaudeError{Kind: ClaudeErrorCLIMissing, Cause: err}
