@@ -464,6 +464,17 @@ func resolveAgentType(ctxAgentType types.AgentType, state *SessionState) types.A
 // origin holds the store — when Primary is in Push and the local ref is missing
 // or un-initialized, the local ref is created/updated from origin's
 // remote-tracking ref. Otherwise an empty orphan is created.
+// primaryIsGitRefs reports whether the configured primary checkpoint backend is
+// git-refs. Resolution is fail-soft: any config-load error is treated as the
+// default git-branch backend (returns false), preserving legacy behavior.
+func primaryIsGitRefs(ctx context.Context) bool {
+	cfg, err := settings.LoadCheckpointsConfig(ctx)
+	if err != nil {
+		return false
+	}
+	return checkpoint.PrimaryIsRefs(cfg)
+}
+
 func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 	// Rebind settings/remote resolution to the repository being modified rather
 	// than the ambient working directory, so the "is a checkpoint_remote
@@ -476,6 +487,17 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 
 	refs := checkpoint.ResolveRefs(ctx)
 	primaryName := refs.Primary.Short()
+
+	// Under the git-refs primary backend, checkpoints are written to
+	// per-checkpoint refs and nothing is ever written to the v1 metadata
+	// branch. Seeding an empty orphan v1 here would leave a vestigial,
+	// never-written branch — the surprise a user hit when `entire enable`
+	// selected git-refs yet still created entire/checkpoints/v1. We still adopt
+	// real v1 data that already exists on origin or a checkpoint_remote below
+	// (so legacy checkpoints stay readable); we only suppress the empty-orphan
+	// fallback. Resolution is fail-soft: an unreadable config keeps the legacy
+	// git-branch seeding behavior.
+	skipEmptyOrphan := primaryIsGitRefs(ctx)
 
 	localRef, localErr := repo.Reference(refs.Primary, true)
 	if localErr != nil && !errors.Is(localErr, plumbing.ErrReferenceNotFound) {
@@ -515,6 +537,9 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		// Nothing usable on the checkpoint remote (fetch skipped/failed or the
 		// remote has no data) — create a fresh orphan that future pushes publish
 		// there. Still never origin.
+		if skipEmptyOrphan {
+			return nil
+		}
 		return createOrphanMetadataRef(ctx, repo, refs)
 	}
 
@@ -565,6 +590,9 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 	}
 
 	// No local or origin ref — create an empty orphan.
+	if skipEmptyOrphan {
+		return nil
+	}
 	return createOrphanMetadataRef(ctx, repo, refs)
 }
 

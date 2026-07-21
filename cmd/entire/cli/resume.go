@@ -760,7 +760,7 @@ func checkRemoteMetadata(
 
 	if !refs.ReadBootstrappableFromOrigin() {
 		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but metadata is not available in %s.\n", checkpointID, refs.Read)
-		fmt.Fprintf(errW, "This ref is local-only. Try: entire explain %s\n", checkpointID)
+		fmt.Fprintf(errW, "This ref is local-only. Try: entire checkpoint explain %s\n", checkpointID)
 		return nil, nil
 	}
 
