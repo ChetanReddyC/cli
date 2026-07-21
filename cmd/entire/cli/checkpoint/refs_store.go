@@ -209,6 +209,9 @@ func (s *gitRefsStore) writeSession(ctx context.Context, opts WriteOptions) erro
 }
 
 func (s *gitRefsStore) backfillTranscript(ctx context.Context, opts UpdateOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
 	if opts.CheckpointID.IsEmpty() {
 		return errors.New("invalid update options: checkpoint ID is required")
 	}
