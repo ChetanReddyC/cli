@@ -5635,13 +5635,13 @@ func TestExtractIntent_TruncatesLongPrompts(t *testing.T) {
 
 func TestBuildNoSummaryMarkdown_IntentAndAffordance(t *testing.T) {
 	t.Parallel()
-	got := buildNoSummaryMarkdown("add explain --generate flag", nil, "Run `entire explain --generate abc`.")
+	got := buildNoSummaryMarkdown("add explain --generate flag", nil, "Run `entire checkpoint explain --generate abc`.")
 	if !strings.Contains(got, "## Intent\n\nadd explain --generate flag\n") {
 		t.Fatalf("missing intent section:\n%s", got)
 	}
 	// escapeSummaryText replaces every backtick with U+2018 (‘), so both
-	// backticks in "Run `entire explain --generate abc`." map to ‘.
-	if !strings.Contains(got, "## Summary\n\n*Run ‘entire explain --generate abc‘.*\n") {
+	// backticks in "Run `entire checkpoint explain --generate abc`." map to ‘.
+	if !strings.Contains(got, "## Summary\n\n*Run ‘entire checkpoint explain --generate abc‘.*\n") {
 		t.Fatalf("missing italic summary affordance:\n%s", got)
 	}
 	if strings.Contains(got, "## Files") {
