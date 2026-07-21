@@ -132,24 +132,35 @@ func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explai
 			}
 			// Only "the target isn't a commit at all" is a genuine miss that
 			// keeps the checkpoint-not-found report below. Everything else —
-			// unreadable commit, missing trailer, ambiguous ref, lookup
-			// failure — happened AFTER the target resolved to something;
-			// masking those as not-found is the conflation fixed for the
-			// prose path in runExplainAuto (issue #1814).
+			// unreadable commit, missing trailer, ambiguous ref, repo or
+			// lookup failure — reflects a real failure, not a miss; masking
+			// those as not-found is this path's variant of the conflation
+			// PR #1812 fixes for the prose path in runExplainAuto (this
+			// path's fix: issue #1814).
 			if !errors.Is(commitErr, errExportTargetNotCommit) {
+				if freshLookup != nil {
+					// Defensive: resolveCheckpointFromCommitRef documents a
+					// nil lookup on error, but a leak here would be silent.
+					_ = freshLookup.Close()
+				}
 				return id.CheckpointID(""), lookup, commitErr
 			}
 		}
 		return id.CheckpointID(""), lookup, fmt.Errorf("%w: %s", checkpoint.ErrCheckpointNotFound, prefix)
 	default:
-		return id.CheckpointID(""), lookup, fmt.Errorf("%w: %s matches %d checkpoints", errAmbiguousCommitPrefix, prefix, len(matches))
+		ids := make([]string, len(matches))
+		for i, m := range matches {
+			ids[i] = m.String()
+		}
+		return id.CheckpointID(""), lookup, fmt.Errorf("%w: %s matches %d checkpoints (%s)", errAmbiguousCommitPrefix, prefix, len(matches), strings.Join(ids, ", "))
 	}
 }
 
 // errExportTargetNotCommit marks resolveCheckpointFromCommitRef's genuine
 // "target does not resolve to any commit" outcome, so
-// resolveExplainCheckpointID can fall through to its checkpoint-not-found
-// report only for that case and surface every other failure verbatim.
+// resolveExplainCheckpointID's positional commit fallback can fall through to
+// its checkpoint-not-found report only for that case and surface every other
+// failure verbatim.
 var errExportTargetNotCommit = errors.New("commit not found")
 
 // resolveCheckpointFromCommitRef opens the repo, resolves a git commit-ish,
@@ -158,18 +169,27 @@ var errExportTargetNotCommit = errors.New("commit not found")
 // metadata from the remote — symmetry with the prefix path so
 // `--commit <sha>` and `--checkpoint <prefix>` share the same fetch
 // behavior.
+//
+// Invariant: on every error return the lookup is nil (any lookup created
+// along the way is closed internally), so callers may drop the lookup slot
+// without closing it when err != nil.
 func resolveCheckpointFromCommitRef(ctx context.Context, errW io.Writer, commitRef string) (id.CheckpointID, *explainCheckpointLookup, error) {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return id.CheckpointID(""), nil, fmt.Errorf("not a git repository: %w", err)
 	}
 	defer repo.Close()
-	hash, _, err := resolveCommitUnambiguous(repo, commitRef)
+	hash, ambiguousMatches, err := resolveCommitUnambiguous(repo, commitRef)
 	if err != nil {
 		if errors.Is(err, errAmbiguousCommitPrefix) {
 			// The target IS commit-like (several commits match); reporting it
-			// as not-found would misdirect. Surface the ambiguity.
-			return id.CheckpointID(""), nil, fmt.Errorf("ambiguous commit ref %s: %w", commitRef, err)
+			// as not-found would misdirect. Surface the ambiguity, naming the
+			// candidates so the user can disambiguate without rerunning git log.
+			candidates := make([]string, 0, len(ambiguousMatches))
+			for _, m := range buildAmbiguousCommitMatches(repo, ambiguousMatches) {
+				candidates = append(candidates, m.ShortID)
+			}
+			return id.CheckpointID(""), nil, fmt.Errorf("ambiguous commit ref %s (matches commits %s): %w", commitRef, strings.Join(candidates, ", "), err)
 		}
 		return id.CheckpointID(""), nil, fmt.Errorf("%w: %s: %w", errExportTargetNotCommit, commitRef, err)
 	}
@@ -190,11 +210,20 @@ func resolveCheckpointFromCommitRef(ctx context.Context, errW io.Writer, commitR
 	// same remote-fetch retry the prefix path uses; otherwise downstream
 	// metadata reads would fail with an immediate "not found".
 	if !lookupHasCheckpoint(lookup, cpID) {
-		if matches, fresh := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, cpID.String()); len(matches) == 1 {
-			if fresh != lookup {
-				_ = lookup.Close()
-			}
+		matches, fresh := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, cpID.String())
+		if fresh != lookup {
+			_ = lookup.Close()
 			lookup = fresh
+		}
+		if len(matches) != 1 {
+			// The commit resolved and its trailer parsed; the checkpoint is
+			// simply not obtainable here. Failing now with the linkage beats
+			// succeeding and letting a downstream read die with a bare
+			// "checkpoint not found" that misdirects the user toward the
+			// checkpoint ID when the problem is availability (offline,
+			// unfetchable remote, or genuinely gone).
+			_ = lookup.Close()
+			return id.CheckpointID(""), nil, fmt.Errorf("commit %s references checkpoint %s, which is not available locally and could not be fetched from the remote", commitRef, cpID)
 		}
 	}
 	return cpID, lookup, nil
@@ -224,11 +253,16 @@ func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer
 	// git-refs primary: there is no single metadata branch to fetch — each
 	// checkpoint is its own ref. When the prefix is a full checkpoint ID (the
 	// Entire-Checkpoint commit trailer always is), fetch that one ref directly,
-	// then re-list. Falls through to the v1-branch fetch below otherwise.
+	// then re-list. A shorter prefix cannot be fetched per-ref, and under a
+	// refs primary there is no v1 metadata branch to fetch either, so a
+	// short-prefix miss stays local-only.
 	if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: bad config surfaces via Open elsewhere
-		if cid, err := id.NewCheckpointID(prefix); err == nil {
+		if cid, err := id.NewCheckpointID(prefix); err != nil {
+			logging.Debug(ctx, "explain: prefix is not a full checkpoint ID; refs-primary store cannot fetch by prefix, treating as no match",
+				slog.String("prefix", prefix))
+		} else {
 			// cid is already validated by NewCheckpointID above, so RefName can't
-			// error here; the guard is defensive — fall back to the v1-branch path
+			// error here; the guard is defensive — treat it as a local-only miss
 			// rather than fetch a malformed ref.
 			refName, refErr := checkpoint.RefName(cid)
 			if refErr != nil {
