@@ -184,14 +184,14 @@ func newExpertsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "experts [scope-or-query]",
 		Short: "Rank agent provenance for code scopes",
-		Long: `Rank which agents, skills, and tools have provenance over code scopes — who
-and what has touched the given files.
+		Long: `Rank which agents, skills, and tools have provenance over a code scope — who
+and what has touched the given code.
 
-Each argument is a scope: a file path or a directory (repeatable). With no
-argument the current branch's changed paths are used; pass --staged to use
-staged paths instead. Results come from the entire-api cell keyed on the repo,
-so the repo must be mirrored.`,
-		Example: "  entire experts src/payments/ --json\n  entire experts --staged\n  entire experts internal/auth internal/session --limit 5",
+The argument is either a single scope (a file or directory path) or a
+natural-language query. A scope or query is required unless --staged is set,
+which uses the staged file paths as scopes instead. Results come from the
+entire-api cell keyed on the repo, so the repo must be mirrored.`,
+		Example: "  entire experts src/payments --json\n  entire experts \"who owns token refresh\" --json\n  entire experts --staged",
 		Hidden:  true,
 		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
