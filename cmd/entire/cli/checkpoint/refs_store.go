@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -34,6 +35,14 @@ type gitRefsStore struct {
 
 	blobFetcher BlobFetchFunc
 	refFetcher  RefFetchFunc
+
+	// fetchFailureMu guards fetchFailure: the first transport-level ref-fetch
+	// failure, memoized for the store's lifetime so a loop over N missing refs
+	// (e.g. a stop hook finalizing every checkpoint of a turn) pays a dead
+	// network once instead of N times. Genuine remote absence is per-ref and
+	// is never memoized.
+	fetchFailureMu sync.Mutex
+	fetchFailure   error
 }
 
 // newGitRefsStore constructs the per-checkpoint-ref store for a repository.
@@ -323,7 +332,26 @@ func (s *gitRefsStore) resolveRefMaybeFetch(ctx context.Context, cid id.Checkpoi
 	if s.refFetcher == nil {
 		return nil, err //nolint:wrapcheck // genuinely absent; caller maps ErrReferenceNotFound to ErrCheckpointNotFound
 	}
+	s.fetchFailureMu.Lock()
+	priorFailure := s.fetchFailure
+	s.fetchFailureMu.Unlock()
+	if priorFailure != nil {
+		return nil, fmt.Errorf("fetch checkpoint ref %s: skipping after earlier fetch failure: %w", refName, priorFailure)
+	}
 	if fetchErr := s.refFetcher(ctx, refName); fetchErr != nil {
+		if errors.Is(fetchErr, plumbing.ErrReferenceNotFound) {
+			// The fetcher probed the remote and it genuinely lacks this ref
+			// (remote.FetchCheckpointRef's absence signal) — absence, not a
+			// failure, and per-ref, so it is not memoized.
+			logging.Debug(ctx, "git-refs: remote has no such checkpoint ref",
+				slog.String("ref", refName.String()))
+			return nil, plumbing.ErrReferenceNotFound
+		}
+		s.fetchFailureMu.Lock()
+		if s.fetchFailure == nil {
+			s.fetchFailure = fetchErr
+		}
+		s.fetchFailureMu.Unlock()
 		logging.Debug(ctx, "git-refs: on-demand checkpoint ref fetch failed",
 			slog.String("ref", refName.String()), slog.String("error", fetchErr.Error()))
 		return nil, fmt.Errorf("fetch checkpoint ref %s: %w", refName, fetchErr)

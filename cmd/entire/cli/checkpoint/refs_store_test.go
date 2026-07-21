@@ -2,6 +2,7 @@ package checkpoint
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	git "github.com/go-git/go-git/v6"
@@ -250,6 +251,79 @@ func TestGitRefsStore_BackfillFetchFailureAborts(t *testing.T) {
 	require.ErrorIs(t, err, assert.AnError, "the fetch failure must surface")
 	require.NotErrorIs(t, err, ErrCheckpointNotFound,
 		"a fetch failure must not read as absence")
+}
+
+// TestGitRefsStore_RemoteAbsenceFromFetcherIsNotFound pins the classification
+// chain for a fetcher that reports "the remote has no such ref" by wrapping
+// plumbing.ErrReferenceNotFound (remote.FetchCheckpointRef's absence signal):
+// both backfills and reads must treat it as checkpoint-not-found, not as a
+// hard failure.
+func TestGitRefsStore_RemoteAbsenceFromFetcherIsNotFound(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newRefsStore(t)
+	store.SetRefFetcher(func(_ context.Context, rn plumbing.ReferenceName) error {
+		return fmt.Errorf("checkpoint ref %s not found on origin: %w", rn, plumbing.ErrReferenceNotFound)
+	})
+
+	err := store.Write(ctx, SessionSummary{
+		CheckpointID: id.MustCheckpointID("ffffffffffff"),
+		Summary:      &Summary{Intent: "orphan"},
+	})
+	require.ErrorIs(t, err, ErrCheckpointNotFound, "remote absence must classify as not-found for backfills")
+
+	summary, err := store.Read(ctx, id.MustCheckpointID("ffffffffffff"))
+	require.NoError(t, err)
+	assert.Nil(t, summary, "remote absence must classify as not-found for reads")
+}
+
+// TestGitRefsStore_FetchFailureMemoized: a transport-level fetch failure is
+// remembered for the store's lifetime, so a loop backfilling N checkpoints on
+// a dead network pays the outage once instead of N times (stop hooks finalize
+// every checkpoint of a turn). The memoized error stays a hard error — never
+// absence. Genuine remote absence is NOT memoized (per-ref, not an outage).
+func TestGitRefsStore_FetchFailureMemoized(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("transport failure fetched once", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		calls := 0
+		store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+			calls++
+			return assert.AnError
+		})
+
+		for _, cid := range []string{"aaaaaaaaaaaa", "bbbbbbbbbbbb"} {
+			err := store.Write(ctx, SessionSummary{
+				CheckpointID: id.MustCheckpointID(cid),
+				Summary:      &Summary{Intent: "x"},
+			})
+			require.ErrorIs(t, err, assert.AnError)
+			require.NotErrorIs(t, err, ErrCheckpointNotFound)
+		}
+		assert.Equal(t, 1, calls, "the outage must be paid once, not per checkpoint")
+	})
+
+	t.Run("remote absence not memoized", func(t *testing.T) {
+		t.Parallel()
+		store := newRefsStore(t)
+		calls := 0
+		store.SetRefFetcher(func(_ context.Context, rn plumbing.ReferenceName) error {
+			calls++
+			return fmt.Errorf("ref %s not on remote: %w", rn, plumbing.ErrReferenceNotFound)
+		})
+
+		for _, cid := range []string{"aaaaaaaaaaaa", "bbbbbbbbbbbb"} {
+			err := store.Write(ctx, SessionSummary{
+				CheckpointID: id.MustCheckpointID(cid),
+				Summary:      &Summary{Intent: "x"},
+			})
+			require.ErrorIs(t, err, ErrCheckpointNotFound)
+		}
+		assert.Equal(t, 2, calls, "absence is per-ref and must not suppress later fetches")
+	})
 }
 
 // TestGitRefsStore_BackfillAbsentAfterFetchIsNotFound pins the genuine-absence
