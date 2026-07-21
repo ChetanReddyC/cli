@@ -893,7 +893,7 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 //
 // summaryTimeoutSeconds is the per-invocation --summary-timeout-seconds flag
 // value (0 = unset). Effective precedence for the deadline: flag > settings >
-// package default. See resolveSummaryTimeout for the resolution.
+// no deadline. See resolveSummaryTimeout for the resolution.
 func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store checkpoint.Writer, checkpointID id.CheckpointID, cpSummary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, force bool, summaryTimeoutSeconds int) error {
 	// Check if summary already exists
 	if content.Metadata.Summary != nil && !force {
@@ -1061,7 +1061,7 @@ func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, f
 
 	// scopedTranscript is either read from checkpoint storage (redacted on
 	// write) or replaced by external compact output redacted before use.
-	summary, err := generateTranscriptSummary(runCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, agentType, generator, progress) // wired in chunk 6
+	summary, err := generateTranscriptSummary(runCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, agentType, generator, progress)
 	if err != nil {
 		// Populate attempt with captured subprocess output before classifying
 		// the error, so the timeout-diagnostic path can surface stderr / byte count.
@@ -1194,24 +1194,35 @@ func timeoutDiagnostic(_ error, attempt *summaryAttempt) (string, []explainRow) 
 	}
 
 	if attempt.streaming {
+		// Key off the furthest phase reached, not the earliest one missing:
+		// PhaseConnecting comes from a version-dependent status event, so an
+		// older CLI can reach FirstToken/Generating without ever reporting
+		// Connecting — diagnosing that as "never sent its request" would
+		// contradict the progress lines the user just watched.
 		switch {
-		case !attempt.phasesReached[agent.PhaseConnecting]:
-			return prefix + "provider never sent its request",
+		case attempt.phasesReached[agent.PhaseDone]:
+			return prefix + "model finished but the result was not delivered in time",
 				[]explainRow{
-					{Label: "cause", Value: "the provider CLI may be stalled before subprocess startup"},
-					{Label: "try", Value: tryRunCLI},
+					{Label: "cause", Value: "the deadline fired while the finished result was being read"},
+					{Label: "try", Value: "raise --summary-timeout-seconds and retry"},
 				}
-		case !attempt.phasesReached[agent.PhaseFirstToken]:
+		case attempt.phasesReached[agent.PhaseGenerating], attempt.phasesReached[agent.PhaseFirstToken]:
+			return prefix + "model responded but did not finish",
+				[]explainRow{
+					{Label: "cause", Value: "transcript may be too large for the chosen cap, or model is slow"},
+					{Label: "try", Value: "raise --summary-timeout-seconds or pick a faster model"},
+				}
+		case attempt.phasesReached[agent.PhaseConnecting]:
 			return prefix + "provider sent request but received no response",
 				[]explainRow{
 					{Label: "cause", Value: "network/firewall, provider API degraded, or auth check stuck"},
 					{Label: "try", Value: "check connectivity to the provider, then retry"},
 				}
-		case !attempt.phasesReached[agent.PhaseDone]:
-			return prefix + "model responded but did not finish",
+		default:
+			return prefix + "provider never sent its request",
 				[]explainRow{
-					{Label: "cause", Value: "transcript may be too large for the chosen cap, or model is slow"},
-					{Label: "try", Value: "raise --summary-timeout-seconds or pick a faster model"},
+					{Label: "cause", Value: "the provider CLI may be stalled before subprocess startup"},
+					{Label: "try", Value: tryRunCLI},
 				}
 		}
 	}

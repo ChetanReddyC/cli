@@ -5952,6 +5952,43 @@ func TestTimeoutDiagnostic_StreamingStuckMidGeneration(t *testing.T) {
 	}
 }
 
+func TestTimeoutDiagnostic_StreamingFirstTokenWithoutConnecting(t *testing.T) {
+	t.Parallel()
+	// Older CLIs can reach FirstToken without ever emitting the
+	// version-dependent "requesting" status event. The diagnostic must key
+	// off the furthest phase reached — reporting "never sent its request"
+	// here would contradict the progress lines the user just watched.
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true
+	attempt.phasesReached[agent.PhaseFirstToken] = true
+
+	label, _ := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "did not finish") {
+		t.Errorf("label = %q, want 'did not finish' (furthest phase reached wins)", label)
+	}
+}
+
+func TestTimeoutDiagnostic_StreamingDoneButDeadlineFired(t *testing.T) {
+	t.Parallel()
+	// All phases including Done were reached, yet the deadline still fired
+	// (e.g. while the result was being read). Must not fall through to the
+	// non-streaming branch and claim the provider produced no output.
+	attempt := newSummaryAttempt("claude-code", 5*time.Second)
+	attempt.streaming = true
+	attempt.phasesReached[agent.PhaseConnecting] = true
+	attempt.phasesReached[agent.PhaseFirstToken] = true
+	attempt.phasesReached[agent.PhaseGenerating] = true
+	attempt.phasesReached[agent.PhaseDone] = true
+
+	label, _ := timeoutDiagnostic(context.DeadlineExceeded, attempt)
+	if !strings.Contains(label, "was not delivered in time") {
+		t.Errorf("label = %q, want 'was not delivered in time'", label)
+	}
+	if strings.Contains(label, "produced no output") {
+		t.Errorf("label = %q must not claim the provider produced no output", label)
+	}
+}
+
 func TestTimeoutDiagnostic_NonStreamingNoOutput(t *testing.T) {
 	t.Parallel()
 	attempt := newSummaryAttempt("codex", 5*time.Second)
