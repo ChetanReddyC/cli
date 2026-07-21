@@ -22,8 +22,12 @@ func init() { //nolint:gochecknoinits // child test binaries must intercept befo
 	if len(args) < 5 || args[len(args)-4] != fakeStreamMarkerArg {
 		return
 	}
-	writeDecodedFixture(os.Stdout, args[len(args)-3])
+	// Write stderr BEFORE stdout: hang-mode tests kill this child as soon as
+	// they observe a progress event (i.e. stdout output), and asserting on
+	// captured stderr is only deterministic if it was fully written before
+	// any stdout could have been seen.
 	writeDecodedFixture(os.Stderr, args[len(args)-2])
+	writeDecodedFixture(os.Stdout, args[len(args)-3])
 	if args[len(args)-1] == fakeStreamHangSentinel {
 		// Block until killed by the parent's ctx cancellation. Sleep instead
 		// of select{} so the runtime's deadlock detector doesn't fire and
