@@ -74,8 +74,14 @@ func (s *gitRefsStore) Write(ctx context.Context, req WriteRequest) error {
 // LOCAL-ONLY lookup. A missing ref yields (ZeroHash, nil) so the next write
 // becomes an orphan commit — correct for creates, whose ref never exists yet
 // (locally or remotely); probing the remote would add a doomed round-trip to
-// every condensation and break offline writes. Backfills, which target an
-// existing checkpoint, use refBaseForBackfill instead.
+// every condensation and, with a fetcher configured, fail offline writes.
+// Backfills, which target an existing checkpoint, use refBaseForBackfill
+// instead. Migration (migrate.go) also uses refBase deliberately: it imports
+// from the LOCAL v1 branch and must never probe the remote, even though its
+// target ref may already exist. One writeSession caller does target an
+// existing checkpoint — attach, which adds a session to it — but attach
+// pre-fetches and verifies the ref's presence itself (refreshCheckpoint)
+// before writing, so the local-only probe is safe there too.
 func (s *gitRefsStore) refBase(cid id.CheckpointID) (plumbing.Hash, *object.Tree, error) {
 	refName, err := RefName(cid)
 	if err != nil {
@@ -97,13 +103,15 @@ func (s *gitRefsStore) refBase(cid id.CheckpointID) (plumbing.Hash, *object.Tree
 // first fetched once from the remote (resolveRefMaybeFetch) when a fetcher is
 // configured: a backfill targets an EXISTING checkpoint that may have been
 // written or migrated on another machine, and declaring it absent without
-// looking remotely diverges from the read path — the write would land on a
-// fallback backend (or fail) while reads, which DO fetch, serve the refs
-// copy, leaving the backfill permanently invisible. A ref absent even after
-// the fetch yields (ZeroHash, nil), which the backfill helpers report as
-// ErrCheckpointNotFound; a fetch FAILURE is returned as-is — transient
-// unavailability must not read as absence, or the kind-routing store's
-// fallthrough would fork the write onto a stale copy.
+// looking remotely diverges from the read path — the backfill would be
+// handled as targeting a nonexistent checkpoint while reads, which DO fetch,
+// serve the refs copy, leaving the backfilled data permanently invisible.
+// A ref absent even after the fetch yields (ZeroHash, nil), which the
+// backfill helpers report as ErrCheckpointNotFound — the signal that the
+// checkpoint does not exist in this backend. A fetch FAILURE is returned
+// as-is: transient unavailability must never masquerade as absence, because
+// a caller or routing layer acting on a false "absent" would misdirect the
+// backfill (e.g. onto a stale copy in another backend) instead of retrying.
 func (s *gitRefsStore) refBaseForBackfill(ctx context.Context, cid id.CheckpointID) (plumbing.Hash, *object.Tree, error) {
 	ref, err := s.resolveRefMaybeFetch(ctx, cid)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {

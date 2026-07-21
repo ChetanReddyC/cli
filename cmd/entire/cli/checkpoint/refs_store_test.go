@@ -121,30 +121,60 @@ func TestGitRefsStore_OnDemandRefFetch_FailurePropagates(t *testing.T) {
 // TestGitRefsStore_BackfillFetchesMissingRef: a backfill targets an EXISTING
 // checkpoint, which may have been written or migrated on another machine — so
 // like reads, backfills must on-demand fetch a ref that is missing locally
-// before declaring the checkpoint absent. Otherwise the write lands on a
-// fallback store (or errors) while reads — which DO fetch — serve the refs
-// copy, and the backfill is permanently invisible.
+// before declaring the checkpoint absent. Otherwise the backfill is handled
+// as targeting a nonexistent checkpoint while reads — which DO fetch — serve
+// the refs copy, and the backfilled data is permanently invisible.
 func TestGitRefsStore_BackfillFetchesMissingRef(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	backfills := map[string]func(cid id.CheckpointID) WriteRequest{
-		"summary": func(cid id.CheckpointID) WriteRequest {
-			return SessionSummary{CheckpointID: cid, Summary: &Summary{Intent: "fetched intent"}}
+	backfills := map[string]struct {
+		makeReq func(cid id.CheckpointID) WriteRequest
+		verify  func(t *testing.T, store *gitRefsStore, cid id.CheckpointID)
+	}{
+		"summary": {
+			makeReq: func(cid id.CheckpointID) WriteRequest {
+				return SessionSummary{CheckpointID: cid, Summary: &Summary{Intent: "fetched intent"}}
+			},
+			verify: func(t *testing.T, store *gitRefsStore, cid id.CheckpointID) {
+				t.Helper()
+				meta, err := store.ReadSessionMetadata(context.Background(), cid, 0)
+				require.NoError(t, err)
+				require.NotNil(t, meta.Summary)
+				assert.Equal(t, "fetched intent", meta.Summary.Intent)
+			},
 		},
-		"transcript": func(cid id.CheckpointID) WriteRequest {
-			return SessionTranscript{
-				CheckpointID: cid,
-				SessionID:    "sess-1",
-				Transcript:   redact.AlreadyRedacted([]byte("finalized")),
-			}
+		"transcript": {
+			makeReq: func(cid id.CheckpointID) WriteRequest {
+				return SessionTranscript{
+					CheckpointID: cid,
+					SessionID:    "sess-1",
+					Transcript:   redact.AlreadyRedacted([]byte("finalized")),
+				}
+			},
+			verify: func(t *testing.T, store *gitRefsStore, cid id.CheckpointID) {
+				t.Helper()
+				content, err := store.ReadSessionContent(context.Background(), cid, 0)
+				require.NoError(t, err)
+				assert.Equal(t, []byte("finalized"), content.Transcript)
+			},
 		},
-		"attribution": func(cid id.CheckpointID) WriteRequest {
-			return CheckpointAttribution{CheckpointID: cid, Attribution: &Attribution{AgentLines: 3}}
+		"attribution": {
+			makeReq: func(cid id.CheckpointID) WriteRequest {
+				return CheckpointAttribution{CheckpointID: cid, Attribution: &Attribution{AgentLines: 3}}
+			},
+			verify: func(t *testing.T, store *gitRefsStore, cid id.CheckpointID) {
+				t.Helper()
+				summary, err := store.Read(context.Background(), cid)
+				require.NoError(t, err)
+				require.NotNil(t, summary)
+				require.NotNil(t, summary.CombinedAttribution)
+				assert.Equal(t, 3, summary.CombinedAttribution.AgentLines)
+			},
 		},
 	}
 
-	for name, makeReq := range backfills {
+	for name, tc := range backfills {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			store := newRefsStore(t)
@@ -162,17 +192,50 @@ func TestGitRefsStore_BackfillFetchesMissingRef(t *testing.T) {
 				return store.repo.Storer.SetReference(plumbing.NewHashReference(rn, commitHash))
 			})
 
-			require.NoError(t, store.Write(ctx, makeReq(cid)),
+			require.NoError(t, store.Write(ctx, tc.makeReq(cid)),
 				"a backfill must fetch the missing ref instead of declaring the checkpoint absent")
 			assert.Equal(t, 1, fetched, "fetcher invoked once for the missing ref")
+
+			// The write must have landed on the fetched history, not orphaned
+			// over it: the new tip's parent is the pre-removal commit.
+			newRef, err := store.repo.Reference(mustRefName(t, cid), true)
+			require.NoError(t, err)
+			newTip, err := store.repo.CommitObject(newRef.Hash())
+			require.NoError(t, err)
+			require.Len(t, newTip.ParentHashes, 1)
+			assert.Equal(t, commitHash, newTip.ParentHashes[0],
+				"the backfill commit must parent on the fetched tip")
+
+			tc.verify(t, store, cid)
 		})
 	}
 }
 
+// TestGitRefsStore_BackfillLocalRefNeverFetches pins the zero-cost claim: a
+// backfill whose ref exists locally must not touch the remote — otherwise
+// every summary/attribution/transcript backfill pays a network round-trip and
+// offline finalization breaks.
+func TestGitRefsStore_BackfillLocalRefNeverFetches(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	refsWrite(t, store, cid, "sess-1", "transcript")
+	store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+		t.Error("a backfill with a locally-present ref must not fetch")
+		return nil
+	})
+
+	require.NoError(t, store.Write(context.Background(), SessionSummary{
+		CheckpointID: cid,
+		Summary:      &Summary{Intent: "local"},
+	}))
+}
+
 // TestGitRefsStore_BackfillFetchFailureAborts: a failed fetch is a transient
 // availability problem, not evidence of absence. The backfill must surface it
-// as a real error — NOT ErrCheckpointNotFound, which the kind-routing store
-// treats as "try the next backend" and would fork the write onto a stale copy.
+// as a real error — NOT ErrCheckpointNotFound, which callers treat as "the
+// checkpoint does not exist in this backend", a signal a routing layer may
+// act on to select a different backend (forking the write onto a stale copy).
 func TestGitRefsStore_BackfillFetchFailureAborts(t *testing.T) {
 	t.Parallel()
 	store := newRefsStore(t)
@@ -186,13 +249,13 @@ func TestGitRefsStore_BackfillFetchFailureAborts(t *testing.T) {
 	})
 	require.ErrorIs(t, err, assert.AnError, "the fetch failure must surface")
 	require.NotErrorIs(t, err, ErrCheckpointNotFound,
-		"a fetch failure must not read as absence — the router would fall through and fork the write")
+		"a fetch failure must not read as absence")
 }
 
 // TestGitRefsStore_BackfillAbsentAfterFetchIsNotFound pins the genuine-absence
 // contract: a fetch that succeeds but restores no ref means the checkpoint
 // really does not exist in this backend, and the backfill reports the
-// not-found sentinel (which the router may legitimately fall through on).
+// not-found sentinel (which a routing layer may legitimately act on).
 func TestGitRefsStore_BackfillAbsentAfterFetchIsNotFound(t *testing.T) {
 	t.Parallel()
 	store := newRefsStore(t)
