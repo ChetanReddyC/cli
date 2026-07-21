@@ -579,6 +579,9 @@ func TestRunExplainAuto_TemporaryCheckpointRendersIdentityBullet(t *testing.T) {
 	if !strings.Contains(output, "Temporary checkpoints can be summarized after commit") {
 		t.Errorf("expected 'after commit' affordance in temporary output, got:\n%s", output)
 	}
+	if !strings.Contains(output, "entire checkpoint explain --generate") {
+		t.Errorf("expected canonical `entire checkpoint explain --generate` hint in temporary output, got:\n%s", output)
+	}
 }
 
 // collidingShaPrefix creates commits until two share a 2-char SHA prefix
@@ -2427,8 +2430,8 @@ func TestFormatCheckpointOutput_Short(t *testing.T) {
 	if !strings.Contains(output, "## Summary") {
 		t.Errorf("expected '## Summary' heading in no-color output, got:\n%s", output)
 	}
-	if !strings.Contains(output, "entire explain --generate") {
-		t.Errorf("expected --generate hint in summary affordance, got:\n%s", output)
+	if !strings.Contains(output, "entire checkpoint explain --generate") {
+		t.Errorf("expected canonical `entire checkpoint explain --generate` hint in summary affordance, got:\n%s", output)
 	}
 	// Should NOT show full file list in default mode
 	if strings.Contains(output, "main.go") {
@@ -5632,13 +5635,13 @@ func TestExtractIntent_TruncatesLongPrompts(t *testing.T) {
 
 func TestBuildNoSummaryMarkdown_IntentAndAffordance(t *testing.T) {
 	t.Parallel()
-	got := buildNoSummaryMarkdown("add explain --generate flag", nil, "Run `entire explain --generate abc`.")
+	got := buildNoSummaryMarkdown("add explain --generate flag", nil, "Run `entire checkpoint explain --generate abc`.")
 	if !strings.Contains(got, "## Intent\n\nadd explain --generate flag\n") {
 		t.Fatalf("missing intent section:\n%s", got)
 	}
 	// escapeSummaryText replaces every backtick with U+2018 (‘), so both
-	// backticks in "Run `entire explain --generate abc`." map to ‘.
-	if !strings.Contains(got, "## Summary\n\n*Run ‘entire explain --generate abc‘.*\n") {
+	// backticks in "Run `entire checkpoint explain --generate abc`." map to ‘.
+	if !strings.Contains(got, "## Summary\n\n*Run ‘entire checkpoint explain --generate abc‘.*\n") {
 		t.Fatalf("missing italic summary affordance:\n%s", got)
 	}
 	if strings.Contains(got, "## Files") {
