@@ -6,11 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
+	"slices"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 )
+
+const helloWorldResult = "Hello, world."
 
 func TestGenerateTextStreaming_Success(t *testing.T) {
 	t.Parallel()
@@ -21,7 +24,7 @@ func TestGenerateTextStreaming_Success(t *testing.T) {
 	}
 
 	agentInst := &ClaudeCodeAgent{
-		CommandRunner: fakeStreamCmd(string(fixture), "", 0),
+		CommandRunner: testutil.FakeStreamCmd(string(fixture), "", 0),
 	}
 
 	var phases []agent.ProgressPhase
@@ -34,8 +37,8 @@ func TestGenerateTextStreaming_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result != "Hello, world." {
-		t.Errorf("result = %q, want %q", result, "Hello, world.")
+	if result != helloWorldResult {
+		t.Errorf("result = %q, want %q", result, helloWorldResult)
 	}
 	// We expect Connecting, FirstToken, Generating x2 from the stream,
 	// plus a final Done emitted by GenerateTextStreaming itself.
@@ -57,8 +60,8 @@ func TestGenerateTextStreaming_FallbackOnUnrecognizedFlag(t *testing.T) {
 	// Old CLI: exit non-zero with stderr complaining about --output-format=stream-json.
 	// Fallback path is exercised by routing the *second* call (GenerateText) to a
 	// canned non-streaming envelope.
-	streamCall := fakeStreamCmd("", "error: unknown flag: --output-format=stream-json", 1)
-	nonStreamCall := fakeStreamCmd(`{"is_error":false,"result":"fallback ok","subtype":"success"}`, "", 0)
+	streamCall := testutil.FakeStreamCmd("", "error: unknown flag: --output-format=stream-json", 1)
+	nonStreamCall := testutil.FakeStreamCmd(`{"is_error":false,"result":"fallback ok","subtype":"success"}`, "", 0)
 	calls := 0
 	agentInst := &ClaudeCodeAgent{
 		CommandRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -100,7 +103,7 @@ func TestGenerateTextStreaming_EnvelopeErrorSurfaced(t *testing.T) {
 	}
 
 	agentInst := &ClaudeCodeAgent{
-		CommandRunner: fakeStreamCmd(string(fixture), "", 0),
+		CommandRunner: testutil.FakeStreamCmd(string(fixture), "", 0),
 	}
 	_, err = agentInst.GenerateTextStreaming(context.Background(), "test", "haiku", nil)
 	if err == nil {
@@ -124,6 +127,64 @@ func TestGenerateTextStreaming_EnvelopeErrorSurfaced(t *testing.T) {
 	}
 }
 
+func TestGenerateTextStreaming_SuccessOutranksLateCancellation(t *testing.T) {
+	t.Parallel()
+
+	fixture, err := os.ReadFile(filepath.Join("testdata", "stream_success.jsonl"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	fake := testutil.FakeStreamCmd(string(fixture), "", 0)
+	agentInst := &ClaudeCodeAgent{
+		CommandRunner: func(context.Context, string, ...string) *exec.Cmd {
+			return fake(context.Background(), "claude")
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	result, err := agentInst.GenerateTextStreaming(ctx, "test", "haiku", func(p agent.GenerationProgress) {
+		if p.Phase == agent.PhaseGenerating {
+			cancel()
+		}
+	})
+	if err != nil {
+		t.Fatalf("GenerateTextStreaming() error = %v, want completed success", err)
+	}
+	if result != helloWorldResult {
+		t.Errorf("result = %q, want %s", result, helloWorldResult)
+	}
+}
+
+func TestGenerateTextStreaming_FinalResultDoesNotHideProcessFailure(t *testing.T) {
+	t.Parallel()
+
+	fixture, err := os.ReadFile(filepath.Join("testdata", "stream_success.jsonl"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	fake := testutil.FakeStreamCmd(string(fixture), "transport closed", 23)
+	agentInst := &ClaudeCodeAgent{CommandRunner: func(context.Context, string, ...string) *exec.Cmd {
+		return fake(context.Background(), "claude")
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var phases []agent.ProgressPhase
+
+	_, err = agentInst.GenerateTextStreaming(ctx, "test", "haiku", func(p agent.GenerationProgress) {
+		phases = append(phases, p.Phase)
+		if p.Phase == agent.PhaseGenerating {
+			cancel()
+		}
+	})
+	if err == nil {
+		t.Fatal("GenerateTextStreaming() error = nil, want process failure")
+	}
+	if slices.Contains(phases, agent.PhaseDone) {
+		t.Errorf("phases = %v, must not report Done after process failure", phases)
+	}
+}
+
 func equalPhases(a, b []agent.ProgressPhase) bool {
 	if len(a) != len(b) {
 		return false
@@ -134,63 +195,4 @@ func equalPhases(a, b []agent.ProgressPhase) bool {
 		}
 	}
 	return true
-}
-
-// fakeStreamCmd returns a CommandRunner factory whose *exec.Cmd, when Start()'d
-// and Wait()'d, produces stdout/stderr/exit-code as configured. Implementation
-// uses 'sh -c' to write fixture data; on Windows runners we'd need PowerShell,
-// but our CI is Linux/macOS.
-func fakeStreamCmd(stdout, stderr string, exitCode int) func(ctx context.Context, name string, args ...string) *exec.Cmd {
-	return func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		script := buildFakeShellScript(stdout, stderr, exitCode)
-		return exec.CommandContext(ctx, "sh", "-c", script)
-	}
-}
-
-func buildFakeShellScript(stdout, stderr string, exitCode int) string {
-	var sb strings.Builder
-	if stdout != "" {
-		sb.WriteString("cat <<'__EOF__'\n")
-		sb.WriteString(stdout)
-		if !strings.HasSuffix(stdout, "\n") {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("__EOF__\n")
-	}
-	if stderr != "" {
-		sb.WriteString("cat <<'__EOF__' 1>&2\n")
-		sb.WriteString(stderr)
-		if !strings.HasSuffix(stderr, "\n") {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("__EOF__\n")
-	}
-	if exitCode != 0 {
-		sb.WriteString("exit ")
-		sb.WriteString(itoa(exitCode))
-		sb.WriteString("\n")
-	}
-	return sb.String()
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [12]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }

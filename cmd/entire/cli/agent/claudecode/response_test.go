@@ -145,7 +145,7 @@ func TestStreamClaudeResponse_Success(t *testing.T) {
 	var phases []string
 	final, malformed, err := streamClaudeResponse(bytes.NewReader(data), func(ev streamEvent) {
 		switch {
-		case ev.Type == "system" && ev.Subtype == "status" && ev.Status == "requesting":
+		case ev.Type == streamEventTypeSystem && ev.Subtype == "status" && ev.Status == "requesting":
 			phases = append(phases, "connecting")
 		case ev.Type == streamEventTypeStreamEvent && ev.Event.Type == "message_start":
 			phases = append(phases, "first-token")

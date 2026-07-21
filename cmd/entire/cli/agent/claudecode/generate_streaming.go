@@ -15,6 +15,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
+const streamEventTypeSystem = "system"
+
 // GenerateTextStreaming runs the Claude CLI in stream-json mode, dispatches
 // progress events to the optional callback, and returns the final result text.
 // Implements the agent.StreamingTextGenerator interface.
@@ -82,14 +84,16 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 		return "", envelopeErrorMessage(final)
 	}
 
-	if ctx.Err() != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", context.DeadlineExceeded
-		}
-		return "", context.Canceled
-	}
-
 	if final != nil {
+		// A fully decoded success wins over cancellation that arrives after the
+		// provider completed. A non-context process failure remains authoritative.
+		if waitErr != nil {
+			stderrStr := strings.TrimSpace(stderr.String())
+			if stderrStr != "" {
+				return "", fmt.Errorf("claude stream failed: %s: %w", stderrStr, waitErr)
+			}
+			return "", fmt.Errorf("claude stream failed: %w", waitErr)
+		}
 		if final.Result == nil {
 			return "", errors.New("claude returned empty result")
 		}
@@ -101,6 +105,13 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 			})
 		}
 		return *final.Result, nil
+	}
+
+	if ctx.Err() != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", context.DeadlineExceeded
+		}
+		return "", context.Canceled
 	}
 
 	// No envelope: check if the CLI rejected streaming flags (older version).
@@ -156,7 +167,7 @@ func makeProgressDispatcher(progress agent.ProgressFn) func(streamEvent) {
 	var totalChars int
 	return func(ev streamEvent) {
 		switch {
-		case ev.Type == "system" && ev.Subtype == "status" && ev.Status == "requesting":
+		case ev.Type == streamEventTypeSystem && ev.Subtype == "status" && ev.Status == "requesting":
 			progress(agent.GenerationProgress{Phase: agent.PhaseConnecting})
 		case ev.Type == streamEventTypeStreamEvent && ev.Event.Type == "message_start":
 			p := agent.GenerationProgress{Phase: agent.PhaseFirstToken, TTFTms: ev.TTFTms}
