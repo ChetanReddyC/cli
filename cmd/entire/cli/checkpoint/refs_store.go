@@ -70,8 +70,12 @@ func (s *gitRefsStore) Write(ctx context.Context, req WriteRequest) error {
 }
 
 // refBase resolves a checkpoint ref's current tip commit (the parent for the
-// next write) and subtree object (the checkpoint's current contents). A missing
-// ref yields (ZeroHash, nil) so the next write becomes an orphan commit.
+// next write) and subtree object (the checkpoint's current contents) with a
+// LOCAL-ONLY lookup. A missing ref yields (ZeroHash, nil) so the next write
+// becomes an orphan commit — correct for creates, whose ref never exists yet
+// (locally or remotely); probing the remote would add a doomed round-trip to
+// every condensation and break offline writes. Backfills, which target an
+// existing checkpoint, use refBaseForBackfill instead.
 func (s *gitRefsStore) refBase(cid id.CheckpointID) (plumbing.Hash, *object.Tree, error) {
 	refName, err := RefName(cid)
 	if err != nil {
@@ -86,6 +90,33 @@ func (s *gitRefsStore) refBase(cid id.CheckpointID) (plumbing.Hash, *object.Tree
 		// rather than silently starting a fresh orphan history over the ref.
 		return plumbing.ZeroHash, nil, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
 	}
+	return s.refTip(cid, ref)
+}
+
+// refBaseForBackfill resolves like refBase, but a ref missing locally is
+// first fetched once from the remote (resolveRefMaybeFetch) when a fetcher is
+// configured: a backfill targets an EXISTING checkpoint that may have been
+// written or migrated on another machine, and declaring it absent without
+// looking remotely diverges from the read path — the write would land on a
+// fallback backend (or fail) while reads, which DO fetch, serve the refs
+// copy, leaving the backfill permanently invisible. A ref absent even after
+// the fetch yields (ZeroHash, nil), which the backfill helpers report as
+// ErrCheckpointNotFound; a fetch FAILURE is returned as-is — transient
+// unavailability must not read as absence, or the kind-routing store's
+// fallthrough would fork the write onto a stale copy.
+func (s *gitRefsStore) refBaseForBackfill(ctx context.Context, cid id.CheckpointID) (plumbing.Hash, *object.Tree, error) {
+	ref, err := s.resolveRefMaybeFetch(ctx, cid)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return plumbing.ZeroHash, nil, nil // genuinely absent → backfill reports not-found
+	}
+	if err != nil {
+		return plumbing.ZeroHash, nil, err
+	}
+	return s.refTip(cid, ref)
+}
+
+// refTip reads the commit and tree at a resolved checkpoint ref.
+func (s *gitRefsStore) refTip(cid id.CheckpointID, ref *plumbing.Reference) (plumbing.Hash, *object.Tree, error) {
 	commit, err := s.repo.CommitObject(ref.Hash())
 	if err != nil {
 		return plumbing.ZeroHash, nil, fmt.Errorf("read checkpoint commit %s: %w", ref.Hash(), err)
@@ -165,7 +196,7 @@ func (s *gitRefsStore) backfillTranscript(ctx context.Context, opts UpdateOption
 		return errors.New("invalid update options: checkpoint ID is required")
 	}
 
-	parentHash, existing, err := s.refBase(opts.CheckpointID)
+	parentHash, existing, err := s.refBaseForBackfill(ctx, opts.CheckpointID)
 	if err != nil {
 		return err
 	}
@@ -192,7 +223,7 @@ func (s *gitRefsStore) backfillSummary(ctx context.Context, checkpointID id.Chec
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	parentHash, existing, err := s.refBase(checkpointID)
+	parentHash, existing, err := s.refBaseForBackfill(ctx, checkpointID)
 	if err != nil {
 		return err
 	}
@@ -216,7 +247,7 @@ func (s *gitRefsStore) backfillAttribution(ctx context.Context, checkpointID id.
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	parentHash, existing, err := s.refBase(checkpointID)
+	parentHash, existing, err := s.refBaseForBackfill(ctx, checkpointID)
 	if err != nil {
 		return err
 	}

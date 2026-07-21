@@ -118,6 +118,110 @@ func TestGitRefsStore_OnDemandRefFetch_FailurePropagates(t *testing.T) {
 	})
 }
 
+// TestGitRefsStore_BackfillFetchesMissingRef: a backfill targets an EXISTING
+// checkpoint, which may have been written or migrated on another machine — so
+// like reads, backfills must on-demand fetch a ref that is missing locally
+// before declaring the checkpoint absent. Otherwise the write lands on a
+// fallback store (or errors) while reads — which DO fetch — serve the refs
+// copy, and the backfill is permanently invisible.
+func TestGitRefsStore_BackfillFetchesMissingRef(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	backfills := map[string]func(cid id.CheckpointID) WriteRequest{
+		"summary": func(cid id.CheckpointID) WriteRequest {
+			return SessionSummary{CheckpointID: cid, Summary: &Summary{Intent: "fetched intent"}}
+		},
+		"transcript": func(cid id.CheckpointID) WriteRequest {
+			return SessionTranscript{
+				CheckpointID: cid,
+				SessionID:    "sess-1",
+				Transcript:   redact.AlreadyRedacted([]byte("finalized")),
+			}
+		},
+		"attribution": func(cid id.CheckpointID) WriteRequest {
+			return CheckpointAttribution{CheckpointID: cid, Attribution: &Attribution{AgentLines: 3}}
+		},
+	}
+
+	for name, makeReq := range backfills {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := newRefsStore(t)
+			cid := id.MustCheckpointID("a1b2c3d4e5f6")
+			refsWrite(t, store, cid, "sess-1", "transcript")
+
+			ref, err := store.repo.Reference(mustRefName(t, cid), true)
+			require.NoError(t, err)
+			commitHash := ref.Hash()
+			require.NoError(t, store.repo.Storer.RemoveReference(mustRefName(t, cid)))
+
+			fetched := 0
+			store.SetRefFetcher(func(_ context.Context, rn plumbing.ReferenceName) error {
+				fetched++
+				return store.repo.Storer.SetReference(plumbing.NewHashReference(rn, commitHash))
+			})
+
+			require.NoError(t, store.Write(ctx, makeReq(cid)),
+				"a backfill must fetch the missing ref instead of declaring the checkpoint absent")
+			assert.Equal(t, 1, fetched, "fetcher invoked once for the missing ref")
+		})
+	}
+}
+
+// TestGitRefsStore_BackfillFetchFailureAborts: a failed fetch is a transient
+// availability problem, not evidence of absence. The backfill must surface it
+// as a real error — NOT ErrCheckpointNotFound, which the kind-routing store
+// treats as "try the next backend" and would fork the write onto a stale copy.
+func TestGitRefsStore_BackfillFetchFailureAborts(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+		return assert.AnError // offline / network failure
+	})
+
+	err := store.Write(context.Background(), SessionSummary{
+		CheckpointID: id.MustCheckpointID("ffffffffffff"),
+		Summary:      &Summary{Intent: "must not land"},
+	})
+	require.ErrorIs(t, err, assert.AnError, "the fetch failure must surface")
+	require.NotErrorIs(t, err, ErrCheckpointNotFound,
+		"a fetch failure must not read as absence — the router would fall through and fork the write")
+}
+
+// TestGitRefsStore_BackfillAbsentAfterFetchIsNotFound pins the genuine-absence
+// contract: a fetch that succeeds but restores no ref means the checkpoint
+// really does not exist in this backend, and the backfill reports the
+// not-found sentinel (which the router may legitimately fall through on).
+func TestGitRefsStore_BackfillAbsentAfterFetchIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+		return nil // fetch "succeeds" but the remote has no such ref
+	})
+
+	err := store.Write(context.Background(), SessionSummary{
+		CheckpointID: id.MustCheckpointID("ffffffffffff"),
+		Summary:      &Summary{Intent: "orphan"},
+	})
+	require.ErrorIs(t, err, ErrCheckpointNotFound)
+}
+
+// TestGitRefsStore_CreateNeverFetches pins the deliberate split: a create's
+// ref never exists yet (locally or remotely), so writeSession must not probe
+// the remote — fetch-on-create would add a doomed network round-trip to every
+// condensation and break offline writes.
+func TestGitRefsStore_CreateNeverFetches(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+		t.Error("a create must never invoke the ref fetcher")
+		return nil
+	})
+
+	refsWrite(t, store, id.MustCheckpointID("a1b2c3d4e5f6"), "sess-new", "fresh transcript")
+}
+
 func TestGitRefsStore_WriteAllVariantsAndRead(t *testing.T) {
 	t.Parallel()
 	store := newRefsStore(t)
