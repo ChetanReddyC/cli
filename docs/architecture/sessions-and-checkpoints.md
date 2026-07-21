@@ -305,6 +305,14 @@ When condensing multiple concurrent sessions:
 - `sessions` array in `CheckpointSummary` maps each session to its file paths
 - `files_touched` is merged from all sessions
 
+Checkpoints written by `entire import <agent>` additionally carry a `commit_sha`
+(omitempty) on both the session `Metadata` and the root `CheckpointSummary`,
+set to the default branch's head at import time — origin's tip is preferred
+(the commit the server already knows about), falling back to the local branch
+tip, then HEAD, then empty when nothing resolves. It is a best-effort anchor
+for UI display only, not an attribution signal, and pre-existing imported
+checkpoints are not backfilled with it.
+
 ### Checkpoint Policy
 
 Repo-wide checkpoint policy lives at `refs/entire/policies/checkpoint`. The ref

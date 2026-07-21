@@ -69,6 +69,7 @@ fails even with --dry-run.`, imp.AgentType()),
 			res, err := agentimport.Run(ctx, repo, imp, agentimport.Options{
 				RepoRoot: repoRoot, OverridePath: pathFlag, SessionFilter: sessions,
 				Now: time.Now(), DryRun: dryRun,
+				LinkCommitSHA: resolveImportLinkCommitSHA(repo),
 			})
 			if err != nil {
 				return fmt.Errorf("import %s: %w", imp.Name(), err)
