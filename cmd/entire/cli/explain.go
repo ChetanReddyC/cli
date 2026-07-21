@@ -933,6 +933,11 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 	timeout := resolveSummaryTimeout(ctx, summaryTimeoutSeconds)
 
 	attempt := newSummaryAttempt(provider.Name, timeout)
+	// Set streaming eagerly from the provider's capability rather than waiting
+	// for the first progress event: a streaming provider that stalls before
+	// emitting anything should still get the streaming timeout diagnostic
+	// ("never sent its request"), not "provider produced no output".
+	attempt.streaming = provider.Streaming
 	progressWriter := newSummaryProgressWriter(errW, attempt)
 
 	start := time.Now()
@@ -1193,41 +1198,51 @@ func timeoutDiagnostic(_ error, attempt *summaryAttempt) (string, []explainRow) 
 		tryRunCLI = fmt.Sprintf("run `%s` directly to confirm it works", cli)
 	}
 
+	stderr := strings.TrimSpace(attempt.stderrCaptured)
+
 	if attempt.streaming {
 		// Key off the furthest phase reached, not the earliest one missing:
 		// PhaseConnecting comes from a version-dependent status event, so an
 		// older CLI can reach FirstToken/Generating without ever reporting
 		// Connecting — diagnosing that as "never sent its request" would
 		// contradict the progress lines the user just watched.
+		var label string
+		var rows []explainRow
 		switch {
 		case attempt.phasesReached[agent.PhaseDone]:
-			return prefix + "model finished but the result was not delivered in time",
-				[]explainRow{
-					{Label: "cause", Value: "the deadline fired while the finished result was being read"},
-					{Label: "try", Value: "raise --summary-timeout-seconds and retry"},
-				}
+			label = "model finished but the result was not delivered in time"
+			rows = []explainRow{
+				{Label: "cause", Value: "the deadline fired while the finished result was being read"},
+				{Label: "try", Value: "raise --summary-timeout-seconds and retry"},
+			}
 		case attempt.phasesReached[agent.PhaseGenerating], attempt.phasesReached[agent.PhaseFirstToken]:
-			return prefix + "model responded but did not finish",
-				[]explainRow{
-					{Label: "cause", Value: "transcript may be too large for the chosen cap, or model is slow"},
-					{Label: "try", Value: "raise --summary-timeout-seconds or pick a faster model"},
-				}
+			label = "model responded but did not finish"
+			rows = []explainRow{
+				{Label: "cause", Value: "transcript may be too large for the chosen cap, or model is slow"},
+				{Label: "try", Value: "raise --summary-timeout-seconds or pick a faster model"},
+			}
 		case attempt.phasesReached[agent.PhaseConnecting]:
-			return prefix + "provider sent request but received no response",
-				[]explainRow{
-					{Label: "cause", Value: "network/firewall, provider API degraded, or auth check stuck"},
-					{Label: "try", Value: "check connectivity to the provider, then retry"},
-				}
+			label = "provider sent request but received no response"
+			rows = []explainRow{
+				{Label: "cause", Value: "network/firewall, provider API degraded, or auth check stuck"},
+				{Label: "try", Value: "check connectivity to the provider, then retry"},
+			}
 		default:
-			return prefix + "provider never sent its request",
-				[]explainRow{
-					{Label: "cause", Value: "the provider CLI may be stalled before subprocess startup"},
-					{Label: "try", Value: tryRunCLI},
-				}
+			label = "provider never sent its request"
+			rows = []explainRow{
+				{Label: "cause", Value: "the provider CLI may be stalled before subprocess startup"},
+				{Label: "try", Value: tryRunCLI},
+			}
 		}
+		// attempt.streaming is set eagerly when a streaming-capable provider
+		// is selected, so a provider that stalls before its first event lands
+		// here — surface the captured stderr rather than dropping it.
+		if stderr != "" {
+			rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+		}
+		return prefix + label, rows
 	}
 
-	stderr := strings.TrimSpace(attempt.stderrCaptured)
 	stdoutBytes := attempt.stdoutByteCount
 
 	if stdoutBytes == 0 {
