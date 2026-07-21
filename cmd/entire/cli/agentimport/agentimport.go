@@ -98,6 +98,11 @@ type Options struct {
 	SessionFilter []string
 	Now           time.Time
 	DryRun        bool
+
+	// LinkCommitSHA, when non-empty, is written to each imported checkpoint's
+	// metadata as commit_sha — the anchor commit the UI shows imported sessions
+	// against. The caller resolves it (default branch head); Run does not.
+	LinkCommitSHA string
 }
 
 // Result summarizes an import run.
@@ -170,7 +175,7 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 				red = r
 				redacted = true
 			}
-			if err := writeTurn(ctx, stores, imp, cid, sf, red, turn); err != nil {
+			if err := writeTurn(ctx, stores, imp, cid, sf, red, turn, opts.LinkCommitSHA); err != nil {
 				return res, err
 			}
 			existing[cid.String()] = true
@@ -261,7 +266,7 @@ func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns 
 	return nil
 }
 
-func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.CheckpointID, sf SessionFile, red redact.RedactedBytes, turn Turn) error {
+func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.CheckpointID, sf SessionFile, red redact.RedactedBytes, turn Turn, linkCommitSHA string) error {
 	if err := stores.Persistent.Write(ctx, cp.Session(cp.WriteOptions{
 		CheckpointID:              cid,
 		SessionID:                 sf.SessionID,
@@ -275,6 +280,7 @@ func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.Chec
 		CheckpointsCount:          1,
 		CheckpointTranscriptStart: turn.LineStart,
 		TokenUsage:                turn.Tokens,
+		CommitSHA:                 linkCommitSHA,
 	})); err != nil {
 		return fmt.Errorf("write imported checkpoint %s: %w", cid, err)
 	}

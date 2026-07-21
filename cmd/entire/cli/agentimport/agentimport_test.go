@@ -152,6 +152,67 @@ func TestRun_ImportsAndIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestRun_StampsLinkCommitSHA proves Options.LinkCommitSHA is copied verbatim
+// into each imported checkpoint's commit_sha metadata field, and that leaving
+// it unset leaves commit_sha empty. Run resolves nothing itself.
+func TestRun_StampsLinkCommitSHA(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	const commitSHA = "b01b59663fd4860fd15a9939499be44a14dbf168"
+
+	claudeDirWithSHA := t.TempDir()
+	writeFixtureSession(t, claudeDirWithSHA, "sess-with-sha.jsonl")
+	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDirWithSHA,
+		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		LinkCommitSHA: commitSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cid := DeriveCheckpointID("sess-with-sha", "u1")
+	md, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md.CommitSHA != commitSHA {
+		t.Fatalf("expected commit_sha %q, got %q", commitSHA, md.CommitSHA)
+	}
+
+	// A separate session fixture (own sessionID/turn UUIDs) run with
+	// LinkCommitSHA unset must persist an empty commit_sha. Reusing the same
+	// session would be idempotently skipped, so this needs its own fixture.
+	claudeDirNoSHA := t.TempDir()
+	writeFixtureSession(t, claudeDirNoSHA, "sess-no-sha.jsonl")
+	res2, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDirNoSHA,
+		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res2)
+	}
+
+	cid2 := DeriveCheckpointID("sess-no-sha", "u1")
+	md2, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md2.CommitSHA != "" {
+		t.Fatalf("expected empty commit_sha, got %q", md2.CommitSHA)
+	}
+}
+
 // TestRun_AppliesConfiguredCustomRedaction proves imported transcripts honor
 // repo/user-configured custom_redactions (loaded at the command via
 // strategy.EnsureRedactionConfigured), not just always-on secret scanning.

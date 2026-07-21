@@ -37,6 +37,13 @@ type WriteOptions struct {
 	// Branch is the branch name where the checkpoint was created (empty if detached HEAD)
 	Branch string
 
+	// CommitSHA links this checkpoint to an existing commit without a trailer.
+	// Set only by `entire import`: imported history has no Entire-Checkpoint
+	// trailer (we never rewrite existing commits), so import stamps the default
+	// branch's head SHA here as an anchor — "imported at this point in time" —
+	// not attribution. Empty for all other writers.
+	CommitSHA string
+
 	// Transcript is the session transcript content (full.jsonl).
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
@@ -316,13 +323,17 @@ type SessionContent struct {
 
 // Metadata contains the metadata stored in metadata.json for each checkpoint.
 type Metadata struct {
-	CLIVersion       string          `json:"cli_version,omitempty"`
-	CheckpointID     id.CheckpointID `json:"checkpoint_id"`
-	SessionID        string          `json:"session_id"`
-	Strategy         string          `json:"strategy"`
-	CreatedAt        time.Time       `json:"created_at"`
-	Branch           string          `json:"branch,omitempty"` // Branch where checkpoint was created (empty if detached HEAD)
-	CheckpointsCount int             `json:"checkpoints_count"`
+	CLIVersion   string          `json:"cli_version,omitempty"`
+	CheckpointID id.CheckpointID `json:"checkpoint_id"`
+	SessionID    string          `json:"session_id"`
+	Strategy     string          `json:"strategy"`
+	CreatedAt    time.Time       `json:"created_at"`
+	Branch       string          `json:"branch,omitempty"` // Branch where checkpoint was created (empty if detached HEAD)
+	// CommitSHA anchors an imported checkpoint to an existing commit (the
+	// default branch head at import time). Empty for non-imported checkpoints,
+	// which link to commits via the Entire-Checkpoint trailer instead.
+	CommitSHA        string `json:"commit_sha,omitempty"`
+	CheckpointsCount int    `json:"checkpoints_count"`
 	// SaveStepCount is the number of SaveStep-recorded steps for this session.
 	// Honest "real checkpoint work happened" signal (0 = commit-only/fallback
 	// session), kept separate from the displayed CheckpointsCount prompt count.
@@ -478,6 +489,7 @@ type CheckpointSummary struct {
 	CheckpointID        id.CheckpointID    `json:"checkpoint_id"`
 	Strategy            string             `json:"strategy"`
 	Branch              string             `json:"branch,omitempty"`
+	CommitSHA           string             `json:"commit_sha,omitempty"`
 	CheckpointsCount    int                `json:"checkpoints_count"`
 	FilesTouched        []string           `json:"files_touched"`
 	Sessions            []SessionFilePaths `json:"sessions"`
