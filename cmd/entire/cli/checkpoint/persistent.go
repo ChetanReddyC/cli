@@ -818,6 +818,9 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 			if !imported {
 				imported = existingSummary.Imported
 			}
+			// A later write to the same checkpoint (e.g. a review session
+			// attached to it) carries no CommitSHA; the imported anchor
+			// must survive that rewrite rather than be cleared.
 			if commitSHA == "" {
 				commitSHA = existingSummary.CommitSHA
 			}

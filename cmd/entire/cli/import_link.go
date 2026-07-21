@@ -9,9 +9,11 @@ import (
 
 // resolveImportLinkCommitSHA returns the commit SHA imported checkpoints are
 // anchored to: the default branch's head at import time. Preference order:
-// origin's tip of the default branch (the commit the server already knows),
-// then the local branch tip, then HEAD. Best-effort — returns "" when nothing
-// resolves (e.g. an empty repo); import proceeds without a link.
+// origin's tip of the default branch (the commit most likely already known to
+// the server), then the local branch tip, then HEAD. Best-effort — returns ""
+// when nothing resolves (e.g. an empty repo); import proceeds without a link.
+// This function is the source of truth for the order; the architecture docs
+// describe it but defer here.
 func resolveImportLinkCommitSHA(repo *git.Repository) string {
 	if name := strategy.GetDefaultBranchName(repo); name != "" {
 		if ref, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", name), true); err == nil {

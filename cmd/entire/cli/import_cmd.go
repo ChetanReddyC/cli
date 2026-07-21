@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/agentimport"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
@@ -66,10 +67,15 @@ fails even with --dry-run.`, imp.AgentType()),
 			// it only always-on secret scanning would run on imported history.
 			strategy.EnsureRedactionConfigured()
 
+			// Logged so support can tell why an import has no anchor (empty
+			// sha: nothing resolved) or a stale one (origin tip not fetched).
+			linkCommitSHA := resolveImportLinkCommitSHA(repo)
+			logging.Debug(ctx, "import: resolved link commit", "commit_sha", linkCommitSHA)
+
 			res, err := agentimport.Run(ctx, repo, imp, agentimport.Options{
 				RepoRoot: repoRoot, OverridePath: pathFlag, SessionFilter: sessions,
 				Now: time.Now(), DryRun: dryRun,
-				LinkCommitSHA: resolveImportLinkCommitSHA(repo),
+				LinkCommitSHA: linkCommitSHA,
 			})
 			if err != nil {
 				return fmt.Errorf("import %s: %w", imp.Name(), err)

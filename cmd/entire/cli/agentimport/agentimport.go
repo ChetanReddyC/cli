@@ -101,7 +101,8 @@ type Options struct {
 
 	// LinkCommitSHA, when non-empty, is written to each imported checkpoint's
 	// metadata as commit_sha — the anchor commit the UI shows imported sessions
-	// against. The caller resolves it (default branch head); Run does not.
+	// against. The caller resolves it (default branch head when resolvable;
+	// see resolveImportLinkCommitSHA); Run does not.
 	LinkCommitSHA string
 }
 
