@@ -243,6 +243,7 @@ func TestHydrateListedCheckpointInfo(t *testing.T) {
 
 	stub := remoteDiscoveredInfo(cid)
 	require.True(t, listedCheckpointNeedsHydration(stub))
+	require.True(t, stub.ListedStub)
 	require.Empty(t, stub.SessionID)
 	require.Zero(t, stub.SessionCount)
 
@@ -251,18 +252,51 @@ func TestHydrateListedCheckpointInfo(t *testing.T) {
 	assert.Equal(t, 1, hydrated.SessionCount)
 	assert.Equal(t, []string{"session-from-device-a"}, hydrated.SessionIDs)
 	assert.False(t, listedCheckpointNeedsHydration(hydrated))
+	assert.False(t, hydrated.ListedStub)
 
 	// Already-hydrated infos are returned unchanged (no redundant reads needed
 	// for the session-filter path once collectCheckpoint has cached them).
 	again := HydrateListedCheckpointInfo(context.Background(), store, hydrated)
 	assert.Equal(t, hydrated, again)
 
-	// Missing checkpoint: best-effort leave the stub as-is so listing still
-	// surfaces the ID even when the remote fetch/read fails.
+	// Missing checkpoint: fail-once clears ListedStub so callers do not re-fetch,
+	// but leaves SessionID empty so listing can still surface the ID.
 	missing := remoteDiscoveredInfo(id.CheckpointID("01KVBJCWYA4YW6J5M9GP655HZN"))
-	unchanged := HydrateListedCheckpointInfo(context.Background(), store, missing)
-	assert.Equal(t, missing, unchanged)
-	assert.Empty(t, unchanged.SessionID)
+	failed := HydrateListedCheckpointInfo(context.Background(), store, missing)
+	assert.Equal(t, missing.CheckpointID, failed.CheckpointID)
+	assert.Empty(t, failed.SessionID)
+	assert.False(t, failed.ListedStub, "failed hydration must clear ListedStub (fail-once)")
+	assert.False(t, listedCheckpointNeedsHydration(failed))
+}
+
+// TestHydrateListedCheckpointInfo_MatchesLocalList pins the field mapping shared
+// with readCommittedInfoFromCheckpointTree: hydrating a stub for a locally
+// present checkpoint must yield the same CheckpointInfo that List returns for
+// it. Deliberate CreatedAt divergence (documented on HydrateListedCheckpointInfo):
+// local List assigns meta.CreatedAt unconditionally; hydration only overwrites
+// when non-zero (keeping ULID-derived time). A normal refsWrite has non-zero
+// CreatedAt, so both paths agree here.
+func TestHydrateListedCheckpointInfo_MatchesLocalList(t *testing.T) {
+	t.Parallel()
+
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	refsWrite(t, store, cid, "session-from-device-a", "transcript")
+
+	infos, err := store.List(context.Background())
+	require.NoError(t, err)
+	var local CheckpointInfo
+	for _, info := range infos {
+		if info.CheckpointID == cid {
+			local = info
+			break
+		}
+	}
+	require.Equal(t, cid, local.CheckpointID)
+	require.False(t, local.ListedStub)
+
+	hydrated := HydrateListedCheckpointInfo(context.Background(), store, remoteDiscoveredInfo(cid))
+	assert.Equal(t, local, hydrated)
 }
 
 func TestGitRefsStore_WriteAllVariantsAndRead(t *testing.T) {

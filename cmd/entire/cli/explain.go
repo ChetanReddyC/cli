@@ -2140,12 +2140,11 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 		if !found {
 			return
 		}
-		// Remote-discovered refs-native List stubs carry only CheckpointID/
-		// CreatedAt. Hydrate before projecting into RewindPoint so --session
-		// filters (and prompt display) see the real SessionID instead of
-		// silently dropping the second-device checkpoints this path surfaces.
-		cpInfo = checkpoint.HydrateListedCheckpointInfo(ctx, store, cpInfo)
-		committedByID[cpID] = cpInfo
+		// Defer hydration of remote-discovered stubs until after sort+truncate
+		// below: hydrating here (during the commitScanLimit walk) can issue up
+		// to hundreds of sequential ref fetches to display at most `limit`
+		// entries. Stubs project with empty SessionID; hydrateListedBranchCheckpoints
+		// fills them before --session filters run.
 
 		message := strings.Split(c.Message, "\n")[0]
 		point := strategy.RewindPoint{
@@ -2161,7 +2160,9 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 			ToolUseID:        cpInfo.ToolUseID,
 			Agent:            cpInfo.Agent,
 		}
-		point.SessionPrompt = readLatestCommittedSessionPrompt(ctx, store, cpID, cpInfo.SessionCount)
+		if !cpInfo.ListedStub {
+			point.SessionPrompt = readLatestCommittedSessionPrompt(ctx, store, cpID, cpInfo.SessionCount)
+		}
 
 		points = append(points, point)
 	}
@@ -2226,6 +2227,10 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 		truncated = true
 	}
 
+	// Hydrate remote-discovered stubs only for the truncated display set (not
+	// the full commit walk). Session filter runs later in formatBranchCheckpoints.
+	hydrateListedBranchCheckpoints(ctx, store, points, committedByID)
+
 	// Append imported (read-only, commit-less) checkpoints after the live points,
 	// bounded by the same limit so a one-month import doesn't produce an
 	// unbounded list. They get their own budget and never displace live points.
@@ -2240,6 +2245,54 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	points = append(points, imported...)
 
 	return points, truncated, nil
+}
+
+// hydrateListedBranchCheckpoints fills SessionID/etc for remote-discovered List
+// stubs among the already-truncated RewindPoints. Per-ref fetch budget is
+// ListHydrationTimeout (much shorter than the default on-demand fetch). Failures
+// clear ListedStub (fail-once) inside HydrateListedCheckpointInfo; when any
+// stub still lacks SessionID afterward we note it on stderr so --session
+// filters dropping them is not silent.
+func hydrateListedBranchCheckpoints(
+	ctx context.Context,
+	store interface {
+		checkpoint.SessionReader
+		Read(ctx context.Context, checkpointID id.CheckpointID) (*checkpoint.CheckpointSummary, error)
+		ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.Metadata, error)
+	},
+	points []strategy.RewindPoint,
+	committedByID map[id.CheckpointID]checkpoint.CheckpointInfo,
+) {
+	hydrationFailed := 0
+	for i := range points {
+		cpID := points[i].CheckpointID
+		if cpID.IsEmpty() {
+			continue
+		}
+		cpInfo, ok := committedByID[cpID]
+		if !ok || !cpInfo.ListedStub {
+			continue
+		}
+		hctx, cancel := context.WithTimeout(ctx, checkpoint.ListHydrationTimeout)
+		hydrated := checkpoint.HydrateListedCheckpointInfo(hctx, store, cpInfo)
+		cancel()
+		committedByID[cpID] = hydrated
+		points[i].SessionID = hydrated.SessionID
+		points[i].SessionCount = hydrated.SessionCount
+		points[i].SessionIDs = hydrated.SessionIDs
+		points[i].IsTaskCheckpoint = hydrated.IsTask
+		points[i].ToolUseID = hydrated.ToolUseID
+		points[i].Agent = hydrated.Agent
+		if hydrated.SessionCount > 0 {
+			points[i].SessionPrompt = readLatestCommittedSessionPrompt(ctx, store, cpID, hydrated.SessionCount)
+		}
+		if hydrated.SessionID == "" {
+			hydrationFailed++
+		}
+	}
+	if hydrationFailed > 0 {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: could not load session metadata for %d remote checkpoint(s); they may be missing from --session filters.\n", hydrationFailed)
+	}
 }
 
 // getImportedRewindPoints returns read-only imported checkpoints (Kind

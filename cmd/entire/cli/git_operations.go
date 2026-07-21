@@ -510,11 +510,12 @@ const checkpointRefListTimeout = 5 * time.Second
 // on another machine that have no local ref yet, then hydrates each lazily on
 // read through FetchCheckpointRef.
 //
-// Enumeration is checkpoint-remote-scoped, matching the on-demand fetch and PR
-// #1719's authority rule: with a checkpoint_remote configured it queries that
-// remote, and with none configured it returns (nil, nil) so List stays
-// local-only rather than scanning origin. This keeps the default (no
-// checkpoint_remote) behavior unchanged.
+// Scope (deliberately stricter than the on-demand read fetch):
+//   - no checkpoint_remote configured → (nil, nil), List stays local-only
+//     (unlike FetchCheckpointRef / remote.FetchURL, which fall back to origin);
+//   - with checkpoint_remote configured → queries the resolved checkpoint URL
+//     via remote.FetchURL (which can still fall through to origin in edge cases
+//     such as settings-load failure or an underivable checkpoint URL).
 //
 // Resolution and ls-remote are pinned to the worktree root (not process cwd) so
 // repo-local git config (url.*.insteadOf, credential helpers, remotes) applies.
@@ -545,8 +546,11 @@ func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, 
 
 // parseCheckpointRefNames extracts the checkpoint ref names from `git ls-remote`
 // output. Each line is "<hash>\t<refname>"; only refs under CheckpointRefPrefix
-// are kept (the store re-validates each via ParseRef). Peeled tag lines
-// ("<hash>\t<refname>^{}") never carry the checkpoint prefix, so they drop out.
+// are kept (the store re-validates each via ParseRef). Checkpoint refs point at
+// commits so no peeled (`^{}`) lines appear for them; refs/tags peeled lines
+// lack the checkpoint prefix and drop out here; any anomalous
+// refs/entire/checkpoints/...^{} name is rejected by ParseRef downstream (the
+// "{}" shard never matches ShardFor).
 func parseCheckpointRefNames(output []byte) []plumbing.ReferenceName {
 	var names []plumbing.ReferenceName
 	for _, line := range strings.Split(string(output), "\n") {

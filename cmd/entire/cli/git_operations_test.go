@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
@@ -703,8 +702,7 @@ func TestParseCheckpointRefNames_RealLsRemote(t *testing.T) {
 
 // TestListCheckpointRefsOnRemote_NotConfigured proves the authority gate: with
 // no checkpoint_remote configured, enumeration is a no-op (nil, no error, no
-// network) so List behavior stays unchanged (local-only) — never scanning
-// origin. Not parallel: uses t.Chdir.
+// network) so List stays local-only. Not parallel: uses t.Chdir.
 func TestListCheckpointRefsOnRemote_NotConfigured(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -718,16 +716,35 @@ func TestListCheckpointRefsOnRemote_NotConfigured(t *testing.T) {
 	assert.Nil(t, names, "no checkpoint_remote configured must leave List local-only (no remote enumeration)")
 }
 
-// TestListCheckpointRefsOnRemote_ResolvesFromSubdir proves worktree pinning:
-// enumeration resolves the worktree root (and therefore repo-local settings)
-// even when the process cwd is a subdirectory, rather than depending on cwd
-// alone. Not parallel: uses t.Chdir.
+// TestListCheckpointRefsOnRemote_ResolvesFromSubdir proves worktree pinning for
+// the configured path: settings + ls-remote run from the worktree root even when
+// process cwd is a subdirectory. Uses a local bare remote and an unknown
+// checkpoint_remote provider so FetchURL falls back to origin (offline).
+// Not parallel: uses t.Chdir.
 func TestListCheckpointRefsOnRemote_ResolvesFromSubdir(t *testing.T) {
+	bareDir := t.TempDir()
+	gitRun(t, bareDir, "init", "--bare", "-q", bareDir)
+
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "f.txt", "init")
 	testutil.GitAdd(t, dir, "f.txt")
 	testutil.GitCommit(t, dir, "init")
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	ref := "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN"
+	gitRun(t, dir, "update-ref", ref, head)
+	gitRun(t, dir, "remote", "add", "origin", bareDir)
+	gitRun(t, dir, "push", "-q", "origin", ref+":"+ref)
+
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	// provider "local" is unknown to providerHost → FetchURL falls back to origin
+	// (the bare path) after file:// derivation fails — keeps this offline.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"local","repo":"org/checkpoints"}}}`),
+		0o644,
+	))
 
 	sub := filepath.Join(dir, "nested", "deep")
 	require.NoError(t, os.MkdirAll(sub, 0o755))
@@ -735,14 +752,37 @@ func TestListCheckpointRefsOnRemote_ResolvesFromSubdir(t *testing.T) {
 
 	names, err := ListCheckpointRefsOnRemote(context.Background())
 	require.NoError(t, err)
-	assert.Nil(t, names, "no checkpoint_remote from a subdir must still be a no-op (worktree-resolved settings)")
+	require.Len(t, names, 1)
+	assert.Equal(t, ref, names[0].String())
 }
 
-// TestCheckpointRefListTimeoutIsShort pins the discovery budget: user-facing
-// list/explain must not inherit a long fetch-style hang when the remote is
-// unreachable (best-effort fallback to local refs).
-func TestCheckpointRefListTimeoutIsShort(t *testing.T) {
-	t.Parallel()
-	assert.LessOrEqual(t, checkpointRefListTimeout, 5*time.Second)
-	assert.Greater(t, checkpointRefListTimeout, time.Duration(0))
+// TestListCheckpointRefsOnRemote_HonorsCanceledContext proves the discovery
+// timeout context reaches the git subprocess: an already-canceled ctx with a
+// configured checkpoint_remote must error (not hang / not silently succeed).
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_HonorsCanceledContext(t *testing.T) {
+	bareDir := t.TempDir()
+	gitRun(t, bareDir, "init", "--bare", "-q", bareDir)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	gitRun(t, dir, "remote", "add", "origin", bareDir)
+
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"local","repo":"org/checkpoints"}}}`),
+		0o644,
+	))
+	t.Chdir(dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ListCheckpointRefsOnRemote(ctx)
+	require.Error(t, err, "canceled context must reach ls-remote (regression: deleting WithTimeout would still pass a constant-only test)")
 }

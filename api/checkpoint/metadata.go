@@ -293,6 +293,14 @@ type CheckpointInfo struct {
 	// Imported is true when this checkpoint was imported from pre-existing
 	// agent history (Kind == "imported"): read-only and commit-less.
 	Imported bool
+
+	// ListedStub is true for names-only remote-discovery List entries that still
+	// need hydration (or have not yet failed a hydration attempt). It is cleared
+	// after a successful hydrate and also after a failed attempt (fail-once), so
+	// callers do not re-fetch forever. A local ref whose root metadata was
+	// unreadable has the same zero SessionID/SessionCount shape but ListedStub
+	// false — do not treat field zero-ness alone as stub-ness.
+	ListedStub bool `json:"-"`
 }
 
 // SessionContent contains the actual content for a session.

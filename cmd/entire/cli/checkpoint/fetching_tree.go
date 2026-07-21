@@ -29,9 +29,13 @@ type RefFetchFunc func(ctx context.Context, ref plumbing.ReferenceName) error
 // in List to discover checkpoints written on another machine that have no local
 // ref yet; each discovered checkpoint is then hydrated lazily on read via
 // RefFetchFunc. The checkpoint package cannot resolve the remote target itself,
-// so the CLI layer injects it. Enumeration is checkpoint-remote-scoped (never
-// origin): it returns (nil, nil) when no checkpoint remote is configured, which
-// leaves List local-only — the same authority rule as the on-demand fetch.
+// so the CLI layer injects it.
+//
+// Scope is stricter than the on-demand read fetch: with no checkpoint_remote
+// configured the lister returns (nil, nil) and List stays local-only. The
+// on-demand fetch (FetchURL) falls back to origin in that case. When a
+// checkpoint_remote is configured the lister queries the resolved checkpoint
+// URL (which can still fall through to origin in FetchURL edge cases).
 type RemoteRefListFunc func(ctx context.Context) ([]plumbing.ReferenceName, error)
 
 // FetchingTree wraps a git tree to automatically fetch missing blobs on demand.
