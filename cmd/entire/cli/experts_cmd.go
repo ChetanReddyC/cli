@@ -182,10 +182,18 @@ func (s expertsStyles) link(style lipgloss.Style, url, text string) string {
 func newExpertsCmd() *cobra.Command {
 	f := &expertsFlags{limit: 8}
 	cmd := &cobra.Command{
-		Use:    "experts [scope-or-query]",
-		Short:  "Rank agent provenance for code scopes",
-		Hidden: true,
-		Args:   cobra.ArbitraryArgs,
+		Use:   "experts [scope-or-query]",
+		Short: "Rank agent provenance for code scopes",
+		Long: `Rank which agents, skills, and tools have provenance over code scopes — who
+and what has touched the given files.
+
+Each argument is a scope: a file path or a directory (repeatable). With no
+argument the current branch's changed paths are used; pass --staged to use
+staged paths instead. Results come from the entire-api cell keyed on the repo,
+so the repo must be mirrored.`,
+		Example: "  entire experts src/payments/ --json\n  entire experts --staged\n  entire experts internal/auth internal/session --limit 5",
+		Hidden:  true,
+		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runExperts(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args, f)
 		},
