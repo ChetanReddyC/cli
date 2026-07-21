@@ -452,8 +452,8 @@ func runExplain(ctx context.Context, w, errW io.Writer, sessionID, commitRef, ch
 	return runExplainBranchWithFilter(ctx, w, errW, noPager, sessionID)
 }
 
-// explainTargetNotFoundError reports that the positional target matched no
-// committed or temporary checkpoint. It unwraps to
+// explainTargetNotFoundError reports that the requested checkpoint target
+// matched no committed or temporary checkpoint. It unwraps to
 // checkpoint.ErrCheckpointNotFound so callers' errors.Is contracts keep
 // working, while runExplainAuto can distinguish this resolution miss from a
 // failure AFTER a successful match that happens to wrap the same sentinel
@@ -548,7 +548,12 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		slog.String("target", target),
 		slog.String("commit", abbreviateCommitHash(lookup.repo, hash)),
 		slog.String("checkpoint_id", cpID.String()))
-	return runExplainCheckpointWithLookup(ctx, w, errW, cpID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, lookup, nil, summaryTimeoutSeconds)
+	if err := runExplainCheckpointWithLookup(ctx, w, errW, cpID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, lookup, nil, summaryTimeoutSeconds); err != nil {
+		// The user typed a commit, not this checkpoint ID — without the
+		// trailer linkage the error reads as if they asked for an unknown ID.
+		return fmt.Errorf("commit %s references checkpoint %s via its Entire-Checkpoint trailer: %w", abbreviateCommitHash(lookup.repo, hash), cpID, err)
+	}
+	return nil
 }
 
 // runExplainAutoAmbiguityGuard refuses --generate when the positional
@@ -685,7 +690,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	if generate {
 		summary, summaryErr := checkpoint.ReadCheckpoint(ctx, lookup.store, fullCheckpointID)
 		if summaryErr != nil {
-			return fmt.Errorf("failed to read checkpoint: %w", summaryErr)
+			return fmt.Errorf("failed to read checkpoint %s: %w", fullCheckpointID, summaryErr)
 		}
 		if summary.Imported {
 			return fmt.Errorf("cannot generate a summary for imported checkpoint %s: imported history is read-only", fullCheckpointID)
@@ -732,7 +737,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		content, err = checkpoint.ReadLatestSessionContent(ctx, lookup.store, fullCheckpointID, summary)
 		if err != nil {
 			stopLoad(false)
-			return fmt.Errorf("failed to reload checkpoint: %w", err)
+			return fmt.Errorf("failed to reload checkpoint %s: %w", fullCheckpointID, err)
 		}
 	}
 
@@ -784,11 +789,11 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 	store := lookup.store
 	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read checkpoint: %w", err)
+		return nil, nil, fmt.Errorf("failed to read checkpoint %s: %w", cpID, err)
 	}
 	content, contentErr := checkpoint.ReadLatestSessionContent(ctx, store, cpID, summary)
 	if contentErr != nil {
-		return nil, nil, fmt.Errorf("failed to read checkpoint content: %w", contentErr)
+		return nil, nil, fmt.Errorf("failed to read checkpoint content for %s: %w", cpID, contentErr)
 	}
 	return summary, content, nil
 }
@@ -1236,7 +1241,9 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 	// This ensures we find checkpoints even if HEAD has advanced since the session started
 	tempCheckpoints, err := store.ListAllCheckpoints(ctx, "", branchCheckpointsLimit)
 	if err != nil {
-		return "", false, nil //nolint:nilerr // best-effort: caller falls back to ErrCheckpointNotFound when no temp checkpoint is found
+		logging.Debug(ctx, "explain: listing temporary checkpoints failed; treating as no temp match",
+			slog.String("error", err.Error()))
+		return "", false, nil
 	}
 
 	// Find checkpoints matching the SHA prefix - check for ambiguity
@@ -1274,12 +1281,20 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 	// Get shadow commit and tree to read metadata
 	shadowCommit, commitErr := repo.CommitObject(tc.CommitHash)
 	if commitErr != nil {
-		return "", false, nil //nolint:nilerr // best-effort: missing shadow commit is treated as not-found
+		// The prefix DID match this temp checkpoint; record why it still
+		// reads as not-found (pruned/gc'd shadow objects, IO errors).
+		logging.Debug(ctx, "explain: temp checkpoint matched but shadow commit unreadable; treating as not-found",
+			slog.String("commit", tc.CommitHash.String()),
+			slog.String("error", commitErr.Error()))
+		return "", false, nil
 	}
 
 	shadowTree, treeErr := shadowCommit.Tree()
 	if treeErr != nil {
-		return "", false, nil //nolint:nilerr // best-effort: missing shadow tree is treated as not-found
+		logging.Debug(ctx, "explain: temp checkpoint matched but shadow tree unreadable; treating as not-found",
+			slog.String("commit", tc.CommitHash.String()),
+			slog.String("error", treeErr.Error()))
+		return "", false, nil
 	}
 
 	// Read agent type from shadow branch metadata (stored during checkpoint creation)

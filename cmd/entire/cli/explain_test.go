@@ -506,32 +506,77 @@ func TestShouldFallBackToCommitResolution(t *testing.T) {
 }
 
 // TestRunExplainAuto_PostResolutionErrorSurfacesVerbatim guards the adjacent
-// contract end-to-end: when the target RESOLVES via the committed-checkpoint
-// prefix match but a later read step fails hard (here: the git-refs on-demand
-// ref fetch failing in a repo with no reachable remote), runExplainAuto must
-// surface that failure instead of running the commit fallback.
+// contract end-to-end, for both the read-only and --generate entry points:
+// when the target RESOLVES via the committed-checkpoint prefix match but a
+// later read step fails hard, runExplainAuto must surface that failure —
+// naming the resolved checkpoint — instead of running the commit fallback.
+// The fault injector is the pinned "a ULID is never read from the branch"
+// routing contract: the checkpoint is listed (List unions both backends) but
+// its read routes to refs only, where the on-demand ref fetch fails hard in a
+// repo with no reachable remote.
 func TestRunExplainAuto_PostResolutionErrorSurfacesVerbatim(t *testing.T) {
+	for _, generate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("generate=%v", generate), func(t *testing.T) {
+			repo, _ := runExplainAutoTestRepo(t)
+			ctx := context.Background()
+
+			ulidID := id.MustCheckpointID("01KVBJCWYA4YW6J5M9GP655HZN")
+			require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(ctx, checkpoint.Session{
+				CheckpointID: ulidID,
+				SessionID:    "session-stray-ulid",
+				Strategy:     "manual-commit",
+				Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")),
+				AuthorName:   "Test",
+				AuthorEmail:  "test@example.com",
+			}))
+
+			var out, errOut bytes.Buffer
+			err := runExplainAuto(ctx, &out, &errOut, ulidID.String(), true, false, false, false, generate, false, false, 0)
+
+			require.Error(t, err)
+			require.ErrorContains(t, err, "failed to read checkpoint",
+				"the post-resolution failure must surface as-is")
+			require.ErrorContains(t, err, ulidID.String(),
+				"the error must name the checkpoint the target resolved to")
+			require.NotContains(t, err.Error(), "no checkpoint or commit found",
+				"a post-resolution failure must not be masked by the commit fallback")
+			require.False(t, shouldFallBackToCommitResolution(err),
+				"a post-resolution failure must not classify as a target miss")
+		})
+	}
+}
+
+// TestRunExplainAuto_TrailerReferencedCheckpointMissing: when the positional
+// target is a commit whose Entire-Checkpoint trailer references a checkpoint
+// that no longer resolves, the error must name the commit and the trailer
+// linkage — the user typed a commit SHA and would otherwise see "checkpoint
+// not found: <id>" for an ID they never entered.
+func TestRunExplainAuto_TrailerReferencedCheckpointMissing(t *testing.T) {
 	repo, _ := runExplainAutoTestRepo(t)
 	ctx := context.Background()
 
-	ulidID := id.MustCheckpointID("01KVBJCWYA4YW6J5M9GP655HZN")
-	require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(ctx, checkpoint.Session{
-		CheckpointID: ulidID,
-		SessionID:    "session-stray-ulid",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")),
-		AuthorName:   "Test",
-		AuthorEmail:  "test@example.com",
-	}))
+	cpID := id.MustCheckpointID("deadbeefcafe")
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	tmpDir := wt.Filesystem().Root()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "feature.txt"), []byte("feature"), 0o644))
+	_, err = wt.Add("feature.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit(trailers.AppendCheckpointTrailer("Implement feature", cpID.String()), &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	require.NoError(t, err)
 
 	var out, errOut bytes.Buffer
-	err := runExplainAuto(ctx, &out, &errOut, ulidID.String(), true, false, false, false, true, false, false, 0)
+	err = runExplainAuto(ctx, &out, &errOut, commitHash.String(), true, false, false, false, false, false, false, 0)
 
 	require.Error(t, err)
-	require.ErrorContains(t, err, "failed to read checkpoint",
-		"the post-resolution failure must surface as-is")
-	require.NotContains(t, err.Error(), "no checkpoint or commit found",
-		"a post-resolution failure must not be masked by the commit fallback")
+	require.ErrorIs(t, err, checkpoint.ErrCheckpointNotFound)
+	require.ErrorContains(t, err, cpID.String())
+	require.ErrorContains(t, err, commitHash.String()[:7],
+		"the error must name the commit the user actually typed")
+	require.ErrorContains(t, err, "Entire-Checkpoint trailer",
+		"the error must explain how the commit led to the checkpoint")
 }
 
 // TestRunExplainCheckpoint_NotFoundSentinels verifies the typed-error
