@@ -1200,7 +1200,13 @@ func timeoutDiagnostic(_ error, attempt *summaryAttempt) (string, []explainRow) 
 
 	stderr := strings.TrimSpace(attempt.stderrCaptured)
 
-	if attempt.streaming {
+	// A streaming attempt with no phases but observed stdout means streaming
+	// degenerated to something else — e.g. the old-CLI flag-rejection fallback
+	// ran GenerateText, which produced output that never became progress
+	// events. Claiming "provider never sent its request" would be false;
+	// route to the evidence-based branches below instead.
+	sawAnyPhase := len(attempt.phasesReached) > 0
+	if attempt.streaming && (sawAnyPhase || attempt.stdoutByteCount == 0) {
 		// Key off the furthest phase reached, not the earliest one missing:
 		// PhaseConnecting comes from a version-dependent status event, so an
 		// older CLI can reach FirstToken/Generating without ever reporting
