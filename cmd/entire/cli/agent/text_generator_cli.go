@@ -36,7 +36,7 @@ type TextCommandRunner func(ctx context.Context, name string, args ...string) *e
 // Returns (result, capturedStderr, stdoutByteCount, err). capturedStderr and
 // stdoutByteCount are populated even on error so callers can wrap them into a
 // *agent.TextGenerationError for timeout diagnostics.
-func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, binary, displayName string, args []string, stdin string) (string, string, int, error) { //nolint:unparam // capturedStderr (result 1) is used by sub-package callers (codex, geminicli, etc.) even though intra-package tests blank it
+func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, binary, displayName string, args []string, stdin string) (string, string, int, error) {
 	if runner == nil {
 		runner = exec.CommandContext
 	}

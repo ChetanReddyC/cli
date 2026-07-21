@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -27,11 +28,11 @@ func TestGenerateTextStreaming_Success(t *testing.T) {
 		CommandRunner: testutil.FakeStreamCmd(string(fixture), "", 0),
 	}
 
-	var phases []agent.ProgressPhase
+	var events []agent.GenerationProgress
 	result, err := agentInst.GenerateTextStreaming(
 		context.Background(), "test prompt", "haiku",
 		func(p agent.GenerationProgress) {
-			phases = append(phases, p.Phase)
+			events = append(events, p)
 		},
 	)
 	if err != nil {
@@ -42,6 +43,10 @@ func TestGenerateTextStreaming_Success(t *testing.T) {
 	}
 	// We expect Connecting, FirstToken, Generating x2 from the stream,
 	// plus a final Done emitted by GenerateTextStreaming itself.
+	phases := make([]agent.ProgressPhase, 0, len(events))
+	for _, e := range events {
+		phases = append(phases, e.Phase)
+	}
 	want := []agent.ProgressPhase{
 		agent.PhaseConnecting,
 		agent.PhaseFirstToken,
@@ -50,7 +55,75 @@ func TestGenerateTextStreaming_Success(t *testing.T) {
 		agent.PhaseDone,
 	}
 	if !equalPhases(phases, want) {
-		t.Errorf("phases = %v, want %v", phases, want)
+		t.Fatalf("phases = %v, want %v", phases, want)
+	}
+
+	// Field payloads must match the fixture, not just the phase sequence.
+	firstToken := events[1]
+	if firstToken.TTFTms != 935 {
+		t.Errorf("FirstToken.TTFTms = %d, want 935 (top-level ttft_ms in fixture)", firstToken.TTFTms)
+	}
+	if firstToken.InputTokens != 9 {
+		t.Errorf("FirstToken.InputTokens = %d, want 9", firstToken.InputTokens)
+	}
+	if firstToken.CachedInputTokens != 1234 {
+		t.Errorf("FirstToken.CachedInputTokens = %d, want 1234", firstToken.CachedInputTokens)
+	}
+	// The token estimate accumulates raw chars across deltas ("Hello, " = 7,
+	// "world." = 6) and divides the running total — per-delta division would
+	// truncate small deltas to 0 and freeze the UI at "~0 tokens".
+	if got := events[2].OutputTokens; got != 7/4 {
+		t.Errorf("Generating[0].OutputTokens = %d, want %d", got, 7/4)
+	}
+	if got := events[3].OutputTokens; got != 13/4 {
+		t.Errorf("Generating[1].OutputTokens = %d, want %d (running total, not per-delta)", got, 13/4)
+	}
+	done := events[4]
+	if done.OutputTokens != 3 {
+		t.Errorf("Done.OutputTokens = %d, want 3 (usage.output_tokens from result envelope)", done.OutputTokens)
+	}
+	if done.DurationMs != 2509 {
+		t.Errorf("Done.DurationMs = %d, want 2509", done.DurationMs)
+	}
+}
+
+func TestGenerateTextStreaming_InjectsAPIKeyHelperSettings(t *testing.T) {
+	// t.Setenv: no t.Parallel.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"),
+		[]byte(`{"apiKeyHelper":"echo test-key"}`), 0o600); err != nil {
+		t.Fatalf("write settings fixture: %v", err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+
+	fixture, err := os.ReadFile(filepath.Join("testdata", "stream_success.jsonl"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	// The streaming path must re-inject the user's apiKeyHelper via a
+	// --settings file exactly like GenerateText does; --setting-sources ""
+	// alone would silently drop API-billing auth on every streaming call.
+	var gotArgs []string
+	fake := testutil.FakeStreamCmd(string(fixture), "", 0)
+	agentInst := &ClaudeCodeAgent{
+		CommandRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			gotArgs = args
+			return fake(ctx, name)
+		},
+	}
+	if _, err := agentInst.GenerateTextStreaming(context.Background(), "test", "haiku", nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	settingsPath, ok := flagValue(gotArgs, "--settings")
+	if !ok {
+		t.Fatalf("streaming argv is missing the --settings auth injection: %v", gotArgs)
+	}
+	if !strings.Contains(settingsPath, "entire-claude-auth") {
+		t.Errorf("--settings = %q, want the injected auth settings file path", settingsPath)
+	}
+	if got, _ := flagValue(gotArgs, "--setting-sources"); got != "" {
+		t.Errorf("--setting-sources = %q, want empty (isolation must be preserved)", got)
 	}
 }
 
@@ -153,6 +226,77 @@ func TestGenerateTextStreaming_SuccessOutranksLateCancellation(t *testing.T) {
 	}
 	if result != helloWorldResult {
 		t.Errorf("result = %q, want %s", result, helloWorldResult)
+	}
+}
+
+func TestGenerateTextStreaming_CtxKillAfterDecodedResultReturnsSuccess(t *testing.T) {
+	t.Parallel()
+
+	fixture, err := os.ReadFile(filepath.Join("testdata", "stream_success.jsonl"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	// The child writes the complete stream (including the result envelope) and
+	// then hangs; canceling ctx kills it by signal. The decoded success must
+	// win over the context-caused kill — the summary was fully paid for and
+	// delivered before the kill landed.
+	agentInst := &ClaudeCodeAgent{CommandRunner: testutil.FakeStreamCmdHang(string(fixture), "")}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	result, err := agentInst.GenerateTextStreaming(ctx, "test", "haiku", func(p agent.GenerationProgress) {
+		if p.Phase == agent.PhaseGenerating {
+			cancel()
+		}
+	})
+	if err != nil {
+		t.Fatalf("GenerateTextStreaming() error = %v, want decoded success to win over ctx-caused kill", err)
+	}
+	if result != helloWorldResult {
+		t.Errorf("result = %q, want %q", result, helloWorldResult)
+	}
+}
+
+func TestGenerateTextStreaming_CtxKillMidStreamCarriesEvidence(t *testing.T) {
+	t.Parallel()
+
+	fixture, err := os.ReadFile(filepath.Join("testdata", "stream_success.jsonl"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	// Truncate the fixture before the result envelope: the stream dies
+	// mid-generation when ctx kills the subprocess.
+	lines := strings.Split(strings.TrimSpace(string(fixture)), "\n")
+	partial := strings.Join(lines[:len(lines)-1], "\n") + "\n"
+	const stallMsg = "network stall: upstream not responding"
+
+	agentInst := &ClaudeCodeAgent{CommandRunner: testutil.FakeStreamCmdHang(partial, stallMsg)}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	_, err = agentInst.GenerateTextStreaming(ctx, "test", "haiku", func(p agent.GenerationProgress) {
+		if p.Phase == agent.PhaseGenerating {
+			cancel()
+		}
+	})
+	if err == nil {
+		t.Fatal("GenerateTextStreaming() error = nil, want ctx-kill failure")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled sentinel to survive the wrapper", err)
+	}
+	// The wrapper must carry the diagnostic evidence: captured stderr and how
+	// much stdout arrived before the kill. A bare sentinel here forces the
+	// explain layer's timeout diagnostic to fabricate a cause.
+	var genErr *agent.TextGenerationError
+	if !errors.As(err, &genErr) {
+		t.Fatalf("error = %T (%v), want *agent.TextGenerationError carrying evidence", err, err)
+	}
+	if genErr.Stderr != stallMsg {
+		t.Errorf("Stderr = %q, want %q", genErr.Stderr, stallMsg)
+	}
+	if genErr.StdoutBytes == 0 {
+		t.Error("StdoutBytes = 0, want the bytes read before the kill to be counted")
 	}
 }
 

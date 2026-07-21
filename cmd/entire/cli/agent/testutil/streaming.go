@@ -9,9 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"time"
 )
 
-const fakeStreamMarkerArg = "__entire_test_fake_stream_process__"
+const (
+	fakeStreamMarkerArg    = "__entire_test_fake_stream_process__"
+	fakeStreamHangSentinel = "hang"
+)
 
 func init() { //nolint:gochecknoinits // child test binaries must intercept before testing.Main runs
 	args := os.Args
@@ -20,6 +24,14 @@ func init() { //nolint:gochecknoinits // child test binaries must intercept befo
 	}
 	writeDecodedFixture(os.Stdout, args[len(args)-3])
 	writeDecodedFixture(os.Stderr, args[len(args)-2])
+	if args[len(args)-1] == fakeStreamHangSentinel {
+		// Block until killed by the parent's ctx cancellation. Sleep instead
+		// of select{} so the runtime's deadlock detector doesn't fire and
+		// pollute the captured stderr.
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	exitCode, err := strconv.Atoi(args[len(args)-1])
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "invalid fake stream exit code:", err)
@@ -45,12 +57,25 @@ func writeDecodedFixture(output *os.File, encoded string) {
 // It relaunches the current Go test binary and is portable across supported
 // platforms; package init handles the marked child before testing.Main runs.
 func FakeStreamCmd(stdout, stderr string, exitCode int) func(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return fakeStreamCmd(stdout, stderr, strconv.Itoa(exitCode))
+}
+
+// FakeStreamCmdHang is FakeStreamCmd whose child writes the fixtures and then
+// blocks until killed — it never exits on its own. Wire it to the real test
+// ctx (do not detach) to deterministically exercise context-kill behavior:
+// cancel the ctx and the child dies by signal with the fixtures already
+// written to the pipe.
+func FakeStreamCmdHang(stdout, stderr string) func(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return fakeStreamCmd(stdout, stderr, fakeStreamHangSentinel)
+}
+
+func fakeStreamCmd(stdout, stderr, exitArg string) func(ctx context.Context, name string, args ...string) *exec.Cmd {
 	return func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, os.Args[0], "-test.run=^$", "--",
 			fakeStreamMarkerArg,
 			base64.StdEncoding.EncodeToString([]byte(stdout)),
 			base64.StdEncoding.EncodeToString([]byte(stderr)),
-			strconv.Itoa(exitCode),
+			exitArg,
 		)
 	}
 }

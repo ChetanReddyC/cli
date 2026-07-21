@@ -51,6 +51,26 @@ func buildGenerateArgs(model, settingsPath string) []string {
 	return args
 }
 
+// buildStreamingGenerateArgs is buildGenerateArgs for the stream-json path,
+// with the same isolation and auth-injection contract (see buildGenerateArgs).
+// --include-partial-messages enables the per-token stream_event envelopes
+// that PhaseFirstToken and PhaseGenerating are dispatched from, and
+// --verbose is required by the claude CLI for stream-json output.
+func buildStreamingGenerateArgs(model, settingsPath string) []string {
+	args := []string{
+		"--print",
+		"--output-format", "stream-json",
+		"--include-partial-messages",
+		"--verbose",
+		"--model", model,
+		"--setting-sources", "",
+	}
+	if settingsPath != "" {
+		args = append(args, "--settings", settingsPath)
+	}
+	return args
+}
+
 // writeAuthSettingsFile writes a minimal claude settings file containing only
 // the given apiKeyHelper and returns its path plus a cleanup func. The file is
 // created 0600 so the (possibly key-bearing) helper is no more exposed than the

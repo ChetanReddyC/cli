@@ -37,18 +37,20 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 		commandRunner = exec.CommandContext
 	}
 
-	// --include-partial-messages enables the per-token stream_event envelopes
-	// (message_start, content_block_delta, etc.) that PhaseFirstToken and
-	// PhaseGenerating are dispatched from. Without it, Claude only emits the
-	// coarse `assistant` message + final `result` event, and the progress UI
-	// stays silent between "Generating checkpoint summary..." and "✓ done".
-	cmd := commandRunner(ctx, "claude",
-		"--print",
-		"--output-format", "stream-json",
-		"--include-partial-messages",
-		"--verbose",
-		"--model", model,
-		"--setting-sources", "")
+	// Re-inject only the user's apiKeyHelper (via a 0600 file, never argv) so
+	// API-billing auth keeps working under --setting-sources "" isolation —
+	// same contract as GenerateText (see buildGenerateArgs). Best-effort: if
+	// extracting/writing the helper fails, run without it (env/keychain auth
+	// still work) rather than failing the call.
+	settingsPath, cleanup, err := writeAuthSettingsFile(readUserAPIKeyHelper())
+	if err != nil {
+		settingsPath = ""
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	cmd := commandRunner(ctx, "claude", buildStreamingGenerateArgs(model, settingsPath)...)
 
 	cmd.Dir = os.TempDir()
 	cmd.Env = agent.StripGitEnv(os.Environ())
@@ -65,12 +67,15 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 		return "", fmt.Errorf("claude stream start: %w", err)
 	}
 
-	final, malformed, parseErr := streamClaudeResponse(stdout, makeProgressDispatcher(progress))
+	// Count stdout bytes so the timeout diagnostic can distinguish "provider
+	// produced no output" from "was generating output when killed".
+	counted := &countingReader{r: stdout}
+	final, malformed, parseErr := streamClaudeResponse(counted, makeProgressDispatcher(progress))
 
 	// Drain any unread stdout so the subprocess can exit cleanly even if the
 	// scanner aborted early (e.g. bufio.ErrTooLong on an oversized line).
 	// Without this, a blocked pipe would deadlock cmd.Wait().
-	if _, drainErr := io.Copy(io.Discard, stdout); drainErr != nil {
+	if _, drainErr := io.Copy(io.Discard, counted); drainErr != nil {
 		logging.Debug(ctx, "draining claude stream stdout", slog.String("error", drainErr.Error()))
 	}
 	waitErr := cmd.Wait()
@@ -85,9 +90,11 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 	}
 
 	if final != nil {
-		// A fully decoded success wins over cancellation that arrives after the
-		// provider completed. A non-context process failure remains authoritative.
-		if waitErr != nil {
+		// A fully decoded success wins over a context-caused kill that lands
+		// after the provider completed (e.g. the deadline firing between the
+		// result envelope and cmd.Wait). A non-context process failure — the
+		// CLI exiting non-zero on its own — remains authoritative.
+		if waitErr != nil && !isContextKill(ctx, waitErr) {
 			stderrStr := strings.TrimSpace(stderr.String())
 			if stderrStr != "" {
 				return "", fmt.Errorf("claude stream failed: %s: %w", stderrStr, waitErr)
@@ -108,10 +115,20 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 	}
 
 	if ctx.Err() != nil {
+		// Wrap the sentinel in a *agent.TextGenerationError so the explain
+		// layer's timeout diagnostic gets its evidence (captured stderr and
+		// how much stdout arrived before the kill) instead of a bare sentinel
+		// that forces it to fabricate a cause. errors.Is against the sentinel
+		// keeps working through Unwrap.
+		sentinel := context.Canceled
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", context.DeadlineExceeded
+			sentinel = context.DeadlineExceeded
 		}
-		return "", context.Canceled
+		return "", &agent.TextGenerationError{
+			Err:         sentinel,
+			Stderr:      strings.TrimSpace(stderr.String()),
+			StdoutBytes: counted.n,
+		}
 	}
 
 	// No envelope: check if the CLI rejected streaming flags (older version).
@@ -192,6 +209,32 @@ func outputTokensFromUsage(u *messageUsage) int {
 		return 0
 	}
 	return u.OutputTokens
+}
+
+// isContextKill reports whether waitErr looks like exec.CommandContext's kill
+// triggered by ctx being done (signal termination while ctx.Err() is set), as
+// opposed to the CLI exiting on its own. On Windows a context kill reports a
+// normal exit code, so this returns false there and real process failures keep
+// their precedence over a decoded result.
+func isContextKill(ctx context.Context, waitErr error) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	return errors.As(waitErr, &exitErr) && exitErr.ProcessState != nil && !exitErr.Exited()
+}
+
+// countingReader passes reads through and counts bytes seen, so the timeout
+// diagnostic can report how much stdout the subprocess produced before dying.
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err //nolint:wrapcheck // pass-through reader: wrapping would break io.EOF detection in the scanner
 }
 
 // looksLikeUnrecognizedFlag returns true if stderr indicates the CLI
