@@ -591,6 +591,44 @@ func TestFetchTrailDescription_ReadsNestedBodyDocument(t *testing.T) {
 	}
 }
 
+func TestResolveTrailUpdateBody_PrefersDetailSnapshot(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := io.WriteString(w, `{"trail":{"number":42,"body_document":{"text_snapshot":"the real body"}},"checkpoints":[],"has_write_permission":true}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	// The list resource omits the description, so found.Body is empty. The
+	// seed must come from the detail endpoint, not the empty list body.
+	found := &api.TrailResource{Number: 42, Body: ""}
+	body := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	if body != "the real body" {
+		t.Fatalf("body = %q, want %q", body, "the real body")
+	}
+}
+
+func TestResolveTrailUpdateBody_FallsBackToListBody(t *testing.T) {
+	t.Parallel()
+	// Older/partial server: detail omits body_document (text_snapshot empty).
+	// The seed must fall back to the list body rather than blanking it.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := io.WriteString(w, `{"trail":{"number":42},"checkpoints":[],"has_write_permission":true}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	found := &api.TrailResource{Number: 42, Body: "list body"}
+	body := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	if body != "list body" {
+		t.Fatalf("body = %q, want %q", body, "list body")
+	}
+}
+
 func TestResolveCreateBranch(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

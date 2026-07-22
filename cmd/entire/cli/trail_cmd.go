@@ -1099,6 +1099,22 @@ func newTrailCreateRequest(title, body, branch, base, statusStr, typeStr, priori
 	return req
 }
 
+// resolveTrailUpdateBody returns the body text to seed the interactive update
+// form with. The list resource omits the description (it lives in
+// body_document, detail-endpoint only), so update must fetch the detail body
+// or it would seed an empty field and PATCH a full-body wipe. Best-effort:
+// a failed or empty detail fetch falls back to the list body, mirroring
+// runTrailShow.
+func resolveTrailUpdateBody(ctx context.Context, client *api.Client, forge, owner, repo string, found *api.TrailResource) string {
+	body := found.Body
+	if found.Number > 0 {
+		if bt, err := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number); err == nil && strings.TrimSpace(bt) != "" {
+			body = bt
+		}
+	}
+	return body
+}
+
 func newTrailUpdateCmd() *cobra.Command {
 	var statusStr, title, body, branch, typeStr, priorityStr string
 	var labelAdd, labelRemove, assigneeAdd, assigneeRemove, reviewerAdd, reviewerRemove []string
@@ -1221,7 +1237,11 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 			}
 			statusStr = string(metadata.Status)
 			title = metadata.Title
-			body = metadata.Body
+			// The list resource omits the description; fetch the detail body so
+			// the form is prefilled with the current text instead of blank
+			// (blank + BodyChanged would PATCH a full-body wipe).
+			body = resolveTrailUpdateBody(ctx, client, forge, owner, repoName, found)
+			origStatus, origTitle, origBody := statusStr, title, body
 
 			form := NewAccessibleForm(
 				huh.NewGroup(
@@ -1240,9 +1260,12 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, i
 			if formErr := form.Run(); formErr != nil {
 				return handleFormCancellation(w, "Trail update", formErr)
 			}
-			inputs.StatusChanged = true
-			inputs.TitleChanged = true
-			inputs.BodyChanged = true
+			// Only mark a field changed when the user actually edited it, so an
+			// untouched body/title/status isn't needlessly PATCHed (a no-op body
+			// PATCH would otherwise rewrite the description on every update).
+			inputs.StatusChanged = statusStr != origStatus
+			inputs.TitleChanged = title != origTitle
+			inputs.BodyChanged = body != origBody
 		}
 
 		statusStr = strings.TrimSpace(statusStr)
