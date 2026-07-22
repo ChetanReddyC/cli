@@ -54,6 +54,12 @@ type Turn struct {
 	// subagent's tokens are counted exactly once rather than re-added on every
 	// turn after it is discovered.
 	Tokens *types.TokenUsage
+	// CommitSHAs are the commits this turn recorded making, in transcript
+	// order, as written by the agent's gitOperation transcript records
+	// (kind "committed" only). SHAs may be SHORT — callers must resolve them
+	// against the repo before use. Nil for agents/transcripts without the
+	// feature; the anchor then falls back to Options.LinkCommitSHA.
+	CommitSHAs []string
 }
 
 // Importer is the per-agent seam: it locates an agent's transcripts for a repo
@@ -99,10 +105,12 @@ type Options struct {
 	Now           time.Time
 	DryRun        bool
 
-	// LinkCommitSHA, when non-empty, is written to each imported checkpoint's
-	// metadata as commit_sha — the anchor commit the UI shows imported sessions
-	// against. The caller resolves it (default branch head when resolvable;
-	// see resolveImportLinkCommitSHA); Run does not.
+	// LinkCommitSHA, when non-empty, is the fallback anchor written to each
+	// imported checkpoint's metadata as commit_sha — the commit the UI shows
+	// imported sessions against. The caller resolves it (default branch head
+	// when resolvable; see resolveImportLinkCommitSHA); Run does not. A turn
+	// whose transcript records a resolvable commit that is an ancestor of this
+	// fallback anchors to that real commit instead (see turnAnchorResolver).
 	LinkCommitSHA string
 }
 
@@ -142,6 +150,11 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		}
 	}
 
+	// One resolver per Run: it lazily walks and memoizes opts.LinkCommitSHA's
+	// ancestor set the first time a turn actually carries a candidate, so a
+	// whole import run pays for at most one history walk, not one per turn.
+	anchorResolver := newTurnAnchorResolver(repo, opts.LinkCommitSHA)
+
 	for _, sf := range files {
 		res.SessionsScanned++
 		full, readErr := os.ReadFile(sf.Path)
@@ -176,7 +189,8 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 				red = r
 				redacted = true
 			}
-			if err := writeTurn(ctx, stores, imp, cid, sf, red, turn, opts.LinkCommitSHA); err != nil {
+			anchor := anchorResolver.resolve(turn.CommitSHAs)
+			if err := writeTurn(ctx, stores, imp, cid, sf, red, turn, anchor); err != nil {
 				return res, err
 			}
 			existing[cid.String()] = true
