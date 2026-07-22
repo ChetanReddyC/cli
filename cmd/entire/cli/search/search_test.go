@@ -572,15 +572,23 @@ func TestParseSearchInput_AllReposFilter(t *testing.T) {
 	}
 }
 
-func TestValidateRepoFilters_RejectsMultipleRepos(t *testing.T) {
+func TestValidateRepoFilters_AllowsMultipleRepos(t *testing.T) {
 	t.Parallel()
 
-	err := ValidateRepoFilters([]string{"entirehq/entire.io", "entireio/cli"})
-	if err == nil {
-		t.Fatal("expected validation error")
+	if err := ValidateRepoFilters([]string{"entirehq/entire.io", "entireio/cli"}); err != nil {
+		t.Errorf("expected multiple valid repo filters to be accepted, got: %v", err)
 	}
-	if got := err.Error(); got != "only one explicit repo filter is currently supported" {
-		t.Errorf("error = %q", got)
+}
+
+func TestValidateRepoFilters_RejectsInvalidAmongMultiple(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateRepoFilters([]string{"entireio/cli", "AGENTS.md"})
+	if err == nil {
+		t.Fatal("expected validation error for an invalid repo among valid ones")
+	}
+	if got := err.Error(); !strings.Contains(got, `invalid repo filter "AGENTS.md"`) {
+		t.Errorf("error = %q, want it to name the invalid repo", got)
 	}
 }
 

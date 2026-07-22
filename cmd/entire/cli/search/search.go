@@ -424,7 +424,7 @@ func ParseSearchInput(raw string) ParsedInput {
 		case strings.HasPrefix(tok, "branch:"):
 			p.Branch = strings.Trim(tok[len("branch:"):], "\"")
 		case strings.HasPrefix(tok, "repo:"):
-			p.Repos = appendUnique(p.Repos, parseListFilter(strings.TrimPrefix(tok, "repo:"))...)
+			p.Repos = AppendUnique(p.Repos, parseListFilter(strings.TrimPrefix(tok, "repo:"))...)
 		default:
 			queryParts = append(queryParts, tok)
 		}
@@ -490,16 +490,17 @@ func parseListFilter(raw string) []string {
 	return values
 }
 
-// ValidateRepoFilters ensures repo filters match backend semantics.
+// ValidateRepoFilters ensures each repo filter matches backend semantics.
+// Multiple explicit repo filters are accepted: the v4 query-serve path resolves
+// each and fans out across the cells hosting them, mirroring code search.
 func ValidateRepoFilters(repos []string) error {
-	if len(repos) > 1 {
-		return errors.New("only one explicit repo filter is currently supported")
-	}
-	if len(repos) == 1 && !isValidRepoFilter(repos[0]) {
-		return fmt.Errorf(
-			"invalid repo filter %q: expected owner/name or *; if you meant all repos, quote the asterisk: --repo '*'",
-			repos[0],
-		)
+	for _, repo := range repos {
+		if !isValidRepoFilter(repo) {
+			return fmt.Errorf(
+				"invalid repo filter %q: expected owner/name or *; if you meant all repos, quote the asterisk: --repo '*'",
+				repo,
+			)
+		}
 	}
 	return nil
 }
@@ -515,7 +516,9 @@ func isValidRepoFilter(repo string) bool {
 	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
 }
 
-func appendUnique(existing []string, values ...string) []string {
+// AppendUnique appends values to existing, skipping any already present, and
+// returns the result. Order is preserved (first occurrence wins).
+func AppendUnique(existing []string, values ...string) []string {
 	if len(values) == 0 {
 		return existing
 	}
