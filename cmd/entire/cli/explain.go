@@ -2248,11 +2248,12 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 }
 
 // hydrateListedBranchCheckpoints fills SessionID/etc for remote-discovered List
-// stubs among the already-truncated RewindPoints. Per-ref fetch budget is
-// ListHydrationTimeout (much shorter than the default on-demand fetch). Failures
-// clear ListedStub (fail-once) inside HydrateListedCheckpointInfo; when any
-// stub still lacks SessionID afterward we note it on stderr so --session
-// filters dropping them is not silent.
+// stubs among the already-truncated RewindPoints. The whole pass is capped by
+// ListHydrationPassTimeout, and each ref additionally gets ListHydrationTimeout
+// (much shorter than the default on-demand fetch). Failures clear ListedStub
+// (fail-once) inside HydrateListedCheckpointInfo; when any stub still lacks
+// SessionID afterward we note it on stderr so --session filters dropping them
+// is not silent.
 func hydrateListedBranchCheckpoints(
 	ctx context.Context,
 	store interface {
@@ -2263,6 +2264,9 @@ func hydrateListedBranchCheckpoints(
 	points []strategy.RewindPoint,
 	committedByID map[id.CheckpointID]checkpoint.CheckpointInfo,
 ) {
+	passCtx, passCancel := context.WithTimeout(ctx, checkpoint.ListHydrationPassTimeout)
+	defer passCancel()
+
 	hydrationFailed := 0
 	for i := range points {
 		cpID := points[i].CheckpointID
@@ -2273,7 +2277,13 @@ func hydrateListedBranchCheckpoints(
 		if !ok || !cpInfo.ListedStub {
 			continue
 		}
-		hctx, cancel := context.WithTimeout(ctx, checkpoint.ListHydrationTimeout)
+		if err := passCtx.Err(); err != nil {
+			// Overall budget exhausted: leave remaining stubs unhydrated and
+			// count them toward the user-facing warning.
+			hydrationFailed++
+			continue
+		}
+		hctx, cancel := context.WithTimeout(passCtx, checkpoint.ListHydrationTimeout)
 		hydrated := checkpoint.HydrateListedCheckpointInfo(hctx, store, cpInfo)
 		cancel()
 		committedByID[cpID] = hydrated
@@ -2284,7 +2294,7 @@ func hydrateListedBranchCheckpoints(
 		points[i].ToolUseID = hydrated.ToolUseID
 		points[i].Agent = hydrated.Agent
 		if hydrated.SessionCount > 0 {
-			points[i].SessionPrompt = readLatestCommittedSessionPrompt(ctx, store, cpID, hydrated.SessionCount)
+			points[i].SessionPrompt = readLatestCommittedSessionPrompt(passCtx, store, cpID, hydrated.SessionCount)
 		}
 		if hydrated.SessionID == "" {
 			hydrationFailed++

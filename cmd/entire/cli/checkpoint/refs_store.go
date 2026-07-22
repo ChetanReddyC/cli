@@ -24,6 +24,11 @@ import (
 // into many minutes of sequential ref fetches.
 const ListHydrationTimeout = 15 * time.Second
 
+// ListHydrationPassTimeout bounds the entire List/explain stub-hydration pass.
+// Without this, a slow remote can burn stub_count * ListHydrationTimeout
+// (limit defaults to 100 and is user-settable via --limit).
+const ListHydrationPassTimeout = 30 * time.Second
+
 var (
 	_ PersistentStore = (*gitRefsStore)(nil)
 	_ AuthorReader    = (*gitRefsStore)(nil)
