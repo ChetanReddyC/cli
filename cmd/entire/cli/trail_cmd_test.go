@@ -604,7 +604,10 @@ func TestResolveTrailUpdateBody_PrefersDetailSnapshot(t *testing.T) {
 	// The list resource omits the description, so found.Body is empty. The
 	// seed must come from the detail endpoint, not the empty list body.
 	found := &api.TrailResource{Number: 42, Body: ""}
-	body := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	body, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	if err != nil {
+		t.Fatalf("resolveTrailUpdateBody: %v", err)
+	}
 	if body != "the real body" {
 		t.Fatalf("body = %q, want %q", body, "the real body")
 	}
@@ -623,9 +626,32 @@ func TestResolveTrailUpdateBody_FallsBackToListBody(t *testing.T) {
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
 	found := &api.TrailResource{Number: 42, Body: "list body"}
-	body := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	body, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	if err != nil {
+		t.Fatalf("resolveTrailUpdateBody: %v", err)
+	}
 	if body != "list body" {
 		t.Fatalf("body = %q, want %q", body, "list body")
+	}
+}
+
+func TestResolveTrailUpdateBody_ReturnsErrorOnFetchFailure(t *testing.T) {
+	t.Parallel()
+	// A detail-fetch failure must be surfaced (not swallowed) so the caller can
+	// warn: a blank baseline could otherwise silently overwrite an unseen body.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	found := &api.TrailResource{Number: 42, Body: "list body"}
+	body, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	if err == nil {
+		t.Fatal("expected error on fetch failure, got nil")
+	}
+	if body != "list body" {
+		t.Fatalf("body = %q, want fallback %q", body, "list body")
 	}
 }
 
