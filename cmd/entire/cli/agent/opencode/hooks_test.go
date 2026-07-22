@@ -195,6 +195,13 @@ func TestInstallHooks_AppliesContextInjection(t *testing.T) {
 	if !strings.Contains(content, `output.system.push(pendingInjection)`) {
 		t.Fatal("plugin file should push the injection onto the system prompt")
 	}
+	// resetSessionTracking must clear the stashed injection so a session change
+	// cannot leak the prior session's context into the next session.
+	_, afterReset, _ := strings.Cut(content, "function resetSessionTracking")
+	resetBody, _, _ := strings.Cut(afterReset, "return true")
+	if !strings.Contains(resetBody, `pendingInjection = null`) {
+		t.Fatal("resetSessionTracking should clear pendingInjection on session change")
+	}
 }
 
 func TestInstallHooks_MessageUpdatedFallsBackToSessionStart(t *testing.T) {
