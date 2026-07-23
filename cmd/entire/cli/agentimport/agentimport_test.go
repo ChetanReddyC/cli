@@ -90,7 +90,10 @@ func initRepoWithCommit(t *testing.T) (*git.Repository, string) {
 		t.Fatal(err)
 	}
 	if _, err := wt.Commit("init", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+		// When must be a real timestamp: the anchor resolver's bounded walk
+		// stops at commits older than its date cutoff, and a zero-value When
+		// (year 1) would halt the walk at the first commit.
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +234,7 @@ func TestRun_AnchorsTurnToRecordedCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeAndCommit(t, wt, repoDir, "f.txt", "y", "second")
+	writeAndCommit(t, wt, repoDir, "y", "second")
 	tipHead, err := repo.Head()
 	if err != nil {
 		t.Fatal(err)

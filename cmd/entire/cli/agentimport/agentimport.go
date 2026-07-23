@@ -154,7 +154,7 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 	// One resolver per Run: it lazily walks and memoizes opts.LinkCommitSHA's
 	// ancestor set the first time a turn actually carries a candidate, so a
 	// whole import run pays for at most one history walk, not one per turn.
-	anchorResolver := newTurnAnchorResolver(repo, opts.LinkCommitSHA)
+	anchorResolver := newTurnAnchorResolver(repo, opts.LinkCommitSHA, opts.Now)
 
 	for _, sf := range files {
 		res.SessionsScanned++
@@ -190,8 +190,8 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 				red = r
 				redacted = true
 			}
-			anchor := anchorResolver.resolve(ctx, turn.CommitSHAs)
-			if len(turn.CommitSHAs) > 0 && anchor == opts.LinkCommitSHA {
+			anchor, fromCandidate := anchorResolver.resolve(ctx, turn.CommitSHAs)
+			if len(turn.CommitSHAs) > 0 && !fromCandidate {
 				logging.Debug(ctx, "import: turn anchor fell back",
 					"sessionID", sf.SessionID, "turnUUID", turn.UUID, "candidates", len(turn.CommitSHAs))
 			}
