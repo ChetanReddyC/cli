@@ -1088,14 +1088,18 @@ func mirrorGetRow(m coreapi.Mirror) []string {
 }
 
 // mirrorGetRowStyled colors the per-cluster rows the way the list view does:
-// private gray, status by lifecycle. NAME and CLONE URL stay the default
-// foreground — the clone URL is the copy target of this view.
+// private gray, status by lifecycle, and the CLONE URL cyan — it is the
+// payload of this view (the one thing `get` shows that the grouped list
+// doesn't), and a cell left unstyled here would instead pick up printTable's
+// muted secondary-column gray, reading as de-emphasized. Cyan also matches
+// the list's cluster accent, and the URL is the cluster-bearing value.
 func mirrorGetRowStyled(st statusStyles) func(coreapi.Mirror) []string {
 	return func(m coreapi.Mirror) []string {
 		cells := mirrorGetRow(m)
 		if !st.colorEnabled {
 			return cells
 		}
+		cells[1] = st.render(st.cyan, cells[1])
 		cells[2] = st.render(st.gray, cells[2])
 		if style, ok := repoStatusColor(st, cells[3]); ok {
 			cells[3] = st.render(style, cells[3])
