@@ -55,8 +55,9 @@ displayed in an interactive table. Use --json for machine-readable output.
 
 CLI queries also support inline filters like author:<name>, date:<week|month>,
 branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
-		Args:   cobra.ArbitraryArgs,
-		Hidden: true,
+		Example: "  entire search \"retry backoff\" --json\n  entire search \"auth timeout author:alice date:week\"\n  entire search --code \"parseToken\"",
+		Args:    cobra.ArbitraryArgs,
+		Hidden:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			query := strings.Join(args, " ")
