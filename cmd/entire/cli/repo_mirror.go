@@ -670,9 +670,12 @@ func reportOneShotMirror(out, errW io.Writer, outcome mirrorCreateOutcome, err e
 // repoDirLocalFilters carries the client-side filter/sort flags
 // of `repo mirror list`. privateSet distinguishes an unset --private (keep
 // all) from an explicit --private/--private=false (tri-state flag).
+// mirroredOnly/availableOnly split the two row types the merged table
+// interleaves (cobra rejects setting both).
 type repoDirLocalFilters struct {
 	name, owner, cluster, status, access string
 	privateSet, private                  bool
+	mirroredOnly, availableOnly          bool
 	sortSpec                             string
 }
 
@@ -681,6 +684,15 @@ type repoDirLocalFilters struct {
 // only to the rows the caller fetched. hostBySlug is needed because --cluster
 // accepts a public host while rows carry only the placement slug.
 func applyRepoDirLocal(f repoDirLocalFilters, rows []repoDirRow, hostBySlug map[string]string) ([]repoDirRow, error) {
+	// A mirror row is one with placements; a candidate row has none (its
+	// Access/availability came from the entry's .Candidate). The two type
+	// filters are mutually exclusive at the flag layer.
+	if f.mirroredOnly {
+		rows = slices.DeleteFunc(rows, func(r repoDirRow) bool { return len(r.Placements) == 0 })
+	}
+	if f.availableOnly {
+		rows = slices.DeleteFunc(rows, func(r repoDirRow) bool { return len(r.Placements) > 0 })
+	}
 	rows = filterByName(rows, func(r repoDirRow) string { return r.Repo }, f.name)
 	if f.owner != "" {
 		rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
@@ -924,6 +936,7 @@ func runRepoMirrorListWalk(cmd *cobra.Command, o repoMirrorListOpts, headers []s
 func newRepoMirrorListCmd() *cobra.Command {
 	var cluster, owner, name, status, access string
 	var private bool
+	var mirrored, available bool
 	var sortSpec string
 	var limit, pageSize int
 	var pageToken string
@@ -960,6 +973,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 					name: name, owner: owner, cluster: cluster,
 					status: status, access: access,
 					privateSet: cmd.Flags().Changed("private"), private: private,
+					mirroredOnly: mirrored, availableOnly: available,
 					sortSpec: sortSpec,
 				},
 				limit: limit, pageSize: pageSize, pageToken: pageToken,
@@ -978,14 +992,17 @@ func newRepoMirrorListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&status, "status", "", "Filter by exact STATUS (mirrors: ready/processing/failed/suspended, matching any of a repo's placements; candidates: available/owner-only)")
 	cmd.Flags().StringVar(&access, "access", "", "Filter by exact ACCESS (candidates only: read/write/admin)")
 	cmd.Flags().BoolVar(&private, "private", false, "Filter by visibility: --private for private only, --private=false for public only (omit for all)")
+	cmd.Flags().BoolVar(&mirrored, "mirrored", false, "Keep only repos already mirrored (drops onboardable candidates)")
+	cmd.Flags().BoolVar(&available, "available", false, "Keep only GitHub repos you could onboard as mirrors (drops existing mirrors)")
 	cmd.Flags().StringVar(&sortSpec, "sort", "", "Sort by column key (e.g. name, clusters; prefix '-' for descending). Default: name ascending")
 	cmd.Flags().IntVar(&limit, "limit", 0, "Show at most N rows, applied after the local filters and sort (0 shows all fetched)")
 	cmd.Flags().BoolVar(&all, "all", false, "Fetch the complete directory instead of the first "+strconv.Itoa(coreListFetchBudget)+" entries (slower on large orgs)")
 	cmd.Flags().BoolVar(&noPager, "no-pager", false, "Print directly to stdout instead of a pager for long output")
+	cmd.MarkFlagsMutuallyExclusive("mirrored", "available")
 	pageModeFlags(cmd, &pageSize, &pageToken)
 	addJSONFlag(cmd)
 	setFlagGroup(cmd, flagGroupNavigation, "all", "limit", "page-size", "page-token")
-	setFlagGroup(cmd, flagGroupFiltering, "name", "owner", "cluster", "status", "access", "private", "sort")
+	setFlagGroup(cmd, flagGroupFiltering, "name", "owner", "cluster", "status", "access", "private", "mirrored", "available", "sort")
 	setFlagGroup(cmd, flagGroupFormatting, "json", "no-pager")
 	useGroupedFlagHelp(cmd,
 		flagGroup{name: flagGroupNavigation},

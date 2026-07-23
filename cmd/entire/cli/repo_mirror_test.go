@@ -961,6 +961,31 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		require.NotContains(t, stdout, "acme/fine")
 	})
 
+	t.Run("--mirrored and --available split the two row types", func(t *testing.T) {
+		both := func() []coreapi.RepoIndexEntry {
+			return []coreapi.RepoIndexEntry{
+				onboardedEntry("acme/web", "private", "us"),
+				candidateEntry("acme/mkt", "public", coreapi.RepoCandidateAccessAdmin, true),
+				candidateEntry("alice/x", "private", coreapi.RepoCandidateAccessRead, false), // owner-only candidate
+			}
+		}
+		serveRepoList(t, both(), clusters, false)
+		stdout, _ := runMirrorList(t, "--mirrored")
+		require.Contains(t, stdout, "acme/web")
+		require.NotContains(t, stdout, "acme/mkt", "candidate dropped by --mirrored")
+		require.NotContains(t, stdout, "alice/x")
+
+		serveRepoList(t, both(), clusters, false)
+		stdout, _ = runMirrorList(t, "--available")
+		require.Contains(t, stdout, "acme/mkt")
+		require.Contains(t, stdout, "alice/x", "--available keeps every candidate, owner-only included")
+		require.NotContains(t, stdout, "acme/web", "mirror dropped by --available")
+
+		serveRepoList(t, both(), clusters, false)
+		err := runMirrorListErr(t, "--mirrored", "--available")
+		require.Error(t, err, "the two type filters are mutually exclusive")
+	})
+
 	t.Run("--access filters candidates and drops mirrors, which have no access", func(t *testing.T) {
 		serveRepoList(t, []coreapi.RepoIndexEntry{
 			onboardedEntry("acme/web", "private", "us"), // mirror → empty ACCESS
@@ -2077,7 +2102,7 @@ func TestRepoMirrorList_GroupedFlagHelp(t *testing.T) {
 	require.GreaterOrEqual(t, idx, 0, "expected a Navigation Flags section")
 	requireOrder(t, stdout[idx:],
 		"Navigation Flags:", "--all", "--limit", "--page-size", "--page-token",
-		"Filtering & Sorting Flags:", "--access", "--cluster", "--name", "--owner", "--private", "--sort", "--status",
+		"Filtering & Sorting Flags:", "--access", "--available", "--cluster", "--mirrored", "--name", "--owner", "--private", "--sort", "--status",
 		"Formatting Flags:", "--json", "--no-pager",
 	)
 }
