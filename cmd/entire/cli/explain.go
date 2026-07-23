@@ -2384,14 +2384,24 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	// Warn (once per process) if metadata branches are disconnected
 	strategy.WarnIfMetadataDisconnected()
 
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	// This is a user-facing enumeration (`entire checkpoint list` / the branch
+	// `explain` view), so opt into git-refs remote discovery: when a
+	// checkpoint_remote is configured, List enumerates it (names only) to
+	// surface refs-native checkpoints written on another machine, and the
+	// fetchers hydrate each on read. WithRemoteListDiscovery keeps this off the
+	// per-turn hook hot path.
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		BlobFetcher:     FetchBlobsByHash,
+		RefFetcher:      FetchCheckpointRef,
+		RemoteRefLister: ListCheckpointRefsOnRemote,
+	})
 	if err != nil {
 		return nil, false, fmt.Errorf("open checkpoint store: %w", err)
 	}
 	store := stores.Persistent
 
 	// Get all committed checkpoints for lookup.
-	committedInfos, err := store.List(ctx)
+	committedInfos, err := store.List(checkpoint.WithRemoteListDiscovery(ctx))
 	if err != nil {
 		committedInfos = nil // Continue without committed checkpoints
 	}
@@ -2427,6 +2437,11 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 		if !found {
 			return
 		}
+		// Defer hydration of remote-discovered stubs until after sort+truncate
+		// below: hydrating here (during the commitScanLimit walk) can issue up
+		// to hundreds of sequential ref fetches to display at most `limit`
+		// entries. Stubs project with empty SessionID; hydrateListedBranchCheckpoints
+		// fills them before --session filters run.
 
 		message := strings.Split(c.Message, "\n")[0]
 		point := strategy.RewindPoint{
@@ -2442,7 +2457,9 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 			ToolUseID:        cpInfo.ToolUseID,
 			Agent:            cpInfo.Agent,
 		}
-		point.SessionPrompt = readLatestCommittedSessionPrompt(ctx, store, cpID, cpInfo.SessionCount)
+		if !cpInfo.ListedStub {
+			point.SessionPrompt = readLatestCommittedSessionPrompt(ctx, store, cpID, cpInfo.SessionCount)
+		}
 
 		points = append(points, point)
 	}
@@ -2507,6 +2524,10 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 		truncated = true
 	}
 
+	// Hydrate remote-discovered stubs only for the truncated display set (not
+	// the full commit walk). Session filter runs later in formatBranchCheckpoints.
+	hydrateListedBranchCheckpoints(ctx, store, points, committedByID)
+
 	// Append imported (read-only, commit-less) checkpoints after the live points,
 	// bounded by the same limit so a one-month import doesn't produce an
 	// unbounded list. They get their own budget and never displace live points.
@@ -2521,6 +2542,64 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	points = append(points, imported...)
 
 	return points, truncated, nil
+}
+
+// hydrateListedBranchCheckpoints fills SessionID/etc for remote-discovered List
+// stubs among the already-truncated RewindPoints. The whole pass is capped by
+// ListHydrationPassTimeout, and each ref additionally gets ListHydrationTimeout
+// (much shorter than the default on-demand fetch). Failures clear ListedStub
+// (fail-once) inside HydrateListedCheckpointInfo; when any stub still lacks
+// SessionID afterward we note it on stderr so --session filters dropping them
+// is not silent.
+func hydrateListedBranchCheckpoints(
+	ctx context.Context,
+	store interface {
+		checkpoint.SessionReader
+		Read(ctx context.Context, checkpointID id.CheckpointID) (*checkpoint.CheckpointSummary, error)
+		ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.Metadata, error)
+	},
+	points []strategy.RewindPoint,
+	committedByID map[id.CheckpointID]checkpoint.CheckpointInfo,
+) {
+	passCtx, passCancel := context.WithTimeout(ctx, checkpoint.ListHydrationPassTimeout)
+	defer passCancel()
+
+	hydrationFailed := 0
+	for i := range points {
+		cpID := points[i].CheckpointID
+		if cpID.IsEmpty() {
+			continue
+		}
+		cpInfo, ok := committedByID[cpID]
+		if !ok || !cpInfo.ListedStub {
+			continue
+		}
+		if err := passCtx.Err(); err != nil {
+			// Overall budget exhausted: leave remaining stubs unhydrated and
+			// count them toward the user-facing warning.
+			hydrationFailed++
+			continue
+		}
+		hctx, cancel := context.WithTimeout(passCtx, checkpoint.ListHydrationTimeout)
+		hydrated := checkpoint.HydrateListedCheckpointInfo(hctx, store, cpInfo)
+		cancel()
+		committedByID[cpID] = hydrated
+		points[i].SessionID = hydrated.SessionID
+		points[i].SessionCount = hydrated.SessionCount
+		points[i].SessionIDs = hydrated.SessionIDs
+		points[i].IsTaskCheckpoint = hydrated.IsTask
+		points[i].ToolUseID = hydrated.ToolUseID
+		points[i].Agent = hydrated.Agent
+		if hydrated.SessionCount > 0 {
+			points[i].SessionPrompt = readLatestCommittedSessionPrompt(passCtx, store, cpID, hydrated.SessionCount)
+		}
+		if hydrated.SessionID == "" {
+			hydrationFailed++
+		}
+	}
+	if hydrationFailed > 0 {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: could not load session metadata for %d remote checkpoint(s); they may be missing from --session filters.\n", hydrationFailed)
+	}
 }
 
 // getImportedRewindPoints returns read-only imported checkpoints (Kind
@@ -2916,11 +2995,14 @@ func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.R
 	var sb strings.Builder
 	styles := newStatusStyles(w)
 
-	// Filter by session if specified (must happen before counting)
+	// Filter by session if specified (must happen before counting). Use the
+	// shared matcher so archived contributors in SessionIDs are considered —
+	// matching only SessionID (latest contributor) silently drops multi-session
+	// checkpoints where the requested session was archived.
 	if sessionFilter != "" {
 		var filtered []strategy.RewindPoint
 		for _, p := range points {
-			if p.SessionID == sessionFilter || strings.HasPrefix(p.SessionID, sessionFilter) {
+			if checkpointMatchesSessionFilter(p, sessionFilter) {
 				filtered = append(filtered, p)
 			}
 		}
