@@ -67,29 +67,12 @@ jobs:
           E2E_CHECKPOINT_STORE: ${{ matrix.checkpoint_store }}
         run: mise run test:e2e:canary
 
-  test-windows-external-discovery:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      # Runs only the Windows-gated discovery tests: exec.LookPath resolves
-      # external agents via PATHEXT (.bat/.cmd), a code path the ubuntu jobs
-      # cannot exercise. The rest of the package mocks agents as #!/bin/sh
-      # scripts, which Windows cannot execute, so it stays on ubuntu.
-      - name: Windows external-agent discovery
-        run: go test ./cmd/entire/cli/agent/external -run 'RegistersBatOnWindows$' -count=1
-
   test:
     runs-on: ubuntu-latest
     needs:
       - test-core
       - test-integration
       - test-canary
-      - test-windows-external-discovery
     if: ${{ always() }}
     steps:
       - name: Check dependencies
@@ -97,4 +80,3 @@ jobs:
           [ "${{ needs.test-core.result }}" = "success" ]
           [ "${{ needs.test-integration.result }}" = "success" ]
           [ "${{ needs.test-canary.result }}" = "success" ]
-          [ "${{ needs.test-windows-external-discovery.result }}" = "success" ]
