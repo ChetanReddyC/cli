@@ -90,7 +90,10 @@ func initRepoWithCommit(t *testing.T) (*git.Repository, string) {
 		t.Fatal(err)
 	}
 	if _, err := wt.Commit("init", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+		// When must be a real timestamp: the anchor resolver's bounded walk
+		// stops at commits older than its date cutoff, and a zero-value When
+		// (year 1) would halt the walk at the first commit.
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -149,6 +152,138 @@ func TestRun_ImportsAndIsIdempotent(t *testing.T) {
 		if !in.Imported {
 			t.Fatalf("checkpoint %s missing Imported flag: %+v", in.CheckpointID, in)
 		}
+	}
+}
+
+// TestRun_StampsLinkCommitSHA proves Options.LinkCommitSHA is copied verbatim
+// into each imported checkpoint's commit_sha metadata field, and that leaving
+// it unset leaves commit_sha empty. Run resolves nothing itself.
+func TestRun_StampsLinkCommitSHA(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	const commitSHA = "b01b59663fd4860fd15a9939499be44a14dbf168"
+
+	claudeDirWithSHA := t.TempDir()
+	writeFixtureSession(t, claudeDirWithSHA, "sess-with-sha.jsonl")
+	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDirWithSHA,
+		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		LinkCommitSHA: commitSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cid := DeriveCheckpointID("sess-with-sha", "u1")
+	md, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md.CommitSHA != commitSHA {
+		t.Fatalf("expected commit_sha %q, got %q", commitSHA, md.CommitSHA)
+	}
+
+	// A separate session fixture (own sessionID/turn UUIDs) run with
+	// LinkCommitSHA unset must persist an empty commit_sha. Reusing the same
+	// session would be idempotently skipped, so this needs its own fixture.
+	claudeDirNoSHA := t.TempDir()
+	writeFixtureSession(t, claudeDirNoSHA, "sess-no-sha.jsonl")
+	res2, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDirNoSHA,
+		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res2)
+	}
+
+	cid2 := DeriveCheckpointID("sess-no-sha", "u1")
+	md2, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md2.CommitSHA != "" {
+		t.Fatalf("expected empty commit_sha, got %q", md2.CommitSHA)
+	}
+}
+
+// TestRun_AnchorsTurnToRecordedCommit proves a turn whose transcript records a
+// resolvable, default-branch-reachable commit anchors to that real commit
+// instead of the LinkCommitSHA fallback, while a turn with no recorded commit
+// still falls back exactly as before.
+func TestRun_AnchorsTurnToRecordedCommit(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	firstCommit, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstSHA := firstCommit.Hash().String()
+
+	// Second commit on the default branch, so tip != first commit.
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAndCommit(t, wt, repoDir, "y", "second")
+	tipHead, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tipSHA := tipHead.Hash().String()
+
+	claudeDir := t.TempDir()
+	content := strings.Join([]string{
+		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"output_tokens":5}}}`,
+		`{"type":"user","uuid":"tr1","toolUseResult":{"gitOperation":{"commit":{"sha":"` + firstSHA[:7] + `","kind":"committed"}}}}`,
+		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"second"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(claudeDir, "sess-anchor.jsonl"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDir,
+		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		LinkCommitSHA: tipSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cid1 := DeriveCheckpointID("sess-anchor", "u1")
+	md1, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md1.CommitSHA != firstSHA {
+		t.Fatalf("turn1 CommitSHA = %q, want recorded commit %q", md1.CommitSHA, firstSHA)
+	}
+
+	cid2 := DeriveCheckpointID("sess-anchor", "u2")
+	md2, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md2.CommitSHA != tipSHA {
+		t.Fatalf("turn2 CommitSHA = %q, want fallback %q", md2.CommitSHA, tipSHA)
 	}
 }
 

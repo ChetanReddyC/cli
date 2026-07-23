@@ -39,6 +39,11 @@ type checkpointSummaryProvider struct {
 	Model         string
 	TextGenerator agent.TextGenerator
 	Generator     summarize.Generator
+	// Streaming reports whether the underlying text generator supports the
+	// streaming path (the same predicate TextGeneratorAdapter dispatches on),
+	// so the explain layer can attribute timeouts to the streaming diagnostic
+	// even when the provider stalls before its first progress event.
+	Streaming bool
 }
 
 func resolveDispatchSummaryProvider(ctx context.Context, w io.Writer, override string) (*checkpointSummaryProvider, error) {
@@ -204,11 +209,14 @@ func buildCheckpointSummaryProviderWithEffectiveModel(name types.AgentName, effe
 		return nil, fmt.Errorf("agent %s does not support summary generation", name)
 	}
 
+	_, streaming := agent.AsStreamingTextGenerator(textGenerator)
+
 	return &checkpointSummaryProvider{
 		Name:          name,
 		DisplayName:   string(ag.Type()),
 		Model:         effectiveModel,
 		TextGenerator: textGenerator,
+		Streaming:     streaming,
 		Generator: &summarize.TextGeneratorAdapter{
 			TextGenerator: textGenerator,
 			Model:         effectiveModel,
