@@ -34,7 +34,7 @@ func newSearchCmd() *cobra.Command { //nolint:maintidx // command wiring is inhe
 		authorFlag       string
 		dateFlag         string
 		branchFlag       string
-		repoFlag         string
+		repoFlags        []string
 		allReposFlag     bool
 		insecureHTTPAuth bool
 	)
@@ -87,11 +87,8 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				// literal search text so "author:foo" searches for that
 				// string in code rather than being silently consumed.
 				codeQuery, inlineRepos := extractInlineRepoFilters(query)
-				var codeRepos []string
-				if repoFlag != "" {
-					codeRepos = []string{repoFlag}
-				}
-				codeRepos = append(codeRepos, inlineRepos...)
+				codeRepos := search.AppendUnique(nil, repoFlags...)
+				codeRepos = search.AppendUnique(codeRepos, inlineRepos...)
 				// repo:* or --all-repos means "all repos" — no filter.
 				// Otherwise, if no explicit filter was given, scope to the
 				// current repo (matching the checkpoint-search default).
@@ -149,10 +146,10 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			if branchFlag == "" {
 				branchFlag = parsed.Branch
 			}
-			repos := parsed.Repos
-			if repoFlag != "" {
-				repos = []string{repoFlag}
-			}
+			// Merge --repo flag values with inline repo: filters (flags first),
+			// deduped. Repeatable/comma-separated --repo mirrors code-search UX.
+			repos := search.AppendUnique(nil, repoFlags...)
+			repos = search.AppendUnique(repos, parsed.Repos...)
 			if err := search.ValidateRepoFilters(repos); err != nil {
 				return fmt.Errorf("validating repo filter: %w", err)
 			}
@@ -306,7 +303,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	cmd.Flags().StringVar(&authorFlag, "author", "", "Filter by author name")
 	cmd.Flags().StringVar(&dateFlag, "date", "", "Filter by time period (week or month)")
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Filter by branch name")
-	cmd.Flags().StringVar(&repoFlag, "repo", "", "Filter by repository (gh/owner/repo, et/proj/repo, owner/repo, ULID, or *)")
+	cmd.Flags().StringSliceVar(&repoFlags, "repo", nil, "Filter by repository (gh/owner/repo, et/proj/repo, owner/repo, ULID, or *); repeatable and comma-separated for multiple repos")
 	cmd.Flags().BoolVar(&allReposFlag, "all-repos", false, "Search all accessible repos instead of just the current one")
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
