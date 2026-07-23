@@ -102,7 +102,8 @@ func modelInRange(rawLines [][]byte, start, end int) string {
 // commitSHAsInRange returns the commit SHAs recorded by gitOperation
 // tool-result records within [start, end), in order. Only kind "committed"
 // is collected — other kinds (or commit-less gitOperation records like
-// push/branch/pr) are ignored. SHAs are short; resolution happens in Run.
+// push/branch/pr) are ignored. SHAs may be abbreviated; resolution happens
+// in Run.
 func commitSHAsInRange(rawLines [][]byte, start, end int) []string {
 	var shas []string
 	for i := start; i < end && i < len(rawLines); i++ {

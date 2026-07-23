@@ -93,13 +93,16 @@ func TestClaudeSplitTurns_TwoPromptsBoundedByNext(t *testing.T) {
 // records are collected into Turn.CommitSHAs in transcript order, only for
 // kind "committed" — a tool_result line carrying a commit is not itself a
 // turn boundary (isUserPromptLine already rejects it), so it just attaches to
-// the enclosing turn.
+// the enclosing turn. A garbage (non-JSON) line between the two commit
+// records proves one bad line is skipped without dropping the turn's other
+// recorded SHAs.
 func TestClaudeSplitTurns_ExtractsCommitSHAs(t *testing.T) {
 	t.Parallel()
 	full := []byte(strings.Join([]string{
 		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
 		`{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"output_tokens":5}}}`,
 		`{"type":"user","uuid":"tr1","toolUseResult":{"gitOperation":{"commit":{"sha":"fe71aa6","kind":"committed"},"push":{"ok":true}}}}`,
+		`not valid json {{{`,
 		`{"type":"user","uuid":"tr2","toolUseResult":{"gitOperation":{"commit":{"sha":"aabbccd","kind":"committed"}}}}`,
 		`{"type":"user","uuid":"tr3","toolUseResult":{"gitOperation":{"commit":{"sha":"ddeeff0","kind":"amended"}}}}`,
 		`{"type":"user","uuid":"tr4","toolUseResult":{"gitOperation":{"push":{"ok":true}}}}`,

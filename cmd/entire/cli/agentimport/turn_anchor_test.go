@@ -1,6 +1,8 @@
 package agentimport
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/go-git/go-git/v6"
@@ -75,7 +77,7 @@ func TestResolveTurnAnchor_PicksLastReachableCandidate(t *testing.T) {
 	repo, c1, c2, _ := buildAnchorTestRepo(t)
 	r := newTurnAnchorResolver(repo, c2)
 
-	got := r.resolve([]string{c1[:7], c2[:7]})
+	got := r.resolve(context.Background(), []string{c1[:7], c2[:7]})
 	if got != c2 {
 		t.Fatalf("resolve = %q, want last candidate (full) %q", got, c2)
 	}
@@ -85,19 +87,20 @@ func TestResolveTurnAnchor_SkipsUnreachableAndUnresolvable(t *testing.T) {
 	t.Parallel()
 	repo, _, c2, s1 := buildAnchorTestRepo(t)
 	r := newTurnAnchorResolver(repo, c2)
+	ctx := context.Background()
 
 	// s1 resolves but is not an ancestor of the fallback c2.
-	if got := r.resolve([]string{s1[:7]}); got != c2 {
+	if got := r.resolve(ctx, []string{s1[:7]}); got != c2 {
 		t.Fatalf("unreachable candidate: resolve = %q, want fallback %q", got, c2)
 	}
 
 	// "deadbeef" is valid hex but doesn't resolve to anything in this repo.
-	if got := r.resolve([]string{"deadbeef"}); got != c2 {
+	if got := r.resolve(ctx, []string{"deadbeef"}); got != c2 {
 		t.Fatalf("unresolvable candidate: resolve = %q, want fallback %q", got, c2)
 	}
 
 	// nil candidates.
-	if got := r.resolve(nil); got != c2 {
+	if got := r.resolve(ctx, nil); got != c2 {
 		t.Fatalf("nil candidates: resolve = %q, want fallback %q", got, c2)
 	}
 }
@@ -110,11 +113,12 @@ func TestResolveTurnAnchor_RejectsRevisionSyntax(t *testing.T) {
 	t.Parallel()
 	repo, _, c2, _ := buildAnchorTestRepo(t)
 	r := newTurnAnchorResolver(repo, c2)
+	ctx := context.Background()
 
-	if got := r.resolve([]string{"HEAD"}); got != c2 {
+	if got := r.resolve(ctx, []string{"HEAD"}); got != c2 {
 		t.Fatalf("revision syntax candidate: resolve = %q, want fallback %q", got, c2)
 	}
-	if got := r.resolve([]string{"HEAD~2"}); got != c2 {
+	if got := r.resolve(ctx, []string{"HEAD~2"}); got != c2 {
 		t.Fatalf("revision syntax candidate: resolve = %q, want fallback %q", got, c2)
 	}
 }
@@ -124,7 +128,24 @@ func TestResolveTurnAnchor_EmptyFallback(t *testing.T) {
 	repo, c1, _, _ := buildAnchorTestRepo(t)
 	r := newTurnAnchorResolver(repo, "")
 
-	if got := r.resolve([]string{c1[:7]}); got != "" {
+	if got := r.resolve(context.Background(), []string{c1[:7]}); got != "" {
 		t.Fatalf("empty fallback: resolve = %q, want empty", got)
+	}
+}
+
+// TestResolveTurnAnchor_FallbackDoesNotResolve proves a non-empty,
+// well-formed (full hex, 40 chars) fallback that simply doesn't exist in the
+// repo degrades gracefully: buildAncestors' CommitObject lookup fails, the
+// ancestor set stays empty, every candidate falls through, and resolve
+// returns the (unresolvable) fallback string verbatim rather than panicking.
+func TestResolveTurnAnchor_FallbackDoesNotResolve(t *testing.T) {
+	t.Parallel()
+	repo, c1, _, _ := buildAnchorTestRepo(t)
+	fallback := strings.Repeat("ca", 20) // valid hex, 40 chars, not a real object
+	r := newTurnAnchorResolver(repo, fallback)
+
+	got := r.resolve(context.Background(), []string{c1[:7]})
+	if got != fallback {
+		t.Fatalf("resolve = %q, want unresolvable fallback %q", got, fallback)
 	}
 }

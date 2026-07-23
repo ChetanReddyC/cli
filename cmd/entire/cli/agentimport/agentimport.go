@@ -54,11 +54,12 @@ type Turn struct {
 	// subagent's tokens are counted exactly once rather than re-added on every
 	// turn after it is discovered.
 	Tokens *types.TokenUsage
-	// CommitSHAs are the commits this turn recorded making, in transcript
-	// order, as written by the agent's gitOperation transcript records
-	// (kind "committed" only). SHAs may be SHORT — callers must resolve them
-	// against the repo before use. Nil for agents/transcripts without the
-	// feature; the anchor then falls back to Options.LinkCommitSHA.
+	// CommitSHAs are the commit SHAs (possibly abbreviated) this turn's
+	// transcript records creating, in transcript order. Extraction is
+	// per-importer (see commitSHAsInRange for Claude Code). Callers must
+	// resolve them against the repo before use. Nil when the transcript
+	// records no commits (including agents that don't extract them); the
+	// anchor then falls back to Options.LinkCommitSHA.
 	CommitSHAs []string
 }
 
@@ -189,7 +190,11 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 				red = r
 				redacted = true
 			}
-			anchor := anchorResolver.resolve(turn.CommitSHAs)
+			anchor := anchorResolver.resolve(ctx, turn.CommitSHAs)
+			if len(turn.CommitSHAs) > 0 && anchor == opts.LinkCommitSHA {
+				logging.Debug(ctx, "import: turn anchor fell back",
+					"sessionID", sf.SessionID, "turnUUID", turn.UUID, "candidates", len(turn.CommitSHAs))
+			}
 			if err := writeTurn(ctx, stores, imp, cid, sf, red, turn, anchor); err != nil {
 				return res, err
 			}
@@ -281,7 +286,7 @@ func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns 
 	return nil
 }
 
-func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.CheckpointID, sf SessionFile, red redact.RedactedBytes, turn Turn, linkCommitSHA string) error {
+func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.CheckpointID, sf SessionFile, red redact.RedactedBytes, turn Turn, anchorCommitSHA string) error {
 	if err := stores.Persistent.Write(ctx, cp.Session(cp.WriteOptions{
 		CheckpointID:              cid,
 		SessionID:                 sf.SessionID,
@@ -295,7 +300,7 @@ func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.Chec
 		CheckpointsCount:          1,
 		CheckpointTranscriptStart: turn.LineStart,
 		TokenUsage:                turn.Tokens,
-		CommitSHA:                 linkCommitSHA,
+		CommitSHA:                 anchorCommitSHA,
 	})); err != nil {
 		return fmt.Errorf("write imported checkpoint %s: %w", cid, err)
 	}
