@@ -599,9 +599,49 @@ func TestValidateRepoFilters_RejectsInvalidRepoValue(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
-	want := "invalid repo filter \"AGENTS.md\": expected owner/name or *; if you meant all repos, quote the asterisk: --repo '*'"
+	want := "invalid repo filter \"AGENTS.md\": expected owner/name, gh/owner/repo, a repo ULID, or *; if you meant all repos, quote the asterisk: --repo '*'"
 	if got := err.Error(); got != want {
 		t.Errorf("error = %q, want %q", got, want)
+	}
+}
+
+// The CLI --repo help advertises gh/owner/repo, et/proj/repo, and raw ULIDs,
+// and the semantic v4 lookup + code-search resolver both handle them. Validation
+// must accept the same set so it never rejects a filter that would resolve
+// downstream (ENT-1047 review finding).
+func TestValidateRepoFilters_AcceptsAdvertisedFormats(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{
+		"entireio/cli",               // bare owner/name slug
+		"gh/entireio/cli",            // GitHub prefixed path
+		"et/proj/repo",               // Entire project prefixed path
+		"git/owner/repo",             // generic git prefixed path
+		"01ARZ3NDEKTSV4RRFFQ69G5FAV", // raw repo ULID (canonical)
+		"*",                          // all-repos wildcard
+	}
+	for _, repo := range valid {
+		if err := ValidateRepoFilters([]string{repo}); err != nil {
+			t.Errorf("ValidateRepoFilters(%q) = %v, want nil", repo, err)
+		}
+	}
+}
+
+func TestValidateRepoFilters_RejectsMalformed(t *testing.T) {
+	t.Parallel()
+
+	invalid := []string{
+		"AGENTS.md",  // bare filename, not a ULID or slug
+		"owner/",     // empty name segment
+		"/repo",      // empty owner segment
+		"a/b/c/d",    // too many path segments
+		"owner name", // contains a space
+		"gh//repo",   // empty middle segment in a prefixed path
+	}
+	for _, repo := range invalid {
+		if err := ValidateRepoFilters([]string{repo}); err == nil {
+			t.Errorf("ValidateRepoFilters(%q) = nil, want validation error", repo)
+		}
 	}
 }
 
