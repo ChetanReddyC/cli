@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/internal/coreapi"
@@ -151,6 +152,68 @@ func repoDirClusters(r repoDirRow) string {
 
 func repoDirCells(r repoDirRow) []string {
 	return []string{r.Repo, orDash(repoDirClusters(r)), yesNo(r.Private), r.Status, orDash(r.Access)}
+}
+
+// repoDirCellsStyled wraps repoDirCells with trail-list-style cell coloring:
+// clusters/access cyan, private gray, status by lifecycle (see
+// repoStatusColor); NAME stays the terminal's default foreground as the
+// primary identifier. Cells are pre-colored and the table renderer measures
+// widths with lipgloss.Width (ANSI-agnostic), so color never shifts columns.
+// st must be built against the final output writer, not the pager buffer the
+// render goes through — the buffer never looks like a TTY (see the styles
+// wiring in newRepoMirrorListCmd).
+func repoDirCellsStyled(st statusStyles) func(repoDirRow) []string {
+	return func(r repoDirRow) []string {
+		cells := repoDirCells(r)
+		if !st.colorEnabled {
+			return cells
+		}
+		if cells[1] != "-" {
+			cells[1] = st.render(st.cyan, cells[1])
+		}
+		cells[2] = st.render(st.gray, cells[2])
+		if style, ok := repoStatusColor(st, r.Status); ok {
+			cells[3] = st.render(style, cells[3])
+		}
+		if cells[4] != "-" {
+			cells[4] = st.render(st.cyan, cells[4])
+		}
+		return cells
+	}
+}
+
+// repoStatusColor maps a STATUS cell to its lifecycle color: healthy
+// (ready/available) green, in-flight (processing) and part-degraded (mixed)
+// yellow, failed red, suspended magenta. owner-only and unknown statuses stay
+// uncolored — same palette roles as `trail list`'s status column.
+func repoStatusColor(st statusStyles, status string) (lipgloss.Style, bool) {
+	switch status {
+	case "ready", "available":
+		return st.green, true
+	case "processing", repoDirStatusMixed:
+		return st.yellow, true
+	case "failed":
+		return st.red, true
+	case "suspended":
+		return st.magenta, true
+	default:
+		return lipgloss.Style{}, false
+	}
+}
+
+// styledHeaders pre-colors table headers (trail list's yellow) for renders
+// that go through a pager buffer, where the shared printTable can't detect
+// the terminal itself. Plain when color is off, so tests and pipes see the
+// bare text.
+func styledHeaders(st statusStyles, headers []string) []string {
+	if !st.colorEnabled {
+		return headers
+	}
+	out := make([]string, len(headers))
+	for i, h := range headers {
+		out[i] = st.render(st.yellow, h)
+	}
+	return out
 }
 
 func orDash(s string) string {
@@ -704,6 +767,160 @@ func warnRepoDirTruncated(cmd *cobra.Command) {
 	fmt.Fprintln(cmd.ErrOrStderr(), "Warning: the repo directory was truncated by the server; some repos are not shown.")
 }
 
+// repoMirrorListOpts carries `repo mirror list`'s flag values into the run
+// functions below, keeping the cobra constructor to flag wiring.
+type repoMirrorListOpts struct {
+	filters   repoDirLocalFilters
+	limit     int
+	pageSize  int
+	pageToken string
+	noPager   bool
+	all       bool
+}
+
+// runRepoMirrorList owns the shared frame of both list modes: the styled
+// headers/cells, the client-side filter pipeline, the detail hint, and the
+// pager. Style is decided against the final writer HERE: flushThroughPager is
+// about to swap stdout for a buffer, and a buffer never looks like a TTY —
+// deciding color inside the render would always disable it. Cells are
+// pre-colored (trail-list style), so the shared table renderer just aligns
+// and passes them through; `less -R` keeps the ANSI codes alive in the paged
+// view.
+func runRepoMirrorList(cmd *cobra.Command, o repoMirrorListOpts) error {
+	st := newStatusStyles(cmd.OutOrStdout())
+	headers := styledHeaders(st, columnHeaders(repoDirColumns))
+	cells := repoDirCellsStyled(st)
+	// The client-side pipeline is shared by both modes: every filter and the
+	// sort run over whatever rows the server round-trip(s) yielded — the
+	// fetched window in walk mode, one page in page mode. listedAny records
+	// whether any row survived it, so the detail hint below prints only
+	// under a real table.
+	listedAny := false
+	applyLocal := func(rows []repoDirRow, hostBySlug map[string]string) ([]repoDirRow, error) {
+		rows, err := applyRepoDirLocal(o.filters, rows, hostBySlug)
+		listedAny = listedAny || len(rows) > 0
+		return rows, err
+	}
+	// The NAME cell is the handle into the detail view; the hint on stderr
+	// keeps the workflow discoverable without corrupting a piped table, and
+	// is skipped for --json (scripts get nested placements in the rows
+	// already).
+	hintDetail := func(err error) error {
+		if err == nil && listedAny && !jsonRequested(cmd) {
+			fmt.Fprintln(cmd.ErrOrStderr(), "\nPer-cluster detail and clone URLs: entire repo mirror get <owner/repo>")
+		}
+		return err
+	}
+	run := func() error { return runRepoMirrorListWalk(cmd, o, headers, cells, applyLocal) }
+	if pageModeRequested(cmd) {
+		run = func() error { return runRepoMirrorListPage(cmd, o, headers, cells, applyLocal) }
+	}
+	// Buffer the rendered table so long TTY output can go through a pager;
+	// the row set is fully materialized for the client-side sort anyway, so
+	// buffering the render adds nothing.
+	return hintDetail(flushThroughPager(cmd, o.noPager, run))
+}
+
+// runRepoMirrorListPage is the single-page cursor passthrough: one /repos
+// request, cursor reported for resumption. The client-side local pipeline
+// applies to just this page; the cursor survives filtering.
+func runRepoMirrorListPage(cmd *cobra.Command, o repoMirrorListOpts, headers []string, cells func(repoDirRow) []string, applyLocal func([]repoDirRow, map[string]string) ([]repoDirRow, error)) error {
+	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+		hostBySlug, err := fetchRepoDirCatalog(ctx, cmd, c)
+		if err != nil {
+			return err
+		}
+		params := coreapi.ListReposParams{Scope: coreapi.NewOptListReposScope(coreapi.ListReposScopeAll)}
+		if o.pageToken != "" {
+			params.PageToken = coreapi.NewOptString(o.pageToken)
+		}
+		if o.pageSize > 0 {
+			params.PageSize = coreapi.NewOptInt32(int32(o.pageSize)) //nolint:gosec // G115: validatePageSize bounds it
+		}
+		out, err := c.ListRepos(ctx, params)
+		if err != nil {
+			return err
+		}
+		next := out.NextPageToken.Or("")
+		// A truncated page the cursor can resume past needs no warning — the
+		// resume hint covers it. Truncated with no cursor means unreachable
+		// repos.
+		if out.Truncated && next == "" {
+			warnRepoDirTruncated(cmd)
+		}
+		rows, err := applyLocal(buildRepoDir(out.Repos, hostBySlug), hostBySlug)
+		if err != nil {
+			return err
+		}
+		return renderCoreListPage(cmd, "No repos found.", headers, cells, rows, next)
+	})
+}
+
+// runRepoMirrorListWalk is the default bounded cursor walk over the whole
+// directory (budget-capped, lifted by --all), with partial/truncated
+// disclosure on stderr.
+func runRepoMirrorListWalk(cmd *cobra.Command, o repoMirrorListOpts, headers []string, cells func(repoDirRow) []string, applyLocal func([]repoDirRow, map[string]string) ([]repoDirRow, error)) error {
+	return runCoreList(cmd, "No repos found.", headers, cells, func(ctx context.Context, c *coreapi.Client) ([]repoDirRow, error) {
+		hostBySlug, err := fetchRepoDirCatalog(ctx, cmd, c)
+		if err != nil {
+			return nil, err
+		}
+		// The server cannot filter or sort this directory, so the whole
+		// pipeline below is local. Bound what one call fetches: the budget
+		// caps the cursor walk (raised to --limit when larger, lifted
+		// entirely by --all) so a huge org pays for a few pages, not
+		// thousands — at the disclosed price of filters and sort seeing only
+		// the fetched window.
+		budget := max(coreListFetchBudget, o.limit)
+		if o.all {
+			budget = 0 // unbounded
+		}
+		truncated := false
+		repos, partial, err := fetchPagesBounded(ctx, budget, func(ctx context.Context, cursor string) ([]coreapi.RepoIndexEntry, string, error) {
+			params := coreapi.ListReposParams{Scope: coreapi.NewOptListReposScope(coreapi.ListReposScopeAll)}
+			if cursor != "" {
+				params.PageToken = coreapi.NewOptString(cursor)
+			}
+			out, lerr := c.ListRepos(ctx, params)
+			if lerr != nil {
+				return nil, "", lerr
+			}
+			next := out.NextPageToken.Or("")
+			// A capped page mid-chain is fine — the cursor walks past it.
+			// Only a capped page with no cursor to continue from (legacy
+			// server, or a hard directory cap) leaves repos unseen, and a
+			// short directory must not read as "this is everything".
+			truncated = truncated || (out.Truncated && next == "")
+			return out.Repos, next, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		if partial {
+			// Deliberate client behavior with an escape hatch, and a script
+			// acting on silently partial data is the worst outcome — so it
+			// prints for --json too (stderr never corrupts the stdout JSON).
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"Note: the repo directory has more entries; results were computed from the first %d fetched.\n"+
+					"All filters and --sort are local to that window — pass --all to fetch the complete directory.\n",
+				len(repos))
+		}
+		if truncated {
+			warnRepoDirTruncated(cmd)
+		}
+		rows, err := applyLocal(buildRepoDir(repos, hostBySlug), hostBySlug)
+		if err != nil {
+			return nil, err
+		}
+		// Cap last, after filters and the sort, so --limit N always means
+		// "the first N rows of the table you would have seen".
+		if o.limit > 0 && len(rows) > o.limit {
+			rows = rows[:o.limit]
+		}
+		return rows, nil
+	})
+}
+
 func newRepoMirrorListCmd() *cobra.Command {
 	var cluster, owner, name, status, access string
 	var private bool
@@ -738,133 +955,16 @@ func newRepoMirrorListCmd() *cobra.Command {
 			return err
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// The client-side pipeline is shared by both modes:
-			// every filter and the sort run over whatever rows the server
-			// round-trip(s) yielded — the fetched window in walk mode, one
-			// page in page mode. listedAny records whether any row survived
-			// it, so the detail hint below prints only under a real table.
-			listedAny := false
-			applyLocal := func(rows []repoDirRow, hostBySlug map[string]string) ([]repoDirRow, error) {
-				rows, err := applyRepoDirLocal(repoDirLocalFilters{
+			return runRepoMirrorList(cmd, repoMirrorListOpts{
+				filters: repoDirLocalFilters{
 					name: name, owner: owner, cluster: cluster,
 					status: status, access: access,
 					privateSet: cmd.Flags().Changed("private"), private: private,
 					sortSpec: sortSpec,
-				}, rows, hostBySlug)
-				listedAny = listedAny || len(rows) > 0
-				return rows, err
-			}
-			// The NAME cell is the handle into the detail view; the hint on
-			// stderr keeps the workflow discoverable without corrupting a
-			// piped table, and is skipped for --json (scripts get nested
-			// placements in the rows already).
-			hintDetail := func(err error) error {
-				if err == nil && listedAny && !jsonRequested(cmd) {
-					fmt.Fprintln(cmd.ErrOrStderr(), "\nPer-cluster detail and clone URLs: entire repo mirror get <owner/repo>")
-				}
-				return err
-			}
-			if pageModeRequested(cmd) {
-				// Single-page cursor passthrough: one /repos request, cursor
-				// reported for resumption. The client-side local pipeline
-				// applies to just this page; the cursor survives filtering.
-				return hintDetail(flushThroughPager(cmd, noPager, func() error {
-					return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-						hostBySlug, err := fetchRepoDirCatalog(ctx, cmd, c)
-						if err != nil {
-							return err
-						}
-						params := coreapi.ListReposParams{Scope: coreapi.NewOptListReposScope(coreapi.ListReposScopeAll)}
-						if pageToken != "" {
-							params.PageToken = coreapi.NewOptString(pageToken)
-						}
-						if pageSize > 0 {
-							params.PageSize = coreapi.NewOptInt32(int32(pageSize)) //nolint:gosec // G115: validatePageSize bounds it
-						}
-						out, err := c.ListRepos(ctx, params)
-						if err != nil {
-							return err
-						}
-						next := out.NextPageToken.Or("")
-						// A truncated page the cursor can resume past needs no
-						// warning — the resume hint covers it. Truncated with no
-						// cursor means unreachable repos.
-						if out.Truncated && next == "" {
-							warnRepoDirTruncated(cmd)
-						}
-						rows, err := applyLocal(buildRepoDir(out.Repos, hostBySlug), hostBySlug)
-						if err != nil {
-							return err
-						}
-						return renderCoreListPage(cmd, "No repos found.", columnHeaders(repoDirColumns), repoDirCells, rows, next)
-					})
-				}))
-			}
-			// Buffer the rendered table so long TTY output can go through a
-			// pager; the row set is fully materialized for the client-side sort
-			// anyway, so buffering the render adds nothing.
-			return hintDetail(flushThroughPager(cmd, noPager, func() error {
-				return runCoreList(cmd, "No repos found.", columnHeaders(repoDirColumns), repoDirCells, func(ctx context.Context, c *coreapi.Client) ([]repoDirRow, error) {
-					hostBySlug, err := fetchRepoDirCatalog(ctx, cmd, c)
-					if err != nil {
-						return nil, err
-					}
-					// The server cannot filter or sort this directory, so the whole
-					// pipeline below is local. Bound what one call fetches: the
-					// budget caps the cursor walk (raised to --limit when larger,
-					// lifted entirely by --all) so a huge org pays for a few pages,
-					// not thousands — at the disclosed price of filters and sort
-					// seeing only the fetched window.
-					budget := max(coreListFetchBudget, limit)
-					if all {
-						budget = 0 // unbounded
-					}
-					truncated := false
-					repos, partial, err := fetchPagesBounded(ctx, budget, func(ctx context.Context, cursor string) ([]coreapi.RepoIndexEntry, string, error) {
-						params := coreapi.ListReposParams{Scope: coreapi.NewOptListReposScope(coreapi.ListReposScopeAll)}
-						if cursor != "" {
-							params.PageToken = coreapi.NewOptString(cursor)
-						}
-						out, lerr := c.ListRepos(ctx, params)
-						if lerr != nil {
-							return nil, "", lerr
-						}
-						next := out.NextPageToken.Or("")
-						// A capped page mid-chain is fine — the cursor walks past it.
-						// Only a capped page with no cursor to continue from (legacy
-						// server, or a hard directory cap) leaves repos unseen, and a
-						// short directory must not read as "this is everything".
-						truncated = truncated || (out.Truncated && next == "")
-						return out.Repos, next, nil
-					})
-					if err != nil {
-						return nil, err
-					}
-					if partial {
-						// Deliberate client behavior with an escape hatch, and a
-						// script acting on silently partial data is the worst
-						// outcome — so it prints for --json too (stderr never
-						// corrupts the stdout JSON).
-						fmt.Fprintf(cmd.ErrOrStderr(),
-							"Note: the repo directory has more entries; results were computed from the first %d fetched.\n"+
-								"All filters and --sort are local to that window — pass --all to fetch the complete directory.\n",
-							len(repos))
-					}
-					if truncated {
-						warnRepoDirTruncated(cmd)
-					}
-					rows, err := applyLocal(buildRepoDir(repos, hostBySlug), hostBySlug)
-					if err != nil {
-						return nil, err
-					}
-					// Cap last, after filters and the sort, so --limit N always
-					// means "the first N rows of the table you would have seen".
-					if limit > 0 && len(rows) > limit {
-						rows = rows[:limit]
-					}
-					return rows, nil
-				})
-			}))
+				},
+				limit: limit, pageSize: pageSize, pageToken: pageToken,
+				noPager: noPager, all: all,
+			})
 		},
 	}
 	// Every flag in the Filtering & Sorting group runs on the client today
@@ -940,7 +1040,11 @@ func newRepoMirrorGetCmd() *cobra.Command {
 			// carries no cluster coordinate, so it resolves on the active
 			// context's core.
 			if owner, repo, ok := parseOwnerRepoRef(ref); ok {
-				return runCoreList(cmd, "", columnHeaders(mirrorGetColumns), mirrorGetRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Mirror, error) {
+				// Not paged, so the writer runCoreList renders to is the
+				// final one — but cells are still pre-colored for consistency
+				// with the list view (same status palette, yellow headers).
+				st := newStatusStyles(cmd.OutOrStdout())
+				return runCoreList(cmd, "", styledHeaders(st, columnHeaders(mirrorGetColumns)), mirrorGetRowStyled(st), func(ctx context.Context, c *coreapi.Client) ([]coreapi.Mirror, error) {
 					return listRepoMirrors(ctx, c, owner, repo)
 				})
 			}
@@ -964,6 +1068,23 @@ var mirrorGetColumns = []column{colName, colCloneURL, colPrivate, colStatus}
 
 func mirrorGetRow(m coreapi.Mirror) []string {
 	return append(mirrorRow(m), orDash(string(m.Status.Or(""))))
+}
+
+// mirrorGetRowStyled colors the per-cluster rows the way the list view does:
+// private gray, status by lifecycle. NAME and CLONE URL stay the default
+// foreground — the clone URL is the copy target of this view.
+func mirrorGetRowStyled(st statusStyles) func(coreapi.Mirror) []string {
+	return func(m coreapi.Mirror) []string {
+		cells := mirrorGetRow(m)
+		if !st.colorEnabled {
+			return cells
+		}
+		cells[2] = st.render(st.gray, cells[2])
+		if style, ok := repoStatusColor(st, cells[3]); ok {
+			cells[3] = st.render(style, cells[3])
+		}
+		return cells
+	}
 }
 
 // parseOwnerRepoRef reads a bare <owner>/<repo> mirror reference — the NAME

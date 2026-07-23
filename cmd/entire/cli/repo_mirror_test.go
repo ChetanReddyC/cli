@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1489,6 +1490,45 @@ func TestRepoDirCells(t *testing.T) {
 			require.Equal(t, tt.want, repoDirCells(tt.row))
 		})
 	}
+}
+
+// TestRepoStatusColor pins the STATUS→color mapping shared by the list and
+// the get views: lifecycle states get a color, owner-only and unknown values
+// stay uncolored. The concrete styles come from statusStyles, tested with the
+// rest of the styling infra; here only the routing is observable.
+func TestRepoStatusColor(t *testing.T) {
+	t.Parallel()
+	st := newStatusStyles(io.Discard)
+	for _, status := range []string{"ready", "available", "processing", "mixed", "failed", "suspended"} {
+		if _, ok := repoStatusColor(st, status); !ok {
+			t.Errorf("repoStatusColor(%q) ok = false, want a lifecycle color", status)
+		}
+	}
+	for _, status := range []string{"owner-only", "", "unheard-of"} {
+		if _, ok := repoStatusColor(st, status); ok {
+			t.Errorf("repoStatusColor(%q) ok = true, want uncolored", status)
+		}
+	}
+}
+
+// TestStyledCellsDisabledGate pins that the styled cell/header wrappers are
+// exact identities when color is off (pipes, tests, NO_COLOR): agents and
+// scripts must see the bare text, byte for byte.
+func TestStyledCellsDisabledGate(t *testing.T) {
+	t.Parallel()
+	st := newStatusStyles(io.Discard) // never a TTY → color disabled
+	require.False(t, st.colorEnabled)
+
+	row := repoDirRow{Repo: "acme/web", Private: true, Status: "ready", Placements: []repoDirPlacement{
+		{Cluster: "us", Status: "ready", CloneURL: "entire://h/gh/acme/web"},
+	}}
+	require.Equal(t, repoDirCells(row), repoDirCellsStyled(st)(row))
+
+	headers := columnHeaders(repoDirColumns)
+	require.Equal(t, headers, styledHeaders(st, headers))
+
+	m := coreapi.Mirror{Owner: "acme", Repo: "web", ClusterHost: "h", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusReady)}
+	require.Equal(t, mirrorGetRow(m), mirrorGetRowStyled(st)(m))
 }
 
 func TestClusterHostBySlug(t *testing.T) {
