@@ -363,7 +363,7 @@ func nativeEntry(fullName, visibility, slug string) coreapi.RepoIndexEntry {
 }
 
 // onboardedMulti builds a /repos entry placed on several clusters (all ready),
-// so per-placement flattening and the clone-URL tiebreak are observable.
+// so multi-placement grouping and the CLUSTERS cell are observable.
 func onboardedMulti(fullName, visibility string, slugs ...string) coreapi.RepoIndexEntry {
 	e := coreapi.RepoIndexEntry{FullName: fullName, Visibility: visibility}
 	for _, s := range slugs {
@@ -542,10 +542,10 @@ func runMirrorList(t *testing.T, args ...string) (stdout, stderr string) {
 }
 
 // TestRepoMirrorList_Merged pins the merged `repo mirror list`: one table from a
-// single GET /repos?scope=all, with existing mirrors (clone URL + clone status)
-// and onboardable candidates (access + availability) interleaved. The former
-// --show-available flag is gone. Per-row formatting is covered by
-// TestRepoDirCells; this pins the end-to-end routing and rendering.
+// single GET /repos?scope=all, with existing mirrors (one row per repo: clusters
+// + clone status) and onboardable candidates (access + availability)
+// interleaved. The former --show-available flag is gone. Per-row formatting is
+// covered by TestRepoDirCells; this pins the end-to-end routing and rendering.
 //
 // Not parallel: swaps the package-level activeCoreClient seam.
 func TestRepoMirrorList_Merged(t *testing.T) {
@@ -564,18 +564,41 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		require.Equal(t, testReposPath, rec.path)
 		require.Equal(t, "all", rec.query.Get("scope"), "list must request the unified directory")
 		require.Contains(t, stderr, "Listing repos on")
-		for _, h := range []string{"NAME", "CLONE URL", "PRIVATE", "STATUS", "ACCESS"} {
+		for _, h := range []string{"NAME", "CLUSTERS", "PRIVATE", "STATUS", "ACCESS"} {
 			require.Contains(t, stdout, h)
 		}
-		// Mirror row: clone URL + clone status, access dashed.
-		require.Contains(t, stdout, "entire://aws-us-east-2.entire.io/gh/acme/web")
-		require.Contains(t, stdout, "ready")
-		// Candidate rows: availability status + access, clone URL dashed.
+		// Mirror row: cluster slug + clone status, access dashed.
+		require.Regexp(t, `acme/web\s+us\s+yes\s+ready`, stdout)
+		// Candidate rows: availability status + access, clusters dashed.
 		require.Contains(t, stdout, "acme/marketing")
 		require.Contains(t, stdout, "available")
 		require.Contains(t, stdout, "admin")
 		require.Contains(t, stdout, "alice/dotfiles")
 		require.Contains(t, stdout, "owner-only")
+		// The NAME cell is the handle into the detail view.
+		require.Contains(t, stderr, "entire repo mirror get <owner/repo>")
+	})
+
+	t.Run("a multi-cluster repo lists once, clusters joined in one cell", func(t *testing.T) {
+		serveRepoList(t, []coreapi.RepoIndexEntry{
+			onboardedMulti("acme/web", "private", "us", "eu"),
+		}, []coreapi.Cluster{
+			{Slug: "us", PublicUrl: "https://aws-us-east-2.entire.io"},
+			{Slug: "eu", PublicUrl: "https://eu-west-1.entire.io"},
+		}, false)
+		stdout, _ := runMirrorList(t)
+		require.Equal(t, 1, strings.Count(stdout, "acme/web"), "one row per repo, not one per placement")
+		require.Regexp(t, `acme/web\s+us, eu\s+yes\s+ready`, stdout)
+	})
+
+	t.Run("the detail hint is withheld from empty tables and --json", func(t *testing.T) {
+		serveRepoList(t, nil, clusters, false)
+		_, stderr := runMirrorList(t)
+		require.NotContains(t, stderr, "mirror get", "no rows, nothing to drill into")
+
+		serveRepoList(t, []coreapi.RepoIndexEntry{onboardedEntry("acme/web", "private", "us")}, clusters, false)
+		_, stderr = runMirrorList(t, "--json")
+		require.NotContains(t, stderr, "mirror get", "scripts already get nested placements in the rows")
 	})
 
 	t.Run("--show-available flag is gone", func(t *testing.T) {
@@ -753,7 +776,7 @@ func TestRepoMirrorList_FetchBudget(t *testing.T) {
 		}, clusters, true)
 		stdout, stderr := runMirrorList(t, "--json")
 		require.Contains(t, stderr, "truncated")
-		require.Contains(t, stdout, `"cloneUrl"`, "--json emits the flat directory rows")
+		require.Contains(t, stdout, `"cloneUrl"`, "--json emits the directory rows with nested placements")
 	})
 
 	t.Run("a catalog fetch failure fails the whole command", func(t *testing.T) {
@@ -767,23 +790,34 @@ func TestRepoMirrorList_FetchBudget(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	t.Run("a malformed catalog publicUrl lists the mirror with a dashed clone URL, never a spoofed one", func(t *testing.T) {
+	t.Run("a malformed catalog publicUrl lists the mirror without a clone URL, never a spoofed one", func(t *testing.T) {
 		// The `bad` cluster's publicUrl smuggles evil.com via userinfo; it must
-		// never produce a clone URL. The mirror still lists, just with "-".
-		serveRepoList(t, []coreapi.RepoIndexEntry{
-			onboardedEntry("acme/web", "private", "us"),
-			onboardedEntry("acme/bad", "private", "bad"),
-		}, []coreapi.Cluster{
-			{Slug: "us", PublicUrl: "https://aws-us-east-2.entire.io"},
-			{Slug: "bad", PublicUrl: "https://aws-us-east-2.entire.io@evil.com"},
-		}, false)
-
+		// never produce a clone URL. The mirror still lists — its slug in
+		// CLUSTERS — and its --json placement carries no cloneUrl. The healthy
+		// cluster's clone URL is unaffected.
+		serve := func(t *testing.T) {
+			t.Helper()
+			serveRepoList(t, []coreapi.RepoIndexEntry{
+				onboardedEntry("acme/web", "private", "us"),
+				onboardedEntry("acme/bad", "private", "bad"),
+			}, []coreapi.Cluster{
+				{Slug: "us", PublicUrl: "https://aws-us-east-2.entire.io"},
+				{Slug: "bad", PublicUrl: "https://aws-us-east-2.entire.io@evil.com"},
+			}, false)
+		}
+		serve(t)
 		stdout, stderr, err := execMirrorList(t)
 		require.NoError(t, err)
-		require.Contains(t, stdout, "entire://aws-us-east-2.entire.io/gh/acme/web")
 		require.Contains(t, stdout, "acme/bad", "the mirror is still listed")
+		require.Regexp(t, `acme/bad\s+bad\s+`, stdout, "the unresolvable cluster still names itself in CLUSTERS")
+		require.NotContains(t, stdout, "evil.com", "a spoofed host must never reach the output")
+		require.NotContains(t, stderr, "omitted", "no warning: the row is kept")
+
+		serve(t)
+		stdout, _, err = execMirrorList(t, "--json")
+		require.NoError(t, err)
+		require.Contains(t, stdout, "entire://aws-us-east-2.entire.io/gh/acme/web", "the healthy placement keeps its clone URL")
 		require.NotContains(t, stdout, "evil.com", "a spoofed host must never reach a clone URL")
-		require.NotContains(t, stderr, "omitted", "no warning: the row is kept with a dashed clone URL")
 	})
 }
 
@@ -900,6 +934,30 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		serveRepoList(t, []coreapi.RepoIndexEntry{onboardedEntry("acme/web", "public", "us")}, clusters, false)
 		stdout, _ := runMirrorList(t, "--status", "READY")
 		require.Contains(t, stdout, "acme/web")
+	})
+
+	t.Run("--status matches any placement of a mixed-status repo", func(t *testing.T) {
+		// One placement failed, the other ready: the STATUS cell reads
+		// "mixed", but hunting failures with --status failed must still
+		// surface the repo — and --status mixed matches the displayed cell.
+		mixedRepo := func() []coreapi.RepoIndexEntry {
+			return []coreapi.RepoIndexEntry{
+				{FullName: "acme/web", Visibility: "private", Placements: []coreapi.RepoPlacement{
+					{ClusterSlug: "us", Status: coreapi.RepoPlacementStatusReady, Mirror: true},
+					{ClusterSlug: "eu", Status: coreapi.RepoPlacementStatusFailed, Mirror: true},
+				}},
+				onboardedEntry("acme/fine", "private", "us"),
+			}
+		}
+		serveRepoList(t, mixedRepo(), clusters, false)
+		stdout, _ := runMirrorList(t, "--status", "failed")
+		require.Contains(t, stdout, "acme/web", "a failed placement must surface the repo")
+		require.NotContains(t, stdout, "acme/fine")
+
+		serveRepoList(t, mixedRepo(), clusters, false)
+		stdout, _ = runMirrorList(t, "--status", "mixed")
+		require.Contains(t, stdout, "acme/web", "--status matches the displayed cell too")
+		require.NotContains(t, stdout, "acme/fine")
 	})
 
 	t.Run("--access filters candidates and drops mirrors, which have no access", func(t *testing.T) {
@@ -1283,6 +1341,84 @@ func TestRepoMirrorGet_Routing(t *testing.T) {
 		require.Error(t, err)
 		require.ErrorContains(t, err, "pass a mirror ULID or a clone URL")
 	})
+
+	t.Run("owner/repo lists every cluster mirror with clone URL and status", func(t *testing.T) {
+		// The drill-down from the grouped `mirror list` NAME cell: one row per
+		// cluster mirror, per-cluster clone URL + status, deterministic
+		// (cluster-host) order. The owner narrowing is server-side; the repo
+		// match is client-side (ListMirrors has no repo filter), so the
+		// sibling repo must not leak in.
+		var gotOwner, gotProvider string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			assert.Equal(t, mirrorsAPIPath, r.URL.Path)
+			gotOwner, gotProvider = r.URL.Query().Get("owner"), r.URL.Query().Get("provider")
+			assert.NoError(t, printJSON(w, &coreapi.ListMirrorsOutputBody{Mirrors: []coreapi.Mirror{
+				{MirrorId: "M2", Owner: "entirehq", Repo: "entiredb", ClusterHost: "eu-west-1.entire.io",
+					IsPrivate: coreapi.NewOptBool(true), Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusFailed)},
+				{MirrorId: "M3", Owner: "entirehq", Repo: "other", ClusterHost: "aws-us-east-2.entire.io"},
+				{MirrorId: "M1", Owner: "entirehq", Repo: "entiredb", ClusterHost: "aws-us-east-2.entire.io",
+					IsPrivate: coreapi.NewOptBool(true), Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusReady)},
+			}}))
+		}))
+		t.Cleanup(srv.Close)
+		seamActive(t, func(context.Context) (*coreapi.Client, error) {
+			return coreapi.NewWithBearer(srv.URL, "tok")
+		})
+		seamCluster(t, func(_ context.Context, host string) (*coreapi.Client, error) {
+			t.Errorf("owner/repo get dialed cluster core %q; it has no cluster coordinate", host)
+			return nil, errors.New("wrong core")
+		})
+
+		out, err := runGet(t, "entirehq/entiredb")
+		require.NoError(t, err)
+		require.Equal(t, "entirehq", gotOwner, "owner narrowing must be server-side")
+		require.Equal(t, "github", gotProvider)
+		requireOrder(t, out,
+			"entire://aws-us-east-2.entire.io/gh/entirehq/entiredb", "ready",
+			"entire://eu-west-1.entire.io/gh/entirehq/entiredb", "failed",
+		)
+		require.NotContains(t, out, "entirehq/other", "the sibling repo must not leak into the match")
+	})
+
+	t.Run("owner/repo with no mirrors is a friendly error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			assert.NoError(t, printJSON(w, &coreapi.ListMirrorsOutputBody{}))
+		}))
+		t.Cleanup(srv.Close)
+		seamActive(t, func(context.Context) (*coreapi.Client, error) {
+			return coreapi.NewWithBearer(srv.URL, "tok")
+		})
+		_, err := runGet(t, "entirehq/ghost")
+		require.Error(t, err)
+		require.ErrorContains(t, err, "no mirror matching")
+	})
+}
+
+func TestParseOwnerRepoRef(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		ref                 string
+		wantOwner, wantRepo string
+		wantOK              bool
+	}{
+		{ref: "acme/web", wantOwner: "acme", wantRepo: "web", wantOK: true},
+		{ref: "entire://host/gh/acme/web"},  // clone URL, not this form
+		{ref: "acme/web/extra"},             // too many segments
+		{ref: "/web"},                       // empty owner
+		{ref: "acme/"},                      // empty repo
+		{ref: "0123456789ABCDEFGHJKMNPQRS"}, // no separator (ULID shape)
+	}
+	for _, tt := range tests {
+		t.Run(tt.ref, func(t *testing.T) {
+			t.Parallel()
+			owner, repo, ok := parseOwnerRepoRef(tt.ref)
+			require.Equal(t, tt.wantOK, ok)
+			require.Equal(t, tt.wantOwner, owner)
+			require.Equal(t, tt.wantRepo, repo)
+		})
+	}
 }
 
 func TestMirrorRow(t *testing.T) {
@@ -1327,12 +1463,22 @@ func TestRepoDirCells(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "mirror row: clone URL + status, access dashed",
-			row:  repoDirRow{Repo: "acme/web", CloneURL: "entire://h/gh/acme/web", Private: true, Status: "ready"},
-			want: []string{"acme/web", "entire://h/gh/acme/web", "yes", "ready", "-"},
+			name: "mirror row: clusters + status, access dashed",
+			row: repoDirRow{Repo: "acme/web", Private: true, Status: "ready", Placements: []repoDirPlacement{
+				{Cluster: "us", Status: "ready", CloneURL: "entire://h/gh/acme/web"},
+			}},
+			want: []string{"acme/web", "us", "yes", "ready", "-"},
 		},
 		{
-			name: "candidate row: access + availability, clone URL dashed",
+			name: "multi-cluster mirror row joins its slugs in one cell",
+			row: repoDirRow{Repo: "acme/web", Private: true, Status: "ready", Placements: []repoDirPlacement{
+				{Cluster: "us", Status: "ready"},
+				{Cluster: "eu", Status: "ready"},
+			}},
+			want: []string{"acme/web", "us, eu", "yes", "ready", "-"},
+		},
+		{
+			name: "candidate row: access + availability, clusters dashed",
 			row:  repoDirRow{Repo: "acme/mkt", Private: false, Status: "available", Access: "admin"},
 			want: []string{"acme/mkt", "-", "no", "available", "admin"},
 		},
@@ -1367,7 +1513,7 @@ func TestBuildRepoDir(t *testing.T) {
 	t.Parallel()
 	hosts := map[string]string{"us": "aws-us-east-2.entire.io"}
 
-	t.Run("flattens mirrors per placement and maps candidates", func(t *testing.T) {
+	t.Run("groups mirrors one row per repo and maps candidates", func(t *testing.T) {
 		t.Parallel()
 		rows := buildRepoDir([]coreapi.RepoIndexEntry{
 			onboardedEntry("acme/web", "private", "us"),
@@ -1375,30 +1521,49 @@ func TestBuildRepoDir(t *testing.T) {
 			candidateEntry("alice/x", "private", coreapi.RepoCandidateAccessRead, false),
 		}, hosts)
 		require.Equal(t, []repoDirRow{
-			{Repo: "acme/web", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web", Private: true, Status: "ready", Cluster: "us"},
+			{Repo: "acme/web", Private: true, Status: "ready", Placements: []repoDirPlacement{
+				{Cluster: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
+			}},
 			{Repo: "acme/mkt", Private: false, Status: "available", Access: "admin"},
 			{Repo: "alice/x", Private: true, Status: "owner-only", Access: "read"},
 		}, rows)
 	})
 
-	t.Run("one row per placement for a multi-cell mirror", func(t *testing.T) {
+	t.Run("a multi-cell mirror stays one row, its placements nested in order", func(t *testing.T) {
 		t.Parallel()
 		rows := buildRepoDir([]coreapi.RepoIndexEntry{
 			onboardedMulti("acme/web", "private", "us", "eu"),
 		}, map[string]string{"us": "aws-us-east-2.entire.io", "eu": "eu-west-1.entire.io"})
-		require.Len(t, rows, 2)
-		require.Equal(t, "entire://aws-us-east-2.entire.io/gh/acme/web", rows[0].CloneURL)
-		require.Equal(t, "entire://eu-west-1.entire.io/gh/acme/web", rows[1].CloneURL)
+		require.Len(t, rows, 1)
+		require.Equal(t, []repoDirPlacement{
+			{Cluster: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
+			{Cluster: "eu", Status: "ready", CloneURL: "entire://eu-west-1.entire.io/gh/acme/web"},
+		}, rows[0].Placements)
+		require.Equal(t, "ready", rows[0].Status, "placements agree, so the row carries their shared status")
 	})
 
-	t.Run("unknown cluster slug keeps the row with an empty clone URL", func(t *testing.T) {
+	t.Run("disagreeing placement statuses roll up to mixed", func(t *testing.T) {
+		t.Parallel()
+		rows := buildRepoDir([]coreapi.RepoIndexEntry{
+			{FullName: "acme/web", Visibility: "private", Placements: []coreapi.RepoPlacement{
+				{ClusterSlug: "us", Status: coreapi.RepoPlacementStatusReady, Mirror: true},
+				{ClusterSlug: "eu", Status: coreapi.RepoPlacementStatusFailed, Mirror: true},
+			}},
+		}, hosts)
+		require.Len(t, rows, 1)
+		require.Equal(t, repoDirStatusMixed, rows[0].Status)
+		require.Equal(t, "failed", rows[0].Placements[1].Status, "per-placement statuses stay exact")
+	})
+
+	t.Run("unknown cluster slug keeps the placement with an empty clone URL", func(t *testing.T) {
 		t.Parallel()
 		rows := buildRepoDir([]coreapi.RepoIndexEntry{
 			onboardedEntry("a/b", "public", "ghost"),
 		}, map[string]string{})
 		require.Len(t, rows, 1)
-		require.Empty(t, rows[0].CloneURL, "unresolved host → dashed clone URL, row kept")
-		require.Equal(t, "ghost", rows[0].Cluster)
+		require.Equal(t, []repoDirPlacement{
+			{Cluster: "ghost", Status: "ready"},
+		}, rows[0].Placements, "unresolved host → no clone URL, but the slug still names the placement")
 	})
 
 	t.Run("native (non-mirror) placements are dropped, not given fabricated clone URLs", func(t *testing.T) {
@@ -1410,7 +1575,9 @@ func TestBuildRepoDir(t *testing.T) {
 			onboardedEntry("acme/web", "public", "us"),
 		}, hosts)
 		require.Equal(t, []repoDirRow{
-			{Repo: "acme/web", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web", Private: false, Status: "ready", Cluster: "us"},
+			{Repo: "acme/web", Private: false, Status: "ready", Placements: []repoDirPlacement{
+				{Cluster: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
+			}},
 		}, rows, "only the mirror row survives; the native repo is dropped")
 	})
 
@@ -1423,7 +1590,9 @@ func TestBuildRepoDir(t *testing.T) {
 			}},
 		}, hosts)
 		require.Equal(t, []repoDirRow{
-			{Repo: "acme/web", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web", Private: false, Status: "ready", Cluster: "us"},
+			{Repo: "acme/web", Private: false, Status: "ready", Placements: []repoDirPlacement{
+				{Cluster: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
+			}},
 		}, rows)
 	})
 }
@@ -1606,12 +1775,22 @@ func TestRemoveMirror(t *testing.T) {
 	})
 }
 
-// repoDirKeys renders each row as "repo@cloneURL" so a sorted slice's order
-// (including the clone-URL tiebreak) is asserted in one line.
+// repoDirKeys renders each row as "repo@clusters" so a sorted slice's order
+// (including the CLUSTERS-cell tiebreak) is asserted in one line.
 func repoDirKeys(rows []repoDirRow) []string {
 	out := make([]string, len(rows))
 	for i, r := range rows {
-		out[i] = r.Repo + "@" + r.CloneURL
+		out[i] = r.Repo + "@" + repoDirClusters(r)
+	}
+	return out
+}
+
+// placedOn builds the nested placements for a sort fixture row, one ready
+// placement per slug.
+func placedOn(slugs ...string) []repoDirPlacement {
+	out := make([]repoDirPlacement, len(slugs))
+	for i, s := range slugs {
+		out[i] = repoDirPlacement{Cluster: s, Status: "ready"}
 	}
 	return out
 }
@@ -1619,51 +1798,63 @@ func repoDirKeys(rows []repoDirRow) []string {
 func TestSortRepoDir(t *testing.T) {
 	t.Parallel()
 
-	// One repo placed on two clusters (delivered eu-first) plus a
-	// lexically-earlier repo, so both the primary key and the clone-URL
-	// tiebreak are observable.
+	// Two same-owner repos plus a row colliding with one of them on every
+	// non-name column, so both the primary key and the name/clusters tiebreak
+	// are observable.
 	base := func() []repoDirRow {
 		return []repoDirRow{
-			{Repo: "acme/web", CloneURL: "entire://eu-west-1.entire.io/gh/acme/web", Private: true, Status: "ready"},
-			{Repo: "acme/web", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web", Private: false, Status: "ready"},
-			{Repo: "acme/api", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/api", Private: false, Status: "processing"},
+			{Repo: "acme/web", Private: true, Status: "ready", Placements: placedOn("us", "eu")},
+			{Repo: "beta/api", Private: false, Status: "ready", Placements: placedOn("eu")},
+			{Repo: "acme/api", Private: false, Status: "ready", Placements: placedOn("us")},
 		}
 	}
 
-	t.Run("default sorts repo then clone URL ascending", func(t *testing.T) {
+	t.Run("default sorts by repo name ascending", func(t *testing.T) {
 		t.Parallel()
 		r := base()
 		require.NoError(t, sortRepoDir(r, ""))
 		require.Equal(t, []string{
-			"acme/api@entire://aws-us-east-2.entire.io/gh/acme/api",
-			"acme/web@entire://aws-us-east-2.entire.io/gh/acme/web",
-			"acme/web@entire://eu-west-1.entire.io/gh/acme/web",
+			"acme/api@us",
+			"acme/web@us, eu",
+			"beta/api@eu",
 		}, repoDirKeys(r))
 	})
 
-	t.Run("-name reverses the whole ordering, tiebreak included", func(t *testing.T) {
+	t.Run("-name reverses the ordering", func(t *testing.T) {
 		t.Parallel()
 		r := base()
 		require.NoError(t, sortRepoDir(r, "-name"))
 		require.Equal(t, []string{
-			"acme/web@entire://eu-west-1.entire.io/gh/acme/web",
-			"acme/web@entire://aws-us-east-2.entire.io/gh/acme/web",
-			"acme/api@entire://aws-us-east-2.entire.io/gh/acme/api",
+			"beta/api@eu",
+			"acme/web@us, eu",
+			"acme/api@us",
 		}, repoDirKeys(r))
 	})
 
-	t.Run("non-name column sort keeps the name+clone-URL tiebreak", func(t *testing.T) {
+	t.Run("non-name column sort falls back to the name tiebreak", func(t *testing.T) {
 		t.Parallel()
-		// The two public rows collide on "private"; within the tie the order
-		// must fall back to repo then clone URL, not the eu-first input order.
+		// beta/api and acme/api collide on "ready"+public; within the tie the
+		// order must fall back to repo name, not the input order.
 		r := base()
 		require.NoError(t, sortRepoDir(r, "private"))
 		require.Equal(t, []string{
-			// "no" (public) group first, ordered by repo then clone URL.
-			"acme/api@entire://aws-us-east-2.entire.io/gh/acme/api",
-			"acme/web@entire://aws-us-east-2.entire.io/gh/acme/web",
+			// "no" (public) group first, ordered by repo name.
+			"acme/api@us",
+			"beta/api@eu",
 			// "yes" (private) group last.
-			"acme/web@entire://eu-west-1.entire.io/gh/acme/web",
+			"acme/web@us, eu",
+		}, repoDirKeys(r))
+	})
+
+	t.Run("clusters sorts by the joined CLUSTERS cell", func(t *testing.T) {
+		t.Parallel()
+		r := base()
+		require.NoError(t, sortRepoDir(r, "clusters"))
+		require.Equal(t, []string{
+			// "eu" < "us" < "us, eu"; the eu-only row leads.
+			"beta/api@eu",
+			"acme/api@us",
+			"acme/web@us, eu",
 		}, repoDirKeys(r))
 	})
 
@@ -1672,9 +1863,9 @@ func TestSortRepoDir(t *testing.T) {
 		r := base()
 		require.NoError(t, sortRepoDir(r, " -name"))
 		require.Equal(t, []string{
-			"acme/web@entire://eu-west-1.entire.io/gh/acme/web",
-			"acme/web@entire://aws-us-east-2.entire.io/gh/acme/web",
-			"acme/api@entire://aws-us-east-2.entire.io/gh/acme/api",
+			"beta/api@eu",
+			"acme/web@us, eu",
+			"acme/api@us",
 		}, repoDirKeys(r))
 	})
 
