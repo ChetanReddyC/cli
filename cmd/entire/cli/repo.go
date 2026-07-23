@@ -175,6 +175,11 @@ func newRepoListCmd() *cobra.Command {
 			return validatePageSize(cmd, pageSize)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Decide color against the real output writer before
+			// flushThroughPager swaps stdout for a buffer that never looks
+			// like a TTY; the buffered render passes the pre-styled cells
+			// through unchanged (see preStyleTable).
+			headers, row := preStyleTable(cmd.OutOrStdout(), repoColumns, repoRow)
 			if pageModeRequested(cmd) {
 				return flushThroughPager(cmd, noPager, func() error {
 					return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
@@ -193,12 +198,12 @@ func newRepoListCmd() *cobra.Command {
 						if err != nil {
 							return err
 						}
-						return renderCoreListPage(cmd, "No repositories found in this project.", repoColumns, repoRow, out.Repos, out.NextPageToken.Or(""))
+						return renderCoreListPage(cmd, "No repositories found in this project.", headers, row, out.Repos, out.NextPageToken.Or(""))
 					})
 				})
 			}
 			return flushThroughPager(cmd, noPager, func() error {
-				return runCoreList(cmd, "No repositories found in this project.", repoColumns, repoRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Repo, error) {
+				return runCoreList(cmd, "No repositories found in this project.", headers, row, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Repo, error) {
 					projID, err := resolveProjectRef(ctx, c, args[0])
 					if err != nil {
 						return nil, err

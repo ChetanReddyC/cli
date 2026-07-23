@@ -433,6 +433,43 @@ func printTable[T any](w io.Writer, headers []string, items []T, row func(T) []s
 	return nil
 }
 
+// preStyleTable pre-colors table headers and a row function against w's color
+// capability, so a command that renders its table into a pager buffer keeps
+// its color. printTable/renderCoreListPage decide color from the writer they
+// render into; under flushThroughPager that writer is an in-memory buffer,
+// which never looks like a TTY, so a straight render there is always plain.
+// Pre-styling against the real output writer here and letting the buffered
+// render pass the ANSI through unchanged (its own color gate is off, so it
+// never re-styles) restores it — the same approach the mirror-list view takes.
+// Identity (no wrapping) when color is off, so pipes, tests, and NO_COLOR see
+// bare text byte for byte.
+func preStyleTable[T any](w io.Writer, headers []string, row func(T) []string) ([]string, func(T) []string) {
+	return styleTableWith(newTableStyles(w), headers, row)
+}
+
+// styleTableWith is the pure core of preStyleTable: it applies st's header and
+// per-column styles to the headers and row cells, matching how printTable
+// colors a direct render. Split out from the writer-facing wrapper so the
+// enabled path is unit-testable without a real terminal. Identity when st is
+// disabled, so plain output stays byte-for-byte unchanged.
+func styleTableWith[T any](st tableStyles, headers []string, row func(T) []string) ([]string, func(T) []string) {
+	if !st.enabled {
+		return headers, row
+	}
+	styledHeaders := make([]string, len(headers))
+	for i, h := range headers {
+		styledHeaders[i] = st.style(st.header, h)
+	}
+	styledRow := func(t T) []string {
+		cells := row(t)
+		for i := range cells {
+			cells[i] = st.style(st.columnStyle(i), cells[i])
+		}
+		return cells
+	}
+	return styledHeaders, styledRow
+}
+
 // printFields writes a single record as aligned "FIELD  value" lines: the
 // label in header gray, the value in the same primary/secondary color the
 // list view would give that column.
