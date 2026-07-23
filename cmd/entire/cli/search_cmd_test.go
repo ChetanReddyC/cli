@@ -42,6 +42,23 @@ func TestSearchCmd_AccessibleModeRequiresQuery(t *testing.T) {
 	}
 }
 
+// Each instance's examples must use its own command path: the top-level alias
+// is `entire search`, the canonical form under the checkpoint group is
+// `entire checkpoint search`. A shared prefix would mislead one command's help.
+func TestSearchCmd_ExamplesMatchCommandPath(t *testing.T) {
+	t.Parallel()
+
+	topLevel := newSearchCmd().Example
+	if !strings.Contains(topLevel, "entire search ") || strings.Contains(topLevel, "checkpoint search") {
+		t.Fatalf("top-level search examples must use the `entire search` prefix:\n%s", topLevel)
+	}
+
+	checkpoint := newCheckpointSearchCmd().Example
+	if !strings.Contains(checkpoint, "entire checkpoint search ") {
+		t.Fatalf("checkpoint search examples must use the `entire checkpoint search` prefix:\n%s", checkpoint)
+	}
+}
+
 func TestSearchCmd_HelpMentionsRepoFlagAndInlineFilters(t *testing.T) {
 	t.Parallel()
 
