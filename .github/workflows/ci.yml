@@ -73,9 +73,15 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4
-      - name: Named external-agent discovery
-        run: go test ./cmd/entire/cli/agent/external -run '^TestDiscoverAndRegisterNamedAlways_RegistersBatOnWindows$' -count=1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Runs only the Windows-gated discovery tests: exec.LookPath resolves
+      # external agents via PATHEXT (.bat/.cmd), a code path the ubuntu jobs
+      # cannot exercise. The rest of the package mocks agents as #!/bin/sh
+      # scripts, which Windows cannot execute, so it stays on ubuntu.
+      - name: Windows external-agent discovery
+        run: go test ./cmd/entire/cli/agent/external -run 'RegistersBatOnWindows$' -count=1
 
   test:
     runs-on: ubuntu-latest
