@@ -34,12 +34,12 @@ type column struct {
 // Keys are lower-case, single shell tokens (kebab-case for multi-word columns)
 // so `--sort clone-url` needs no quoting; headers stay upper-case display text.
 var (
-	colName     = column{key: "name", header: "NAME (owner/repo)"}
-	colCloneURL = column{key: "clone-url", header: "CLONE URL"}
-	colClusters = column{key: "clusters", header: "CLUSTERS"}
-	colPrivate  = column{key: "private", header: "PRIVATE"}
-	colAccess   = column{key: "access", header: "ACCESS"}
-	colStatus   = column{key: "status", header: "STATUS"}
+	colName       = column{key: "name", header: "NAME (owner/repo)"}
+	colCloneURL   = column{key: "clone-url", header: "CLONE URL"}
+	colClusters   = column{key: "clusters", header: "CLUSTERS"}
+	colVisibility = column{key: "visibility", header: "VISIBILITY"}
+	colAccess     = column{key: "access", header: "ACCESS"}
+	colStatus     = column{key: "status", header: "STATUS"}
 )
 
 // columnHeaders is the display-header view of a column set, for the table/field
@@ -61,18 +61,19 @@ func columnHeaders(cols []column) []string {
 // model's internal ids are dropped. The clone URL is synthesised from the
 // mirror's coords (the form `git clone` accepts), since the list API doesn't
 // return it.
-var mirrorColumns = []column{colName, colCloneURL, colPrivate}
+var mirrorColumns = []column{colName, colCloneURL, colVisibility}
 
-// mirrorPrivate renders the PRIVATE column ("yes"/"no") for a `get` mirror,
-// sharing yesNo with the `list` directory row so both agree on the cell value.
-func mirrorPrivate(m coreapi.Mirror) string {
-	return yesNo(m.IsPrivate.Or(false))
+// mirrorVisibility renders the VISIBILITY column for a `get` mirror, sharing
+// visibilityDisplay with the `list` directory row so both agree on the cell
+// value.
+func mirrorVisibility(m coreapi.Mirror) string {
+	return visibilityDisplay(m.IsPrivate.Or(false))
 }
 
 func mirrorRow(m coreapi.Mirror) []string {
 	repo := m.Owner + "/" + m.Repo
 	cloneURL := mirrorCloneURL(m.ClusterHost, m.Owner, m.Repo)
-	return []string{repo, cloneURL, mirrorPrivate(m)}
+	return []string{repo, cloneURL, mirrorVisibility(m)}
 }
 
 // parseSortColumn resolves a --sort spec to the column it names and a
@@ -103,12 +104,12 @@ func parseSortColumn(spec string, columns []column) (col column, desc bool, err 
 
 // repoDirColumns is the merged `repo mirror list` view: existing mirrors and
 // onboardable GitHub candidates in one table, from GET /repos?scope=all. NAME
-// and PRIVATE come from every row; CLUSTERS and the placement STATUS are
+// and VISIBILITY come from every row; CLUSTERS and the placement STATUS are
 // onboarded-only; ACCESS is candidate-only. Sparse cells render as "-".
 // Per-placement detail (clone URLs, per-cluster status) lives one step down,
 // in `repo mirror get <owner/repo>` — a directory this size stays one row per
 // repo, not one per placement.
-var repoDirColumns = []column{colName, colClusters, colPrivate, colStatus, colAccess}
+var repoDirColumns = []column{colName, colClusters, colVisibility, colStatus, colAccess}
 
 // repoDirPlacement is one GitHub-mirror placement of a directory row's repo.
 // CloneURL is omitted from JSON when the placement's cluster host couldn't be
@@ -151,11 +152,11 @@ func repoDirClusters(r repoDirRow) string {
 }
 
 func repoDirCells(r repoDirRow) []string {
-	return []string{r.Repo, orDash(repoDirClusters(r)), yesNo(r.Private), r.Status, orDash(r.Access)}
+	return []string{r.Repo, orDash(repoDirClusters(r)), visibilityDisplay(r.Private), r.Status, orDash(r.Access)}
 }
 
 // repoDirCellsStyled wraps repoDirCells with trail-list-style cell coloring:
-// clusters/access cyan, private gray, status by lifecycle (see
+// clusters/access cyan, visibility by audience, status by lifecycle (see
 // repoStatusColor); NAME stays the terminal's default foreground as the
 // primary identifier. Cells are pre-colored and the table renderer measures
 // widths with lipgloss.Width (ANSI-agnostic), so color never shifts columns.
@@ -171,7 +172,7 @@ func repoDirCellsStyled(st statusStyles) func(repoDirRow) []string {
 		if cells[1] != "-" {
 			cells[1] = st.render(st.cyan, cells[1])
 		}
-		cells[2] = st.render(st.gray, cells[2])
+		cells[2] = st.render(visibilityColor(st, r.Private), cells[2])
 		if style, ok := repoStatusColor(st, r.Status); ok {
 			cells[3] = st.render(style, cells[3])
 		}
@@ -223,11 +224,24 @@ func orDash(s string) string {
 	return s
 }
 
-func yesNo(b bool) string {
-	if b {
-		return "yes"
+// visibilityDisplay renders the VISIBILITY cell (and the `get` record's
+// Visibility section): the repo's audience in GitHub's terms, not a yes/no.
+func visibilityDisplay(private bool) string {
+	if private {
+		return "Private"
 	}
-	return "no"
+	return "Public"
+}
+
+// visibilityColor maps a visibility value to its color: Public green (openly
+// reachable), Private magenta (restricted — the accent, distinct from every
+// status color that shares a row with it). Shared by the list column and the
+// `get` record so the same value always looks the same.
+func visibilityColor(st statusStyles, private bool) lipgloss.Style {
+	if private {
+		return st.magenta
+	}
+	return st.green
 }
 
 // clusterHostBySlug maps each cluster's slug to the validated bare host of its
@@ -321,8 +335,8 @@ func sortRepoDir(rows []repoDirRow, spec string) error {
 		switch col {
 		case colClusters:
 			return strings.ToLower(repoDirClusters(r))
-		case colPrivate:
-			return yesNo(r.Private)
+		case colVisibility:
+			return strings.ToLower(visibilityDisplay(r.Private))
 		case colStatus:
 			return strings.ToLower(r.Status)
 		case colAccess:
@@ -1129,20 +1143,25 @@ func mirrorRepoDetailRow(e coreapi.RepoIndexEntry, hostBySlug map[string]string)
 	return row
 }
 
-// renderRepoDetail prints the `get <owner/repo>` record: bold repo name,
-// dim-labeled identity fields, then the placements table — cluster cyan,
-// clone URL the default foreground (it is the payload of this view), status
-// by lifecycle. A candidate (no placements, availability in Status) states
-// its availability instead of an empty table; a native-only repo states it
-// has no GitHub mirrors.
+// renderRepoDetail prints the `get <owner/repo>` record as labeled sections —
+// the label line in the same yellow as the table headers below it, the value
+// indented beneath — then the placements table: cluster cyan, clone URL the
+// default foreground (it is the payload of this view), status by lifecycle.
+// Visibility carries its audience color (Public green, Private magenta),
+// matching the list's VISIBILITY column. A candidate (no placements,
+// availability in Status) states its availability instead of an empty table;
+// a native-only repo states it has no GitHub mirrors.
 func renderRepoDetail(w io.Writer, row repoDirRow) {
 	st := newStatusStyles(w)
-	fmt.Fprintln(w, st.render(st.bold, row.Repo))
-	fields := []explainRow{{Label: "private", Value: yesNo(row.Private)}}
-	if row.Access != "" {
-		fields = append(fields, explainRow{Label: "access", Value: row.Access})
+	section := func(label, value string) {
+		fmt.Fprintln(w, st.render(st.yellow, label+":"))
+		fmt.Fprintf(w, "  %s\n", value)
 	}
-	fmt.Fprint(w, st.metadataRows(fields))
+	section("Name", st.render(st.bold, row.Repo))
+	section("Visibility", st.render(visibilityColor(st, row.Private), visibilityDisplay(row.Private)))
+	if row.Access != "" {
+		section("Access", row.Access)
+	}
 	fmt.Fprintln(w)
 
 	if len(row.Placements) == 0 {

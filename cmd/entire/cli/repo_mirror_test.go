@@ -565,11 +565,11 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		require.Equal(t, testReposPath, rec.path)
 		require.Equal(t, "all", rec.query.Get("scope"), "list must request the unified directory")
 		require.Contains(t, stderr, "Listing repos on")
-		for _, h := range []string{"NAME", "CLUSTERS", "PRIVATE", "STATUS", "ACCESS"} {
+		for _, h := range []string{"NAME", "CLUSTERS", "VISIBILITY", "STATUS", "ACCESS"} {
 			require.Contains(t, stdout, h)
 		}
 		// Mirror row: cluster slug + clone status, access dashed.
-		require.Regexp(t, `acme/web\s+us\s+yes\s+ready`, stdout)
+		require.Regexp(t, `acme/web\s+us\s+Private\s+ready`, stdout)
 		// Candidate rows: availability status + access, clusters dashed.
 		require.Contains(t, stdout, "acme/marketing")
 		require.Contains(t, stdout, "available")
@@ -589,7 +589,7 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		}, false)
 		stdout, _ := runMirrorList(t)
 		require.Equal(t, 1, strings.Count(stdout, "acme/web"), "one row per repo, not one per placement")
-		require.Regexp(t, `acme/web\s+us, eu\s+yes\s+ready`, stdout)
+		require.Regexp(t, `acme/web\s+us, eu\s+Private\s+ready`, stdout)
 	})
 
 	t.Run("the detail hint is withheld from empty tables and --json", func(t *testing.T) {
@@ -1416,8 +1416,8 @@ func TestRepoMirrorGet_Routing(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "entirehq/entiredb", *gotFilter, "the lookup must be the server-side exact-match filter")
 		requireOrder(t, out,
-			"entirehq/entiredb",
-			"private", "yes",
+			"Name:", "entirehq/entiredb",
+			"Visibility:", "Private",
 			"CLUSTER", "CLONE URL", "STATUS",
 			"eu", "entire://eu-west-1.entire.io/gh/entirehq/entiredb", "failed",
 			"us", "entire://aws-us-east-2.entire.io/gh/entirehq/entiredb", "ready",
@@ -1431,7 +1431,12 @@ func TestRepoMirrorGet_Routing(t *testing.T) {
 
 		out, err := runGet(t, "entirehq/notyet")
 		require.NoError(t, err)
-		requireOrder(t, out, "entirehq/notyet", "private", "yes", "access", "write", "Not mirrored on any cluster (available).")
+		requireOrder(t, out,
+			"Name:", "entirehq/notyet",
+			"Visibility:", "Private",
+			"Access:", "write",
+			"Not mirrored on any cluster (available).",
+		)
 		require.NotContains(t, out, "CLONE URL", "a candidate has no placements table")
 	})
 
@@ -1494,12 +1499,12 @@ func TestMirrorRow(t *testing.T) {
 		{
 			name:   "private mirror synthesises clone URL",
 			mirror: coreapi.Mirror{Owner: "entirehq", Repo: "entire.io", ClusterHost: "aws-us-east-2.entire.io", IsPrivate: coreapi.NewOptBool(true)},
-			want:   []string{"entirehq/entire.io", "entire://aws-us-east-2.entire.io/gh/entirehq/entire.io", "yes"},
+			want:   []string{"entirehq/entire.io", "entire://aws-us-east-2.entire.io/gh/entirehq/entire.io", "Private"},
 		},
 		{
-			name:   "public mirror, unset IsPrivate defaults to no",
+			name:   "public mirror, unset IsPrivate defaults to Public",
 			mirror: coreapi.Mirror{Owner: "octocat", Repo: "hello", ClusterHost: "eu-west-1.entire.io"},
-			want:   []string{"octocat/hello", "entire://eu-west-1.entire.io/gh/octocat/hello", "no"},
+			want:   []string{"octocat/hello", "entire://eu-west-1.entire.io/gh/octocat/hello", "Public"},
 		},
 	}
 	for _, tt := range tests {
@@ -1530,7 +1535,7 @@ func TestRepoDirCells(t *testing.T) {
 			row: repoDirRow{Repo: "acme/web", Private: true, Status: "ready", Placements: []repoDirPlacement{
 				{Cluster: "us", Status: "ready", CloneURL: "entire://h/gh/acme/web"},
 			}},
-			want: []string{"acme/web", "us", "yes", "ready", "-"},
+			want: []string{"acme/web", "us", "Private", "ready", "-"},
 		},
 		{
 			name: "multi-cluster mirror row joins its slugs in one cell",
@@ -1538,12 +1543,12 @@ func TestRepoDirCells(t *testing.T) {
 				{Cluster: "us", Status: "ready"},
 				{Cluster: "eu", Status: "ready"},
 			}},
-			want: []string{"acme/web", "us, eu", "yes", "ready", "-"},
+			want: []string{"acme/web", "us, eu", "Private", "ready", "-"},
 		},
 		{
 			name: "candidate row: access + availability, clusters dashed",
 			row:  repoDirRow{Repo: "acme/mkt", Private: false, Status: "available", Access: "admin"},
-			want: []string{"acme/mkt", "-", "no", "available", "admin"},
+			want: []string{"acme/mkt", "-", "Public", "available", "admin"},
 		},
 	}
 	for _, tt := range tests {
@@ -1932,16 +1937,16 @@ func TestSortRepoDir(t *testing.T) {
 
 	t.Run("non-name column sort falls back to the name tiebreak", func(t *testing.T) {
 		t.Parallel()
-		// beta/api and acme/api collide on "ready"+public; within the tie the
+		// beta/api and acme/api collide on "ready"+Public; within the tie the
 		// order must fall back to repo name, not the input order.
 		r := base()
-		require.NoError(t, sortRepoDir(r, "private"))
+		require.NoError(t, sortRepoDir(r, "visibility"))
 		require.Equal(t, []string{
-			// "no" (public) group first, ordered by repo name.
+			// "private" sorts before "public"; the Private row leads, the
+			// Public group follows ordered by repo name.
+			"acme/web@us, eu",
 			"acme/api@us",
 			"beta/api@eu",
-			// "yes" (private) group last.
-			"acme/web@us, eu",
 		}, repoDirKeys(r))
 	})
 
