@@ -32,7 +32,7 @@ type column struct {
 }
 
 // Keys are lower-case, single shell tokens (kebab-case for multi-word columns)
-// so `--sort clone-url` needs no quoting; headers stay upper-case display text.
+// so a --sort value needs no quoting; headers stay upper-case display text.
 var (
 	colName       = column{key: "name", header: "NAME (owner/repo)"}
 	colCloneURL   = column{key: "clone-url", header: "CLONE URL"}
@@ -322,10 +322,9 @@ func buildRepoDir(entries []coreapi.RepoIndexEntry, hostBySlug map[string]string
 	return rows
 }
 
-// sortRepoDir orders directory rows in place by the --sort spec, matching the
-// old sortMirrors: by the named column ascending (case-insensitive), tie-broken
-// by repo name then the CLUSTERS cell for a deterministic order. A '-' prefix
-// reverses.
+// sortRepoDir orders directory rows in place by the --sort spec: by the named
+// column ascending (case-insensitive), tie-broken by repo name then the
+// CLUSTERS cell for a deterministic order. A '-' prefix reverses.
 func sortRepoDir(rows []repoDirRow, spec string) error {
 	col, desc, err := parseSortColumn(spec, repoDirColumns)
 	if err != nil {
@@ -1071,7 +1070,7 @@ func newRepoMirrorGetCmd() *cobra.Command {
 			// detail the list aggregates away (clone URL, per-cluster
 			// status). Like a ULID it carries no cluster coordinate, so it
 			// resolves on the active context's core.
-			if _, _, ok := parseOwnerRepoRef(ref); ok {
+			if isOwnerRepoRef(ref) {
 				return runRepoMirrorGetByName(cmd, ref)
 			}
 			clusterHost, _, _, _, err := parseMirrorCloneURL(ref)
@@ -1195,19 +1194,17 @@ func renderRepoDetail(w io.Writer, row repoDirRow) {
 	fmt.Fprint(w, b.String())
 }
 
-// parseOwnerRepoRef reads a bare <owner>/<repo> mirror reference — the NAME
-// cell of `mirror list`. Anything carrying a scheme, extra path segments, or
-// an empty side is not this form (it falls through to clone-URL parsing, whose
+// isOwnerRepoRef reports whether ref is a bare <owner>/<repo> mirror
+// reference — the NAME cell of `mirror list`, passed verbatim to the /repos
+// exact-match filter. Anything carrying a scheme, extra path segments, or an
+// empty side is not this form (it falls through to clone-URL parsing, whose
 // error names the expected shapes).
-func parseOwnerRepoRef(ref string) (owner, repo string, ok bool) {
+func isOwnerRepoRef(ref string) bool {
 	if strings.Contains(ref, "://") {
-		return "", "", false
+		return false
 	}
 	owner, repo, found := strings.Cut(ref, "/")
-	if !found || owner == "" || repo == "" || strings.Contains(repo, "/") {
-		return "", "", false
-	}
-	return owner, repo, true
+	return found && owner != "" && repo != "" && !strings.Contains(repo, "/")
 }
 
 // resolveMirrorRef turns a mirror reference into its ULID. A ULID passes
@@ -1289,7 +1286,7 @@ func noMirrorErr(ref string) error {
 // forms. Shared by the pre-dial parse in `mirror get` and resolveMirrorRef so
 // both boundaries report identically.
 func badMirrorRefErr(err error) error {
-	return fmt.Errorf("%w; pass a mirror ULID or a clone URL (entire://<cluster>/gh/<owner>/<repo>)", err)
+	return fmt.Errorf("%w; pass <owner>/<repo>, a mirror ULID, or a clone URL (entire://<cluster>/gh/<owner>/<repo>)", err)
 }
 
 func newRepoMirrorRemoveCmd() *cobra.Command {

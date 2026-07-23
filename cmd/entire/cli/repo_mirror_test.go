@@ -545,8 +545,8 @@ func runMirrorList(t *testing.T, args ...string) (stdout, stderr string) {
 // TestRepoMirrorList_Merged pins the merged `repo mirror list`: one table from a
 // single GET /repos?scope=all, with existing mirrors (one row per repo: clusters
 // + clone status) and onboardable candidates (access + availability)
-// interleaved. The former --show-available flag is gone. Per-row formatting is
-// covered by TestRepoDirCells; this pins the end-to-end routing and rendering.
+// interleaved. Per-row formatting is covered by TestRepoDirCells; this pins
+// the end-to-end routing and rendering.
 //
 // Not parallel: swaps the package-level activeCoreClient seam.
 func TestRepoMirrorList_Merged(t *testing.T) {
@@ -600,13 +600,6 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		serveRepoList(t, []coreapi.RepoIndexEntry{onboardedEntry("acme/web", "private", "us")}, clusters, false)
 		_, stderr = runMirrorList(t, "--json")
 		require.NotContains(t, stderr, "mirror get", "scripts already get nested placements in the rows")
-	})
-
-	t.Run("--show-available flag is gone", func(t *testing.T) {
-		serveRepoList(t, nil, clusters, false)
-		err := runMirrorListErr(t, "--show-available")
-		require.Error(t, err, "the merged list no longer accepts --show-available")
-		require.Contains(t, err.Error(), "unknown flag")
 	})
 
 	t.Run("empty directory prints the empty sentence", func(t *testing.T) {
@@ -1365,7 +1358,7 @@ func TestRepoMirrorGet_Routing(t *testing.T) {
 		})
 		_, err := runGet(t, "not-a-url")
 		require.Error(t, err)
-		require.ErrorContains(t, err, "pass a mirror ULID or a clone URL")
+		require.ErrorContains(t, err, "pass <owner>/<repo>, a mirror ULID, or a clone URL")
 	})
 
 	// serveRepoDetail answers the two endpoints the owner/repo form uses: the
@@ -1464,14 +1457,13 @@ func TestRepoMirrorGet_Routing(t *testing.T) {
 	})
 }
 
-func TestParseOwnerRepoRef(t *testing.T) {
+func TestIsOwnerRepoRef(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		ref                 string
-		wantOwner, wantRepo string
-		wantOK              bool
+		ref  string
+		want bool
 	}{
-		{ref: "acme/web", wantOwner: "acme", wantRepo: "web", wantOK: true},
+		{ref: "acme/web", want: true},
 		{ref: "entire://host/gh/acme/web"},  // clone URL, not this form
 		{ref: "acme/web/extra"},             // too many segments
 		{ref: "/web"},                       // empty owner
@@ -1481,10 +1473,7 @@ func TestParseOwnerRepoRef(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.ref, func(t *testing.T) {
 			t.Parallel()
-			owner, repo, ok := parseOwnerRepoRef(tt.ref)
-			require.Equal(t, tt.wantOK, ok)
-			require.Equal(t, tt.wantOwner, owner)
-			require.Equal(t, tt.wantRepo, repo)
+			require.Equal(t, tt.want, isOwnerRepoRef(tt.ref))
 		})
 	}
 }
