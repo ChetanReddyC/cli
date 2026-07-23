@@ -1311,13 +1311,13 @@ func TestRepoMirrorGet_Routing(t *testing.T) {
 		clusterCoreClient = fn
 		t.Cleanup(func() { clusterCoreClient = prev })
 	}
-	runGet := func(t *testing.T, ref string) (string, error) {
+	runGet := func(t *testing.T, args ...string) (string, error) {
 		t.Helper()
 		cmd := newRepoCmd()
 		var out, errW bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&errW)
-		cmd.SetArgs([]string{"mirror", "get", ref})
+		cmd.SetArgs(append([]string{"mirror", "get"}, args...))
 		err := cmd.ExecuteContext(t.Context())
 		return out.String(), err
 	}
@@ -1368,24 +1368,23 @@ func TestRepoMirrorGet_Routing(t *testing.T) {
 		require.ErrorContains(t, err, "pass a mirror ULID or a clone URL")
 	})
 
-	t.Run("owner/repo lists every cluster mirror with clone URL and status", func(t *testing.T) {
-		// The drill-down from the grouped `mirror list` NAME cell: one row per
-		// cluster mirror, per-cluster clone URL + status, deterministic
-		// (cluster-host) order. The owner narrowing is server-side; the repo
-		// match is client-side (ListMirrors has no repo filter), so the
-		// sibling repo must not leak in.
-		var gotOwner, gotProvider string
+	// serveRepoDetail answers the two endpoints the owner/repo form uses: the
+	// exact-match /repos?filter= lookup and the cluster catalog.
+	serveRepoDetail := func(t *testing.T, repos []coreapi.RepoIndexEntry, clusters []coreapi.Cluster) *string {
+		t.Helper()
+		var gotFilter string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			assert.Equal(t, mirrorsAPIPath, r.URL.Path)
-			gotOwner, gotProvider = r.URL.Query().Get("owner"), r.URL.Query().Get("provider")
-			assert.NoError(t, printJSON(w, &coreapi.ListMirrorsOutputBody{Mirrors: []coreapi.Mirror{
-				{MirrorId: "M2", Owner: "entirehq", Repo: "entiredb", ClusterHost: "eu-west-1.entire.io",
-					IsPrivate: coreapi.NewOptBool(true), Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusFailed)},
-				{MirrorId: "M3", Owner: "entirehq", Repo: "other", ClusterHost: "aws-us-east-2.entire.io"},
-				{MirrorId: "M1", Owner: "entirehq", Repo: "entiredb", ClusterHost: "aws-us-east-2.entire.io",
-					IsPrivate: coreapi.NewOptBool(true), Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusReady)},
-			}}))
+			switch r.URL.Path {
+			case testClustersPath:
+				assert.NoError(t, printJSON(w, &coreapi.ListClustersOutputBody{Clusters: clusters}))
+			case testReposPath:
+				gotFilter = r.URL.Query().Get("filter")
+				assert.NoError(t, printJSON(w, &coreapi.ListReposOutputBody{Repos: repos}))
+			default:
+				t.Errorf("unexpected path %q", r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
 		}))
 		t.Cleanup(srv.Close)
 		seamActive(t, func(context.Context) (*coreapi.Client, error) {
@@ -1395,30 +1394,68 @@ func TestRepoMirrorGet_Routing(t *testing.T) {
 			t.Errorf("owner/repo get dialed cluster core %q; it has no cluster coordinate", host)
 			return nil, errors.New("wrong core")
 		})
+		return &gotFilter
+	}
+	detailClusters := []coreapi.Cluster{
+		{Slug: "us", PublicUrl: "https://aws-us-east-2.entire.io"},
+		{Slug: "eu", PublicUrl: "https://eu-west-1.entire.io"},
+	}
+
+	t.Run("owner/repo renders the record view with a per-cluster table", func(t *testing.T) {
+		// The drill-down from the grouped `mirror list` NAME cell: identity
+		// fields, then one row per cluster mirror with clone URL + status,
+		// deterministic (cluster-slug) order — the entry delivers eu-first.
+		gotFilter := serveRepoDetail(t, []coreapi.RepoIndexEntry{
+			{FullName: "entirehq/entiredb", Visibility: "private", Placements: []coreapi.RepoPlacement{
+				{ClusterSlug: "eu", Status: coreapi.RepoPlacementStatusFailed, Mirror: true},
+				{ClusterSlug: "us", Status: coreapi.RepoPlacementStatusReady, Mirror: true},
+			}},
+		}, detailClusters)
 
 		out, err := runGet(t, "entirehq/entiredb")
 		require.NoError(t, err)
-		require.Equal(t, "entirehq", gotOwner, "owner narrowing must be server-side")
-		require.Equal(t, "github", gotProvider)
+		require.Equal(t, "entirehq/entiredb", *gotFilter, "the lookup must be the server-side exact-match filter")
 		requireOrder(t, out,
-			"entire://aws-us-east-2.entire.io/gh/entirehq/entiredb", "ready",
-			"entire://eu-west-1.entire.io/gh/entirehq/entiredb", "failed",
+			"entirehq/entiredb",
+			"private", "yes",
+			"CLUSTER", "CLONE URL", "STATUS",
+			"eu", "entire://eu-west-1.entire.io/gh/entirehq/entiredb", "failed",
+			"us", "entire://aws-us-east-2.entire.io/gh/entirehq/entiredb", "ready",
 		)
-		require.NotContains(t, out, "entirehq/other", "the sibling repo must not leak into the match")
 	})
 
-	t.Run("owner/repo with no mirrors is a friendly error", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			assert.NoError(t, printJSON(w, &coreapi.ListMirrorsOutputBody{}))
-		}))
-		t.Cleanup(srv.Close)
-		seamActive(t, func(context.Context) (*coreapi.Client, error) {
-			return coreapi.NewWithBearer(srv.URL, "tok")
-		})
+	t.Run("owner/repo on a candidate shows access and availability, no table", func(t *testing.T) {
+		serveRepoDetail(t, []coreapi.RepoIndexEntry{
+			candidateEntry("entirehq/notyet", "private", coreapi.RepoCandidateAccessWrite, true),
+		}, detailClusters)
+
+		out, err := runGet(t, "entirehq/notyet")
+		require.NoError(t, err)
+		requireOrder(t, out, "entirehq/notyet", "private", "yes", "access", "write", "Not mirrored on any cluster (available).")
+		require.NotContains(t, out, "CLONE URL", "a candidate has no placements table")
+	})
+
+	t.Run("owner/repo --json emits the list's row shape, placements nested", func(t *testing.T) {
+		serveRepoDetail(t, []coreapi.RepoIndexEntry{
+			{FullName: "entirehq/entiredb", Visibility: "private", Placements: []coreapi.RepoPlacement{
+				{ClusterSlug: "us", Status: coreapi.RepoPlacementStatusReady, Mirror: true},
+			}},
+		}, detailClusters)
+
+		out, err := runGet(t, "entirehq/entiredb", "--json")
+		require.NoError(t, err)
+		var row repoDirRow
+		require.NoError(t, json.Unmarshal([]byte(out), &row))
+		require.Equal(t, repoDirRow{Repo: "entirehq/entiredb", Private: true, Status: "ready", Placements: []repoDirPlacement{
+			{Cluster: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/entirehq/entiredb"},
+		}}, row)
+	})
+
+	t.Run("owner/repo with no matching repo is a friendly error", func(t *testing.T) {
+		serveRepoDetail(t, nil, detailClusters)
 		_, err := runGet(t, "entirehq/ghost")
 		require.Error(t, err)
-		require.ErrorContains(t, err, "no mirror matching")
+		require.ErrorContains(t, err, "no repo matching")
 	})
 }
 
@@ -1551,9 +1588,6 @@ func TestStyledCellsDisabledGate(t *testing.T) {
 
 	headers := columnHeaders(repoDirColumns)
 	require.Equal(t, headers, styledHeaders(st, headers))
-
-	m := coreapi.Mirror{Owner: "acme", Repo: "web", ClusterHost: "h", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusReady)}
-	require.Equal(t, mirrorGetRow(m), mirrorGetRowStyled(st)(m))
 }
 
 func TestClusterHostBySlug(t *testing.T) {

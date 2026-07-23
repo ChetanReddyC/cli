@@ -1017,8 +1017,9 @@ func newRepoMirrorGetCmd() *cobra.Command {
 		Use:   "get <mirror>",
 		Short: "Show a repo's mirrors by owner/repo, or one mirror by ULID or clone URL",
 		Long: "Show a mirror, or every mirror of a repo. <mirror> is one of:\n\n" +
-			"  - <owner>/<repo>, as shown in the `mirror list` NAME column — lists that\n" +
-			"    repo's mirror on every cluster, with per-cluster clone URL and status\n" +
+			"  - <owner>/<repo>, as shown in the `mirror list` NAME column — shows the\n" +
+			"    repo (visibility, access) and its mirror on every cluster, with\n" +
+			"    per-cluster clone URL and status\n" +
 			"  - a mirror ULID\n" +
 			"  - an entire:// clone URL (entire://<cluster>/gh/<owner>/<repo>) — the form\n" +
 			"    `git clone` accepts; a trailing .git, as pasted from `git remote -v`, is\n" +
@@ -1051,19 +1052,13 @@ func newRepoMirrorGetCmd() *cobra.Command {
 				return runCoreObject(cmd, columnHeaders(mirrorColumns), mirrorRow, show)
 			}
 			// The owner/repo form is the drill-down from the grouped `mirror
-			// list` NAME column: one row per cluster mirror of that repo, so
-			// the per-placement detail the list aggregates away (clone URL,
-			// per-cluster status) is one copy-paste away. Like a ULID it
-			// carries no cluster coordinate, so it resolves on the active
-			// context's core.
-			if owner, repo, ok := parseOwnerRepoRef(ref); ok {
-				// Not paged, so the writer runCoreList renders to is the
-				// final one — but cells are still pre-colored for consistency
-				// with the list view (same status palette, yellow headers).
-				st := newStatusStyles(cmd.OutOrStdout())
-				return runCoreList(cmd, "", styledHeaders(st, columnHeaders(mirrorGetColumns)), mirrorGetRowStyled(st), func(ctx context.Context, c *coreapi.Client) ([]coreapi.Mirror, error) {
-					return listRepoMirrors(ctx, c, owner, repo)
-				})
+			// list` NAME column: a record view of that repo — visibility,
+			// access, then its mirror on every cluster with the per-placement
+			// detail the list aggregates away (clone URL, per-cluster
+			// status). Like a ULID it carries no cluster coordinate, so it
+			// resolves on the active context's core.
+			if _, _, ok := parseOwnerRepoRef(ref); ok {
+				return runRepoMirrorGetByName(cmd, ref)
 			}
 			clusterHost, _, _, _, err := parseMirrorCloneURL(ref)
 			if err != nil {
@@ -1077,35 +1072,108 @@ func newRepoMirrorGetCmd() *cobra.Command {
 	return cmd
 }
 
-// mirrorGetColumns is the per-cluster view `get <owner/repo>` renders: one row
-// per mirror of the repo, the clone URL you'd copy, and each mirror's clone
-// lifecycle status — exactly the placement detail the grouped `mirror list`
-// row aggregates away.
-var mirrorGetColumns = []column{colName, colCloneURL, colPrivate, colStatus}
-
-func mirrorGetRow(m coreapi.Mirror) []string {
-	return append(mirrorRow(m), orDash(string(m.Status.Or(""))))
+// runRepoMirrorGetByName renders the record view behind `get <owner/repo>`:
+// the repo's identity fields (visibility, access), then its mirror placements
+// as a cluster/clone-URL/status table. One exact-match /repos?filter= lookup
+// (the endpoint returns that repo's zero-or-one entries; no directory walk)
+// plus the cluster catalog for clone-URL synthesis. A candidate entry renders
+// its access and availability instead of a placements table — though today's
+// control plane only matches onboarded repos in the filter, so that path
+// waits on the server (the not-found error points at `list --available`).
+// --json emits the same repoDirRow shape `list --json` uses, placements
+// nested.
+func runRepoMirrorGetByName(cmd *cobra.Command, ref string) error {
+	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+		out, err := c.ListRepos(ctx, coreapi.ListReposParams{Filter: coreapi.NewOptString(ref)})
+		if err != nil {
+			return err
+		}
+		if len(out.Repos) == 0 {
+			// The filter only matches onboarded repos on today's control
+			// plane, so a not-yet-mirrored GitHub repo lands here too —
+			// point at the list mode that shows those.
+			return fmt.Errorf("no repo matching %q visible from your login (GitHub repos you could onboard: `entire repo mirror list --available`)", ref)
+		}
+		clusters, err := c.ListClusters(ctx)
+		if err != nil {
+			return err
+		}
+		row := mirrorRepoDetailRow(out.Repos[0], clusterHostBySlug(clusters.Clusters))
+		if jsonRequested(cmd) {
+			return printJSON(cmd.OutOrStdout(), row)
+		}
+		renderRepoDetail(cmd.OutOrStdout(), row)
+		return nil
+	})
 }
 
-// mirrorGetRowStyled colors the per-cluster rows the way the list view does:
-// private gray, status by lifecycle, and the CLONE URL cyan — it is the
-// payload of this view (the one thing `get` shows that the grouped list
-// doesn't), and a cell left unstyled here would instead pick up printTable's
-// muted secondary-column gray, reading as de-emphasized. Cyan also matches
-// the list's cluster accent, and the URL is the cluster-bearing value.
-func mirrorGetRowStyled(st statusStyles) func(coreapi.Mirror) []string {
-	return func(m coreapi.Mirror) []string {
-		cells := mirrorGetRow(m)
-		if !st.colorEnabled {
-			return cells
+// mirrorRepoDetailRow shapes one directory entry for the record view, reusing the
+// list's row builder so both views agree on placement/candidate semantics.
+// buildRepoDir drops a repo with no GitHub-mirror placements (a native
+// `entire repo create` repo); the detail view was asked about that repo by
+// name, so it falls back to a bare identity row instead of vanishing.
+// Placements are ordered by cluster slug for a deterministic table.
+func mirrorRepoDetailRow(e coreapi.RepoIndexEntry, hostBySlug map[string]string) repoDirRow {
+	rows := buildRepoDir([]coreapi.RepoIndexEntry{e}, hostBySlug)
+	if len(rows) == 0 {
+		name := e.FullName
+		if name == "" {
+			name = e.Name
 		}
-		cells[1] = st.render(st.cyan, cells[1])
-		cells[2] = st.render(st.gray, cells[2])
-		if style, ok := repoStatusColor(st, cells[3]); ok {
-			cells[3] = st.render(style, cells[3])
-		}
-		return cells
+		return repoDirRow{Repo: name, Private: strings.EqualFold(e.Visibility, "private")}
 	}
+	row := rows[0]
+	slices.SortFunc(row.Placements, func(a, b repoDirPlacement) int {
+		return cmp.Compare(a.Cluster, b.Cluster)
+	})
+	return row
+}
+
+// renderRepoDetail prints the `get <owner/repo>` record: bold repo name,
+// dim-labeled identity fields, then the placements table — cluster cyan,
+// clone URL the default foreground (it is the payload of this view), status
+// by lifecycle. A candidate (no placements, availability in Status) states
+// its availability instead of an empty table; a native-only repo states it
+// has no GitHub mirrors.
+func renderRepoDetail(w io.Writer, row repoDirRow) {
+	st := newStatusStyles(w)
+	fmt.Fprintln(w, st.render(st.bold, row.Repo))
+	fields := []explainRow{{Label: "private", Value: yesNo(row.Private)}}
+	if row.Access != "" {
+		fields = append(fields, explainRow{Label: "access", Value: row.Access})
+	}
+	fmt.Fprint(w, st.metadataRows(fields))
+	fmt.Fprintln(w)
+
+	if len(row.Placements) == 0 {
+		if row.Status != "" {
+			fmt.Fprintf(w, "Not mirrored on any cluster (%s).\n", row.Status)
+			return
+		}
+		fmt.Fprintln(w, "No GitHub mirror placements.")
+		return
+	}
+
+	headers := styledHeaders(st, []string{"CLUSTER", "CLONE URL", "STATUS"})
+	rows := make([][]string, len(row.Placements))
+	for i, p := range row.Placements {
+		cluster, status := p.Cluster, p.Status
+		if st.colorEnabled {
+			cluster = st.render(st.cyan, cluster)
+			if style, ok := repoStatusColor(st, status); ok {
+				status = st.render(style, status)
+			}
+		}
+		rows[i] = []string{cluster, orDash(p.CloneURL), status}
+	}
+	widths := columnWidths(headers, rows)
+	var b strings.Builder
+	plain := func(int) lipgloss.Style { return lipgloss.Style{} }
+	writeTableRow(&b, headers, widths, plain, tableStyles{})
+	for _, r := range rows {
+		writeTableRow(&b, r, widths, plain, tableStyles{})
+	}
+	fmt.Fprint(w, b.String())
 }
 
 // parseOwnerRepoRef reads a bare <owner>/<repo> mirror reference — the NAME
@@ -1121,43 +1189,6 @@ func parseOwnerRepoRef(ref string) (owner, repo string, ok bool) {
 		return "", "", false
 	}
 	return owner, repo, true
-}
-
-// listRepoMirrors fetches every caller-visible mirror of owner/repo on the
-// active context's core, ordered by cluster host for a deterministic table.
-// No mirrors is an error, not an empty table: `get` names one repo, so
-// nothing-found means the reference didn't resolve.
-func listRepoMirrors(ctx context.Context, c *coreapi.Client, owner, repo string) ([]coreapi.Mirror, error) {
-	mirrors, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Mirror, string, error) {
-		params := coreapi.ListMirrorsParams{
-			Provider: coreapi.NewOptString("github"),
-			Owner:    coreapi.NewOptString(owner),
-		}
-		if cursor != "" {
-			params.PageToken = coreapi.NewOptString(cursor)
-		}
-		out, lerr := c.ListMirrors(ctx, params)
-		if lerr != nil {
-			return nil, "", lerr
-		}
-		return out.Mirrors, out.NextPageToken.Or(""), nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	// ListMirrors has no repo filter, so the owner-scoped result is matched
-	// on repo client-side; owner/repo are stored lowercase, EqualFold guards
-	// a differently-cased argument.
-	mirrors = slices.DeleteFunc(mirrors, func(m coreapi.Mirror) bool {
-		return !strings.EqualFold(m.Repo, repo)
-	})
-	if len(mirrors) == 0 {
-		return nil, noMirrorErr(owner + "/" + repo)
-	}
-	slices.SortFunc(mirrors, func(a, b coreapi.Mirror) int {
-		return cmp.Compare(a.ClusterHost, b.ClusterHost)
-	})
-	return mirrors, nil
 }
 
 // resolveMirrorRef turns a mirror reference into its ULID. A ULID passes
