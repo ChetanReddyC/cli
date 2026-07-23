@@ -237,7 +237,8 @@ func (d *Droid) StartSession(ctx context.Context, dir string) (Session, error) {
 // startup dialog (currently the "Trust this folder?" prompt) rather than the
 // interactive input box. The dialog renders its pre-selected option as
 // "> 1. Trust this folder", so the presence of ">" alone cannot distinguish it
-// from the real prompt — we key off the dialog title and footer instead.
+// from the real prompt — we key off the dialog title ("trust this folder") and
+// its "exit without trusting" option label instead.
 // Matching is case-insensitive to stay resilient to Droid re-casing its copy.
 func isDroidStartupDialog(content string) bool {
 	lower := strings.ToLower(content)
