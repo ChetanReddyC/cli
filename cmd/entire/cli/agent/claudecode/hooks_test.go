@@ -490,6 +490,9 @@ func TestInstallHooks_LocalDevSessionEndTimeout(t *testing.T) {
 		}
 
 		// Scoping: other local-dev hooks must not inherit the timeout.
+		if len(settings.Hooks.Stop) == 0 || len(settings.Hooks.Stop[0].Hooks) == 0 {
+			t.Fatal("expected a Stop hook to be installed")
+		}
 		if got := settings.Hooks.Stop[0].Hooks[0].Timeout; got != 0 {
 			t.Errorf("local-dev Stop timeout = %d, want 0 (timeout is SessionEnd-only)", got)
 		}
@@ -510,6 +513,16 @@ func TestInstallHooks_LocalDevSessionEndTimeout(t *testing.T) {
 		}
 		if got := settings.Hooks.SessionEnd[0].Hooks[0].Timeout; got != 0 {
 			t.Errorf("production SessionEnd timeout = %d, want 0 (dev-only)", got)
+		}
+
+		// Stronger than the parsed check: prove the field is omitted entirely
+		// (omitempty), not written as an explicit "timeout": 0.
+		raw, err := os.ReadFile(filepath.Join(tempDir, ".claude", "settings.json"))
+		if err != nil {
+			t.Fatalf("failed to read settings.json: %v", err)
+		}
+		if strings.Contains(string(raw), "timeout") {
+			t.Errorf("production settings.json must not contain any timeout field, got:\n%s", raw)
 		}
 	})
 }
