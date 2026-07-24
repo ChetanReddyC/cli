@@ -1369,7 +1369,7 @@ func TestOpenCodeSessionOperations(t *testing.T) {
 		// Create an OpenCode export JSON transcript file
 		transcriptPath := filepath.Join(env.RepoDir, "test-transcript.json")
 		transcriptContent := `{
-			"info": {"id": testSessionID},
+			"info": {"id": "test-session"},
 			"messages": [
 				{"info": {"id": "msg-1", "role": "user", "time": {"created": 1708300000}}, "parts": [{"type": "text", "text": "Fix the bug"}]},
 				{"info": {"id": "msg-2", "role": "assistant", "time": {"created": 1708300001, "completed": 1708300005}, "tokens": {"input": 100, "output": 50, "reasoning": 5, "cache": {"read": 3, "write": 10}}}, "parts": [{"type": "text", "text": "I'll fix it."}, {"type": "tool", "tool": "write", "callID": "call-1", "state": {"status": "completed", "input": {"filePath": "main.go"}, "output": "written"}}]},

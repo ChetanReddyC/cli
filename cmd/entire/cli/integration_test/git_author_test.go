@@ -204,7 +204,7 @@ func TestGetGitAuthorNoConfigReturnsDefaults(t *testing.T) {
 	// Use the hook runner but with custom environment
 	hookCmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", agentClaudeCode, "user-prompt-submit")
 	hookCmd.Dir = env.RepoDir
-	hookCmd.Stdin = strings.NewReader(`{"session_id": testSessionID, "transcript_path": ""}`)
+	hookCmd.Stdin = strings.NewReader(`{"session_id": "test-session", "transcript_path": ""}`)
 	hookCmd.Env = []string{
 		"HOME=" + fakeHome,
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR=" + env.ClaudeProjectDir,

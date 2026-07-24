@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1005,11 +1004,11 @@ func TestShadow_ResetSession_ClearsTurnCheckpointIDs(t *testing.T) {
 
 	// Verify session state is cleared (file deleted)
 	state, err = env.GetSessionState(sess.ID)
-	if !errors.Is(err, ErrSessionStateNotFound) {
-		if err != nil {
-			t.Fatalf("GetSessionState after reset failed unexpectedly: %v", err)
-		}
-		t.Errorf("Session state should be gone after reset, got: phase=%s, TurnCheckpointIDs=%v",
+	if err != nil {
+		t.Fatalf("GetSessionState after reset failed unexpectedly: %v", err)
+	}
+	if state != nil {
+		t.Errorf("Session state should be nil after reset, got: phase=%s, TurnCheckpointIDs=%v",
 			state.Phase, state.TurnCheckpointIDs)
 	}
 

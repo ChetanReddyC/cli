@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,10 +14,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
-
-// ErrSessionStateNotFound is returned by GetSessionState when no session state
-// file exists for the given session ID.
-var ErrSessionStateNotFound = errors.New("session state not found")
 
 // HookRunner executes CLI hooks in the test environment.
 type HookRunner struct {
@@ -502,6 +497,11 @@ func (env *TestEnv) SimulateSessionStartWithOutput(sessionID string) HookOutput 
 }
 
 // GetSessionState reads and returns the session state for the given session ID.
+// A missing state file is a normal outcome, not an error: sessions get cleaned
+// up (e.g. ENDED with an empty LastCheckpointID), and callers check for a nil
+// state to detect it.
+//
+//nolint:nilnil // (nil, nil) means "no state file", which callers rely on
 func (env *TestEnv) GetSessionState(sessionID string) (*strategy.SessionState, error) {
 	env.T.Helper()
 
@@ -509,7 +509,7 @@ func (env *TestEnv) GetSessionState(sessionID string) (*strategy.SessionState, e
 
 	data, err := os.ReadFile(stateFile)
 	if os.IsNotExist(err) {
-		return nil, ErrSessionStateNotFound
+		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session state: %w", err)
