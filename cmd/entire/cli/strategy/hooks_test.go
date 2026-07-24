@@ -346,6 +346,13 @@ func TestInstallGitHook_HooksPathNotADirectory(t *testing.T) {
 	ClearHooksDirCache()
 	paths.ClearWorktreeRootCache()
 
+	// Assert against the resolved hooks dir (what the error prints), not the
+	// configured value — git may normalize separators on Windows.
+	resolvedHooksDir, resolveErr := GetHooksDir(ctx)
+	if resolveErr != nil {
+		t.Fatalf("GetHooksDir() failed: %v", resolveErr)
+	}
+
 	_, err := InstallGitHook(ctx, true, false, false)
 	if err == nil {
 		t.Fatal("InstallGitHook() should fail when hooks path is not a directory")
@@ -354,8 +361,8 @@ func TestInstallGitHook_HooksPathNotADirectory(t *testing.T) {
 	if !strings.Contains(msg, "core.hooksPath") {
 		t.Errorf("error should name core.hooksPath, got: %s", msg)
 	}
-	if !strings.Contains(msg, hooksPath) {
-		t.Errorf("error should include the resolved hooks path %s, got: %s", hooksPath, msg)
+	if !strings.Contains(msg, resolvedHooksDir) {
+		t.Errorf("error should include the resolved hooks path %s, got: %s", resolvedHooksDir, msg)
 	}
 	if !strings.Contains(msg, "git config") {
 		t.Errorf("error should tell the user how to inspect/fix the setting, got: %s", msg)
