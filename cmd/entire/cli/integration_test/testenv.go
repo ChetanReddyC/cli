@@ -2038,14 +2038,6 @@ func (env *TestEnv) RunPrePushWithError(remote string) error {
 	return env.runPrePush(remote, env.defaultPrePushStdin())
 }
 
-// RunPrePushWithStdin runs the pre-push hook feeding the given stdin verbatim.
-// Pass "" to exercise the real no-op case (a `git push` with nothing new to
-// push feeds the hook empty stdin).
-func (env *TestEnv) RunPrePushWithStdin(remote, stdin string) error {
-	env.T.Helper()
-	return env.runPrePush(remote, stdin)
-}
-
 func (env *TestEnv) runPrePush(remote, stdin string) error {
 	cmd := exec.CommandContext(env.T.Context(), getTestBinary(), "hooks", "git", "pre-push", remote)
 	cmd.Dir = env.RepoDir
