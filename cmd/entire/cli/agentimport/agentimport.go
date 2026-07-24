@@ -131,6 +131,10 @@ type Result struct {
 // (a progress bar, log lines, a TUI) is entirely up to the caller. Every
 // field is optional, and a nil *Progress (the default) is a no-op — Run's
 // behavior is byte-identical whether or not one is supplied.
+//
+// Invariant: for every turn Run processes, exactly one of TurnWritten or
+// TurnSkipped fires — so summing both callbacks' calls across one session
+// always equals that session's turnCount (as reported by SessionStart).
 type Progress struct {
 	// SessionStart fires once per session, after its transcript has been
 	// split into turns and before any of them are written. sessionIndex is
@@ -139,9 +143,14 @@ type Progress struct {
 	SessionStart func(sessionIndex, sessionTotal int, agentName, sessionID string, turnCount int)
 	// TurnWritten fires once per turn Run actually writes to the checkpoint
 	// store — never for a turn skipped as already-imported, nor under
-	// DryRun. turnIndex is 0-based against turnCount, matching the
-	// turnCount reported by this turn's SessionStart call.
+	// DryRun (see TurnSkipped for those). turnIndex is 0-based against
+	// turnCount, matching the turnCount reported by this turn's
+	// SessionStart call.
 	TurnWritten func(sessionIndex, turnIndex, turnCount int)
+	// TurnSkipped fires once per turn Run processes without writing: a turn
+	// already imported (idempotent re-run) or, under DryRun, every turn
+	// (dry runs never write). Index semantics match TurnWritten exactly.
+	TurnSkipped func(sessionIndex, turnIndex, turnCount int)
 }
 
 func (p *Progress) sessionStart(sessionIndex, sessionTotal int, agentName, sessionID string, turnCount int) {
@@ -156,6 +165,13 @@ func (p *Progress) turnWritten(sessionIndex, turnIndex, turnCount int) {
 		return
 	}
 	p.TurnWritten(sessionIndex, turnIndex, turnCount)
+}
+
+func (p *Progress) turnSkipped(sessionIndex, turnIndex, turnCount int) {
+	if p == nil || p.TurnSkipped == nil {
+		return
+	}
+	p.TurnSkipped(sessionIndex, turnIndex, turnCount)
 }
 
 // DeriveCheckpointID produces a stable 12-hex checkpoint ID for an imported
@@ -214,10 +230,12 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 			cid := DeriveCheckpointID(sf.SessionID, turn.UUID)
 			if existing[cid.String()] {
 				res.TurnsSkipped++
+				opts.Progress.turnSkipped(sessionIndex, turnIndex, len(turns))
 				continue
 			}
 			if opts.DryRun {
 				res.TurnsImported++ // counts what would import
+				opts.Progress.turnSkipped(sessionIndex, turnIndex, len(turns))
 				continue
 			}
 			if !redacted {

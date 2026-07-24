@@ -33,14 +33,21 @@ func newImportProgressReporter(w io.Writer, agentName string) (progress *agentim
 		update(fmt.Sprintf("Importing %s sessions... (session %d/%d · turn %d/%d)",
 			agentName, curSession, curSessionTotal, turnsDone, curTurnTotal))
 	}
+	advance := func(_, turnIndex, _ int) {
+		render(turnIndex + 1)
+	}
 	progress = &agentimport.Progress{
 		SessionStart: func(sessionIndex, sessionTotal int, _, _ string, turnCount int) {
 			curSession, curSessionTotal, curTurnTotal = sessionIndex+1, sessionTotal, turnCount
 			render(0)
 		},
-		TurnWritten: func(_, turnIndex, _ int) {
-			render(turnIndex + 1)
-		},
+		// TurnWritten and TurnSkipped share the same advance path: the
+		// counter must sweep to turnCount/turnCount regardless of *why* a
+		// turn didn't need writing (already imported, or DryRun), otherwise
+		// a fully-skipped or dry-run session's completion line would freeze
+		// at "turn 0/M".
+		TurnWritten: advance,
+		TurnSkipped: advance,
 	}
 	return progress, spinnerStop
 }
