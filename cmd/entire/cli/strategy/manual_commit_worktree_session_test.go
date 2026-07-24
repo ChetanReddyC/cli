@@ -361,8 +361,8 @@ func TestManualCommitStrategy_FindSessionsForWorktree_WarnsOnAmbiguousSiblingSes
 	logging.Close()
 	logs := readSessionMatchLogs(t, commitWorktree)
 	require.Contains(t, logs, `"level":"WARN"`, "ambiguous sibling sessions must be surfaced at WARN, not DEBUG")
-	require.Contains(t, logs, "refusing to guess")
-	require.Contains(t, logs, "entire session adopt")
+	require.Contains(t, logs, "ambiguous sessions across worktrees")
+	require.Contains(t, logs, "candidate_worktrees")
 }
 
 func readSessionMatchLogs(t *testing.T, repoDir string) string {

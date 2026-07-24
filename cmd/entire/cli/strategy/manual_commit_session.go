@@ -252,7 +252,7 @@ func warnAmbiguousWorktreeSessions(ctx context.Context, worktreePath string, can
 		seen[state.WorktreePath] = struct{}{}
 		worktrees = append(worktrees, state.WorktreePath)
 	}
-	logging.Warn(logCtx, "session matching: live sessions in multiple worktrees of this repo match; refusing to guess, so commits here will not be linked — run 'entire session adopt --from <worktree>' to link one explicitly",
+	logging.Warn(logCtx, "session matching: ambiguous sessions across worktrees; commit will not be linked",
 		slog.String("commit_worktree", worktreePath),
 		slog.Int("candidate_sessions", len(candidates)),
 		slog.Any("candidate_worktrees", worktrees),
