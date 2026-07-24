@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -13,8 +14,10 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/spf13/cobra"
 )
 
@@ -117,8 +120,93 @@ func newAuthCmd() *cobra.Command {
 	cmd.AddCommand(newLoginCmd())
 	cmd.AddCommand(newLogoutCmd())
 	cmd.AddCommand(newAuthStatusCmd())
+	cmd.AddCommand(newAuthTokenCmd())
 	cmd.AddCommand(newAuthContextsCmd())
 	cmd.AddCommand(newAuthUseCmd())
+	return cmd
+}
+
+// --- token ------------------------------------------------------------------
+
+// newAuthTokenCmd prints an Entire bearer to stdout for scripting. By default
+// that's the active control-plane bearer (resolved the same way the API client's
+// is: ENTIRE_TOKEN verbatim when set, otherwise the active context's login JWT,
+// refreshed if near expiry); with --jurisdiction it mints a data-plane cell
+// identity token for that jurisdiction instead. The user-facing Long and Example
+// carry the detail and the "treat the output as a secret" caveat; only the token
+// is printed — errors and the not-logged-in hint go to stderr so command
+// substitution stays clean.
+func newAuthTokenCmd() *cobra.Command {
+	var insecureHTTPAuth bool
+	var jurisdiction string
+	cmd := &cobra.Command{
+		Use:   "token",
+		Short: "Print an Entire bearer token — a live credential, treat as a secret",
+		Long: "Print an Entire bearer token to stdout so scripts and ad-hoc curl can\n" +
+			"authenticate without plumbing auth themselves.\n\n" +
+			"By default it prints the control-plane bearer: the same one the API client\n" +
+			"uses (ENTIRE_TOKEN verbatim when set, otherwise the active context's login\n" +
+			"JWT, refreshed if near expiry), for the control-plane API (orgs, repos,\n" +
+			"clusters, /me).\n\n" +
+			"With --jurisdiction <slug> it instead mints a jurisdictional identity token\n" +
+			"for that jurisdiction's entire-api cells (e.g.\n" +
+			"https://aws-us-east-2.api.entire.io/api/v1), which reject the control-plane\n" +
+			"bearer. The slug is a jurisdiction like 'us' or 'eu' (find yours with\n" +
+			"'entire auth status'); the token works against any cell in that\n" +
+			"jurisdiction. It is minted by exchanging your login (or ENTIRE_TOKEN, when\n" +
+			"set) for the jurisdiction's audience.\n\n" +
+			"The output is a live credential — treat it as a secret. Only the token is\n" +
+			"printed to stdout; errors and the not-logged-in hint go to stderr so command\n" +
+			"substitution stays clean.",
+		Example: "  curl -H \"Authorization: Bearer $(entire auth token)\" \"https://us.console.entire.io/api/v1/clusters\"\n" +
+			"  curl -H \"Authorization: Bearer $(entire auth token --jurisdiction us)\" \"https://aws-us-east-2.api.entire.io/api/v1/me/activity\"",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Refresh may exchange/refresh over the network; honor the
+			// plain-HTTP opt-in before resolving so local dev cores work.
+			insecure := applyInsecureHTTPAuth(insecureHTTPAuth)
+
+			// --jurisdiction mints a data-plane cell identity token instead of the
+			// control-plane bearer. JurisdictionToken performs its own TLS/exchange
+			// guards and returns context-rich errors.
+			if strings.TrimSpace(jurisdiction) != "" {
+				token, err := auth.JurisdictionToken(cmd.Context(), insecure, jurisdiction)
+				if err != nil {
+					cmd.SilenceUsage = true
+					if errors.Is(err, auth.ErrNotLoggedIn) {
+						fmt.Fprintln(cmd.ErrOrStderr(), "Not logged in. Run 'entire login' to authenticate.")
+						return NewSilentError(err)
+					}
+					return err //nolint:wrapcheck // JurisdictionToken already returns contextual auth errors
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), token)
+				return nil
+			}
+
+			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
+			if err != nil {
+				return err
+			}
+			// Don't mint/print a bearer for an insecure core unless explicitly
+			// opted in — the token would otherwise be usable over plain HTTP.
+			// Mirrors `auth status`.
+			if !insecure && target.coreURL != "" {
+				if err := api.RequireSecureURL(target.coreURL); err != nil {
+					cmd.SilenceUsage = true
+					return fmt.Errorf("login server URL check: %w", err)
+				}
+			}
+			if target.token == "" {
+				cmd.SilenceUsage = true
+				fmt.Fprintln(cmd.ErrOrStderr(), "Not logged in. Run 'entire login' to authenticate.")
+				return NewSilentError(errors.New("not logged in"))
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), target.token)
+			return nil
+		},
+	}
+	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
+	cmd.Flags().StringVarP(&jurisdiction, "jurisdiction", "j", "", "mint a jurisdictional identity token for this jurisdiction slug (e.g. us, eu) for use against that jurisdiction's entire-api cells")
 	return cmd
 }
 
@@ -130,7 +218,7 @@ func newAuthStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Show authentication status",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			target, err := resolveStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
+			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
 			if err != nil {
 				return err
 			}
@@ -155,6 +243,9 @@ type authProfile struct {
 	Email          string
 	Provider       string
 	ProviderUserID string
+	// Jurisdiction is the caller's home jurisdiction slug (e.g. "eu"), used to
+	// pick the default mirror cluster for that jurisdiction. May be empty.
+	Jurisdiction string
 }
 
 // profileFetcher fetches a user's profile via GET /me on coreURL, authenticated
@@ -179,11 +270,43 @@ type loginTokenResolver func(ctx context.Context, c *contexts.Context) (string, 
 // CoreURL + its session token. Zero coreURL/token means not logged in.
 // Shared by `auth status` (profile + session list) and `logout`
 // (revocation) so both hit the same login server.
+//
+// envToken marks the target as resolved from ENTIRE_TOKEN rather than a stored
+// context: the bearer is the env token itself, sent verbatim to its own aud,
+// and there is no stored session to manage — so status renders it without the
+// context/keychain/session lines.
 type statusTarget struct {
 	coreURL       string
 	token         string
 	activeContext string
 	totalContexts int
+	envToken      bool
+}
+
+// resolveAuthStatusTarget picks the target for `entire auth status`, honouring
+// ENTIRE_TOKEN: when it is set the request dials the token's own aud (exactly
+// as coreapi.New does), so status must report that core, not a stored context
+// that the request never touches. `logout` deliberately does NOT use this —
+// logout manages a stored login session, which an ephemeral env token has none
+// of, so it stays on resolveStatusTarget (the active context).
+func resolveAuthStatusTarget(ctx context.Context, listContexts contextsProvider, resolveLogin loginTokenResolver) (statusTarget, error) {
+	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
+		return resolveEnvTokenStatusTarget(raw)
+	}
+	return resolveStatusTarget(ctx, listContexts, resolveLogin)
+}
+
+// resolveEnvTokenStatusTarget builds the status target from ENTIRE_TOKEN via the
+// shared auth.ParseEnvToken — the same trim/blank/aud validation coreapi.New
+// applies — so status reports exactly the core a request would dial. The token
+// is the bearer; fail-closed (a blank or malformed value errors, never falls
+// back to a stored context).
+func resolveEnvTokenStatusTarget(raw string) (statusTarget, error) {
+	coreURL, token, err := auth.ParseEnvToken(raw)
+	if err != nil {
+		return statusTarget{}, err //nolint:wrapcheck // auth.ParseEnvToken already prefixes with EnvTokenVar
+	}
+	return statusTarget{coreURL: coreURL, token: token, envToken: true}, nil
 }
 
 // resolveStatusTarget picks the core + token for `entire auth status` (and
@@ -243,6 +366,7 @@ func defaultFetchProfile(ctx context.Context, coreURL, token string) (*authProfi
 		ProviderUserID: me.Auth.ProviderUserId,
 	}
 	p.Handle, _ = me.Global.Handle.Get()
+	p.Jurisdiction, _ = me.Jurisdiction.Get()
 	if reg, ok := me.Regional.Get(); ok {
 		p.DisplayName, _ = reg.DisplayName.Get()
 		p.Email, _ = reg.Email.Get()
@@ -282,10 +406,19 @@ func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher
 
 	fmt.Fprintf(w, "Logged in to %s\n", t.coreURL)
 	writeProfileLines(w, profile)
-	if t.activeContext != "" {
-		fmt.Fprintf(w, "  %-9s %s\n", "Context:", t.activeContext)
+
+	// ENTIRE_TOKEN mode: no stored context, keychain slot, or revocable
+	// session — the bearer is the env var itself. Name that and stop, rather
+	// than printing context/keychain/session lines that don't apply.
+	if t.envToken {
+		writeAuthStatusLine(w, "Token:", auth.EnvTokenVar+" environment variable")
+		return nil
 	}
-	fmt.Fprintf(w, "  %-9s %s\n", "Token:", "stored in OS keychain")
+
+	if t.activeContext != "" {
+		writeAuthStatusLine(w, "Context:", t.activeContext)
+	}
+	writeAuthStatusLine(w, "Token:", "stored in "+tokenstore.BackendDescription())
 
 	// Active sessions on this core. The token is already known good, so a
 	// listing failure is non-fatal — note it and carry on.
@@ -307,6 +440,14 @@ func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher
 	return nil
 }
 
+// writeAuthStatusLine writes one aligned "  Label   value" row of the
+// `entire auth status` block. writeProfileLines and runAuthStatus both render
+// into this same column, so the label width lives here in one place (it must be
+// ≥ the longest label, currently "Jurisdiction:").
+func writeAuthStatusLine(w io.Writer, label, value string) {
+	fmt.Fprintf(w, "  %-13s %s\n", label, value)
+}
+
 // writeProfileLines renders the user identity from GET /me as aligned
 // label/value lines, omitting any field the server didn't populate.
 func writeProfileLines(w io.Writer, p *authProfile) {
@@ -321,14 +462,19 @@ func writeProfileLines(w io.Writer, p *authProfile) {
 		parts = append(parts, "<"+p.Email+">")
 	}
 	if len(parts) > 0 {
-		fmt.Fprintf(w, "  %-9s %s\n", "User:", strings.Join(parts, " "))
+		writeAuthStatusLine(w, "User:", strings.Join(parts, " "))
 	}
 	if p.Provider != "" {
 		identity := p.Provider
 		if p.ProviderUserID != "" {
 			identity += "/" + p.ProviderUserID
 		}
-		fmt.Fprintf(w, "  %-9s %s\n", "Identity:", identity)
+		writeAuthStatusLine(w, "Identity:", identity)
+	}
+	// The home jurisdiction slug is what 'entire auth token --jurisdiction'
+	// takes; surface it so it's discoverable non-interactively.
+	if p.Jurisdiction != "" {
+		writeAuthStatusLine(w, "Jurisdiction:", p.Jurisdiction)
 	}
 }
 
@@ -352,8 +498,8 @@ func newAuthTableStyles(w io.Writer) authTableStyles {
 	if !useColor {
 		return s
 	}
-	s.header = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true)
-	s.id = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
+	s.header = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Bold(true)
+	s.id = lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Warning)) // yellow
 	s.name = lipgloss.NewStyle().Bold(true)
 	s.value = lipgloss.NewStyle() // default fg
 	return s

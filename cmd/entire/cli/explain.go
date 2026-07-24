@@ -25,6 +25,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -44,8 +45,6 @@ import (
 	"golang.org/x/term"
 )
 
-const defaultCheckpointSummaryTimeout = 5 * time.Minute
-
 const (
 	pagerEnvVar       = "PAGER"
 	lessEnvVar        = "LESS"
@@ -54,16 +53,14 @@ const (
 	windowsGOOS       = "windows"
 )
 
-var checkpointSummaryTimeout = defaultCheckpointSummaryTimeout
-
 var generateTranscriptSummary = summarize.GenerateFromTranscript
 
 // resolveSummaryTimeout picks the effective deadline for `explain --generate`
-// using the precedence: per-run flag > settings.summary_timeout_seconds >
-// package default. Zero or negative values at any layer mean "unset; consult
-// the next layer down" — matching SummaryTimeoutValue() semantics.
+// using the precedence: per-run flag > settings.summary_timeout_seconds > 0.
+// Returns 0 to mean "no deadline" — the caller skips context.WithTimeout
+// entirely and the provider call inherits the parent context unchanged.
 //
-// Settings load failures are logged at debug and fall through to the default;
+// Settings load failures are logged at debug and fall through to 0;
 // a parsing hiccup must not break summary generation.
 func resolveSummaryTimeout(ctx context.Context, flagSeconds int) time.Duration {
 	if flagSeconds > 0 {
@@ -71,14 +68,14 @@ func resolveSummaryTimeout(ctx context.Context, flagSeconds int) time.Duration {
 	}
 	s, err := settings.Load(ctx)
 	if err != nil {
-		logging.Debug(ctx, "summary timeout: settings load failed, using default",
+		logging.Debug(ctx, "summary timeout: settings load failed; no deadline",
 			slog.String("error", err.Error()))
-		return checkpointSummaryTimeout
+		return 0
 	}
 	if v := s.SummaryTimeoutValue(); v > 0 {
 		return v
 	}
-	return checkpointSummaryTimeout
+	return 0
 }
 
 // errCannotGenerateTemporaryCheckpoint is returned by runExplainCheckpoint when
@@ -89,8 +86,8 @@ var errCannotGenerateTemporaryCheckpoint = errors.New("cannot generate summary f
 
 type explainCheckpointLookup struct {
 	repo      *git.Repository
-	store     *checkpoint.GitStore
-	committed []checkpoint.CommittedInfo
+	store     checkpoint.PersistentStore
+	committed []checkpoint.CheckpointInfo
 }
 
 func (l *explainCheckpointLookup) Close() error {
@@ -121,8 +118,8 @@ func printNoTrailerMessage(w io.Writer, repo *git.Repository, hash plumbing.Hash
 	rows := []explainRow{
 		{Label: "commit", Value: abbreviateCommitHash(repo, hash)},
 		{Label: "reason", Value: "no Entire-Checkpoint trailer"},
-		{Label: "hint", Value: "this commit was not created during an Entire session,"},
-		{Label: "", Value: "or the trailer was removed"},
+		{Label: "hint", Value: "the commit exists but was not created during an Entire session"},
+		{Label: "", Value: "(or its trailer was removed)"},
 	}
 	fmt.Fprint(w, styles.renderFailure("No associated Entire checkpoint", rows))
 }
@@ -213,13 +210,6 @@ func abbreviateCommitHash(repo *git.Repository, hash plumbing.Hash) string {
 	return full
 }
 
-// interaction holds a single prompt and its responses for display.
-type interaction struct {
-	Prompt    string
-	Responses []string // Multiple responses can occur between tool calls
-	Files     []string
-}
-
 // associatedCommit holds information about a git commit associated with a checkpoint.
 type associatedCommit struct {
 	SHA      string
@@ -228,20 +218,6 @@ type associatedCommit struct {
 	Author   string
 	Email    string
 	Date     time.Time
-}
-
-// checkpointDetail holds detailed information about a checkpoint for display.
-type checkpointDetail struct {
-	Index            int
-	ShortID          string
-	Timestamp        time.Time
-	IsTaskCheckpoint bool
-	Message          string
-	// Interactions contains all prompt/response pairs in this checkpoint.
-	// Most strategies have one, but shadow condensations may have multiple.
-	Interactions []interaction
-	// Files is the aggregate list of all files modified (for backwards compat)
-	Files []string
 }
 
 func newExplainCmd() *cobra.Command {
@@ -273,9 +249,9 @@ By default, shows checkpoints on the current branch. Pass a checkpoint ID or
 commit SHA as a positional argument to explain a specific item, or use flags.
 
 Viewing specific items:
-  entire explain <id-or-sha>           Auto-detects checkpoint ID or commit SHA
-  entire explain --checkpoint <id>     Force interpretation as checkpoint ID
-  entire explain --commit <ref>        Force interpretation as commit ref
+  entire checkpoint explain <id-or-sha>           Auto-detects checkpoint ID or commit SHA
+  entire checkpoint explain --checkpoint <id>     Force interpretation as checkpoint ID
+  entire checkpoint explain --commit <ref>        Force interpretation as commit ref
 
 Filtering the list view:
   --session      Filter checkpoints by session ID (or prefix)
@@ -424,7 +400,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream stored checkpoint transcript bytes to stdout")
 	cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "Session index within a multi-session checkpoint (0-based, defaults to latest)")
 	cmd.Flags().IntVar(&listLimit, "limit", 0, "Cap the list view at N checkpoints (default: 100). Only meaningful with --json.")
-	cmd.Flags().IntVar(&summaryTimeoutSecondsFlag, "summary-timeout-seconds", 0, "Hard deadline in seconds for --generate summary generation; overrides summary_timeout_seconds setting. 0 = use setting or 5m default.")
+	cmd.Flags().IntVar(&summaryTimeoutSecondsFlag, "summary-timeout-seconds", 0, "Hard deadline in seconds for --generate summary generation; overrides summary_timeout_seconds setting. 0 = use setting; if setting is also unset or 0, no automatic deadline applies.")
 
 	// Verbosity / transcript output modes are mutually exclusive
 	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "transcript", "json")
@@ -469,15 +445,39 @@ func runExplain(ctx context.Context, w, errW io.Writer, sessionID, commitRef, ch
 	}
 
 	// Default or with session filter: show list view (optionally filtered by session)
-	return runExplainBranchWithFilter(ctx, w, noPager, sessionID)
+	return runExplainBranchWithFilter(ctx, w, errW, noPager, sessionID)
+}
+
+// explainTargetNotFoundError reports that the requested checkpoint target
+// matched no committed or temporary checkpoint. It unwraps to
+// checkpoint.ErrCheckpointNotFound so callers' errors.Is contracts keep
+// working, while runExplainAuto can distinguish this resolution miss from a
+// failure AFTER a successful match that happens to wrap the same sentinel
+// (e.g. "failed to save summary: checkpoint not found" from a backfill
+// against a backend missing the checkpoint) — those must surface verbatim,
+// not be masked by the commit fallback's "no checkpoint or commit found".
+type explainTargetNotFoundError struct{ target string }
+
+func (e *explainTargetNotFoundError) Error() string {
+	return fmt.Sprintf("%s: %s", checkpoint.ErrCheckpointNotFound, e.target)
+}
+
+func (e *explainTargetNotFoundError) Unwrap() error { return checkpoint.ErrCheckpointNotFound }
+
+// shouldFallBackToCommitResolution reports whether the checkpoint path's error
+// means "the target matched nothing", the only outcome that may fall through
+// to git commit resolution.
+func shouldFallBackToCommitResolution(err error) bool {
+	var targetMiss *explainTargetNotFoundError
+	return errors.As(err, &targetMiss)
 }
 
 // runExplainAuto resolves a positional target as either a checkpoint ID
 // (or prefix) or a git commit ref. Ordering: checkpoint path first (which
 // also handles shadow-branch temp checkpoints), falling back to commit
-// resolution only on checkpoint.ErrCheckpointNotFound. --generate runs
-// an ambiguity pre-check to avoid writing a summary to the wrong
-// checkpoint on short-prefix collisions.
+// resolution only on the target-miss error (explainTargetNotFoundError).
+// --generate runs an ambiguity pre-check to avoid writing a summary to the
+// wrong checkpoint on short-prefix collisions.
 func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool, summaryTimeoutSeconds int) error {
 	stop := startSpinner(errW, "Loading checkpoints")
 	lookup, lookupErr := newExplainCheckpointLookup(ctx)
@@ -495,11 +495,15 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		return nil
 	}
 	// Fall back to commit resolution ONLY when nothing (committed or temp)
-	// matched the target. errCannotGenerateTemporaryCheckpoint signals that
-	// we DID match a temp checkpoint but --generate is unsupported for it;
-	// falling back to commit in that case would produce a misleading
+	// matched the target. Errors from steps AFTER a successful match — even
+	// ones wrapping checkpoint.ErrCheckpointNotFound, like a summary backfill
+	// failing against a backend missing the checkpoint — surface verbatim;
+	// falling back would misreport them as "no checkpoint or commit found"
+	// for a target that DID resolve. errCannotGenerateTemporaryCheckpoint
+	// likewise signals we matched a temp checkpoint but --generate is
+	// unsupported for it; a commit fallback there would produce a misleading
 	// "no trailer" error for the shadow-branch commit.
-	if !errors.Is(checkpointErr, checkpoint.ErrCheckpointNotFound) {
+	if !shouldFallBackToCommitResolution(checkpointErr) {
 		return checkpointErr
 	}
 	logging.Debug(ctx, "explain auto: checkpoint lookup failed, trying commit fallback",
@@ -540,7 +544,12 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		slog.String("target", target),
 		slog.String("commit", abbreviateCommitHash(lookup.repo, hash)),
 		slog.String("checkpoint_id", cpID.String()))
-	return runExplainCheckpointWithLookup(ctx, w, errW, cpID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, lookup, nil, summaryTimeoutSeconds)
+	if err := runExplainCheckpointWithLookup(ctx, w, errW, cpID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, lookup, nil, summaryTimeoutSeconds); err != nil {
+		// The user typed a commit, not this checkpoint ID — without the
+		// trailer linkage the error reads as if they asked for an unknown ID.
+		return fmt.Errorf("commit %s references checkpoint %s via its Entire-Checkpoint trailer: %w", abbreviateCommitHash(lookup.repo, hash), cpID, err)
+	}
+	return nil
 }
 
 // runExplainAutoAmbiguityGuard refuses --generate when the positional
@@ -551,10 +560,9 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 // Best-effort: on repo/list failures we return nil so the main flow
 // surfaces the real error instead of double-reporting.
 func runExplainAutoAmbiguityGuard(ctx context.Context, target string, lookup *explainCheckpointLookup, lookupErr error) error {
-	// Targets longer than a checkpoint ID can't prefix-match one.
-	// This is coupled to checkpoint IDs being fixed-width; longer targets
-	// cannot be prefixes of committed checkpoint IDs.
-	if len(target) > id.ShortIDLength {
+	// Targets longer than the longest possible checkpoint ID (a 26-char ULID)
+	// can't be a prefix of one, so they can't be an ambiguous checkpoint target.
+	if len(target) > id.MaxIDLength {
 		return nil
 	}
 	if lookupErr != nil {
@@ -629,7 +637,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		// Check temp checkpoints BEFORE returning errCannotGenerateTemporaryCheckpoint
 		// so runExplainAuto can distinguish:
 		//   - target matched a real temp checkpoint (sentinel returned, no fallback)
-		//   - target matched nothing (ErrCheckpointNotFound, safe to fall back to commit)
+		//   - target matched nothing (explainTargetNotFoundError, safe to fall back to commit)
 		// Previously the --generate path bailed before checking temp checkpoints,
 		// which made runExplainAuto fall back to commit resolution for temp
 		// checkpoint SHAs and produce a misleading "no trailer" error.
@@ -638,7 +646,11 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		// layer, so rawTranscript is always false when generate is true; the
 		// direct-to-w write path inside explainTemporaryCheckpoint is not
 		// reachable here and won't leak partial output on error.
-		output, found, tempErr := explainTemporaryCheckpoint(ctx, w, errW, lookup.repo, checkpoint.NewGitStore(lookup.repo, checkpoint.ResolveCommittedRefs(ctx)), checkpointIDPrefix, verbose, full, rawTranscript)
+		tempStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{})
+		if openErr != nil {
+			return fmt.Errorf("open checkpoint store: %w", openErr)
+		}
+		output, found, tempErr := explainTemporaryCheckpoint(ctx, w, errW, lookup.repo, tempStores.Ephemeral(), checkpointIDPrefix, verbose, full, rawTranscript)
 		if tempErr != nil {
 			return tempErr
 		}
@@ -649,7 +661,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 			outputExplainContent(w, output, noPager)
 			return nil
 		}
-		return fmt.Errorf("%w: %s", checkpoint.ErrCheckpointNotFound, checkpointIDPrefix)
+		return &explainTargetNotFoundError{target: checkpointIDPrefix}
 	case 1:
 		fullCheckpointID = matches[0]
 	default:
@@ -659,6 +671,26 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		ambig := buildAmbiguousCheckpointMatches(matches, lookup.committed)
 		renderAmbiguousPrefixFailure(errW, checkpointIDPrefix, "committed checkpoints", ambig)
 		return NewSilentError(fmt.Errorf("%w: %s matches %d checkpoints", errAmbiguousCommitPrefix, checkpointIDPrefix, len(matches)))
+	}
+
+	// Fast-fail on imported checkpoints before the expensive content load.
+	// --generate is read-only-rejected for imported history, so fetching
+	// transcript blobs first (prefetch + ReadLatestSessionContent inside
+	// loadCheckpointForExplain) is wasted work for a guaranteed rejection.
+	// Imported lives in the checkpoint metadata, so a metadata-only
+	// ReadCheckpoint settles it without reading any session content. On the
+	// non-imported path loadCheckpointForExplain re-reads this summary, but
+	// that extra metadata-only read is cheap and happens only under
+	// --generate — the skipped blob prefetch + transcript load on the
+	// imported path is the larger win.
+	if generate {
+		summary, summaryErr := checkpoint.ReadCheckpoint(ctx, lookup.store, fullCheckpointID)
+		if summaryErr != nil {
+			return fmt.Errorf("failed to read checkpoint %s: %w", fullCheckpointID, summaryErr)
+		}
+		if summary.Imported {
+			return fmt.Errorf("cannot generate a summary for imported checkpoint %s: imported history is read-only", fullCheckpointID)
+		}
 	}
 
 	// One spinner covers the entire data-loading pipeline: prefetch's
@@ -675,21 +707,33 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		stopLoad(false)
 		return err
 	}
-	// Handle summary generation — uses raw transcript.
+	// Handle summary generation — uses raw transcript. Imported history was
+	// already rejected above, before the content load.
 	if generate {
+		if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, lookup.repo); err != nil {
+			stopLoad(false)
+			return err
+		}
 		stopLoad(false) // generation prints its own progress to w/errW
-		writeStore := checkpoint.NewGitStore(lookup.repo, checkpoint.ResolveCommittedRefs(ctx))
-		if err := generateCheckpointSummary(ctx, w, errW, writeStore, fullCheckpointID, summary, content, force, summaryTimeoutSeconds); err != nil {
+		writeStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{})
+		if openErr != nil {
+			return fmt.Errorf("open checkpoint store: %w", openErr)
+		}
+		if err := generateCheckpointSummary(ctx, w, errW, writeStores.Persistent, fullCheckpointID, summary, content, force, summaryTimeoutSeconds); err != nil {
 			return err
 		}
 		// Reload to get the updated summary.
 		stopLoad = startSpinner(errW, fmt.Sprintf("Reloading checkpoint %s", fullCheckpointID))
-		lookup.store = checkpoint.NewGitStore(lookup.repo, checkpoint.ResolveCommittedRefs(ctx))
-		lookup.store.SetBlobFetcher(FetchBlobsByHash)
+		reopened, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+		if openErr != nil {
+			stopLoad(false)
+			return fmt.Errorf("open checkpoint store: %w", openErr)
+		}
+		lookup.store = reopened.Persistent
 		content, err = checkpoint.ReadLatestSessionContent(ctx, lookup.store, fullCheckpointID, summary)
 		if err != nil {
 			stopLoad(false)
-			return fmt.Errorf("failed to reload checkpoint: %w", err)
+			return fmt.Errorf("failed to reload checkpoint %s: %w", fullCheckpointID, err)
 		}
 	}
 
@@ -718,14 +762,14 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 			Name:  associatedCommits[0].Author,
 			Email: associatedCommits[0].Email,
 		}
-	} else {
-		author, _ = lookup.store.GetCheckpointAuthor(ctx, fullCheckpointID) //nolint:errcheck // Author is optional
+	} else if authorReader, ok := lookup.store.(checkpoint.AuthorReader); ok {
+		author, _ = authorReader.GetCheckpointAuthor(ctx, fullCheckpointID) //nolint:errcheck // Author is optional
 	}
 
 	// Format and output. Stop spinner BEFORE any write to w to keep stderr
 	// frames and stdout content from interleaving.
 	stopLoad(false)
-	output := formatCheckpointOutput(summary, content, fullCheckpointID, associatedCommits, author, verbose, full, w)
+	output := formatCheckpointOutput(ctx, summary, content, fullCheckpointID, associatedCommits, author, verbose, full, w)
 	outputExplainContent(w, output, noPager)
 	return nil
 }
@@ -739,14 +783,13 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 	prefetchCheckpointBlobs(ctx, lookup.repo, cpID)
 
 	store := lookup.store
-	summary, err := checkpoint.ReadCommittedCheckpoint(ctx, store, cpID)
+	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read checkpoint: %w", err)
+		return nil, nil, fmt.Errorf("failed to read checkpoint %s: %w", cpID, err)
 	}
-
 	content, contentErr := checkpoint.ReadLatestSessionContent(ctx, store, cpID, summary)
 	if contentErr != nil {
-		return nil, nil, fmt.Errorf("failed to read checkpoint content: %w", contentErr)
+		return nil, nil, fmt.Errorf("failed to read checkpoint content for %s: %w", cpID, contentErr)
 	}
 	return summary, content, nil
 }
@@ -762,7 +805,7 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 // inside this function so the caller's spinner provides continuous
 // feedback.
 func prefetchCheckpointBlobs(ctx context.Context, repo *git.Repository, cpID id.CheckpointID) {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	loadPrimaryRoot := func(repo *git.Repository) (*object.Tree, error) {
 		return loadPrimaryMetadataRootTree(ctx, repo, refs)
 	}
@@ -827,7 +870,7 @@ func runPreFetch(ctx context.Context, ft *checkpoint.FetchingTree, cpID id.Check
 
 // loadPrimaryMetadataRootTree reads the tree at refs.Primary, falling back to
 // origin's remote-tracking ref when Primary is pushed.
-func loadPrimaryMetadataRootTree(ctx context.Context, repo *git.Repository, refs checkpoint.CommittedRefs) (*object.Tree, error) {
+func loadPrimaryMetadataRootTree(ctx context.Context, repo *git.Repository, refs checkpoint.PersistentRefs) (*object.Tree, error) {
 	if tree, err := strategy.GetMetadataRefTree(repo, refs.Primary); err == nil {
 		return tree, nil
 	}
@@ -857,15 +900,18 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 	// `git fetch` fails against partial-clone repos with "did not send all
 	// necessary objects"). Falls back to a full metadata-branch fetch if
 	// fetch-pack also can't reach the blobs.
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
-	store.SetBlobFetcher(FetchBlobsByHash)
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	if err != nil {
+		return nil, fmt.Errorf("open checkpoint store: %w", err)
+	}
+	store := stores.Persistent
 
 	lookup := &explainCheckpointLookup{
 		repo:  repo,
 		store: store,
 	}
 
-	committed, err := store.ListCommitted(ctx)
+	committed, err := store.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list checkpoints: %w", err)
 	}
@@ -880,13 +926,13 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 //
 // summaryTimeoutSeconds is the per-invocation --summary-timeout-seconds flag
 // value (0 = unset). Effective precedence for the deadline: flag > settings >
-// package default. See resolveSummaryTimeout for the resolution.
-func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store *checkpoint.GitStore, checkpointID id.CheckpointID, cpSummary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, force bool, summaryTimeoutSeconds int) error {
+// no deadline. See resolveSummaryTimeout for the resolution.
+func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store checkpoint.Writer, checkpointID id.CheckpointID, cpSummary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, force bool, summaryTimeoutSeconds int) error {
 	// Check if summary already exists
 	if content.Metadata.Summary != nil && !force {
 		return renderExplainFailure(errW, "Summary already exists", []explainRow{
 			{Label: "id", Value: checkpointID.String()},
-			{Label: "try", Value: fmt.Sprintf("entire explain --generate --force %s", checkpointID)},
+			{Label: "try", Value: fmt.Sprintf("entire checkpoint explain --generate --force %s", checkpointID)},
 		}, fmt.Errorf("checkpoint %s already has a summary", checkpointID))
 	}
 
@@ -908,33 +954,42 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store *ch
 	if err != nil {
 		return fmt.Errorf("failed to resolve summary provider: %w", err)
 	}
-	scopedTranscript = maybeCompactExternalTranscriptForSummary(ctx, scopedTranscript, content.Metadata.Agent)
+	scopedTranscript = maybeCompactExternalTranscript(ctx, scopedTranscript, content.Metadata.Agent)
 
 	// Generate summary using shared helper
 	logging.Info(ctx, "generating checkpoint summary")
 	if errW != nil {
-		fmt.Fprintln(errW, "Generating checkpoint summary...")
+		fmt.Fprintf(errW, "Generating checkpoint summary... (transcript: %s, provider: %s)\n",
+			humanizeBytes(len(scopedTranscript)), provider.Name)
 	}
 
 	timeout := resolveSummaryTimeout(ctx, summaryTimeoutSeconds)
 
+	attempt := newSummaryAttempt(provider.Name, timeout)
+	// Set streaming eagerly from the provider's capability rather than waiting
+	// for the first progress event: a streaming provider that stalls before
+	// emitting anything should still get the streaming timeout diagnostic
+	// ("never sent its request"), not "provider produced no output".
+	attempt.streaming = provider.Streaming
+	progressWriter := newSummaryProgressWriter(errW, attempt)
+
 	start := time.Now()
-	summary, appliedDeadline, err := generateCheckpointAISummary(ctx, scopedTranscript, cpSummary.FilesTouched, content.Metadata.Agent, provider.Generator, timeout)
+	summary, err := generateCheckpointAISummary(
+		ctx, scopedTranscript, cpSummary.FilesTouched,
+		content.Metadata.Agent, provider.Generator,
+		timeout, progressWriter.handle, attempt,
+	)
 	if err != nil {
-		label, rows, structured := formatCheckpointSummaryError(err, appliedDeadline)
+		progressWriter.Flush()
+		label, rows, structured := formatCheckpointSummaryError(err, attempt)
 		styles := newStatusStyles(errW)
 		fmt.Fprint(errW, styles.renderFailure(label, rows))
 		return NewSilentError(structured)
 	}
 	elapsed := time.Since(start)
 
-	if err := store.UpdateSummary(ctx, checkpointID, summary); err != nil {
+	if err := store.Write(ctx, checkpoint.SessionSummary{CheckpointID: checkpointID, Summary: summary}); err != nil {
 		return fmt.Errorf("failed to save summary: %w", err)
-	}
-
-	refs := checkpoint.ResolveCommittedRefs(ctx)
-	if err := strategy.MirrorCommittedMetadataRef(ctx, store.Repository(), refs); err != nil {
-		return fmt.Errorf("summary was written to %s, but failed to mirror to %s: %w", refs.Primary, refs.Mirror, err)
 	}
 
 	styles := newStatusStyles(w)
@@ -949,7 +1004,7 @@ func formatSummaryDuration(d time.Duration) string {
 	return d.Round(100 * time.Millisecond).String()
 }
 
-func maybeCompactExternalTranscriptForSummary(ctx context.Context, scopedTranscript []byte, agentType types.AgentType) []byte {
+func maybeCompactExternalTranscript(ctx context.Context, scopedTranscript []byte, agentType types.AgentType) []byte {
 	if transcriptHasSummaryContent(scopedTranscript, agentType) {
 		return scopedTranscript
 	}
@@ -1030,39 +1085,55 @@ func transcriptHasSummaryContent(transcriptBytes []byte, agentType types.AgentTy
 	return err == nil && len(entries) > 0
 }
 
-// generateCheckpointAISummary returns the generated summary, the effective
-// deadline applied to the underlying call (which may be shorter than the
-// requested timeout if the parent context had an earlier deadline), and any
-// error. The effective deadline is returned so the caller can render the
-// true timeout value in user-facing error messages instead of always
-// showing the requested value.
-func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, filesTouched []string, agentType types.AgentType, generator summarize.Generator, timeout time.Duration) (*checkpoint.Summary, time.Duration, error) {
-	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
-	timeoutDuration := timeout
-	if deadline, ok := timeoutCtx.Deadline(); ok {
-		timeoutDuration = time.Until(deadline)
+// generateCheckpointAISummary generates a checkpoint summary using the given
+// generator. When timeout > 0 a context.WithTimeout is applied; when timeout
+// is 0 the provider call inherits the parent context unchanged (no deadline
+// unless the parent already has one).
+func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, filesTouched []string, agentType types.AgentType, generator summarize.Generator, timeout time.Duration, progress agent.ProgressFn, attempt *summaryAttempt) (*checkpoint.Summary, error) {
+	runCtx := ctx
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
-	defer cancel()
 
 	// scopedTranscript is either read from checkpoint storage (redacted on
 	// write) or replaced by external compact output redacted before use.
-	summary, err := generateTranscriptSummary(timeoutCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, agentType, generator)
+	summary, err := generateTranscriptSummary(runCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, agentType, generator, progress)
 	if err != nil {
+		// Populate attempt with captured subprocess output before classifying
+		// the error, so the timeout-diagnostic path can surface stderr / byte count.
+		var failure *agent.TextGenerationError
+		if errors.As(err, &failure) {
+			attempt.stderrCaptured = failure.Stderr
+			attempt.stdoutByteCount = failure.StdoutBytes
+		}
 		// Only classify as ctx cancel/deadline when the error chain actually
-		// contains the sentinel. Relying on timeoutCtx.Err() here loses typed
+		// contains the sentinel. Relying on runCtx.Err() here loses typed
 		// errors (e.g. *ClaudeError) when the subprocess returned a real
-		// structured failure while timeoutCtx.Err() is non-nil for any reason
+		// structured failure while runCtx.Err() is non-nil for any reason
 		// (parent cancelled, deadline already elapsed, etc.).
 		if errors.Is(err, context.Canceled) {
-			return nil, timeoutDuration, fmt.Errorf("summary generation canceled: %w", err)
+			return nil, fmt.Errorf("summary generation canceled: %w", err)
 		}
+		// Trust err's chain only: if the subprocess returned an envelope
+		// error (e.g. *agent.TextGenerationError carrying a 404) while ctx
+		// happened to fire concurrently, we want the typed error to surface
+		// to the explain layer, not a generic "timed out" message. The
+		// inner generator (claudecode.GenerateTextStreaming) already gives
+		// envelope errors priority over ctx.Err(), so by the time err
+		// reaches us, DeadlineExceeded is only present in err if the
+		// timeout was actually the cause.
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, timeoutDuration, fmt.Errorf("summary generation timed out after %s: %w", formatSummaryTimeout(timeoutDuration), err)
+			if timeout > 0 {
+				return nil, fmt.Errorf("summary generation timed out after %s: %w", formatSummaryTimeout(timeout), context.DeadlineExceeded)
+			}
+			return nil, fmt.Errorf("summary generation timed out (parent context deadline): %w", context.DeadlineExceeded)
 		}
-		return nil, timeoutDuration, err
+		return nil, err
 	}
 
-	return summary, timeoutDuration, nil
+	return summary, nil
 }
 
 // formatCheckpointSummaryError maps typed Claude CLI errors and context
@@ -1073,7 +1144,7 @@ func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, f
 // renders to errW via newStatusStyles(...).renderFailure(label, rows). This
 // split keeps the formatting policy in one place (the failure block) while
 // letting the caller still return a *SilentError for main.go's exit handling.
-func formatCheckpointSummaryError(err error, deadline time.Duration) (string, []explainRow, error) {
+func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, []explainRow, error) {
 	var claudeErr *claudecode.ClaudeError
 	switch {
 	case errors.As(err, &claudeErr):
@@ -1117,24 +1188,121 @@ func formatCheckpointSummaryError(err error, deadline time.Duration) (string, []
 			return label, rows, fmt.Errorf("Claude failed to generate the summary%s", suffix) //nolint:staticcheck // ST1005
 		}
 	case errors.Is(err, context.DeadlineExceeded):
-		// Deliberately provider-neutral: explain --generate supports multiple
-		// summary providers (claude-code, codex, gemini, ...), so hardcoding
-		// "Claude" / "sonnet" / "Anthropic" here would misdirect users who
-		// selected a different provider in .entire/settings.json.
-		label := "Summary generation timed out after " + formatSummaryTimeout(deadline)
-		rows := []explainRow{
-			{Label: "causes", Value: ""},
-			{Label: "", Value: "• the selected model is taking longer than expected on a large transcript"},
-			{Label: "", Value: "• the summary provider's CLI cannot reach its API (network, VPN, firewall)"},
-			{Label: "", Value: "• the provider's API is degraded"},
-			{Label: "try", Value: "run the provider CLI directly to confirm it works"},
+		label, rows := timeoutDiagnostic(err, attempt)
+		structured := errors.New("summary generation timed out")
+		if attempt.deadline > 0 {
+			structured = fmt.Errorf("summary generation did not return within the %s safety deadline", formatSummaryTimeout(attempt.deadline))
 		}
-		return label, rows, fmt.Errorf("summary generation did not return within the %s safety deadline", formatSummaryTimeout(deadline))
+		return label, rows, structured
 	case errors.Is(err, context.Canceled):
 		return "Summary generation canceled", nil, errors.New("summary generation canceled")
 	default:
 		return "Failed to generate summary", []explainRow{{Label: "detail", Value: err.Error()}}, fmt.Errorf("failed to generate summary: %w", err)
 	}
+}
+
+// providerCLIName returns the user-facing CLI binary name for an agent,
+// delegating to the canonical map in the agent package. Empty string
+// means "not a summary-capable provider" — diagnostic copy then says
+// "the provider CLI" generically.
+//
+// Kept as a tiny wrapper here so timeoutDiagnostic doesn't import the
+// agent package directly for this single lookup, and so the diagnostic
+// stays consistent with which providers are actually summary-capable
+// (FactoryAIDroid and OpenCode are not, and never reach this code path).
+func providerCLIName(name types.AgentName) string {
+	return agent.SummaryCLIBinaryName(name)
+}
+
+// timeoutDiagnostic builds the label and supporting rows for a
+// context.DeadlineExceeded failure. The deadline can be: (a) the user's
+// --summary-timeout-seconds / summary_timeout_seconds, captured in
+// attempt.deadline; or (b) a parent-context deadline imposed externally,
+// in which case attempt.deadline is 0. We render the label without a
+// concrete duration when the latter is the only signal we have.
+func timeoutDiagnostic(_ error, attempt *summaryAttempt) (string, []explainRow) {
+	// Prefix the label: "Timed out after Xs:" when we know X; "Timed out:" otherwise.
+	prefix := "Timed out: "
+	if attempt.deadline > 0 {
+		prefix = "Timed out after " + formatSummaryTimeout(attempt.deadline) + ": "
+	}
+	tryRunCLI := "run the provider CLI directly to confirm it works"
+	if cli := providerCLIName(attempt.provider); cli != "" {
+		tryRunCLI = fmt.Sprintf("run `%s` directly to confirm it works", cli)
+	}
+
+	stderr := strings.TrimSpace(attempt.stderrCaptured)
+
+	// A streaming attempt with no phases but observed stdout means streaming
+	// degenerated to something else — e.g. the old-CLI flag-rejection fallback
+	// ran GenerateText, which produced output that never became progress
+	// events. Claiming "provider never sent its request" would be false;
+	// route to the evidence-based branches below instead.
+	sawAnyPhase := len(attempt.phasesReached) > 0
+	if attempt.streaming && (sawAnyPhase || attempt.stdoutByteCount == 0) {
+		// Key off the furthest phase reached, not the earliest one missing:
+		// PhaseConnecting comes from a version-dependent status event, so an
+		// older CLI can reach FirstToken/Generating without ever reporting
+		// Connecting — diagnosing that as "never sent its request" would
+		// contradict the progress lines the user just watched.
+		var label string
+		var rows []explainRow
+		switch {
+		case attempt.phasesReached[agent.PhaseDone]:
+			label = "model finished but the result was not delivered in time"
+			rows = []explainRow{
+				{Label: "cause", Value: "the deadline fired while the finished result was being read"},
+				{Label: "try", Value: "raise --summary-timeout-seconds and retry"},
+			}
+		case attempt.phasesReached[agent.PhaseGenerating], attempt.phasesReached[agent.PhaseFirstToken]:
+			label = "model responded but did not finish"
+			rows = []explainRow{
+				{Label: "cause", Value: "transcript may be too large for the chosen cap, or model is slow"},
+				{Label: "try", Value: "raise --summary-timeout-seconds or pick a faster model"},
+			}
+		case attempt.phasesReached[agent.PhaseConnecting]:
+			label = "provider sent request but received no response"
+			rows = []explainRow{
+				{Label: "cause", Value: "network/firewall, provider API degraded, or auth check stuck"},
+				{Label: "try", Value: "check connectivity to the provider, then retry"},
+			}
+		default:
+			label = "provider never sent its request"
+			rows = []explainRow{
+				{Label: "cause", Value: "the provider CLI may be stalled before subprocess startup"},
+				{Label: "try", Value: tryRunCLI},
+			}
+		}
+		// attempt.streaming is set eagerly when a streaming-capable provider
+		// is selected, so a provider that stalls before its first event lands
+		// here — surface the captured stderr rather than dropping it.
+		if stderr != "" {
+			rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+		}
+		return prefix + label, rows
+	}
+
+	stdoutBytes := attempt.stdoutByteCount
+
+	if stdoutBytes == 0 {
+		rows := []explainRow{
+			{Label: "cause", Value: "provider CLI produced no output (likely network/auth/CLI path issue)"},
+			{Label: "try", Value: tryRunCLI},
+		}
+		if stderr != "" {
+			rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+		}
+		return prefix + "provider produced no output", rows
+	}
+
+	rows := []explainRow{
+		{Label: "cause", Value: "provider was generating output but did not finish before cap"},
+		{Label: "try", Value: "raise --summary-timeout-seconds"},
+	}
+	if stderr != "" {
+		rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+	}
+	return prefix + "provider was generating output when killed", rows
 }
 
 // formatMessageSuffix formats ": <msg>" when msg is non-empty and "" otherwise.
@@ -1183,6 +1351,180 @@ func formatSummaryTimeout(d time.Duration) string {
 	return d.Round(time.Second).String()
 }
 
+// formatMs formats a millisecond count as "1.5s" / "120ms".
+func formatMs(ms int) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.1fs", float64(ms)/1000.0)
+}
+
+// humanizeBytes formats a byte count as a short human-readable string
+// (e.g., 0 B, 500 B, 1.5 KB, 47 KB, 1.2 MB). Uses 1024-based units.
+func humanizeBytes(n int) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := int64(n) / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	suffix := []string{"KB", "MB", "GB", "TB"}[exp]
+	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), suffix)
+}
+
+// summaryAttempt accumulates observable state during a single --generate
+// summary call. The progress writer populates the streaming fields as
+// events fire; the non-streaming Generate path populates stderrCaptured /
+// stdoutByteCount via *agent.TextGenerationError.
+// formatCheckpointSummaryError reads this struct at DeadlineExceeded to
+// build the timeout diagnostic message.
+type summaryAttempt struct {
+	streaming       bool
+	phasesReached   map[agent.ProgressPhase]bool
+	stderrCaptured  string
+	stdoutByteCount int
+	deadline        time.Duration
+	provider        types.AgentName
+}
+
+func newSummaryAttempt(provider types.AgentName, deadline time.Duration) *summaryAttempt {
+	return &summaryAttempt{
+		phasesReached: make(map[agent.ProgressPhase]bool),
+		deadline:      deadline,
+		provider:      provider,
+	}
+}
+
+// summaryProgressWriter renders agent.GenerationProgress events to the
+// configured writer using existing statusStyles, and side-effectfully
+// updates the supplied *summaryAttempt so the timeout-diagnostic path
+// can attribute failure to a specific phase. On a TTY (and outside
+// ACCESSIBLE mode) it rewrites the current line for the running token
+// count; otherwise it appends one line per event.
+//
+// Provider-neutral phrasing — "provider" stands in for the configured
+// summary provider. The provider name is interpolated into the initial
+// "Generating checkpoint summary..." line by generateCheckpointSummary,
+// not by this writer.
+type summaryProgressWriter struct {
+	w        io.Writer
+	inplace  bool
+	lastLine string
+	arrow    string // precomputed styled glyph
+	check    string // precomputed styled glyph
+	attempt  *summaryAttempt
+
+	// Throttle state for PhaseGenerating updates in non-TTY mode.
+	lastGenerateAt     time.Time
+	lastGenerateTokens int
+}
+
+func newSummaryProgressWriter(w io.Writer, attempt *summaryAttempt) *summaryProgressWriter {
+	styles := newStatusStyles(w)
+	inplace := interactive.IsTerminalWriter(w) && !IsAccessibleMode()
+	arrow := "->"
+	check := "*"
+	if !IsAccessibleMode() {
+		arrow = styles.render(styles.cyan, "→")
+		check = styles.render(styles.green, "✓")
+	}
+	return &summaryProgressWriter{
+		w:       w,
+		inplace: inplace,
+		arrow:   arrow,
+		check:   check,
+		attempt: attempt,
+	}
+}
+
+// shouldEmitGenerating decides whether a PhaseGenerating event should be
+// rendered in non-TTY mode. TTY mode dedupes natively via inplace updates
+// and the lastLine short-circuit, so this rule applies only to non-TTY.
+// Rule: emit at most one update per 500ms OR per 25% jump in OutputTokens,
+// whichever fires first.
+func (s *summaryProgressWriter) shouldEmitGenerating(p agent.GenerationProgress) bool {
+	if s.inplace {
+		return true // TTY: always — updateLine dedupes
+	}
+	now := time.Now()
+	if s.lastGenerateAt.IsZero() {
+		s.lastGenerateAt = now
+		s.lastGenerateTokens = p.OutputTokens
+		return true
+	}
+	if now.Sub(s.lastGenerateAt) >= 500*time.Millisecond {
+		s.lastGenerateAt = now
+		s.lastGenerateTokens = p.OutputTokens
+		return true
+	}
+	if s.lastGenerateTokens > 0 && p.OutputTokens >= s.lastGenerateTokens*5/4 {
+		s.lastGenerateAt = now
+		s.lastGenerateTokens = p.OutputTokens
+		return true
+	}
+	return false
+}
+
+func (s *summaryProgressWriter) handle(p agent.GenerationProgress) {
+	if s.attempt != nil {
+		s.attempt.streaming = true
+		s.attempt.phasesReached[p.Phase] = true
+	}
+
+	switch p.Phase {
+	case agent.PhaseConnecting:
+		s.printLine(s.arrow + " Sending request to provider...")
+	case agent.PhaseFirstToken:
+		s.printLine(fmt.Sprintf(
+			"%s Provider responded (TTFT %s, %s cached input tokens) -- generating...",
+			s.arrow, formatMs(p.TTFTms), formatTokenCount(p.CachedInputTokens)))
+	case agent.PhaseGenerating:
+		if !s.shouldEmitGenerating(p) {
+			return
+		}
+		s.updateLine(fmt.Sprintf(
+			"%s Writing summary... (~%s tokens)",
+			s.arrow, formatTokenCount(p.OutputTokens)))
+	case agent.PhaseDone:
+		s.printLine(fmt.Sprintf(
+			"%s Summary generated (%s, %s output tokens)",
+			s.check, formatMs(p.DurationMs), formatTokenCount(p.OutputTokens)))
+	}
+}
+
+// Flush clears any pending in-place line (e.g. mid-"Writing summary..." update)
+// so the caller can render an error block on a fresh row. No-op on non-TTY
+// since each event already terminates with a newline there.
+func (s *summaryProgressWriter) Flush() {
+	if s.inplace && s.lastLine != "" {
+		fmt.Fprint(s.w, "\r\033[2K")
+		s.lastLine = ""
+	}
+}
+
+func (s *summaryProgressWriter) printLine(line string) {
+	if s.inplace && s.lastLine != "" {
+		fmt.Fprint(s.w, "\r\033[2K")
+	}
+	fmt.Fprintln(s.w, line)
+	s.lastLine = ""
+}
+
+func (s *summaryProgressWriter) updateLine(line string) {
+	if s.lastLine == line {
+		return
+	}
+	if s.inplace {
+		fmt.Fprintf(s.w, "\r\033[2K%s", line)
+	} else {
+		fmt.Fprintln(s.w, line)
+	}
+	s.lastLine = line
+}
+
 // explainTemporaryCheckpoint finds and formats a temporary checkpoint by shadow commit hash prefix.
 // Returns the formatted output, whether the checkpoint was found, and an
 // optional error. When err is non-nil, the function has already rendered a
@@ -1191,16 +1533,18 @@ func formatSummaryTimeout(d time.Duration) string {
 // Searches ALL shadow branches, not just the one for current HEAD, to find checkpoints
 // created from different base commits (e.g., if HEAD advanced since session start).
 // The writer w is used for raw transcript output to bypass the pager.
-func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *git.Repository, store *checkpoint.GitStore, shaPrefix string, verbose, full, rawTranscript bool) (string, bool, error) {
+func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *git.Repository, store checkpoint.EphemeralStore, shaPrefix string, verbose, full, rawTranscript bool) (string, bool, error) {
 	// List temporary checkpoints from ALL shadow branches
 	// This ensures we find checkpoints even if HEAD has advanced since the session started
-	tempCheckpoints, err := store.ListAllTemporaryCheckpoints(ctx, "", branchCheckpointsLimit)
+	tempCheckpoints, err := store.ListAllCheckpoints(ctx, "", branchCheckpointsLimit)
 	if err != nil {
-		return "", false, nil //nolint:nilerr // best-effort: caller falls back to ErrCheckpointNotFound when no temp checkpoint is found
+		logging.Debug(ctx, "explain: listing temporary checkpoints failed; treating as no temp match",
+			slog.String("error", err.Error()))
+		return "", false, nil
 	}
 
 	// Find checkpoints matching the SHA prefix - check for ambiguity
-	var matches []checkpoint.TemporaryCheckpointInfo
+	var matches []checkpoint.EphemeralCheckpointInfo
 	for _, tc := range tempCheckpoints {
 		if strings.HasPrefix(tc.CommitHash.String(), shaPrefix) {
 			matches = append(matches, tc)
@@ -1234,12 +1578,20 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 	// Get shadow commit and tree to read metadata
 	shadowCommit, commitErr := repo.CommitObject(tc.CommitHash)
 	if commitErr != nil {
-		return "", false, nil //nolint:nilerr // best-effort: missing shadow commit is treated as not-found
+		// The prefix DID match this temp checkpoint; record why it still
+		// reads as not-found (pruned/gc'd shadow objects, IO errors).
+		logging.Debug(ctx, "explain: temp checkpoint matched but shadow commit unreadable; treating as not-found",
+			slog.String("commit", tc.CommitHash.String()),
+			slog.String("error", commitErr.Error()))
+		return "", false, nil
 	}
 
 	shadowTree, treeErr := shadowCommit.Tree()
 	if treeErr != nil {
-		return "", false, nil //nolint:nilerr // best-effort: missing shadow tree is treated as not-found
+		logging.Debug(ctx, "explain: temp checkpoint matched but shadow tree unreadable; treating as not-found",
+			slog.String("commit", tc.CommitHash.String()),
+			slog.String("error", treeErr.Error()))
+		return "", false, nil
 	}
 
 	// Read agent type from shadow branch metadata (stored during checkpoint creation)
@@ -1277,7 +1629,7 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 	sb.WriteString(styles.renderIdentity(label, "", rows))
 
 	intent := extractIntent(nil, sessionPrompt)
-	hint := "Not generated. Temporary checkpoints can be summarized after commit. Run `entire explain --generate` on the resulting commit."
+	hint := "Not generated. Temporary checkpoints can be summarized after commit. Run `entire checkpoint explain --generate` on the resulting commit."
 	sb.WriteString(renderExplainBody(w, buildNoSummaryMarkdown(intent, nil, hint)))
 
 	// Transcript section: full shows entire session, verbose shows checkpoint scope
@@ -1311,6 +1663,13 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 		sb.WriteString("\n")
 		sb.WriteString(styles.sectionRule(label, styles.width))
 		sb.WriteString("\n")
+		// External-agent transcripts are stored in native format; compact
+		// the one being rendered so it displays.
+		if full && len(fullTranscript) > 0 {
+			fullTranscript = maybeCompactExternalTranscript(ctx, fullTranscript, agentType)
+		} else if verbose && len(scopedTranscript) > 0 {
+			scopedTranscript = maybeCompactExternalTranscript(ctx, scopedTranscript, agentType)
+		}
 	}
 	appendTranscriptSection(&sb, verbose, full, fullTranscript, scopedTranscript, sessionPrompt, agentType)
 
@@ -1555,9 +1914,9 @@ func buildAmbiguousCommitMatches(repo *git.Repository, hashes []plumbing.Hash) [
 // into ambiguousMatch entries enriched with timestamps and session IDs from
 // the loaded committed-checkpoint listing. Caps at 5 entries to keep the
 // failure block readable when a short prefix collides on many checkpoints.
-func buildAmbiguousCheckpointMatches(ids []id.CheckpointID, committed []checkpoint.CommittedInfo) []ambiguousMatch {
+func buildAmbiguousCheckpointMatches(ids []id.CheckpointID, committed []checkpoint.CheckpointInfo) []ambiguousMatch {
 	const maxMatches = 5
-	infoByID := make(map[id.CheckpointID]checkpoint.CommittedInfo, len(committed))
+	infoByID := make(map[id.CheckpointID]checkpoint.CheckpointInfo, len(committed))
 	for _, info := range committed {
 		infoByID[info.CheckpointID] = info
 	}
@@ -1601,7 +1960,7 @@ func renderExplainBody(w io.Writer, md string) string {
 //
 // Author is displayed when available (only for committed checkpoints).
 // Associated commits are git commits that reference this checkpoint via Entire-Checkpoint trailer.
-func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, checkpointID id.CheckpointID, associatedCommits []associatedCommit, author checkpoint.Author, verbose, full bool, w io.Writer) string {
+func formatCheckpointOutput(ctx context.Context, summary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, checkpointID id.CheckpointID, associatedCommits []associatedCommit, author checkpoint.Author, verbose, full bool, w io.Writer) string {
 	var sb strings.Builder
 	meta := content.Metadata
 	styles := newStatusStyles(w)
@@ -1642,7 +2001,12 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 			files = meta.FilesTouched
 		}
 
-		hint := fmt.Sprintf("Not generated yet. Run `entire explain --generate %s` to create an AI summary.", checkpointID)
+		hint := fmt.Sprintf("Not generated yet. Run `entire checkpoint explain --generate %s` to create an AI summary.", checkpointID)
+		if summary != nil && summary.Imported {
+			// Imported history is read-only; --generate is refused for it, so
+			// don't point users at a command that will error out.
+			hint = "No summary. Imported history is read-only, so summaries cannot be generated."
+		}
 		md := buildNoSummaryMarkdown(intent, files, hint)
 		sb.WriteString(renderExplainBody(w, md))
 	}
@@ -1655,7 +2019,16 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 		sb.WriteString("\n")
 		sb.WriteString(styles.sectionRule(label, styles.width))
 		sb.WriteString("\n")
-		appendTranscriptSection(&sb, verbose, full, content.Transcript, scopedTranscript, content.Prompts, meta.Agent)
+		// Compact after scoping: CheckpointTranscriptStart indexes the stored
+		// format, and compaction changes line counts.
+		displayFull := content.Transcript
+		displayScoped := scopedTranscript
+		if full && len(displayFull) > 0 {
+			displayFull = maybeCompactExternalTranscript(ctx, displayFull, meta.Agent)
+		} else if verbose && len(displayScoped) > 0 {
+			displayScoped = maybeCompactExternalTranscript(ctx, displayScoped, meta.Agent)
+		}
+		appendTranscriptSection(&sb, verbose, full, displayFull, displayScoped, content.Prompts, meta.Agent)
 	}
 
 	return sb.String()
@@ -1732,7 +2105,7 @@ func buildCondensedCompactTranscriptEntries(transcriptBytes []byte) ([]summarize
 // otherwise the same compact shape is returned as plain text.
 func formatCheckpointHeader(
 	summary *checkpoint.CheckpointSummary,
-	meta checkpoint.CommittedMetadata,
+	meta checkpoint.Metadata,
 	cpID id.CheckpointID,
 	commits []associatedCommit,
 	author checkpoint.Author,
@@ -1742,9 +2115,9 @@ func formatCheckpointHeader(
 
 	headline := "● Checkpoint " + cpID.String()
 	if styles.colorEnabled {
-		bullet := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
+		bullet := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), "●")
 		key := styles.render(styles.bold, "Checkpoint")
-		val := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), cpID.String())
+		val := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)), cpID.String())
 		headline = bullet + " " + key + " " + val
 	}
 	sb.WriteString(headline)
@@ -1894,12 +2267,6 @@ func escapeInlineCodeText(s string) string {
 	return strings.ReplaceAll(s, "`", "‘")
 }
 
-// runExplainDefault shows all checkpoints on the current branch.
-// This is the default view when no flags are provided.
-func runExplainDefault(ctx context.Context, w io.Writer, noPager bool) error {
-	return runExplainBranchDefault(ctx, w, noPager)
-}
-
 // branchCheckpointsLimit is the max checkpoints to show in branch view
 const branchCheckpointsLimit = 100
 
@@ -2006,20 +2373,41 @@ func walkFirstParentCommits(ctx context.Context, repo *git.Repository, from plum
 //   - On feature branches: only show checkpoints unique to this branch (not in main)
 //   - On default branch (main/master): show all checkpoints in history (up to limit)
 //   - Includes both committed checkpoints (entire/checkpoints/v1) and temporary checkpoints (shadow branches)
-func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) ([]strategy.RewindPoint, error) {
+//
+// The second return value is true when either the live (commit-linked +
+// temporary) or imported budget hit `limit`, i.e. older checkpoints were
+// dropped. This is the authoritative truncation signal: the budgets are
+// applied here, so callers cannot reconstruct it from the returned length
+// (the two budgets are independent, so the slice can hold up to 2*limit
+// entries without anything being dropped).
+func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) ([]strategy.RewindPoint, bool, error) {
 	// Warn (once per process) if metadata branches are disconnected
 	strategy.WarnIfMetadataDisconnected()
 
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
+	// This is a user-facing enumeration (`entire checkpoint list` / the branch
+	// `explain` view), so opt into git-refs remote discovery: when a
+	// checkpoint_remote is configured, List enumerates it (names only) to
+	// surface refs-native checkpoints written on another machine, and the
+	// fetchers hydrate each on read. WithRemoteListDiscovery keeps this off the
+	// per-turn hook hot path.
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		BlobFetcher:     FetchBlobsByHash,
+		RefFetcher:      FetchCheckpointRef,
+		RemoteRefLister: ListCheckpointRefsOnRemote,
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("open checkpoint store: %w", err)
+	}
+	store := stores.Persistent
 
 	// Get all committed checkpoints for lookup.
-	committedInfos, err := store.ListCommitted(ctx)
+	committedInfos, err := store.List(checkpoint.WithRemoteListDiscovery(ctx))
 	if err != nil {
 		committedInfos = nil // Continue without committed checkpoints
 	}
 
 	// Build map of checkpoint ID -> committed info
-	committedByID := make(map[id.CheckpointID]checkpoint.CommittedInfo)
+	committedByID := make(map[id.CheckpointID]checkpoint.CheckpointInfo)
 	for _, info := range committedInfos {
 		if !info.CheckpointID.IsEmpty() {
 			committedByID[info.CheckpointID] = info
@@ -2030,9 +2418,9 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	if err != nil {
 		// Unborn HEAD (no commits yet) - return empty list instead of erroring
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
-			return []strategy.RewindPoint{}, nil
+			return []strategy.RewindPoint{}, false, nil
 		}
-		return nil, fmt.Errorf("failed to get HEAD: %w", err)
+		return nil, false, fmt.Errorf("failed to get HEAD: %w", err)
 	}
 
 	// Check if we're on the default branch (needed for getReachableTemporaryCheckpoints)
@@ -2049,6 +2437,11 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 		if !found {
 			return
 		}
+		// Defer hydration of remote-discovered stubs until after sort+truncate
+		// below: hydrating here (during the commitScanLimit walk) can issue up
+		// to hundreds of sequential ref fetches to display at most `limit`
+		// entries. Stubs project with empty SessionID; hydrateListedBranchCheckpoints
+		// fills them before --session filters run.
 
 		message := strings.Split(c.Message, "\n")[0]
 		point := strategy.RewindPoint{
@@ -2064,7 +2457,9 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 			ToolUseID:        cpInfo.ToolUseID,
 			Agent:            cpInfo.Agent,
 		}
-		point.SessionPrompt = readLatestCommittedSessionPrompt(ctx, store, cpID, cpInfo.SessionCount)
+		if !cpInfo.ListedStub {
+			point.SessionPrompt = readLatestCommittedSessionPrompt(ctx, store, cpID, cpInfo.SessionCount)
+		}
 
 		points = append(points, point)
 	}
@@ -2077,7 +2472,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 			Order: git.LogOrderCommitterTime,
 		})
 		if iterErr != nil {
-			return nil, fmt.Errorf("failed to get commit log: %w", iterErr)
+			return nil, false, fmt.Errorf("failed to get commit log: %w", iterErr)
 		}
 		defer iter.Close()
 
@@ -2110,27 +2505,143 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("error iterating commits: %w", err)
+		return nil, false, fmt.Errorf("error iterating commits: %w", err)
 	}
 
 	// Get temporary checkpoints from ALL shadow branches whose base commit is reachable from HEAD.
-	tempPoints := getReachableTemporaryCheckpoints(ctx, repo, store, head.Hash(), isOnDefault, limit)
+	tempPoints := getReachableTemporaryCheckpoints(ctx, repo, stores.Ephemeral(), head.Hash(), isOnDefault, limit)
 	points = append(points, tempPoints...)
 
-	// Sort by date, most recent first
+	truncated := false
+
+	// Sort live points (commit-linked + temporary) and apply the limit FIRST, so
+	// a large historical import can't evict recent commit-linked checkpoints.
 	sort.Slice(points, func(i, j int) bool {
 		return points[i].Date.After(points[j].Date)
 	})
-
-	// Apply limit
 	if len(points) > limit {
 		points = points[:limit]
+		truncated = true
 	}
 
-	return points, nil
+	// Hydrate remote-discovered stubs only for the truncated display set (not
+	// the full commit walk). Session filter runs later in formatBranchCheckpoints.
+	hydrateListedBranchCheckpoints(ctx, store, points, committedByID)
+
+	// Append imported (read-only, commit-less) checkpoints after the live points,
+	// bounded by the same limit so a one-month import doesn't produce an
+	// unbounded list. They get their own budget and never displace live points.
+	imported := getImportedRewindPoints(ctx, repo)
+	sort.Slice(imported, func(i, j int) bool {
+		return imported[i].Date.After(imported[j].Date)
+	})
+	if len(imported) > limit {
+		imported = imported[:limit]
+		truncated = true
+	}
+	points = append(points, imported...)
+
+	return points, truncated, nil
 }
 
-func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.CommittedListReader, cpID id.CheckpointID, sessionCount int) string {
+// hydrateListedBranchCheckpoints fills SessionID/etc for remote-discovered List
+// stubs among the already-truncated RewindPoints. The whole pass is capped by
+// ListHydrationPassTimeout, and each ref additionally gets ListHydrationTimeout
+// (much shorter than the default on-demand fetch). Failures clear ListedStub
+// (fail-once) inside HydrateListedCheckpointInfo; when any stub still lacks
+// SessionID afterward we note it on stderr so --session filters dropping them
+// is not silent.
+func hydrateListedBranchCheckpoints(
+	ctx context.Context,
+	store interface {
+		checkpoint.SessionReader
+		Read(ctx context.Context, checkpointID id.CheckpointID) (*checkpoint.CheckpointSummary, error)
+		ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.Metadata, error)
+	},
+	points []strategy.RewindPoint,
+	committedByID map[id.CheckpointID]checkpoint.CheckpointInfo,
+) {
+	passCtx, passCancel := context.WithTimeout(ctx, checkpoint.ListHydrationPassTimeout)
+	defer passCancel()
+
+	hydrationFailed := 0
+	for i := range points {
+		cpID := points[i].CheckpointID
+		if cpID.IsEmpty() {
+			continue
+		}
+		cpInfo, ok := committedByID[cpID]
+		if !ok || !cpInfo.ListedStub {
+			continue
+		}
+		if err := passCtx.Err(); err != nil {
+			// Overall budget exhausted: leave remaining stubs unhydrated and
+			// count them toward the user-facing warning.
+			hydrationFailed++
+			continue
+		}
+		hctx, cancel := context.WithTimeout(passCtx, checkpoint.ListHydrationTimeout)
+		hydrated := checkpoint.HydrateListedCheckpointInfo(hctx, store, cpInfo)
+		cancel()
+		committedByID[cpID] = hydrated
+		points[i].SessionID = hydrated.SessionID
+		points[i].SessionCount = hydrated.SessionCount
+		points[i].SessionIDs = hydrated.SessionIDs
+		points[i].IsTaskCheckpoint = hydrated.IsTask
+		points[i].ToolUseID = hydrated.ToolUseID
+		points[i].Agent = hydrated.Agent
+		if hydrated.SessionCount > 0 {
+			points[i].SessionPrompt = readLatestCommittedSessionPrompt(passCtx, store, cpID, hydrated.SessionCount)
+		}
+		if hydrated.SessionID == "" {
+			hydrationFailed++
+		}
+	}
+	if hydrationFailed > 0 {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: could not load session metadata for %d remote checkpoint(s); they may be missing from --session filters.\n", hydrationFailed)
+	}
+}
+
+// getImportedRewindPoints returns read-only imported checkpoints (Kind
+// "imported", flagged Imported) as RewindPoint entries. They live on the v1
+// metadata branch but carry no commit trailer, so the commit-driven branch
+// walk never surfaces them. Best-effort: returns nil on read failure.
+func getImportedRewindPoints(ctx context.Context, repo *git.Repository) []strategy.RewindPoint {
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	if err != nil {
+		return nil
+	}
+	infos, err := stores.Persistent.List(ctx)
+	if err != nil {
+		return nil
+	}
+	points := make([]strategy.RewindPoint, 0)
+	for _, info := range infos {
+		// Imported checkpoints live on v1 alongside normal ones but have no
+		// commit trailer, so the commit-driven walk above never surfaces them.
+		// Add only the imported ones here.
+		if !info.Imported {
+			continue
+		}
+		point := strategy.RewindPoint{
+			ID:           info.CheckpointID.String(),
+			Message:      readLatestCommittedSessionPrompt(ctx, stores.Persistent, info.CheckpointID, info.SessionCount),
+			Date:         info.CreatedAt,
+			IsLogsOnly:   true,
+			Imported:     true,
+			CheckpointID: info.CheckpointID,
+			SessionID:    info.SessionID,
+			SessionCount: info.SessionCount,
+			SessionIDs:   info.SessionIDs,
+			Agent:        info.Agent,
+		}
+		point.SessionPrompt = point.Message
+		points = append(points, point)
+	}
+	return points
+}
+
+func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.SessionReader, cpID id.CheckpointID, sessionCount int) string {
 	if sessionCount <= 0 {
 		return ""
 	}
@@ -2150,13 +2661,13 @@ func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.Comm
 // whose base commit is reachable from the given HEAD hash and that belong to this worktree.
 // For default branches, all shadow branches for this worktree are included.
 // For feature branches, only shadow branches whose base commit is in HEAD's history are included.
-func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository, store *checkpoint.GitStore, headHash plumbing.Hash, isOnDefault bool, limit int) []strategy.RewindPoint {
+func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository, store checkpoint.EphemeralStore, headHash plumbing.Hash, isOnDefault bool, limit int) []strategy.RewindPoint {
 	var points []strategy.RewindPoint
 
 	// Compute current worktree's hash for filtering shadow branches
 	currentWorktreeHash := getCurrentWorktreeHash(ctx)
 
-	shadowBranches, _ := store.ListTemporary(ctx) //nolint:errcheck // Best-effort
+	shadowBranches, _ := store.List(ctx) //nolint:errcheck // Best-effort
 	for _, sb := range shadowBranches {
 		// Filter by worktree: only show shadow branches belonging to this worktree.
 		// Skip filtering if currentWorktreeHash is empty (error computing it) to avoid
@@ -2206,14 +2717,14 @@ func isShadowBranchReachable(ctx context.Context, repo *git.Repository, baseComm
 	return found
 }
 
-// convertTemporaryCheckpoint converts a TemporaryCheckpointInfo to a RewindPoint.
+// convertTemporaryCheckpoint converts a EphemeralCheckpointInfo to a RewindPoint.
 // Returns nil if the checkpoint should be skipped (no tree changes or can't be read).
 //
-// Filtering uses hasAnyChanges (O(1) tree hash comparison) rather than hasCodeChanges
-// (O(files) full diff). This means metadata-only checkpoints (.entire/ changes without
+// Filtering uses hasAnyChanges (O(1) tree hash comparison) rather than a full
+// O(files) diff. This means metadata-only checkpoints (.entire/ changes without
 // code changes) are kept — only true no-ops (identical tree as parent) are dropped.
 // This trade-off is intentional for list-view performance.
-func convertTemporaryCheckpoint(repo *git.Repository, tc checkpoint.TemporaryCheckpointInfo) *strategy.RewindPoint {
+func convertTemporaryCheckpoint(repo *git.Repository, tc checkpoint.EphemeralCheckpointInfo) *strategy.RewindPoint {
 	shadowCommit, commitErr := repo.CommitObject(tc.CommitHash)
 	if commitErr != nil {
 		return nil
@@ -2249,7 +2760,7 @@ func convertTemporaryCheckpoint(repo *git.Repository, tc checkpoint.TemporaryChe
 
 // runExplainBranchWithFilter shows checkpoints on the current branch, optionally filtered by session.
 // This is strategy-agnostic - it queries checkpoints directly.
-func runExplainBranchWithFilter(ctx context.Context, w io.Writer, noPager bool, sessionFilter string) error {
+func runExplainBranchWithFilter(ctx context.Context, w, errW io.Writer, noPager bool, sessionFilter string) error {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
@@ -2273,8 +2784,20 @@ func runExplainBranchWithFilter(ctx context.Context, w io.Writer, noPager bool, 
 		}
 	}
 
-	// Get checkpoints for this branch (strategy-agnostic)
-	points, err := getBranchCheckpoints(ctx, repo, branchCheckpointsLimit)
+	// Get checkpoints for this branch (strategy-agnostic). getBranchCheckpoints
+	// reports whether it hit its budget; we render everything it returns (it
+	// already enforces the cap internally) and only surface a note when older
+	// checkpoints were actually dropped.
+	//
+	// Note this prose view and the --json list path (runExplainListJSON)
+	// truncate differently on purpose: getBranchCheckpoints budgets the live
+	// and imported lists independently, so it can return up to 2*limit entries.
+	// This grouped view renders them all and only notes when a budget was hit;
+	// the JSON path hard-caps the flat array at limit (its array contract). So
+	// e.g. 60 live + 60 imported shows 120 rows with no note here, but 100
+	// entries with a note under --json. The `--limit` help text ("Only meaningful with --json")
+	// reflects that the cap is a JSON-path concept.
+	points, truncated, err := getBranchCheckpoints(ctx, repo, branchCheckpointsLimit)
 	if err != nil {
 		// If context was cancelled (e.g. user hit Ctrl+C), exit silently
 		if ctx.Err() != nil {
@@ -2283,19 +2806,26 @@ func runExplainBranchWithFilter(ctx context.Context, w io.Writer, noPager bool, 
 		// Log the error but continue with empty list so user sees helpful message
 		logging.Warn(ctx, "failed to get branch checkpoints", "error", err)
 		points = nil
+		truncated = false
 	}
 
 	// Format output
 	output := formatBranchCheckpoints(w, branchName, points, sessionFilter)
 
 	outputExplainContent(w, output, noPager)
-	return nil
-}
 
-// runExplainBranchDefault shows all checkpoints on the current branch grouped by date.
-// This is a convenience wrapper that calls runExplainBranchWithFilter with no filter.
-func runExplainBranchDefault(ctx context.Context, w io.Writer, noPager bool) error {
-	return runExplainBranchWithFilter(ctx, w, noPager, "")
+	// Printed to stderr so the note never lands in piped/paged stdout. The
+	// signal reflects the raw scan budget, not the (filtered, grouped) display
+	// count — so the wording stays vague ("may be hidden", no count) and names
+	// the full `checkpoint explain` command, which works regardless of whether
+	// the user reached this path via `explain`, `checkpoint explain`, or
+	// `checkpoint list` (the latter two share this code but expose different
+	// flags).
+	if truncated {
+		fmt.Fprint(errW, "note: checkpoint list reached its scan limit; older checkpoints may be hidden. "+
+			"Run 'entire checkpoint explain --json --limit <N>' to see more.\n")
+	}
+	return nil
 }
 
 // outputExplainContent outputs content with optional pager support.
@@ -2350,94 +2880,6 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 	// Delegate to checkpoint detail view, forwarding the full flag set so
 	// --generate / --raw-transcript / --force work via --commit as well.
 	return runExplainCheckpoint(ctx, w, errW, checkpointID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, summaryTimeoutSeconds)
-}
-
-// formatSessionInfo formats session information for display.
-//
-// NOTE: This function has no production caller — `entire explain --session`
-// flows through formatBranchCheckpoints (the list view filtered by session),
-// not through here. It is kept for tests that exercise the per-checkpoint
-// markdown body shape used elsewhere; restyling it for the brand format was
-// not worth the diff. If the CLI ever grows a session-detail surface, revisit.
-func formatSessionInfo(session *strategy.Session, sourceRef string, checkpoints []checkpointDetail) string {
-	var sb strings.Builder
-
-	// Session header
-	fmt.Fprintf(&sb, "Session: %s\n", session.ID)
-	fmt.Fprintf(&sb, "Strategy: %s\n", session.Strategy)
-
-	if !session.StartTime.IsZero() {
-		fmt.Fprintf(&sb, "Started: %s\n", session.StartTime.Format("2006-01-02 15:04:05"))
-	}
-
-	if sourceRef != "" {
-		fmt.Fprintf(&sb, "Source Ref: %s\n", sourceRef)
-	}
-
-	fmt.Fprintf(&sb, "Checkpoints: %d\n", len(checkpoints))
-
-	// Checkpoint details
-	for _, cp := range checkpoints {
-		sb.WriteString("\n")
-
-		// Checkpoint header
-		taskMarker := ""
-		if cp.IsTaskCheckpoint {
-			taskMarker = " [Task]"
-		}
-		fmt.Fprintf(&sb, "─── Checkpoint %d [%s] %s%s ───\n",
-			cp.Index, cp.ShortID, cp.Timestamp.Format("2006-01-02 15:04"), taskMarker)
-		sb.WriteString("\n")
-
-		// Display all interactions in this checkpoint
-		for i, inter := range cp.Interactions {
-			// For multiple interactions, add a sub-header
-			if len(cp.Interactions) > 1 {
-				fmt.Fprintf(&sb, "### Interaction %d\n\n", i+1)
-			}
-
-			// Prompt section
-			if inter.Prompt != "" {
-				sb.WriteString("## Prompt\n\n")
-				sb.WriteString(inter.Prompt)
-				sb.WriteString("\n\n")
-			}
-
-			// Response section
-			if len(inter.Responses) > 0 {
-				sb.WriteString("## Responses\n\n")
-				sb.WriteString(strings.Join(inter.Responses, "\n\n"))
-				sb.WriteString("\n\n")
-			}
-
-			// Files modified for this interaction
-			if len(inter.Files) > 0 {
-				fmt.Fprintf(&sb, "Files Modified (%d):\n", len(inter.Files))
-				for _, file := range inter.Files {
-					fmt.Fprintf(&sb, "  - %s\n", file)
-				}
-				sb.WriteString("\n")
-			}
-		}
-
-		// If no interactions, show message and/or files
-		if len(cp.Interactions) == 0 {
-			// Show commit message as summary when no transcript available
-			if cp.Message != "" {
-				sb.WriteString(cp.Message)
-				sb.WriteString("\n\n")
-			}
-			// Show aggregate files if available
-			if len(cp.Files) > 0 {
-				fmt.Fprintf(&sb, "Files Modified (%d):\n", len(cp.Files))
-				for _, file := range cp.Files {
-					fmt.Fprintf(&sb, "  - %s\n", file)
-				}
-			}
-		}
-	}
-
-	return sb.String()
 }
 
 // pagerLookupEnv is overridable for tests so pager env-gate behavior can be
@@ -2544,8 +2986,6 @@ const (
 	maxMessageDisplayLength = 80
 	// maxPromptDisplayLength is the maximum length for session prompts before truncation
 	maxPromptDisplayLength = 60
-	// checkpointIDDisplayLength is the number of characters to show from checkpoint IDs
-	checkpointIDDisplayLength = 12
 )
 
 // formatBranchCheckpoints formats checkpoint information for a branch.
@@ -2555,11 +2995,14 @@ func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.R
 	var sb strings.Builder
 	styles := newStatusStyles(w)
 
-	// Filter by session if specified (must happen before counting)
+	// Filter by session if specified (must happen before counting). Use the
+	// shared matcher so archived contributors in SessionIDs are considered —
+	// matching only SessionID (latest contributor) silently drops multi-session
+	// checkpoints where the requested session was archived.
 	if sessionFilter != "" {
 		var filtered []strategy.RewindPoint
 		for _, p := range points {
-			if p.SessionID == sessionFilter || strings.HasPrefix(p.SessionID, sessionFilter) {
+			if checkpointMatchesSessionFilter(p, sessionFilter) {
 				filtered = append(filtered, p)
 			}
 		}
@@ -2601,6 +3044,7 @@ type checkpointGroup struct {
 	prompt       string
 	isTemporary  bool // true if any commit is not logs-only (can be rewound)
 	isTask       bool // true if this is a task checkpoint
+	imported     bool // true for read-only imported (commit-less) checkpoints
 	commits      []commitEntry
 }
 
@@ -2641,6 +3085,7 @@ func groupByCheckpointID(points []strategy.RewindPoint) []checkpointGroup {
 				prompt:       point.SessionPrompt,
 				isTemporary:  !point.IsLogsOnly,
 				isTask:       point.IsTaskCheckpoint,
+				imported:     point.Imported,
 			}
 			groupMap[cpID] = group
 			order = append(order, cpID)
@@ -2700,14 +3145,13 @@ func groupByCheckpointID(points []strategy.RewindPoint) []checkpointGroup {
 }
 
 // formatCheckpointGroup formats a single checkpoint group for display.
-// The list view headline puts the checkpoint ID first (in bold orange),
+// The list view headline puts the checkpoint ID first (in bold accent/magenta),
 // followed by indicators and the prompt — which cascades from
 // SessionPrompt → latest commit message → dimmed `(no prompt recorded)`.
 func formatCheckpointGroup(sb *strings.Builder, group checkpointGroup, styles statusStyles) {
-	cpID := group.checkpointID
-	if len(cpID) > checkpointIDDisplayLength {
-		cpID = cpID[:checkpointIDDisplayLength]
-	}
+	// Kind-aware trim: a legacy hex ID shows its 12-char prefix; a ULID is shown
+	// in full (front-truncating a ULID drops its entropy tail and won't resolve).
+	cpID := id.CheckpointID(group.checkpointID).DisplayShort()
 
 	// Indicators (Task / temporary). Skip [temporary] when cpID already says so.
 	var indicators []string
@@ -2716,6 +3160,9 @@ func formatCheckpointGroup(sb *strings.Builder, group checkpointGroup, styles st
 	}
 	if group.isTemporary && cpID != "temporary" {
 		indicators = append(indicators, "[temporary]")
+	}
+	if group.imported {
+		indicators = append(indicators, "[imported]")
 	}
 
 	// Prompt cascade: SessionPrompt → latest commit message → dimmed placeholder.
@@ -2782,54 +3229,7 @@ func transcriptOffset(transcriptBytes []byte, agentType types.AgentType) int {
 	return countLines(transcriptBytes)
 }
 
-// hasCodeChanges returns true if the commit has changes to non-metadata files.
-// Uses a full tree diff to distinguish code changes from .entire/ metadata-only changes.
-// Returns false only if the commit has a parent AND only modified .entire/ metadata files.
-//
-// WARNING: This is expensive via go-git (resolves many tree/blob objects from packfiles).
-// For list views with many checkpoints, use hasAnyChanges instead.
-func hasCodeChanges(commit *object.Commit) bool {
-	// First commit on shadow branch captures working copy state - always meaningful
-	if commit.NumParents() == 0 {
-		return true
-	}
-
-	parent, err := commit.Parent(0)
-	if err != nil {
-		return true // Can't check, assume meaningful
-	}
-
-	commitTree, err := commit.Tree()
-	if err != nil {
-		return true
-	}
-
-	parentTree, err := parent.Tree()
-	if err != nil {
-		return true
-	}
-
-	changes, err := parentTree.Diff(commitTree)
-	if err != nil {
-		return true
-	}
-
-	// Check if any non-metadata file was changed
-	for _, change := range changes {
-		name := change.To.Name
-		if name == "" {
-			name = change.From.Name
-		}
-		// Skip .entire/ metadata files
-		if !strings.HasPrefix(name, ".entire/") {
-			return true
-		}
-	}
-
-	return false
-}
-
-// hasAnyChanges is a lightweight alternative to hasCodeChanges that compares
+// hasAnyChanges compares
 // tree hashes without doing a full diff. Returns true if the commit's tree
 // differs from its parent's tree. This may include metadata-only changes,
 // but is O(1) instead of O(files) — suitable for list views.

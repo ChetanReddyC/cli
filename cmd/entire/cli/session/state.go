@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
@@ -57,6 +58,12 @@ const (
 	// to Kind.IsInvestigate so the checkpoint's HasInvestigation umbrella
 	// flag keeps covering them.
 	KindAgentInvestigate Kind = "agent_investigate"
+
+	// KindImported tags a checkpoint created by `entire import` from a
+	// pre-existing agent transcript. Imported checkpoints are read-only and
+	// commit-less; they live on the v1 metadata branch and push like any other
+	// checkpoint.
+	KindImported Kind = "imported"
 )
 
 // IsReview reports whether this Kind counts as "a review happened" for the
@@ -77,6 +84,16 @@ func (k Kind) IsReview() bool {
 func (k Kind) IsInvestigate() bool {
 	// See IsReview for why this is an equality check rather than a switch.
 	return k == KindAgentInvestigate
+}
+
+// IsImported reports whether this Kind is a read-only session reconstructed by
+// `entire import` from a pre-existing transcript. Imported sessions are exempt
+// from lifecycle management (staleness, orphan cleanup) and are not
+// resumable/rewindable. Centralized here so those call sites don't couple to
+// the string literal across packages.
+func (k Kind) IsImported() bool {
+	// See IsReview for why this is an equality check rather than a switch.
+	return k == KindImported
 }
 
 // State represents the state of an active session.
@@ -105,6 +122,24 @@ type State struct {
 	// WorktreeID is the internal git worktree identifier (empty for main worktree)
 	// Derived from .git/worktrees/<name>/, stable across git worktree move
 	WorktreeID string `json:"worktree_id,omitempty"`
+
+	// AdoptedIntoWorktreePath marks a source-side tombstone left behind after
+	// `entire session adopt` moves this session into another repository/worktree.
+	// Hook TurnStart must not reactivate tombstoned source records, otherwise the
+	// same session ID can diverge in two session stores.
+	AdoptedIntoWorktreePath string `json:"adopted_into_worktree_path,omitempty"`
+
+	// AdoptedIntoWorktreeID is the target worktree ID paired with
+	// AdoptedIntoWorktreePath when available.
+	AdoptedIntoWorktreeID string `json:"adopted_into_worktree_id,omitempty"`
+
+	// Branch is the git branch HEAD pointed at the last time this session took a
+	// turn. Captured on each turn start so it tracks branches created or renamed
+	// after the session began. Empty when HEAD was detached or for sessions
+	// recorded before this field existed (callers derive it from commit trailers
+	// as a fallback). Lets `entire resume` map a stopped session back to its
+	// branch without the user remembering it.
+	Branch string `json:"branch,omitempty"`
 
 	// StartedAt is when the session was started
 	StartedAt time.Time `json:"started_at"`
@@ -225,6 +260,15 @@ type State struct {
 	// than being captured by hooks during normal agent execution.
 	AttachedManually bool `json:"attached_manually,omitempty"`
 
+	// ContextInjectionDecided records that the once-per-session model-context
+	// injection (e.g. the `entire trail` pointer) has been handled for this
+	// session, so the dispatcher does not re-inject on later turns. Set on the
+	// first normal turn regardless of whether anything was injected: the prompt
+	// path reads only clone-local cached trail enablement, and a missing/stale
+	// false cache fails closed (miss the hint) rather than retrying/spamming.
+	// Review/investigate sessions leave this false because they skip injection.
+	ContextInjectionDecided bool `json:"context_injection_decided,omitempty"`
+
 	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Gemini CLI", "Cursor")
 	AgentType types.AgentType `json:"agent_type,omitempty"`
 
@@ -232,8 +276,38 @@ type State struct {
 	// Set from hook data when the agent provides it.
 	ModelName string `json:"model_name,omitempty"`
 
-	// Token usage tracking (accumulated across all checkpoints in this session)
+	// Token usage tracking (accumulated across all checkpoints in this session).
+	//
+	// DECISION: SubagentTokens is "latest snapshot wins", not summed. Subagent
+	// usage arrives as a cumulative-since-session-start total (each subagent
+	// transcript is re-read from line 0 every call), so accumulateTokenUsage
+	// replaces rather than adds it (see cmd/entire/cli/strategy). Tradeoff: if
+	// the main transcript resets or rotates mid-session (compaction writing a
+	// fresh file, or a resume that truncates), a subsequent snapshot can be
+	// SMALLER than a previous one, so this session-wide total regresses
+	// (undercounts) for the rest of the session. This is accepted: undercounting
+	// after a transcript reset is preferable to the multiplicative overcount the
+	// summing approach produced, and the alternative (a session-wide high-water
+	// mark) would mask genuine subagent-transcript cleanup. Checkpoint deltas do
+	// not share this exposure — CheckpointTokenUsage.SubagentTokens is derived as
+	// (this total - SubagentTokensBaseline) and floored at 0 by clampSubtract, so
+	// a shrunk snapshot yields 0, never a negative or stale delta.
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+
+	// CheckpointTokenUsage tracks hook-provided token usage since the last condensation.
+	// This is checkpoint-scoped; TokenUsage remains the session-wide total.
+	CheckpointTokenUsage *agent.TokenUsage `json:"checkpoint_token_usage,omitempty"`
+
+	// SubagentTokensBaseline is a snapshot of TokenUsage.SubagentTokens captured
+	// at the last condensation reset. Subagent token usage is always re-read
+	// from the start of each subagent transcript (agent IDs are discovered from
+	// the full main transcript so subagents spawned before the checkpoint
+	// window are still found), so it arrives as a cumulative-since-session-start
+	// total rather than a per-checkpoint delta. This baseline lets
+	// CheckpointTokenUsage.SubagentTokens be rescoped to "since last
+	// condensation" via SubtractTokenUsage instead of re-adding the same
+	// cumulative total on every checkpoint.
+	SubagentTokensBaseline *agent.TokenUsage `json:"subagent_tokens_baseline,omitempty"`
 
 	// SkillEvents records explicit native skill signals observed during this session.
 	// Stored as sidecar metadata so consumers can collapse skill-related transcript events
@@ -283,6 +357,15 @@ type State struct {
 	// PendingPromptAttribution holds attribution calculated at prompt start (before agent runs).
 	// This is moved to PromptAttributions when SaveStep is called.
 	PendingPromptAttribution *PromptAttribution `json:"pending_prompt_attribution,omitempty"`
+
+	// Owner fingerprints the process that owns this session's agent turn,
+	// captured at each turn start via proclive.ResolveOwner. It lets liveness
+	// checks detect an ACTIVE session whose agent has exited (clean /exit,
+	// crash, kill, terminal close, reboot) without a SessionStop hook firing —
+	// see OwnerExited. nil for legacy sessions or when the owner couldn't be
+	// resolved, in which case liveness falls back to the StuckActiveThreshold
+	// timeout. Only meaningful on Owner.Host.
+	Owner *proclive.Identity `json:"owner,omitempty"`
 }
 
 // PromptAttribution captures line-level attribution data at the start of each prompt.
@@ -347,8 +430,7 @@ func (s *State) NormalizeAfterLoad(ctx context.Context) {
 	// will see 0 for these fields and fall back to scoping from the transcript start.
 	// This is acceptable since CLI upgrades are monotonic and the worst case is
 	// redundant transcript content in a condensation, not data loss.
-	s.CondensedTranscriptLines = 0
-	s.TranscriptLinesAtStart = 0
+	s.ClearLegacyTranscriptOffsets()
 
 	// Backfill AttributionBaseCommit for sessions created before this field existed.
 	// Without this, a mid-turn commit would migrate BaseCommit and the fallback in
@@ -362,6 +444,29 @@ func (s *State) NormalizeAfterLoad(ctx context.Context) {
 	// — otherwise a future legitimate divergence would be silently suppressed.
 	if s.DivergenceNoticeShown && s.AttributionBaseCommit == s.BaseCommit {
 		s.DivergenceNoticeShown = false
+	}
+}
+
+// ClearLegacyTranscriptOffsets clears deprecated transcript offset fields so
+// callers that intentionally reset CheckpointTranscriptStart do not re-persist
+// stale legacy state.
+func (s *State) ClearLegacyTranscriptOffsets() {
+	s.CondensedTranscriptLines = 0
+	s.TranscriptLinesAtStart = 0
+}
+
+// RebaselineSubagentTokens snapshots the current cumulative subagent total
+// (TokenUsage.SubagentTokens) into SubagentTokensBaseline so the next checkpoint
+// window's CheckpointTokenUsage.SubagentTokens is rescoped to "since this
+// re-baseline" rather than re-reporting the full cumulative subagent total.
+//
+// The invariant is: every site that starts a fresh checkpoint window by clearing
+// CheckpointTokenUsage MUST also re-baseline. Callers: the condensation reset
+// helper (resetCheckpointWindow) and cross-repo session adoption, which likewise
+// opens a fresh target-local window. Sharing this here keeps the two in step.
+func (s *State) RebaselineSubagentTokens() {
+	if s.TokenUsage != nil {
+		s.SubagentTokensBaseline = s.TokenUsage.SubagentTokens
 	}
 }
 
@@ -393,7 +498,39 @@ func (s *State) IsStuckActive() bool {
 	return time.Since(*ref) > StuckActiveThreshold
 }
 
+// OwnerLiveness reports the liveness of this session's recorded owner process.
+// It returns proclive.LivenessUnknown when no owner was recorded (legacy
+// sessions, or sessions where the owner couldn't be resolved), so callers can
+// fall back to the time-based IsStuckActive heuristic.
+func (s *State) OwnerLiveness() proclive.Liveness {
+	if s.Owner == nil {
+		return proclive.LivenessUnknown
+	}
+	return proclive.Check(*s.Owner)
+}
+
+// OwnerExited reports true when this session is ACTIVE but its owning agent
+// process is gone — exited cleanly, crashed, was killed, or the machine
+// rebooted — without a SessionStop hook firing. Unlike IsStuckActive (a
+// time-based heuristic), this is detected immediately, regardless of how
+// recently the session interacted. It returns false when liveness is Unknown
+// (no owner recorded, cross-host state, or an unsupported platform) so behavior
+// degrades to the StuckActiveThreshold timeout.
+func (s *State) OwnerExited() bool {
+	if !s.Phase.IsActive() {
+		return false
+	}
+	return s.OwnerLiveness() == proclive.LivenessDead
+}
+
 func (s *State) IsStale() bool {
+	// Imported sessions are historical, read-only records reconstructed from
+	// pre-existing transcripts; their timestamps are always old by nature.
+	// Never auto-purge them or they'd vanish from `entire session list` on the
+	// first read after import.
+	if s.Kind.IsImported() {
+		return false
+	}
 	var since time.Duration
 	if s.LastInteractionTime != nil {
 		since = time.Since(*s.LastInteractionTime)

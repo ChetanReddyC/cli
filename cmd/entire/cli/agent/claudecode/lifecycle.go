@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/textutil"
 )
 
 // Compile-time interface assertions for new interfaces.
@@ -19,9 +20,11 @@ var (
 	_ agent.TranscriptAnalyzer     = (*ClaudeCodeAgent)(nil)
 	_ agent.TranscriptPreparer     = (*ClaudeCodeAgent)(nil)
 	_ agent.TokenCalculator        = (*ClaudeCodeAgent)(nil)
+	_ agent.ModelExtractor         = (*ClaudeCodeAgent)(nil)
 	_ agent.SkillEventExtractor    = (*ClaudeCodeAgent)(nil)
 	_ agent.SubagentAwareExtractor = (*ClaudeCodeAgent)(nil)
 	_ agent.HookResponseWriter     = (*ClaudeCodeAgent)(nil)
+	_ agent.ContextInjector        = (*ClaudeCodeAgent)(nil)
 )
 
 // WriteHookResponse outputs a JSON hook response to stdout.
@@ -34,6 +37,20 @@ func (c *ClaudeCodeAgent) WriteHookResponse(message string) error {
 		return fmt.Errorf("failed to encode hook response: %w", err)
 	}
 	return nil
+}
+
+// InjectionEvent reports that Claude Code injects model context at TurnStart
+// (the UserPromptSubmit hook), which supports hookSpecificOutput.additionalContext.
+func (c *ClaudeCodeAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
+
+// RenderContextInjection renders the UserPromptSubmit additionalContext payload
+// Claude Code injects into the model context.
+func (c *ClaudeCodeAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte, error) {
+	out, err := agent.RenderAdditionalContextHookOutput("UserPromptSubmit", inj.Text)
+	if err != nil {
+		return nil, fmt.Errorf("render claude-code context injection: %w", err)
+	}
+	return out, nil
 }
 
 // HookNames returns the hook verbs Claude Code supports.
@@ -55,13 +72,13 @@ func (c *ClaudeCodeAgent) HookNames() []string {
 func (c *ClaudeCodeAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
-		return c.parseSessionStart(stdin)
+		return c.parseSessionInfoEvent(stdin, agent.SessionStart)
 	case HookNameUserPromptSubmit:
 		return c.parseTurnStart(stdin)
 	case HookNameStop:
-		return c.parseTurnEnd(stdin)
+		return c.parseSessionInfoEvent(stdin, agent.TurnEnd)
 	case HookNameSessionEnd:
-		return c.parseSessionEnd(stdin)
+		return c.parseSessionInfoEvent(stdin, agent.SessionEnd)
 	case HookNamePreTask:
 		return c.parseSubagentStart(stdin)
 	case HookNamePostTask:
@@ -97,13 +114,15 @@ func (c *ClaudeCodeAgent) CalculateTokenUsage(transcriptData []byte, fromOffset 
 
 // --- Internal hook parsing functions ---
 
-func (c *ClaudeCodeAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {
+// parseSessionInfoEvent parses the hooks whose payload is sessionInfoRaw —
+// SessionStart, Stop, and SessionEnd differ only in the resulting event type.
+func (c *ClaudeCodeAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent.EventType) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
 	if err != nil {
 		return nil, err
 	}
 	return &agent.Event{
-		Type:       agent.SessionStart,
+		Type:       eventType,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
 		Model:      raw.Model,
@@ -120,36 +139,11 @@ func (c *ClaudeCodeAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) 
 		Type:       agent.TurnStart,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
-		Prompt:     raw.Prompt,
-		Timestamp:  time.Now(),
-	}, nil
-}
-
-func (c *ClaudeCodeAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
-	if err != nil {
-		return nil, err
-	}
-	return &agent.Event{
-		Type:       agent.TurnEnd,
-		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
-		Model:      raw.Model,
-		Timestamp:  time.Now(),
-	}, nil
-}
-
-func (c *ClaudeCodeAgent) parseSessionEnd(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
-	if err != nil {
-		return nil, err
-	}
-	return &agent.Event{
-		Type:       agent.SessionEnd,
-		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
-		Model:      raw.Model,
-		Timestamp:  time.Now(),
+		// Strip IDE-injected context (e.g. <ide_opened_file> from the VS Code
+		// extension) so the session/checkpoint title and prompt show what the
+		// user actually typed, not the injected block.
+		Prompt:    textutil.StripIDEContextTags(raw.Prompt),
+		Timestamp: time.Now(),
 	}, nil
 }
 

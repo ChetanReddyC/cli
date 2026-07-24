@@ -90,6 +90,100 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	}
 }
 
+// TestWriteProfileLines_Jurisdiction verifies the home jurisdiction slug is
+// rendered (so `auth token --jurisdiction` is discoverable) and omitted when the
+// server didn't populate it.
+func TestWriteProfileLines_Jurisdiction(t *testing.T) {
+	t.Parallel()
+
+	var withJ bytes.Buffer
+	writeProfileLines(&withJ, &authProfile{Handle: "alice", Provider: "github", Jurisdiction: "us"})
+	if !strings.Contains(withJ.String(), "Jurisdiction: us") {
+		t.Fatalf("output = %q, want a 'Jurisdiction: us' line", withJ.String())
+	}
+
+	var withoutJ bytes.Buffer
+	writeProfileLines(&withoutJ, &authProfile{Handle: "alice", Provider: "github"})
+	if strings.Contains(withoutJ.String(), "Jurisdiction") {
+		t.Fatalf("output = %q, want no Jurisdiction line when the slug is empty", withoutJ.String())
+	}
+}
+
+// In ENTIRE_TOKEN mode there is no stored context, keychain slot, or revocable
+// session: status names the env-token core and bearer source, and renders none
+// of the context/keychain/session lines. listSessions must not be called — you
+// can't manage an env-token session.
+func TestRunAuthStatus_EnvTokenMode(t *testing.T) {
+	t.Parallel()
+
+	target := statusTarget{coreURL: testCoreURL, token: "tok", envToken: true}
+	listSessions := func(context.Context, string, string) ([]api.AuthSession, error) {
+		t.Helper()
+		t.Fatal("listSessions must not be called in ENTIRE_TOKEN mode")
+		return nil, nil
+	}
+
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, okProfile, listSessions, target); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "Logged in to "+testCoreURL) {
+		t.Fatalf("output = %q, want 'Logged in' to the env token's core", got)
+	}
+	if !strings.Contains(got, "Alice Smith") {
+		t.Fatalf("output = %q, want the profile header", got)
+	}
+	if !strings.Contains(got, auth.EnvTokenVar+" environment variable") {
+		t.Fatalf("output = %q, want the ENTIRE_TOKEN bearer note", got)
+	}
+	for _, unwanted := range []string{"Context:", "stored in OS keychain", "Active sessions", "login contexts saved"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("output = %q, must not contain %q in ENTIRE_TOKEN mode", got, unwanted)
+		}
+	}
+}
+
+// resolveEnvTokenStatusTarget reads the core from the token's aud (the same
+// origin coreapi.New dials) and uses the token verbatim as the bearer; a blank
+// or aud-less token is a fail-closed error, never a fall-back to a context.
+func TestResolveEnvTokenStatusTarget(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid token yields aud core + verbatim bearer", func(t *testing.T) {
+		t.Parallel()
+		tok := makeJWT(t, `{"alg":"HS256","typ":"JWT"}`, `{"aud":"`+testCoreURL+`"}`)
+		got, err := resolveEnvTokenStatusTarget("  " + tok + "  ") // surrounding whitespace trimmed
+		if err != nil {
+			t.Fatalf("resolveEnvTokenStatusTarget: %v", err)
+		}
+		if got.coreURL != testCoreURL {
+			t.Fatalf("coreURL = %q, want the token's aud %q", got.coreURL, testCoreURL)
+		}
+		if got.token != tok {
+			t.Fatalf("token = %q, want the verbatim env token", got.token)
+		}
+		if !got.envToken {
+			t.Fatal("envToken = false, want true")
+		}
+	})
+
+	t.Run("blank is fail-closed", func(t *testing.T) {
+		t.Parallel()
+		if _, err := resolveEnvTokenStatusTarget("   "); err == nil {
+			t.Fatal("want an error for a blank ENTIRE_TOKEN, got nil")
+		}
+	})
+
+	t.Run("token without a URL aud is rejected", func(t *testing.T) {
+		t.Parallel()
+		tok := makeJWT(t, `{"alg":"HS256","typ":"JWT"}`, `{"sub":"ci-runner"}`)
+		if _, err := resolveEnvTokenStatusTarget(tok); err == nil {
+			t.Fatal("want an error when the token has no URL-shaped aud, got nil")
+		}
+	})
+}
+
 func TestRunAuthStatus_RendersSessionsTable(t *testing.T) {
 	t.Parallel()
 
@@ -113,7 +207,7 @@ func TestRunAuthStatus_RendersSessionsTable(t *testing.T) {
 	if !strings.Contains(got, "Active sessions (2):") {
 		t.Fatalf("output = %q, want active-sessions heading with count", got)
 	}
-	for _, want := range []string{"NAME", "CREATED", "LAST USED", "EXPIRES", "2026-01-01", "never"} {
+	for _, want := range []string{"NAME", "CREATED", "LAST USED", "EXPIRES", formatAuthDate("2026-01-01T00:00:00Z"), "never"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("output = %q, want table to contain %q", got, want)
 		}
@@ -335,5 +429,30 @@ func TestAuthCmd_TopLevelLoginAndLogoutStillRegistered(t *testing.T) {
 		if !found {
 			t.Errorf("top-level %q command should remain registered", name)
 		}
+	}
+}
+
+// The Token: provenance line must reflect the configured credential backend:
+// with ENTIRE_TOKEN_STORE=file the token lives in a JSON file, not the OS
+// keychain, and claiming otherwise misleads exactly the headless users the
+// file backend exists for (#1036).
+func TestRunAuthStatus_FileTokenStoreProvenance(t *testing.T) {
+	// Not parallel: t.Setenv.
+	t.Setenv("ENTIRE_TOKEN_STORE", "file")
+	t.Setenv("ENTIRE_TOKEN_STORE_PATH", "/ci/secrets/tokens.json")
+
+	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "core"}
+	listSessions := func(context.Context, string, string) ([]api.AuthSession, error) { return nil, nil }
+
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, okProfile, listSessions, target); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "stored in file /ci/secrets/tokens.json") {
+		t.Fatalf("output = %q, want the file-backend provenance line", got)
+	}
+	if strings.Contains(got, "OS keychain") {
+		t.Fatalf("output = %q, must not claim the OS keychain when the file backend is configured", got)
 	}
 }

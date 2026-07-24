@@ -1,13 +1,16 @@
 package telemetry
 
 import (
+	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/denisbrodbeck/machineid"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/posthog/posthog-go"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -81,6 +84,13 @@ func BuildEventPayload(cmd *cobra.Command, agent string, isEntireEnabled bool, v
 		Properties: properties,
 		Timestamp:  time.Now(),
 	}
+}
+
+// spawnDetachedAnalytics sends the payload from a detached `entire
+// __send_analytics` child so the network call never blocks the CLI. The empty
+// dir keeps the child out of the parent's working directory.
+func spawnDetachedAnalytics(payloadJSON string) {
+	execx.SpawnDetached("", "__send_analytics", payloadJSON)
 }
 
 // TrackCommandDetached tracks a command execution by spawning a detached subprocess.
@@ -177,6 +187,16 @@ func SendEvent(payloadJSON string) {
 		_ = client.Close()
 	}()
 
+	// Resolve the installed git version best-effort. A missing or failing
+	// git must never block the rest of the telemetry — the property is simply
+	// omitted when it can't be determined.
+	if v := gitVersion(context.Background()); v != "" {
+		if payload.Properties == nil {
+			payload.Properties = map[string]any{}
+		}
+		payload.Properties["git_version"] = v
+	}
+
 	// Build properties
 	props := posthog.NewProperties()
 	for k, v := range payload.Properties {
@@ -190,4 +210,29 @@ func SendEvent(payloadJSON string) {
 		Properties: props,
 		Timestamp:  payload.Timestamp,
 	})
+}
+
+// gitVersion returns the installed git version (e.g. "2.43.0"), best-effort.
+// It returns "" when git is absent, the command fails or times out, or the
+// output cannot be parsed — callers must treat "" as "unknown" and move on.
+func gitVersion(ctx context.Context) string {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "git", "--version").Output()
+	if err != nil {
+		return ""
+	}
+	return parseGitVersion(string(out))
+}
+
+// parseGitVersion extracts the version token from `git --version` output, which
+// looks like "git version 2.43.0" (sometimes with a platform suffix such as
+// "git version 2.39.3 (Apple Git-146)"). Returns "" if the shape is unexpected.
+func parseGitVersion(out string) string {
+	fields := strings.Fields(out)
+	if len(fields) < 3 || fields[0] != "git" || fields[1] != "version" {
+		return ""
+	}
+	return fields[2]
 }

@@ -99,6 +99,23 @@ func TestParseHookEvent_TurnStart(t *testing.T) {
 	}
 }
 
+// The VS Code extension prepends an <ide_opened_file> context block to the
+// prompt; it must be stripped so the session/checkpoint title and prompt show
+// only what the user typed.
+func TestParseHookEvent_TurnStart_StripsIDEContextTags(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"session_id":"s1","transcript_path":"/tmp/t.jsonl","prompt":"<ide_opened_file>The user opened /a/b.md in the IDE.</ide_opened_file>\n\nrewrite these docs as one plan"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameUserPromptSubmit, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	if event.Prompt != "rewrite these docs as one plan" {
+		t.Errorf("IDE context tag not stripped; prompt = %q", event.Prompt)
+	}
+}
+
 func TestParseHookEvent_TurnEnd(t *testing.T) {
 	t.Parallel()
 
@@ -540,5 +557,32 @@ func TestWaitForTranscriptFlush_NonexistentFile_ReturnsImmediately(t *testing.T)
 
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("expected immediate return for nonexistent file, but took %v", elapsed)
+	}
+}
+
+func TestClaudeCodeAgent_ContextInjector(t *testing.T) {
+	t.Parallel()
+	c := &ClaudeCodeAgent{}
+	if got := c.InjectionEvent(); got != agent.TurnStart {
+		t.Errorf("InjectionEvent = %v, want TurnStart", got)
+	}
+	out, err := c.RenderContextInjection(agent.ContextInjection{Text: "use entire trail"})
+	if err != nil {
+		t.Fatalf("RenderContextInjection: %v", err)
+	}
+	var parsed struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v (%q)", err, string(out))
+	}
+	if parsed.HookSpecificOutput.HookEventName != "UserPromptSubmit" {
+		t.Errorf("hookEventName = %q, want UserPromptSubmit", parsed.HookSpecificOutput.HookEventName)
+	}
+	if parsed.HookSpecificOutput.AdditionalContext != "use entire trail" {
+		t.Errorf("additionalContext = %q", parsed.HookSpecificOutput.AdditionalContext)
 	}
 }
