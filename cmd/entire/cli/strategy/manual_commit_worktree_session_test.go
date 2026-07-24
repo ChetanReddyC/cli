@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/require"
 )
 
@@ -235,6 +236,75 @@ func TestManualCommitStrategy_FindSessionsForWorktree_ReturnsConcurrentSessionsF
 	matching, err := finder.findSessionsForWorktree(ctx, commitWorktree)
 	require.NoError(t, err)
 	require.Len(t, matching, 2, "concurrent sessions recorded in the same sibling worktree should all match")
+}
+
+func TestManualCommitStrategy_PostCommitBaseUpdate_DoesNotRewriteSiblingSessionBase(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+	mainDir := setupSessionMatchRepo(t)
+	recordedWorktree := resolvedRemovedTempDir(t)
+	commitWorktree := resolvedRemovedTempDir(t)
+	createSessionMatchWorktree(t, mainDir, recordedWorktree, "recorded")
+	t.Cleanup(func() { removeSessionMatchWorktree(mainDir, recordedWorktree) })
+	createSessionMatchWorktree(t, mainDir, commitWorktree, "commit")
+	t.Cleanup(func() { removeSessionMatchWorktree(mainDir, commitWorktree) })
+
+	s := &ManualCommitStrategy{}
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{
+		SessionID:    "sibling-session",
+		WorktreePath: recordedWorktree,
+	})
+	originalBase := testutil.GetHeadHash(t, mainDir)
+
+	// Trailer-less commit in the sibling worktree: the fallback would match
+	// the recorded session here, but BaseCommit must only follow the HEAD of
+	// the session's own worktree (shadow branches are keyed off it).
+	t.Chdir(commitWorktree)
+	clearSessionMatchCaches()
+	testutil.WriteFile(t, commitWorktree, "untracked.txt", "manual\n")
+	testutil.GitAdd(t, commitWorktree, "untracked.txt")
+	testutil.GitCommit(t, commitWorktree, "manual commit without trailer")
+	newHead := testutil.GetHeadHash(t, commitWorktree)
+	require.NotEqual(t, originalBase, newHead)
+
+	hook := &ManualCommitStrategy{}
+	hook.postCommitUpdateBaseCommitOnly(ctx, plumbing.NewHashReference(plumbing.HEAD, plumbing.NewHash(newHead)))
+
+	reloaded, err := hook.loadSessionState(ctx, "sibling-session")
+	require.NoError(t, err)
+	require.NotNil(t, reloaded)
+	require.Equal(t, originalBase, reloaded.BaseCommit,
+		"trailer-less commit in a sibling worktree must not rewrite the recorded session's BaseCommit")
+}
+
+func TestManualCommitStrategy_PostCommitBaseUpdate_StillAdvancesExactMatchSessionBase(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+	mainDir := setupSessionMatchRepo(t)
+
+	s := &ManualCommitStrategy{}
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{
+		SessionID:    "exact-session",
+		WorktreePath: mainDir,
+	})
+	originalBase := testutil.GetHeadHash(t, mainDir)
+
+	t.Chdir(mainDir)
+	clearSessionMatchCaches()
+	testutil.WriteFile(t, mainDir, "untracked.txt", "manual\n")
+	testutil.GitAdd(t, mainDir, "untracked.txt")
+	testutil.GitCommit(t, mainDir, "manual commit without trailer")
+	newHead := testutil.GetHeadHash(t, mainDir)
+	require.NotEqual(t, originalBase, newHead)
+
+	hook := &ManualCommitStrategy{}
+	hook.postCommitUpdateBaseCommitOnly(ctx, plumbing.NewHashReference(plumbing.HEAD, plumbing.NewHash(newHead)))
+
+	reloaded, err := hook.loadSessionState(ctx, "exact-session")
+	require.NoError(t, err)
+	require.NotNil(t, reloaded)
+	require.Equal(t, newHead, reloaded.BaseCommit,
+		"trailer-less commit in the session's own worktree must still advance BaseCommit")
 }
 
 func TestGitCommonDirForWorktree_IgnoresHookGitDirEnv(t *testing.T) {

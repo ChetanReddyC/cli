@@ -153,20 +153,40 @@ func countWarnableStaleEndedSessions(repo *git.Repository, sessions []*SessionSt
 	return n
 }
 
+// findExactSessionsForWorktree returns sessions recorded for exactly this
+// worktree path, with no sibling/parent fallback. Callers that mutate
+// worktree-coupled state (e.g. BaseCommit, which must only follow the HEAD of
+// the session's own worktree) must use this instead of
+// findSessionsForWorktree.
+func (s *ManualCommitStrategy) findExactSessionsForWorktree(ctx context.Context, worktreePath string) ([]*SessionState, error) {
+	allStates, err := s.listAllSessionStates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return exactWorktreeMatches(allStates, worktreePath), nil
+}
+
+func exactWorktreeMatches(states []*SessionState, worktreePath string) []*SessionState {
+	var exact []*SessionState
+	for _, state := range states {
+		if state.WorktreePath == worktreePath {
+			exact = append(exact, state)
+		}
+	}
+	return exact
+}
+
 // findSessionsForWorktree finds all sessions for the given worktree path.
+// Exact WorktreePath matches win; otherwise sessions recorded in another
+// worktree of the same repository (shared git common dir) are matched, as long
+// as all candidates come from a single worktree.
 func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, worktreePath string) ([]*SessionState, error) {
 	allStates, err := s.listAllSessionStates(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var exact []*SessionState
-	for _, state := range allStates {
-		if state.WorktreePath == worktreePath {
-			exact = append(exact, state)
-		}
-	}
-	if len(exact) > 0 {
+	if exact := exactWorktreeMatches(allStates, worktreePath); len(exact) > 0 {
 		return exact, nil
 	}
 
