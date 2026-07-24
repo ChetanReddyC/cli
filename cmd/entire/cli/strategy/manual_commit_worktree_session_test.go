@@ -180,6 +180,79 @@ func TestManualCommitStrategy_FindSessionsForWorktree_DoesNotGuessAmbiguousSibli
 	require.Empty(t, matching)
 }
 
+func TestManualCommitStrategy_FindSessionsForWorktree_ReturnsConcurrentSessionsFromParent(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+	mainDir := setupSessionMatchRepo(t)
+	worktreeDir := filepath.Join(mainDir, ".worktrees", "feature")
+	createSessionMatchWorktree(t, mainDir, worktreeDir, "feature")
+	t.Cleanup(func() { removeSessionMatchWorktree(mainDir, worktreeDir) })
+
+	s := &ManualCommitStrategy{}
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{
+		SessionID:    "parent-session-a",
+		WorktreePath: mainDir,
+	})
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{
+		SessionID:    "parent-session-b",
+		WorktreePath: mainDir,
+	})
+
+	t.Chdir(worktreeDir)
+	clearSessionMatchCaches()
+
+	finder := &ManualCommitStrategy{}
+	matching, err := finder.findSessionsForWorktree(ctx, worktreeDir)
+	require.NoError(t, err)
+	require.Len(t, matching, 2, "concurrent sessions recorded in the same parent worktree should all match")
+}
+
+func TestManualCommitStrategy_FindSessionsForWorktree_ReturnsConcurrentSessionsFromSameSibling(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+	mainDir := setupSessionMatchRepo(t)
+	recordedWorktree := resolvedRemovedTempDir(t)
+	commitWorktree := resolvedRemovedTempDir(t)
+	createSessionMatchWorktree(t, mainDir, recordedWorktree, "recorded")
+	t.Cleanup(func() { removeSessionMatchWorktree(mainDir, recordedWorktree) })
+	createSessionMatchWorktree(t, mainDir, commitWorktree, "commit")
+	t.Cleanup(func() { removeSessionMatchWorktree(mainDir, commitWorktree) })
+
+	s := &ManualCommitStrategy{}
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{
+		SessionID:    "sibling-session-a",
+		WorktreePath: recordedWorktree,
+	})
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{
+		SessionID:    "sibling-session-b",
+		WorktreePath: recordedWorktree,
+	})
+
+	t.Chdir(commitWorktree)
+	clearSessionMatchCaches()
+
+	finder := &ManualCommitStrategy{}
+	matching, err := finder.findSessionsForWorktree(ctx, commitWorktree)
+	require.NoError(t, err)
+	require.Len(t, matching, 2, "concurrent sessions recorded in the same sibling worktree should all match")
+}
+
+func TestGitCommonDirForWorktree_IgnoresHookGitDirEnv(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+	mainDir := setupSessionMatchRepo(t)
+	otherDir := setupSessionMatchRepo(t)
+
+	// Git hooks export GIT_DIR for the hook's own repo; resolution for a
+	// different worktree must not be redirected by it.
+	t.Setenv("GIT_DIR", filepath.Join(otherDir, ".git"))
+	t.Chdir(otherDir)
+
+	commonDir, err := gitCommonDirForWorktree(ctx, mainDir)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(mainDir, ".git"), commonDir)
+}
+
 func setupSessionMatchRepo(t *testing.T) string {
 	t.Helper()
 
