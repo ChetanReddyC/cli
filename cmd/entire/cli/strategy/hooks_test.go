@@ -314,6 +314,52 @@ func TestGetHooksDirInPath_CoreHooksPath(t *testing.T) {
 	}
 }
 
+func TestInstallGitHook_HooksPathNotADirectory(t *testing.T) {
+	// core.hooksPath pointing at a non-directory (commonly /dev/null, the
+	// "disable git hooks globally" idiom) must fail with guidance naming
+	// core.hooksPath, not a raw mkdir error.
+	tmpDir := t.TempDir()
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "init")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	hooksPath := "/dev/null"
+	if runtime.GOOS == "windows" {
+		hooksPath = filepath.Join(tmpDir, "not-a-dir")
+		if err := os.WriteFile(hooksPath, []byte("x"), 0o600); err != nil {
+			t.Fatalf("failed to create non-directory hooks path: %v", err)
+		}
+	}
+	cmd = exec.CommandContext(ctx, "git", "config", "core.hooksPath", hooksPath)
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+	ClearHooksDirCache()
+	paths.ClearWorktreeRootCache()
+
+	_, err := InstallGitHook(ctx, true, false, false)
+	if err == nil {
+		t.Fatal("InstallGitHook() should fail when hooks path is not a directory")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "core.hooksPath") {
+		t.Errorf("error should name core.hooksPath, got: %s", msg)
+	}
+	if !strings.Contains(msg, hooksPath) {
+		t.Errorf("error should include the resolved hooks path %s, got: %s", hooksPath, msg)
+	}
+	if !strings.Contains(msg, "git config") {
+		t.Errorf("error should tell the user how to inspect/fix the setting, got: %s", msg)
+	}
+}
+
 func TestInstallGitHook_WorktreeInstallsInCommonHooks(t *testing.T) {
 	mainRepo, worktreeDir := initHooksWorktreeRepo(t)
 	t.Chdir(worktreeDir)
