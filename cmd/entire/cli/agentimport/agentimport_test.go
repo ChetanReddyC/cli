@@ -438,11 +438,22 @@ func TestRun_StampsImporterGitAuthorOnCheckpointCommit(t *testing.T) {
 // same "Unknown"/"unknown@local" default checkpoint.GetGitAuthorFromRepo
 // already applies elsewhere, rather than an empty one.
 func TestRun_UnconfiguredGitIdentityFallsBackToDefaults(t *testing.T) {
-	// Cannot use t.Parallel(): isolates HOME via t.Setenv so this repo's
-	// global git config resolution can't see the developer's real ~/.gitconfig.
+	// Cannot use t.Parallel(): isolates git config resolution via t.Setenv so
+	// this repo can't see any real identity. GetGitAuthorFromRepo resolves
+	// GlobalScope through go-git's Auto loader, which reads all of git's global
+	// sources; neutralize every one or the fallback assertion is flaky wherever
+	// an identity is configured (~/.gitconfig, XDG, GIT_CONFIG_GLOBAL, or system
+	// /etc/gitconfig). Mirrors the checkpoint package's pointHomeAt helper.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	// t.Setenv registers restoration of the original value; unset it for the
+	// test since an empty GIT_CONFIG_GLOBAL disables global config entirely.
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
+	if err := os.Unsetenv("GIT_CONFIG_GLOBAL"); err != nil {
+		t.Fatal(err)
+	}
 
 	repoDir := t.TempDir()
 	repo, err := git.PlainInit(repoDir, false)
