@@ -38,12 +38,6 @@ func NewHookRunner(repoDir, claudeProjectDir string, t interface {
 	}
 }
 
-// HookResponse represents the JSON response from Claude Code hooks.
-type HookResponse struct {
-	Continue   bool   `json:"continue"`
-	StopReason string `json:"stopReason,omitempty"`
-}
-
 // SimulateUserPromptSubmit simulates the UserPromptSubmit hook.
 // This captures pre-prompt state (untracked files).
 func (r *HookRunner) SimulateUserPromptSubmit(sessionID string) error {
@@ -611,24 +605,6 @@ func (r *CodexHookRunner) SimulateCodexPostToolUseApplyPatch(sessionID, cwd, pat
 		return fmt.Errorf("marshal hook input: %w", err)
 	}
 	return r.runCodexHook("post-tool-use", inputJSON)
-}
-
-// GeminiHookRunner executes Gemini CLI hooks in the test environment.
-type GeminiHookRunner struct {
-	RepoDir          string
-	GeminiProjectDir string
-	T                interface {
-		Helper()
-		Fatalf(format string, args ...interface{})
-		Logf(format string, args ...interface{})
-	}
-}
-
-// GeminiSession represents a simulated Gemini CLI session.
-type GeminiSession struct {
-	ID             string // Raw model session ID (e.g., "gemini-session-1")
-	TranscriptPath string
-	env            *TestEnv
 }
 
 // --- Factory AI Droid Hook Runner ---
