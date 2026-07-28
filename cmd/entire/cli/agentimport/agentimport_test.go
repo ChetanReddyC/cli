@@ -384,6 +384,133 @@ func TestRun_CursorImporterEndToEnd(t *testing.T) {
 	}
 }
 
+// TestRun_StampsImporterGitAuthorOnCheckpointCommit proves an imported
+// checkpoint's underlying git commit on entire/checkpoints/v1 carries the
+// importer's configured git identity (resolved once per Run via
+// checkpoint.GetGitAuthorFromRepo), not an empty signature.
+//
+// Motivation: on the GitHub->mirror ingestion path, the data plane has no
+// pusher identity for imported sessions and falls back to the checkpoint
+// commit's git author. An empty author meant imported sessions couldn't be
+// attributed to the importer.
+func TestRun_StampsImporterGitAuthorOnCheckpointCommit(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	claudeDir := t.TempDir()
+	writeFixtureSession(t, claudeDir, "sess-author.jsonl")
+
+	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDir,
+		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar, ok := stores.Persistent.(cp.AuthorReader)
+	if !ok {
+		t.Fatalf("persistent store %T does not implement AuthorReader", stores.Persistent)
+	}
+	cid := DeriveCheckpointID("sess-author", "u1")
+	author, err := ar.GetCheckpointAuthor(context.Background(), cid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// initRepoWithCommit uses testutil.InitRepo, which configures this
+	// repo-local git identity.
+	const wantName, wantEmail = "Test User", "test@example.com"
+	if author.Name != wantName || author.Email != wantEmail {
+		t.Fatalf("checkpoint commit author = %+v, want Name=%q Email=%q (the repo's configured git identity)",
+			author, wantName, wantEmail)
+	}
+}
+
+// TestRun_UnconfiguredGitIdentityFallsBackToDefaults proves that when the
+// importer's repo has no configured git user (no local or global user.name /
+// user.email), the imported checkpoint commit still gets a signature — the
+// same "Unknown"/"unknown@local" default checkpoint.GetGitAuthorFromRepo
+// already applies elsewhere, rather than an empty one.
+func TestRun_UnconfiguredGitIdentityFallsBackToDefaults(t *testing.T) {
+	// Cannot use t.Parallel(): isolates git config resolution via t.Setenv so
+	// this repo can't see any real identity. GetGitAuthorFromRepo resolves
+	// GlobalScope through go-git's Auto loader, which reads all of git's global
+	// sources; neutralize every one or the fallback assertion is flaky wherever
+	// an identity is configured (~/.gitconfig, XDG, GIT_CONFIG_GLOBAL, or system
+	// /etc/gitconfig). Mirrors the checkpoint package's pointHomeAt helper.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	// t.Setenv registers restoration of the original value; unset it for the
+	// test since an empty GIT_CONFIG_GLOBAL disables global config entirely.
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
+	if err := os.Unsetenv("GIT_CONFIG_GLOBAL"); err != nil {
+		t.Fatal(err)
+	}
+
+	repoDir := t.TempDir()
+	repo, err := git.PlainInit(repoDir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed one commit with a real timestamp (the anchor resolver's bounded
+	// walk stops at commits older than its date cutoff; a zero-value When
+	// would halt it immediately). The commit's own author signature is
+	// independent of GetGitAuthorFromRepo's config-based resolution under
+	// test here.
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, repoDir, "f.txt", "x")
+	if _, err := wt.Add("f.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Commit("init", &git.CommitOptions{
+		Author: &object.Signature{Name: "Seed", Email: "seed@test.com", When: time.Now()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	claudeDir := t.TempDir()
+	writeFixtureSession(t, claudeDir, "sess-noauthor.jsonl")
+
+	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDir,
+		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar, ok := stores.Persistent.(cp.AuthorReader)
+	if !ok {
+		t.Fatalf("persistent store %T does not implement AuthorReader", stores.Persistent)
+	}
+	cid := DeriveCheckpointID("sess-noauthor", "u1")
+	author, err := ar.GetCheckpointAuthor(context.Background(), cid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if author.Name != "Unknown" || author.Email != "unknown@local" {
+		t.Fatalf("checkpoint commit author = %+v, want the GetGitAuthorFromRepo defaults", author)
+	}
+}
+
 func TestRun_DryRunWritesNothing(t *testing.T) {
 	t.Parallel()
 	repo, repoDir := initRepoWithCommit(t)
