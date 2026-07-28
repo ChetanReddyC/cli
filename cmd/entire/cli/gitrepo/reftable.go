@@ -44,7 +44,11 @@ func repoUsesReftable(dotGitPath, commonGitPath string) bool {
 		candidates = append(candidates, filepath.Join(commonGitPath, "reftable"))
 	}
 	for _, dir := range candidates {
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		// Lstat, not Stat: git creates reftable/ as a real directory, so a
+		// symlink in its place is not a genuine reftable stack. Lstat inspects
+		// the entry itself rather than following the link, so a symlink reports
+		// IsDir()==false and is correctly not treated as a reftable repository.
+		if info, err := os.Lstat(dir); err == nil && info.IsDir() {
 			return true
 		}
 	}
@@ -60,6 +64,12 @@ func repoUsesReftable(dotGitPath, commonGitPath string) bool {
 //
 // It also advertises reftable support via the ExtensionChecker interface so
 // go-git's extension verification does not reject the repository on open.
+//
+// TODO: remove this entire type (and its wiring in repository.go) once go-git
+// gains a built-in reftable reader/writer. It exists only because the vendored
+// go-git has no reftable backend, so ref operations must shell out to the git
+// CLI. When upstream supports reftable natively, the plain filesystem storer
+// handles these repositories and this shim can be deleted.
 type reftableStorer struct {
 	*gitfilesystem.Storage
 

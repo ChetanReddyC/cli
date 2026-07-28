@@ -124,6 +124,11 @@ func openPathWithAlternates(repoRoot string) (*git.Repository, error) {
 	// authoritative in a reftable repository, and its extension check rejects
 	// extensions.refstorage=reftable outright. Route ref operations through the
 	// git CLI for such repositories while keeping object storage on go-git.
+	//
+	// TODO: drop the reftable branch below and the whole reftableStorer
+	// (reftable.go) once go-git ships a native reftable reader/writer. At that
+	// point a plain git.Open(storage, worktreeFS) will handle reftable
+	// repositories directly and this CLI-backed shim is dead weight.
 	worktreeFS := osfs.New(repoRoot, osfs.WithBoundOS())
 	if repoUsesReftable(dotGitPath, commonGitPath) {
 		repo, err := git.Open(newReftableStorer(storage, dotGitPath), worktreeFS)
