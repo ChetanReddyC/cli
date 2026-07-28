@@ -44,11 +44,15 @@ func TestReftableRepository_EnableAndFirstCheckpoint(t *testing.T) {
 		t.Fatalf("repository ref format = %q, want reftable", got)
 	}
 
+	// Pin the git-branch backend: this test asserts the v1-branch condensation
+	// flow in a reftable repo, and first-run enable now defaults new setups to
+	// git-refs.
 	output := env.RunCLI(
 		"enable",
 		"--no-github",
 		"--agent", "claude-code",
 		"--telemetry=false",
+		"--checkpoint-backend", "branch",
 	)
 	if !strings.Contains(output, paths.MetadataBranchName) {
 		t.Fatalf("expected enable to create %s branch, got output:\n%s", paths.MetadataBranchName, output)
@@ -144,7 +148,10 @@ func TestReftableRepository_LinkedWorktree(t *testing.T) {
 
 	// Enable and drive a checkpoint from within the worktree by pointing the CLI
 	// at the worktree directory.
-	runCLIIn(t, env, worktreePath, "enable", "--no-github", "--agent", "claude-code", "--telemetry=false")
+	// Pin the git-branch backend (see TestReftableRepository_EnableAndFirstCheckpoint):
+	// first-run enable now defaults to git-refs, but this test asserts the
+	// v1-branch metadata flow.
+	runCLIIn(t, env, worktreePath, "enable", "--no-github", "--agent", "claude-code", "--telemetry=false", "--checkpoint-backend", "branch")
 
 	if got := gitOutput(t, worktreePath, "rev-parse", "--show-ref-format"); got != refFormatReftable {
 		t.Fatalf("worktree ref format = %q, want reftable", got)
