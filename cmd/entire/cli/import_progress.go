@@ -14,11 +14,16 @@ import (
 // tracks "Importing <agentName> sessions... (session i/N · turn j/M)";
 // callers must call the returned stop exactly once when the run finishes —
 // on both the success and error paths — so no spinner frame is left
-// dangling to corrupt whatever prints next. Otherwise (non-TTY, piped, or
-// ACCESSIBLE mode) it prints one plain, ANSI-free line per session from
-// SessionStart, and stop is a no-op.
+// dangling to corrupt whatever prints next. Otherwise — non-TTY, piped,
+// ACCESSIBLE mode, or a terminal that can't render ANSI (NO_COLOR,
+// TERM=cygwin; see interactive.ShouldStyle) — it prints one plain, ANSI-free
+// line per session from SessionStart, and stop is a no-op. The ShouldStyle
+// gate matches startUpdatableSpinner's own gate, so the spinner branch here
+// is taken only when the animation it drives can actually be rendered.
 func newImportProgressReporter(w io.Writer, agentName string) (progress *agentimport.Progress, stop func(success bool)) {
-	if !interactive.IsTerminalWriter(w) || IsAccessibleMode() {
+	// ShouldStyle already returns false for a non-terminal writer, so it
+	// subsumes the non-TTY/piped case as well as NO_COLOR and TERM=cygwin.
+	if IsAccessibleMode() || !interactive.ShouldStyle(w) {
 		return &agentimport.Progress{
 			SessionStart: func(sessionIndex, sessionTotal int, _, _ string, turnCount int) {
 				fmt.Fprintf(w, "Importing %s session %d/%d (%d %s)...\n",

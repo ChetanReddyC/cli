@@ -380,9 +380,13 @@ func TestRunSelectedImports_NonTTYProgressLines(t *testing.T) {
 // idempotent pass over an already-imported corpus (every turn hits
 // agentimport's TurnSkipped path, not TurnWritten) still prints one plain
 // progress line per session and reports the correct "0 imported" summary —
-// the non-TTY side of the P2 Codex's pre-push review caught (the TTY side is
-// covered by agentimport's TestRun_ReimportFiresTurnSkippedNotTurnWritten
-// and this package's TestNewImportProgressReporter_TTYAdvancesOnSkip).
+// the non-TTY side of the bug the P2 Codex's pre-push review caught. The TTY
+// side (a fully-skipped session must still sweep the spinner to turn M/M) is
+// covered at the agentimport layer by
+// TestRun_ReimportFiresTurnSkippedNotTurnWritten; the cli wiring it depends on
+// — newImportProgressReporter routing TurnSkipped and TurnWritten through one
+// shared advance path — has no direct test because the spinner branch only
+// runs against a real terminal.
 func TestRunSelectedImports_NonTTYProgressLines_Reimport(t *testing.T) {
 	// Not parallel: chdirs into a temp repo and performs real checkpoint writes.
 	dir := t.TempDir()
