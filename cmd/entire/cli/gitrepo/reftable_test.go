@@ -20,6 +20,16 @@ import (
 // It returns the repo dir and the initial commit hash.
 func initReftableRepo(t *testing.T, name, content string) (string, string) {
 	t.Helper()
+	return initReftableRepoWithFormat(t, "", name, content)
+}
+
+// initReftableRepoWithFormat is initReftableRepo with an explicit git object
+// format. An empty objectFormat uses git's default (sha1); "sha256" exercises
+// the sha256 hash, which additionally makes git write extensions.objectformat
+// into the repo config. The test is skipped when the installed git cannot
+// initialize the requested reftable + object-format combination.
+func initReftableRepoWithFormat(t *testing.T, objectFormat, name, content string) (string, string) {
+	t.Helper()
 	repoDir := t.TempDir()
 
 	env := append(os.Environ(),
@@ -28,7 +38,12 @@ func initReftableRepo(t *testing.T, name, content string) (string, string) {
 		"GIT_TERMINAL_PROMPT=0",
 	)
 
-	initCmd := exec.Command("git", "init", "-b", "main", "--ref-format=reftable", repoDir) //nolint:noctx // test capability probe
+	initArgs := []string{"init", "-b", "main", "--ref-format=reftable"}
+	if objectFormat != "" {
+		initArgs = append(initArgs, "--object-format="+objectFormat)
+	}
+	initArgs = append(initArgs, repoDir)
+	initCmd := exec.Command("git", initArgs...) //nolint:noctx // test capability probe
 	initCmd.Env = env
 	if out, err := initCmd.CombinedOutput(); err != nil {
 		t.Skipf("git does not support reftable repositories: %v\n%s", err, out)
@@ -47,6 +62,11 @@ func initReftableRepo(t *testing.T, name, content string) (string, string) {
 	if got := git("rev-parse", "--show-ref-format"); got != "reftable" {
 		t.Skipf("git initialized ref format %q, not reftable", got)
 	}
+	if objectFormat != "" {
+		if got := git("rev-parse", "--show-object-format"); got != objectFormat {
+			t.Skipf("git initialized object format %q, not %q", got, objectFormat)
+		}
+	}
 	git("config", "user.name", "Test User")
 	git("config", "user.email", "test@example.com")
 	git("config", "commit.gpgsign", "false")
@@ -55,6 +75,22 @@ func initReftableRepo(t *testing.T, name, content string) (string, string) {
 	git("commit", "-m", "initial")
 
 	return repoDir, git("rev-parse", "HEAD")
+}
+
+// setRepoConfig sets a local git config key in an existing repo, using an
+// isolated global/system config so the developer's real git config is never
+// read or written (matching the reftable test helpers).
+func setRepoConfig(t *testing.T, repoDir, key, value string) {
+	t.Helper()
+	cmd := exec.Command("git", "config", key, value) //nolint:noctx // test helper
+	cmd.Dir = repoDir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+filepath.Join(t.TempDir(), "gitconfig"),
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "git config %s %s: %s", key, value, out)
 }
 
 // reftableCommit adds a file and commits it in an existing reftable repo,
@@ -605,6 +641,66 @@ func TestOpenPath_ReftableRepository(t *testing.T) {
 	_, err = repo.Storer.Reference(newRef.Name())
 	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound)
 	require.NoError(t, repo.Storer.RemoveReference(newRef.Name()))
+}
+
+// TestOpenPath_Sha256ReftableRepository confirms that a reftable repository
+// using the sha256 object format can be opened and that refs round-trip through
+// the git-CLI-backed storer.
+//
+// Such a repository declares TWO extensions in its config:
+// extensions.refstorage=reftable AND extensions.objectformat=sha256. go-git's
+// verifyExtensions asks the storer's SupportsExtension whether each declared
+// extension is supported. The embedded filesystem Storage approves
+// objectformat=sha256, but reftableStorer defines its own SupportsExtension
+// (to advertise refstorage), which shadows the embedded method by Go's
+// promotion rules. As written it approves only refstorage, so objectformat is
+// reported unsupported and go-git rejects the open with ErrUnknownExtension.
+// The reftable backend thus silently breaks sha256 repositories. This test
+// pins the correct behaviour and is the regression guard for that gap in #547.
+func TestOpenPath_Sha256ReftableRepository(t *testing.T) {
+	t.Parallel()
+	repoDir, headHash := initReftableRepoWithFormat(t, "sha256", "file.txt", "hello\n")
+
+	repo, err := OpenPath(repoDir)
+	require.NoError(t, err, "sha256 reftable repository should open; objectformat extension must stay supported")
+	defer repo.Close()
+
+	head, err := repo.Head()
+	require.NoError(t, err)
+	require.Equal(t, "refs/heads/main", head.Name().String())
+	require.Equal(t, headHash, head.Hash().String())
+
+	// A ref write/read round-trips through the git-CLI-backed storer, proving
+	// the sha256 repo is not merely openable but usable.
+	newRef := plumbing.NewHashReference(plumbing.ReferenceName("refs/entire/sha256"), head.Hash())
+	require.NoError(t, repo.Storer.SetReference(newRef))
+	got, err := repo.Storer.Reference(newRef.Name())
+	require.NoError(t, err)
+	require.Equal(t, head.Hash(), got.Hash())
+}
+
+// TestOpenPath_WorktreeConfigReftableRepository confirms that a reftable
+// repository that also enables the worktreeConfig extension can be opened.
+//
+// This is the same extension-shadowing gap as
+// TestOpenPath_Sha256ReftableRepository: the embedded filesystem Storage
+// approves worktreeconfig=true/false, but reftableStorer's own
+// SupportsExtension shadows that method and approves only refstorage. A
+// reftable repo with extensions.worktreeConfig=true therefore fails to open
+// with ErrUnknownExtension. Regression guard for that gap in #547.
+func TestOpenPath_WorktreeConfigReftableRepository(t *testing.T) {
+	t.Parallel()
+	repoDir, headHash := initReftableRepo(t, "file.txt", "hello\n")
+	setRepoConfig(t, repoDir, "extensions.worktreeConfig", "true")
+
+	repo, err := OpenPath(repoDir)
+	require.NoError(t, err, "reftable repository with worktreeConfig should open; worktreeconfig extension must stay supported")
+	defer repo.Close()
+
+	head, err := repo.Head()
+	require.NoError(t, err)
+	require.Equal(t, "refs/heads/main", head.Name().String())
+	require.Equal(t, headHash, head.Hash().String())
 }
 
 // TestRepoUsesReftable_Detection checks that reftable detection distinguishes

@@ -88,10 +88,21 @@ func newReftableStorer(fs *gitfilesystem.Storage, gitDir string) *reftableStorer
 }
 
 // SupportsExtension lets go-git open a repository that declares the
-// extensions.refstorage=reftable extension. Object-format and other extensions
-// remain the responsibility of the embedded filesystem storage / go-git core.
-func (s *reftableStorer) SupportsExtension(name, _ string) bool {
-	return strings.EqualFold(name, "refstorage")
+// extensions.refstorage=reftable extension, and preserves the embedded
+// filesystem storage's support for every other extension it recognises
+// (objectformat=sha1/sha256, worktreeconfig).
+//
+// Defining this method here shadows the promoted *gitfilesystem.Storage
+// method, so it must delegate: without the fallback, a reftable repository
+// that also declares objectformat=sha256 or worktreeConfig would be rejected
+// by go-git's extension verification with ErrUnknownExtension, since it only
+// consults the storer's SupportsExtension. Reftable only changes ref storage,
+// not object storage, so object-format support is unaffected.
+func (s *reftableStorer) SupportsExtension(name, value string) bool {
+	if strings.EqualFold(name, "refstorage") {
+		return true
+	}
+	return s.Storage.SupportsExtension(name, value)
 }
 
 // runGit runs a git plumbing command scoped to this repository's git dir and
