@@ -33,11 +33,18 @@ func startSpinner(w io.Writer, msg string) func(success bool) {
 
 // startUpdatableSpinner is startSpinner's variant for an operation whose
 // status text changes while it runs (e.g. "session 2/5 · turn 3/10"). update
-// replaces the message the next frame draws — or, on a non-terminal writer,
+// replaces the message the next frame draws — or, on the non-animated path,
 // the message stop's completion line uses. update is safe to call at any
 // point, including before the spinner's first frame draws and after stop
 // returns. stop behaves exactly like startSpinner's, rendering whichever
 // message update last set (or msg, if update was never called).
+//
+// The live animation is emitted only when w both is a terminal and can render
+// ANSI (interactive.ShouldStyle) — the frames use cursor-control escapes
+// (\r\033[K), which a legacy console that can't handle ANSI (e.g.
+// TERM=cygwin) renders as literal "←[K" garbage, and which NO_COLOR asks us
+// to suppress. When styling is off we fall back to the completion-line-only
+// path, so no escape byte is ever written to such a writer.
 func startUpdatableSpinner(w io.Writer, msg string) (update func(string), stop func(success bool)) {
 	var mu sync.Mutex
 	current := msg
@@ -52,7 +59,7 @@ func startUpdatableSpinner(w io.Writer, msg string) (update func(string), stop f
 		return current
 	}
 
-	if !interactive.IsTerminalWriter(w) {
+	if !interactive.IsTerminalWriter(w) || !interactive.ShouldStyle(w) {
 		return setMsg, func(success bool) {
 			if success {
 				fmt.Fprintf(w, "✓ %s\n", getMsg())
