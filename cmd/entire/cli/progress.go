@@ -59,7 +59,9 @@ func startUpdatableSpinner(w io.Writer, msg string) (update func(string), stop f
 		return current
 	}
 
-	if !interactive.IsTerminalWriter(w) || !interactive.ShouldStyle(w) {
+	// ShouldStyle already returns false for a non-terminal writer, so this
+	// single gate also covers the plain non-TTY case.
+	if !interactive.ShouldStyle(w) {
 		return setMsg, func(success bool) {
 			if success {
 				fmt.Fprintf(w, "✓ %s\n", getMsg())

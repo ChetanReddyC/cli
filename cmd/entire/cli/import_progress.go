@@ -21,7 +21,9 @@ import (
 // gate matches startUpdatableSpinner's own gate, so the spinner branch here
 // is taken only when the animation it drives can actually be rendered.
 func newImportProgressReporter(w io.Writer, agentName string) (progress *agentimport.Progress, stop func(success bool)) {
-	if !interactive.IsTerminalWriter(w) || IsAccessibleMode() || !interactive.ShouldStyle(w) {
+	// ShouldStyle already returns false for a non-terminal writer, so it
+	// subsumes the non-TTY/piped case as well as NO_COLOR and TERM=cygwin.
+	if IsAccessibleMode() || !interactive.ShouldStyle(w) {
 		return &agentimport.Progress{
 			SessionStart: func(sessionIndex, sessionTotal int, _, _ string, turnCount int) {
 				fmt.Fprintf(w, "Importing %s session %d/%d (%d %s)...\n",
