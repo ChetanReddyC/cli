@@ -14,6 +14,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
+// refFormatReftable is git's rev-parse --show-ref-format value for a repository
+// using the reftable ref backend.
+const refFormatReftable = "reftable"
+
 // TestReftableRepository_EnableAndFirstCheckpoint exercises the full capture
 // flow (enable -> session start -> file changes -> stop -> user commit ->
 // checkpoint) against a repository using the reftable ref backend. go-git's
@@ -36,7 +40,7 @@ func TestReftableRepository_EnableAndFirstCheckpoint(t *testing.T) {
 	gitOutput(t, env.RepoDir, "add", "README.md")
 	gitOutput(t, env.RepoDir, "commit", "-m", "Initial reftable commit")
 
-	if got := gitOutput(t, env.RepoDir, "rev-parse", "--show-ref-format"); got != "reftable" {
+	if got := gitOutput(t, env.RepoDir, "rev-parse", "--show-ref-format"); got != refFormatReftable {
 		t.Fatalf("repository ref format = %q, want reftable", got)
 	}
 
@@ -142,7 +146,7 @@ func TestReftableRepository_LinkedWorktree(t *testing.T) {
 	// at the worktree directory.
 	runCLIIn(t, env, worktreePath, "enable", "--no-github", "--agent", "claude-code", "--telemetry=false")
 
-	if got := gitOutput(t, worktreePath, "rev-parse", "--show-ref-format"); got != "reftable" {
+	if got := gitOutput(t, worktreePath, "rev-parse", "--show-ref-format"); got != refFormatReftable {
 		t.Fatalf("worktree ref format = %q, want reftable", got)
 	}
 
@@ -184,7 +188,7 @@ func requireGitReftableSupport(t *testing.T) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("git does not support reftable repositories: %v\n%s", err, output)
 	}
-	if got := gitOutput(t, dir, "rev-parse", "--show-ref-format"); got != "reftable" {
+	if got := gitOutput(t, dir, "rev-parse", "--show-ref-format"); got != refFormatReftable {
 		t.Skipf("git initialized ref format %q, not reftable", got)
 	}
 }
