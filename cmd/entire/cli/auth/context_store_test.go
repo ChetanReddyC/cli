@@ -147,6 +147,44 @@ func TestRemoveCurrentContext_DeletesJurisdictionTokens(t *testing.T) {
 	}
 }
 
+// TestRemoveContext_SkipsBlankRecordedAudience covers a hand-edited or
+// corrupted contexts.json: a blank audience would resolve to the bare service
+// prefix, so it must be skipped rather than looked up, and it must not stop the
+// real slots from being deleted.
+func TestRemoveContext_SkipsBlankRecordedAudience(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	seedRestore := tokenstore.UseFileBackendForTesting(path)
+
+	const audience = "https://eu.example.io"
+	name, _ := seedLoginWithJurisdictionTokens(t, audience)
+
+	// Corrupt the record the way only an editor could.
+	if err := contexts.Modify(cfgDir, func(f *contexts.File) (bool, error) {
+		f.Find(name).JurisdictionAudiences = []string{"", "  ", audience}
+		return true, nil
+	}); err != nil {
+		t.Fatalf("seed blank audiences: %v", err)
+	}
+	seedRestore()
+
+	// Any lookup of the bare prefix is the bug this guards against.
+	blank := tokenstore.JurisdictionService("")
+	t.Cleanup(tokenstore.UseObservingBackendForTesting(path, func(op, service, _ string) {
+		if service == blank {
+			t.Errorf("%s on the bare jurisdiction prefix %q", op, service)
+		}
+	}))
+
+	if err := RemoveContext(name); err != nil {
+		t.Fatalf("RemoveContext: %v", err)
+	}
+	if v, err := tokenstore.Get(tokenstore.JurisdictionService(audience), "alice"); !errors.Is(err, tokenstore.ErrNotFound) {
+		t.Fatalf("real jurisdiction token survived logout: value=%q err=%v", v, err)
+	}
+}
+
 // TestRemoveContext_JurisdictionDeleteFailureAbortsLogout extends the existing
 // keychain-delete contract to the jurisdiction slots: a failed delete must
 // surface and leave the context entry in place for a retry, never report

@@ -38,9 +38,9 @@ var ErrNotFound = keyring.ErrNotFound
 // at "entire-core:<base-url>" regardless of which CLI wrote it. Two CLIs
 // sharing this prefix on the same machine read each other's writes.
 const (
-	ClusterKeyringPrefix = "entire:"              // entiredb cluster-issued tokens
-	CoreKeyringPrefix    = "entire-core:"         // entire-core control-plane tokens
-	JurisdictionPrefix   = "entire-jurisdiction:" // jurisdiction (data-plane) access tokens
+	ClusterKeyringPrefix      = "entire:"              // entiredb cluster-issued tokens
+	CoreKeyringPrefix         = "entire-core:"         // entire-core control-plane tokens
+	JurisdictionKeyringPrefix = "entire-jurisdiction:" // jurisdiction (data-plane) access tokens
 )
 
 // CoreKeyringService returns the service name for tokens issued by
@@ -56,7 +56,7 @@ func CoreKeyringService(coreURL string) string {
 // is the login context's handle. Trailing slashes are normalized away so
 // callers don't have to.
 func JurisdictionService(audience string) string {
-	return JurisdictionPrefix + strings.TrimRight(audience, "/")
+	return JurisdictionKeyringPrefix + strings.TrimRight(audience, "/")
 }
 
 // RefreshService returns the paired refresh-token service name for an

@@ -111,6 +111,12 @@ func deleteContextKeychain(c *contexts.Context) error {
 		}
 	}
 	for _, audience := range c.JurisdictionAudiences {
+		// A blank entry can only come from a hand-edited or corrupted
+		// contexts.json, and would resolve to the bare service prefix — no
+		// token lives there, so skip rather than round-trip the keyring.
+		if strings.TrimSpace(audience) == "" {
+			continue
+		}
 		if err := tokenstore.Delete(tokenstore.JurisdictionService(audience), c.Handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
 			return fmt.Errorf("delete jurisdiction token for %s: %w", audience, err)
 		}
