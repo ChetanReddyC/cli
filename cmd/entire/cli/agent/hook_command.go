@@ -67,7 +67,9 @@ func WrapProductionJSONWarningHookCommand(command string, format WarningFormat) 
 	)
 }
 
-// The Windows wrappers use an `if errorlevel 1 (…) else (<command>)` form
+// Hook runners execute Windows command strings through cmd.exe already, so
+// these wrappers contain cmd.exe syntax directly rather than launching a
+// second nested shell. They use an `if errorlevel 1 (…) else (<command>)` form
 // rather than a `where … || <else> & <command>` form. This keeps the wrapped
 // command INSIDE the else branch, so there is no unconditional trailing
 // command to fall through to and correctness does NOT depend on `exit /b`
@@ -84,7 +86,7 @@ func WrapProductionJSONWarningHookCommand(command string, format WarningFormat) 
 // from native Windows shells.
 func WrapWindowsProductionSilentHookCommand(command string) string {
 	return fmt.Sprintf(
-		`cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (%s)"`,
+		`where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (%s)`,
 		command,
 	)
 }
@@ -103,8 +105,8 @@ func WrapWindowsProductionJSONWarningHookCommand(command string, format WarningF
 	}
 
 	return fmt.Sprintf(
-		`cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (echo %s) else (%s)"`,
-		escapeWindowsCMDForNestedCommand(string(payload)),
+		`where.exe entire >nul 2>nul & if errorlevel 1 (echo %s) else (%s)`,
+		escapeWindowsCMD(string(payload)),
 		command,
 	)
 }
@@ -113,8 +115,8 @@ func WrapWindowsProductionJSONWarningHookCommand(command string, format WarningF
 // text to stdout when the Entire CLI is missing from PATH.
 func WrapWindowsProductionPlainTextWarningHookCommand(command string, format WarningFormat) string {
 	return fmt.Sprintf(
-		`cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (echo %s) else (%s)"`,
-		escapeWindowsCMDForNestedCommand(windowsPlainTextWarning(format)),
+		`where.exe entire >nul 2>nul & if errorlevel 1 (echo %s) else (%s)`,
+		escapeWindowsCMD(windowsPlainTextWarning(format)),
 		command,
 	)
 }
@@ -130,7 +132,8 @@ func WrapProductionPlainTextWarningHookCommand(command string, format WarningFor
 }
 
 const productionHookWrapperPrefix = `sh -c 'if ! command -v entire >/dev/null 2>&1; then `
-const windowsProductionHookWrapperPrefix = `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 `
+const windowsProductionHookWrapperPrefix = `where.exe entire >nul 2>nul & if errorlevel 1 `
+const legacyWindowsProductionHookWrapperPrefix = `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 `
 
 // IsManagedHookCommand reports whether command is either a direct Entire hook
 // command or one of Entire's production wrapper forms that exec that command.
@@ -146,7 +149,8 @@ func IsManagedHookCommand(command string, prefixes []string) bool {
 
 		return hasManagedHookPrefix(wrappedCommand, prefixes)
 	}
-	if strings.HasPrefix(command, windowsProductionHookWrapperPrefix) {
+	if strings.HasPrefix(command, windowsProductionHookWrapperPrefix) ||
+		strings.HasPrefix(command, legacyWindowsProductionHookWrapperPrefix) {
 		// The wrapped command lives in the `else (<command>)` branch. Take the
 		// last ` else (` so a warning string containing the marker can't fool us.
 		const elseMarker = " else ("
@@ -171,13 +175,13 @@ func hasManagedHookPrefix(command string, prefixes []string) bool {
 	return false
 }
 
-// escapeWindowsCMD caret-escapes one cmd.exe parsing layer's block
-// metacharacters so they cannot terminate the `(echo …)` warning block or
-// redirect its output.
+// escapeWindowsCMD caret-escapes the cmd.exe block metacharacters that would
+// otherwise terminate the `(echo …)` warning block or redirect its output.
 //
-// `%` is deliberately NOT escaped because caret-escaping `%` is not something
-// cmd.exe recognizes — `^%` would leak the caret. The fixed warning constants
-// are %-free; if that changes, percent expansion needs separate handling.
+// `%` is deliberately NOT escaped. Hook runners pass these strings to a cmd /c
+// command line, not a batch script, so batch's `%%` doubling does not apply,
+// and caret-escaping `%` would leak the caret. The fixed warning constants are
+// %-free; if that changes, percent expansion needs separate handling.
 func escapeWindowsCMD(s string) string {
 	replacer := strings.NewReplacer(
 		`^`, `^^`,
@@ -190,13 +194,6 @@ func escapeWindowsCMD(s string) string {
 		`)`, `^)`,
 	)
 	return replacer.Replace(s)
-}
-
-// escapeWindowsCMDForNestedCommand preserves metacharacter escaping through
-// the hook runner's outer cmd.exe /c so the nested cmd.exe /d /s /c receives
-// one complete escape layer of its own.
-func escapeWindowsCMDForNestedCommand(s string) string {
-	return escapeWindowsCMD(escapeWindowsCMD(s))
 }
 
 func windowsPlainTextWarning(format WarningFormat) string {

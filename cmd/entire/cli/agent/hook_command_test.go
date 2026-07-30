@@ -87,11 +87,14 @@ func TestWrapWindowsProductionJSONWarningHookCommand(t *testing.T) {
 	if strings.Contains(command, "sh -c") {
 		t.Fatalf("windows wrapper should not use sh, got %q", command)
 	}
+	if strings.HasPrefix(command, "cmd.exe ") {
+		t.Fatalf("windows wrapper should use the hook runner's existing cmd.exe shell, got %q", command)
+	}
 	if !strings.Contains(command, "where.exe entire") {
 		t.Fatalf("windows wrapper missing PATH guard, got %q", command)
 	}
-	if !strings.Contains(command, "^^^\"systemMessage^^^\"") {
-		t.Fatalf("windows wrapper missing nested-shell escaped systemMessage JSON, got %q", command)
+	if !strings.Contains(command, "^\"systemMessage^\"") {
+		t.Fatalf("windows wrapper missing escaped systemMessage JSON, got %q", command)
 	}
 	if !strings.Contains(command, "entire hooks codex session-start") {
 		t.Fatalf("windows wrapper missing hook target, got %q", command)
@@ -109,6 +112,9 @@ func TestWrapWindowsProductionSilentHookCommand(t *testing.T) {
 	if strings.Contains(command, "sh -c") {
 		t.Fatalf("windows wrapper should not use sh, got %q", command)
 	}
+	if strings.HasPrefix(command, "cmd.exe ") {
+		t.Fatalf("windows wrapper should use the hook runner's existing cmd.exe shell, got %q", command)
+	}
 	if !strings.Contains(command, "where.exe entire") {
 		t.Fatalf("windows wrapper missing PATH guard, got %q", command)
 	}
@@ -125,6 +131,9 @@ func TestWrapWindowsProductionPlainTextWarningHookCommandUsesSingleLineWarning(t
 
 	command := WrapWindowsProductionPlainTextWarningHookCommand("entire hooks codex session-start", WarningFormatMultiLine)
 
+	if strings.HasPrefix(command, "cmd.exe ") {
+		t.Fatalf("windows wrapper should use the hook runner's existing cmd.exe shell, got %q", command)
+	}
 	if strings.Contains(command, "\n") {
 		t.Fatalf("windows wrapper should keep warning command single-line, got %q", command)
 	}
@@ -200,6 +209,10 @@ func TestIsManagedHookCommand_WrappedPrefix(t *testing.T) {
 		prefixes,
 	) {
 		t.Fatal("expected windows wrapped json warning command to match")
+	}
+	legacyWindowsWrapper := `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`
+	if !IsManagedHookCommand(legacyWindowsWrapper, prefixes) {
+		t.Fatal("expected legacy nested windows wrapper to remain managed for migration")
 	}
 }
 
