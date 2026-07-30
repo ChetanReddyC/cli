@@ -104,7 +104,7 @@ func WrapWindowsProductionJSONWarningHookCommand(command string, format WarningF
 
 	return fmt.Sprintf(
 		`cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (echo %s) else (%s)"`,
-		escapeWindowsCMD(string(payload)),
+		escapeWindowsCMDForNestedCommand(string(payload)),
 		command,
 	)
 }
@@ -114,7 +114,7 @@ func WrapWindowsProductionJSONWarningHookCommand(command string, format WarningF
 func WrapWindowsProductionPlainTextWarningHookCommand(command string, format WarningFormat) string {
 	return fmt.Sprintf(
 		`cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (echo %s) else (%s)"`,
-		escapeWindowsCMD(windowsPlainTextWarning(format)),
+		escapeWindowsCMDForNestedCommand(windowsPlainTextWarning(format)),
 		command,
 	)
 }
@@ -171,16 +171,13 @@ func hasManagedHookPrefix(command string, prefixes []string) bool {
 	return false
 }
 
-// escapeWindowsCMD caret-escapes the cmd.exe block metacharacters that would
-// otherwise terminate the `(echo …)` warning block or redirect its output.
+// escapeWindowsCMD caret-escapes one cmd.exe parsing layer's block
+// metacharacters so they cannot terminate the `(echo …)` warning block or
+// redirect its output.
 //
-// `%` is deliberately NOT escaped. These wrappers are a `cmd.exe /d /s /c`
-// command line, not a batch script, so batch's `%%` doubling does not apply
-// (it would print a literal `%%`), and caret-escaping `%` is not a thing cmd
-// recognizes — `^%` would leak the caret. On the command line a lone `%` is
-// literal and `%NAME%` only expands for a defined environment variable, so the
-// fixed, %-free warning constant is emitted verbatim. If the warning text ever
-// gains a `%NAME%` that collides with a real env var, revisit this.
+// `%` is deliberately NOT escaped because caret-escaping `%` is not something
+// cmd.exe recognizes — `^%` would leak the caret. The fixed warning constants
+// are %-free; if that changes, percent expansion needs separate handling.
 func escapeWindowsCMD(s string) string {
 	replacer := strings.NewReplacer(
 		`^`, `^^`,
@@ -193,6 +190,13 @@ func escapeWindowsCMD(s string) string {
 		`)`, `^)`,
 	)
 	return replacer.Replace(s)
+}
+
+// escapeWindowsCMDForNestedCommand preserves metacharacter escaping through
+// the hook runner's outer cmd.exe /c so the nested cmd.exe /d /s /c receives
+// one complete escape layer of its own.
+func escapeWindowsCMDForNestedCommand(s string) string {
+	return escapeWindowsCMD(escapeWindowsCMD(s))
 }
 
 func windowsPlainTextWarning(format WarningFormat) string {

@@ -90,8 +90,8 @@ func TestWrapWindowsProductionJSONWarningHookCommand(t *testing.T) {
 	if !strings.Contains(command, "where.exe entire") {
 		t.Fatalf("windows wrapper missing PATH guard, got %q", command)
 	}
-	if !strings.Contains(command, "^\"systemMessage^\"") {
-		t.Fatalf("windows wrapper missing escaped systemMessage JSON, got %q", command)
+	if !strings.Contains(command, "^^^\"systemMessage^^^\"") {
+		t.Fatalf("windows wrapper missing nested-shell escaped systemMessage JSON, got %q", command)
 	}
 	if !strings.Contains(command, "entire hooks codex session-start") {
 		t.Fatalf("windows wrapper missing hook target, got %q", command)
