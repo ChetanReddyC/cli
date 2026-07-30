@@ -127,4 +127,18 @@ func TestWindowsWrappers_Execution(t *testing.T) {
 			t.Fatalf("expected exit 0, got %d; stderr=%q", code, stderr)
 		}
 	})
+
+	t.Run("json/present propagates the command exit code", func(t *testing.T) {
+		out, stderr, code := runWindowsWrapper(
+			t,
+			WrapWindowsProductionJSONWarningHookCommand("cmd /c exit 7", WarningFormatSingleLine),
+			true,
+		)
+		if strings.Contains(out, "systemMessage") {
+			t.Fatalf("warning must NOT be emitted when entire present; stdout=%q stderr=%q", out, stderr)
+		}
+		if code != 7 {
+			t.Fatalf("expected wrapped command exit code 7 to propagate, got %d; stderr=%q", code, stderr)
+		}
+	})
 }
