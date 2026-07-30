@@ -41,7 +41,8 @@ func runWindowsWrapper(t *testing.T, wrapper string, entirePresent bool) (string
 		t.Fatalf("write run.bat: %v", err)
 	}
 
-	cmd := exec.CommandContext(t.Context(), "cmd.exe", "/d", "/s", "/c", batPath)
+	// /q suppresses batch command echo so stdout contains only wrapper output.
+	cmd := exec.CommandContext(t.Context(), "cmd.exe", "/d", "/q", "/s", "/c", batPath)
 	cmd.Dir = runDir // clean CWD so `where` can't find a stray entire next to us
 	out, err := cmd.Output()
 	if err != nil {
