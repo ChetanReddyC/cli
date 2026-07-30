@@ -67,9 +67,7 @@ func WrapProductionJSONWarningHookCommand(command string, format WarningFormat) 
 	)
 }
 
-// Hook runners execute Windows command strings through cmd.exe already, so
-// these wrappers contain cmd.exe syntax directly rather than launching a
-// second nested shell. They use an `if errorlevel 1 (…) else (<command>)` form
+// The Windows wrappers use an `if errorlevel 1 (…) else (<command>)` form
 // rather than a `where … || <else> & <command>` form. This keeps the wrapped
 // command INSIDE the else branch, so there is no unconditional trailing
 // command to fall through to and correctness does NOT depend on `exit /b`
@@ -86,14 +84,16 @@ func WrapProductionJSONWarningHookCommand(command string, format WarningFormat) 
 // from native Windows shells.
 func WrapWindowsProductionSilentHookCommand(command string) string {
 	return fmt.Sprintf(
-		`where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (%s)`,
+		`cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (%s)"`,
 		command,
 	)
 }
 
 // WrapWindowsProductionJSONWarningHookCommand emits a JSON hook response with a
 // systemMessage field on stdout when the Entire CLI is missing from PATH. It
-// avoids sh so Codex hooks still work from native Windows shells.
+// avoids sh so Codex hooks still work from native Windows shells. Codex already
+// runs hook commands through cmd.exe /C, so this JSON-bearing command uses that
+// shell directly instead of adding a second quote-parsing layer.
 func WrapWindowsProductionJSONWarningHookCommand(command string, format WarningFormat) string {
 	payload, err := jsonutil.MarshalWithNoHTMLEscape(struct {
 		SystemMessage string `json:"systemMessage,omitempty"`
@@ -111,8 +111,8 @@ func WrapWindowsProductionJSONWarningHookCommand(command string, format WarningF
 	)
 }
 
-// WrapWindowsProductionPlainTextWarningHookCommand emits the warning as plain
-// text to stdout when the Entire CLI is missing from PATH.
+// WrapWindowsProductionPlainTextWarningHookCommand is the direct-shell fallback
+// for WrapWindowsProductionJSONWarningHookCommand when JSON marshaling fails.
 func WrapWindowsProductionPlainTextWarningHookCommand(command string, format WarningFormat) string {
 	return fmt.Sprintf(
 		`where.exe entire >nul 2>nul & if errorlevel 1 (echo %s) else (%s)`,
@@ -133,7 +133,7 @@ func WrapProductionPlainTextWarningHookCommand(command string, format WarningFor
 
 const productionHookWrapperPrefix = `sh -c 'if ! command -v entire >/dev/null 2>&1; then `
 const windowsProductionHookWrapperPrefix = `where.exe entire >nul 2>nul & if errorlevel 1 `
-const legacyWindowsProductionHookWrapperPrefix = `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 `
+const nestedWindowsProductionHookWrapperPrefix = `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 `
 
 // IsManagedHookCommand reports whether command is either a direct Entire hook
 // command or one of Entire's production wrapper forms that exec that command.
@@ -150,7 +150,7 @@ func IsManagedHookCommand(command string, prefixes []string) bool {
 		return hasManagedHookPrefix(wrappedCommand, prefixes)
 	}
 	if strings.HasPrefix(command, windowsProductionHookWrapperPrefix) ||
-		strings.HasPrefix(command, legacyWindowsProductionHookWrapperPrefix) {
+		strings.HasPrefix(command, nestedWindowsProductionHookWrapperPrefix) {
 		// The wrapped command lives in the `else (<command>)` branch. Take the
 		// last ` else (` so a warning string containing the marker can't fool us.
 		const elseMarker = " else ("

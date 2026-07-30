@@ -88,7 +88,7 @@ func TestWrapWindowsProductionJSONWarningHookCommand(t *testing.T) {
 		t.Fatalf("windows wrapper should not use sh, got %q", command)
 	}
 	if strings.HasPrefix(command, "cmd.exe ") {
-		t.Fatalf("windows wrapper should use the hook runner's existing cmd.exe shell, got %q", command)
+		t.Fatalf("windows JSON wrapper should use Codex's existing cmd.exe shell, got %q", command)
 	}
 	if !strings.Contains(command, "where.exe entire") {
 		t.Fatalf("windows wrapper missing PATH guard, got %q", command)
@@ -112,8 +112,8 @@ func TestWrapWindowsProductionSilentHookCommand(t *testing.T) {
 	if strings.Contains(command, "sh -c") {
 		t.Fatalf("windows wrapper should not use sh, got %q", command)
 	}
-	if strings.HasPrefix(command, "cmd.exe ") {
-		t.Fatalf("windows wrapper should use the hook runner's existing cmd.exe shell, got %q", command)
+	if !strings.HasPrefix(command, "cmd.exe ") {
+		t.Fatalf("silent windows wrapper should retain its explicit cmd.exe shell, got %q", command)
 	}
 	if !strings.Contains(command, "where.exe entire") {
 		t.Fatalf("windows wrapper missing PATH guard, got %q", command)
@@ -210,9 +210,9 @@ func TestIsManagedHookCommand_WrappedPrefix(t *testing.T) {
 	) {
 		t.Fatal("expected windows wrapped json warning command to match")
 	}
-	legacyWindowsWrapper := `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`
-	if !IsManagedHookCommand(legacyWindowsWrapper, prefixes) {
-		t.Fatal("expected legacy nested windows wrapper to remain managed for migration")
+	nestedWindowsWrapper := `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`
+	if !IsManagedHookCommand(nestedWindowsWrapper, prefixes) {
+		t.Fatal("expected nested windows wrapper to remain managed")
 	}
 }
 

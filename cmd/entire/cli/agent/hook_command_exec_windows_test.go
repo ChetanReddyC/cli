@@ -1,22 +1,21 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
-// runWindowsWrapper executes a Windows hook wrapper string through cmd.exe and
-// returns its stdout and exit code. The wrapper is written verbatim to a .bat
-// file (rather than re-quoted into argv) so the test exercises exactly the
-// string Entire writes into hooks.json. PATH is scoped so `where.exe entire`
-// resolves only when entirePresent is true.
-func runWindowsWrapper(t *testing.T, wrapper string, entirePresent bool) (string, int) {
+// runWindowsWrapper mirrors Codex's Windows command runner: cmd.exe /C followed
+// by the raw, quoted hook command. SysProcAttr.CmdLine is required because
+// cmd.exe does not use the standard Windows argv unquoting rules.
+func runWindowsWrapper(t *testing.T, wrapper string, entirePresent bool) (string, string, int) {
 	t.Helper()
 
 	sysRoot := os.Getenv("SystemRoot")
@@ -36,23 +35,28 @@ func runWindowsWrapper(t *testing.T, wrapper string, entirePresent bool) (string
 	t.Setenv("PATH", strings.Join(pathEntries, ";"))
 
 	runDir := t.TempDir()
-	batPath := filepath.Join(runDir, "run.bat")
-	if err := os.WriteFile(batPath, []byte(wrapper+"\r\n"), 0o700); err != nil {
-		t.Fatalf("write run.bat: %v", err)
+	cmdPath, err := exec.LookPath("cmd.exe")
+	if err != nil {
+		t.Fatalf("find cmd.exe: %v", err)
 	}
 
-	// /q suppresses batch command echo so stdout contains only wrapper output.
-	cmd := exec.CommandContext(t.Context(), "cmd.exe", "/d", "/q", "/s", "/c", batPath)
+	cmd := exec.CommandContext(t.Context(), cmdPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CmdLine: `"` + cmdPath + `" /C "` + wrapper + `"`,
+	}
 	cmd.Dir = runDir // clean CWD so `where` can't find a stray entire next to us
-	out, err := cmd.Output()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return string(out), exitErr.ExitCode()
+			return stdout.String(), stderr.String(), exitErr.ExitCode()
 		}
 		t.Fatalf("run wrapper: %v", err)
 	}
-	return string(out), 0
+	return stdout.String(), stderr.String(), 0
 }
 
 // TestWindowsWrappers_Execution verifies the cmd.exe wrappers behave correctly
@@ -61,53 +65,50 @@ func runWindowsWrapper(t *testing.T, wrapper string, entirePresent bool) (string
 // (and propagates its exit code) when entire is present, and is skipped with a
 // 0 exit when entire is absent, for both the silent and JSON-warning forms.
 func TestWindowsWrappers_Execution(t *testing.T) {
-	if runtime.GOOS != windowsOS {
-		t.Skip("cmd.exe wrapper execution test runs only on Windows")
-	}
 	// No t.Parallel(): t.Setenv("PATH") forbids it.
 
 	const marker = "ENTIRE_HOOK_RAN"
 
 	t.Run("silent/present runs the command", func(t *testing.T) {
-		out, code := runWindowsWrapper(t, WrapWindowsProductionSilentHookCommand("echo "+marker), true)
+		out, stderr, code := runWindowsWrapper(t, WrapWindowsProductionSilentHookCommand("echo "+marker), true)
 		if !strings.Contains(out, marker) {
-			t.Fatalf("expected wrapped command to run; stdout=%q", out)
+			t.Fatalf("expected wrapped command to run; stdout=%q stderr=%q", out, stderr)
 		}
 		if code != 0 {
-			t.Fatalf("expected exit 0, got %d", code)
+			t.Fatalf("expected exit 0, got %d; stderr=%q", code, stderr)
 		}
 	})
 
 	t.Run("silent/present propagates the command exit code", func(t *testing.T) {
-		_, code := runWindowsWrapper(t, WrapWindowsProductionSilentHookCommand("cmd /c exit 7"), true)
+		_, stderr, code := runWindowsWrapper(t, WrapWindowsProductionSilentHookCommand("cmd /c exit 7"), true)
 		if code != 7 {
-			t.Fatalf("expected wrapped command exit code 7 to propagate, got %d", code)
+			t.Fatalf("expected wrapped command exit code 7 to propagate, got %d; stderr=%q", code, stderr)
 		}
 	})
 
 	t.Run("silent/absent skips the command and exits 0", func(t *testing.T) {
-		out, code := runWindowsWrapper(t, WrapWindowsProductionSilentHookCommand("echo "+marker), false)
+		out, stderr, code := runWindowsWrapper(t, WrapWindowsProductionSilentHookCommand("echo "+marker), false)
 		if strings.Contains(out, marker) {
-			t.Fatalf("wrapped command must NOT run when entire absent; stdout=%q", out)
+			t.Fatalf("wrapped command must NOT run when entire absent; stdout=%q stderr=%q", out, stderr)
 		}
 		if code != 0 {
-			t.Fatalf("expected exit 0 when entire absent, got %d", code)
+			t.Fatalf("expected exit 0 when entire absent, got %d; stderr=%q", code, stderr)
 		}
 	})
 
 	t.Run("json/absent emits valid JSON and skips the command", func(t *testing.T) {
-		out, code := runWindowsWrapper(t, WrapWindowsProductionJSONWarningHookCommand("echo "+marker, WarningFormatSingleLine), false)
+		out, stderr, code := runWindowsWrapper(t, WrapWindowsProductionJSONWarningHookCommand("echo "+marker, WarningFormatSingleLine), false)
 		if strings.Contains(out, marker) {
-			t.Fatalf("wrapped command must NOT run when entire absent; stdout=%q", out)
+			t.Fatalf("wrapped command must NOT run when entire absent; stdout=%q stderr=%q", out, stderr)
 		}
 		if code != 0 {
-			t.Fatalf("expected exit 0, got %d", code)
+			t.Fatalf("expected exit 0, got %d; stderr=%q", code, stderr)
 		}
 		var payload struct {
 			SystemMessage string `json:"systemMessage"`
 		}
 		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &payload); err != nil {
-			t.Fatalf("expected valid JSON on stdout, got %q (err %v)", out, err)
+			t.Fatalf("expected valid JSON on stdout, got %q stderr=%q (err %v)", out, stderr, err)
 		}
 		if !strings.Contains(payload.SystemMessage, "Entire CLI") {
 			t.Fatalf("unexpected systemMessage: %q", payload.SystemMessage)
@@ -115,15 +116,15 @@ func TestWindowsWrappers_Execution(t *testing.T) {
 	})
 
 	t.Run("json/present runs the command without a warning", func(t *testing.T) {
-		out, code := runWindowsWrapper(t, WrapWindowsProductionJSONWarningHookCommand("echo "+marker, WarningFormatSingleLine), true)
+		out, stderr, code := runWindowsWrapper(t, WrapWindowsProductionJSONWarningHookCommand("echo "+marker, WarningFormatSingleLine), true)
 		if !strings.Contains(out, marker) {
-			t.Fatalf("expected wrapped command to run; stdout=%q", out)
+			t.Fatalf("expected wrapped command to run; stdout=%q stderr=%q", out, stderr)
 		}
 		if strings.Contains(out, "systemMessage") {
-			t.Fatalf("warning must NOT be emitted when entire present; stdout=%q", out)
+			t.Fatalf("warning must NOT be emitted when entire present; stdout=%q stderr=%q", out, stderr)
 		}
 		if code != 0 {
-			t.Fatalf("expected exit 0, got %d", code)
+			t.Fatalf("expected exit 0, got %d; stderr=%q", code, stderr)
 		}
 	})
 }
