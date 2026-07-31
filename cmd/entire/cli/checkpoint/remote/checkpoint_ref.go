@@ -64,6 +64,20 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 
 	fetchTarget, authoritative := checkpointFetchTarget(ctx)
 
+	// A fully local repository — no checkpoint_remote configured and no origin
+	// remote — has no remote that could host checkpoint refs, so the ref's
+	// local absence is the final verdict. Without this, the origin-name
+	// fallback below probes a remote git cannot resolve ("'origin' does not
+	// appear to be a git repository", exit 128) and a remoteless repo is
+	// misreported as a transport outage. The guard is deliberately narrow:
+	// when a checkpoint_remote IS configured (even unresolvable), the
+	// fallback-emptiness refusal below still applies.
+	if fetchTarget == originRemote && !authoritative && !Configured(ctx) {
+		if _, urlErr := GetRemoteURL(ctx, originRemote); urlErr != nil {
+			return fmt.Errorf("checkpoint ref %s: repository has no remote to fetch from: %w", ref, plumbing.ErrReferenceNotFound)
+		}
+	}
+
 	out, err := LsRemoteInDir(ctx, "", fetchTarget, ref.String())
 	if err != nil {
 		// Redact: fetchTarget can be a remote URL with embedded credentials

@@ -94,3 +94,25 @@ func TestFetchCheckpointRef_UnreachableRemoteIsFailure(t *testing.T) {
 	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
 		"a transport failure must stay distinguishable from absence")
 }
+
+// TestFetchCheckpointRef_NoRemoteAtAllIsAbsence: a fully local repository —
+// no origin remote and no checkpoint_remote configured — has no remote that
+// could host checkpoint refs, so the ref's local absence is the final
+// verdict, not a transport failure. Regression: the origin-name fallback
+// probe used to run `git ls-remote origin` in a remoteless repo and surface
+// exit 128, which broke backfill routing (and `explain --generate`) in fully
+// local repos.
+func TestFetchCheckpointRef_NoRemoteAtAllIsAbsence(t *testing.T) {
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.WriteFile(t, workDir, "f.txt", "content")
+	testutil.GitAdd(t, workDir, "f.txt")
+	testutil.GitCommit(t, workDir, "init")
+	t.Chdir(workDir)
+
+	ref := plumbing.ReferenceName("refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9")
+	err := FetchCheckpointRef(context.Background(), ref)
+	require.Error(t, err)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"a repo with no remotes must classify a locally absent ref as absence")
+}
