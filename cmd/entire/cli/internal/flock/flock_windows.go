@@ -4,6 +4,7 @@ package flock
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -51,6 +52,15 @@ func AcquireContext(ctx context.Context, path string) (release func(), err error
 			windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, overlapped)
 		if lockErr == nil {
 			return releaseFn, nil
+		}
+		// Only lock contention is retryable. LOCKFILE_FAIL_IMMEDIATELY reports a
+		// held lock as ERROR_LOCK_VIOLATION (or ERROR_IO_PENDING); any other error
+		// is a genuine failure (I/O, bad handle) that must fail fast rather than
+		// polling until the deadline and masking the real cause as a timeout —
+		// mirroring the unix path, which only retries on EWOULDBLOCK.
+		if !errors.Is(lockErr, windows.ERROR_LOCK_VIOLATION) && !errors.Is(lockErr, windows.ERROR_IO_PENDING) {
+			_ = f.Close()
+			return nil, fmt.Errorf("lock flock: %w", lockErr)
 		}
 		if err := ctx.Err(); err != nil {
 			_ = f.Close()
