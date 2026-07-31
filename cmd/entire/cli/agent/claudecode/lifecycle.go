@@ -189,26 +189,36 @@ const stopHookSentinel = "hooks claude-code stop"
 
 // waitForTranscriptFlush waits until Claude Code's async transcript writes have
 // settled before turn-end reads the file. It returns as soon as EITHER the stop
-// hook sentinel appears OR the file has stopped growing (size stable across
-// consecutive polls), and gives up after maxWait as a safety bound.
+// hook sentinel appears OR the file size has held steady for a full quiet
+// window, and gives up after maxWait as a safety bound.
 //
-// Settle-on-stability is the primary signal: the historical sentinel ("hooks
-// claude-code stop" hook_progress entry) is not reliably present in the file
-// while this hook runs — Claude persists it around the hook boundary, so a poll
-// loop inside the stop hook essentially never observes it and burned the full
-// maxWait on every healthy turn-end. On a healthy turn-end the assistant has
-// already finished streaming, so the file is stable within a poll or two and we
-// return in tens of ms instead of 3s. When writes are genuinely still in
-// flight, the size keeps changing and we keep waiting up to maxWait.
+// The stop-hook sentinel ("hooks claude-code stop" hook_progress entry) is the
+// authoritative completion signal and the primary fast-path — when present it
+// means the transcript is fully flushed and we return at once. But it is not
+// reliably present while this hook runs: Claude persists it around the hook
+// boundary, so a poll loop inside the stop hook often never observes it and
+// would otherwise burn the full maxWait on every healthy turn-end.
+//
+// Settle-on-stability is therefore the fallback. It is only a heuristic proxy
+// for completion, not a completion signal, so we require the size to hold steady
+// across a wall-clock quietWindow (not just a poll or two) before trusting it.
+// A shorter window risks a brief mid-write pause — a GC pause, disk contention,
+// or a large tool-result flushed as several writes — being mistaken for a
+// finished transcript, causing turn-end to read a TRUNCATED transcript that then
+// gets condensed and pushed. Any observed growth resets the window, so a
+// transcript still being written with sub-second pauses keeps waiting up to
+// maxWait, while a genuinely settled file still returns well under it.
 func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStartTime time.Time) {
 	const (
 		maxWait      = 3 * time.Second
 		pollInterval = 50 * time.Millisecond
 		tailBytes    = 4096
 		maxSkew      = 2 * time.Second
-		// stableChecks is how many consecutive polls the size must be unchanged
-		// before we treat the transcript as settled (~pollInterval of quiet).
-		stableChecks = 2
+		// quietWindow is how long the transcript size must hold steady before
+		// settle-on-stability is trusted. It must comfortably exceed a plausible
+		// mid-write pause so a brief stall is not mistaken for completion, while
+		// still returning well under maxWait on a genuinely settled file.
+		quietWindow = 500 * time.Millisecond
 	)
 
 	logCtx := logging.WithComponent(ctx, "agent.claudecode")
@@ -235,8 +245,10 @@ func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStar
 
 	deadline := time.Now().Add(maxWait)
 	lastSize := int64(-1)
-	stableStreak := 0
+	var stableSince time.Time
 	for time.Now().Before(deadline) {
+		// Authoritative fast-path: the stop-hook sentinel means the transcript is
+		// fully flushed, so return immediately without waiting out the window.
 		if checkStopSentinel(transcriptPath, tailBytes, hookStartTime, maxSkew) {
 			logging.Debug(logCtx, "transcript flush sentinel found",
 				slog.Duration("wait", time.Since(hookStartTime)),
@@ -244,20 +256,22 @@ func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStar
 			return
 		}
 
-		// Settle-on-stability: return once the file has stopped growing.
+		// Settle-on-stability fallback: trust the file only once its size has held
+		// steady for the full quietWindow. Any growth resets the window, so a
+		// sub-second pause mid-write keeps us waiting rather than returning on a
+		// truncated transcript.
 		if fi, statErr := os.Stat(transcriptPath); statErr == nil {
-			if fi.Size() == lastSize {
-				stableStreak++
-				if stableStreak >= stableChecks {
-					logging.Debug(logCtx, "transcript settled (size stable), proceeding",
-						slog.Duration("wait", time.Since(hookStartTime)),
-						slog.Int64("size", fi.Size()),
-					)
-					return
-				}
-			} else {
-				stableStreak = 0
+			switch {
+			case fi.Size() != lastSize:
 				lastSize = fi.Size()
+				stableSince = time.Now()
+			case time.Since(stableSince) >= quietWindow:
+				logging.Debug(logCtx, "transcript settled (size stable through quiet window), proceeding",
+					slog.Duration("wait", time.Since(hookStartTime)),
+					slog.Duration("quiet_window", quietWindow),
+					slog.Int64("size", fi.Size()),
+				)
+				return
 			}
 		}
 
