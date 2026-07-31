@@ -116,3 +116,25 @@ func TestFetchCheckpointRef_NoRemoteAtAllIsAbsence(t *testing.T) {
 	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
 		"a repo with no remotes must classify a locally absent ref as absence")
 }
+
+// TestFetchCheckpointRef_UnreadableSettingsNeverClassifiesAbsence: when the
+// checkpoint_remote configuration CANNOT BE READ (corrupt settings), whether a
+// checkpoint remote exists is undeterminable — the same case the fallback
+// emptiness path refuses to classify. The no-remotes absence shortcut must not
+// fire on a load error, only on a successful load that shows no
+// checkpoint_remote configured.
+func TestFetchCheckpointRef_UnreadableSettingsNeverClassifiesAbsence(t *testing.T) {
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.WriteFile(t, workDir, "f.txt", "content")
+	testutil.GitAdd(t, workDir, "f.txt")
+	testutil.GitCommit(t, workDir, "init")
+	testutil.WriteFile(t, workDir, ".entire/settings.json", "{not valid json")
+	t.Chdir(workDir)
+
+	ref := plumbing.ReferenceName("refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9")
+	err := FetchCheckpointRef(context.Background(), ref)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"an unreadable checkpoint_remote configuration must not classify as absence")
+}

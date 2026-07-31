@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/settings"
+
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
@@ -70,11 +72,16 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 	// fallback below probes a remote git cannot resolve ("'origin' does not
 	// appear to be a git repository", exit 128) and a remoteless repo is
 	// misreported as a transport outage. The guard is deliberately narrow:
-	// when a checkpoint_remote IS configured (even unresolvable), the
-	// fallback-emptiness refusal below still applies.
-	if fetchTarget == originRemote && !authoritative && !Configured(ctx) {
-		if _, urlErr := GetRemoteURL(ctx, originRemote); urlErr != nil {
-			return fmt.Errorf("checkpoint ref %s: repository has no remote to fetch from: %w", ref, plumbing.ErrReferenceNotFound)
+	// it requires a SUCCESSFUL settings load showing no checkpoint_remote —
+	// an unreadable configuration is undeterminable, not "not configured"
+	// (Configured() conflates the two) — and when a checkpoint_remote IS
+	// configured (even unresolvable), the fallback-emptiness refusal below
+	// still applies.
+	if fetchTarget == originRemote && !authoritative {
+		if s, loadErr := settings.Load(ctx); loadErr == nil && s.GetCheckpointRemote() == nil {
+			if _, urlErr := GetRemoteURL(ctx, originRemote); urlErr != nil {
+				return fmt.Errorf("checkpoint ref %s: repository has no remote to fetch from: %w", ref, plumbing.ErrReferenceNotFound)
+			}
 		}
 	}
 
