@@ -138,3 +138,26 @@ func TestFetchCheckpointRef_UnreadableSettingsNeverClassifiesAbsence(t *testing.
 	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
 		"an unreadable checkpoint_remote configuration must not classify as absence")
 }
+
+// TestFetchCheckpointRef_MalformedCheckpointRemoteNeverClassifiesAbsence: a
+// checkpoint_remote entry that is present but malformed (here: missing the
+// required repo field) means the user configured a checkpoint remote and
+// botched it. Combined with a missing origin, that must stay a failure —
+// classifying it as absence would misroute backfills for checkpoints that
+// live on the remote the user intended.
+func TestFetchCheckpointRef_MalformedCheckpointRemoteNeverClassifiesAbsence(t *testing.T) {
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.WriteFile(t, workDir, "f.txt", "content")
+	testutil.GitAdd(t, workDir, "f.txt")
+	testutil.GitCommit(t, workDir, "init")
+	testutil.WriteFile(t, workDir, ".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github"}}}`)
+	t.Chdir(workDir)
+
+	ref := plumbing.ReferenceName("refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9")
+	err := FetchCheckpointRef(context.Background(), ref)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"a present-but-malformed checkpoint_remote must not classify as absence")
+}

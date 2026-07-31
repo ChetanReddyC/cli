@@ -72,13 +72,15 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 	// fallback below probes a remote git cannot resolve ("'origin' does not
 	// appear to be a git repository", exit 128) and a remoteless repo is
 	// misreported as a transport outage. The guard is deliberately narrow:
-	// it requires a SUCCESSFUL settings load showing no checkpoint_remote —
-	// an unreadable configuration is undeterminable, not "not configured"
-	// (Configured() conflates the two) — and when a checkpoint_remote IS
-	// configured (even unresolvable), the fallback-emptiness refusal below
-	// still applies.
+	// it requires a SUCCESSFUL settings load whose strategy options carry no
+	// checkpoint_remote entry AT ALL. An unreadable configuration is
+	// undeterminable, and a present-but-malformed entry means the user
+	// configured a checkpoint remote and botched it (GetCheckpointRemote
+	// collapses both to nil) — neither may classify as absence. When a
+	// checkpoint_remote IS configured (even unresolvable), the
+	// fallback-emptiness refusal below still applies.
 	if fetchTarget == originRemote && !authoritative {
-		if s, loadErr := settings.Load(ctx); loadErr == nil && s.GetCheckpointRemote() == nil {
+		if s, loadErr := settings.Load(ctx); loadErr == nil && !checkpointRemoteKeyPresent(s) {
 			if _, urlErr := GetRemoteURL(ctx, originRemote); urlErr != nil {
 				return fmt.Errorf("checkpoint ref %s: repository has no remote to fetch from: %w", ref, plumbing.ErrReferenceNotFound)
 			}
@@ -119,6 +121,19 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, RedactURL(fetchTarget), err)
 	}
 	return nil
+}
+
+// checkpointRemoteKeyPresent reports whether a checkpoint_remote entry exists
+// in the strategy options at all — including a malformed one that
+// GetCheckpointRemote would reject. Presence in any form means the user
+// intends a checkpoint remote, so the no-remotes absence shortcut must not
+// apply.
+func checkpointRemoteKeyPresent(s *settings.EntireSettings) bool {
+	if s == nil || s.StrategyOptions == nil {
+		return false
+	}
+	_, ok := s.StrategyOptions["checkpoint_remote"]
+	return ok
 }
 
 // HookCheckpointRefFetcher returns the write-probe fetcher for git-hook
