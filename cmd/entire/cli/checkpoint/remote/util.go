@@ -95,7 +95,7 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 			// Genuinely no remote to fetch checkpoints from: no origin remote and
 			// no configured checkpoint_remote. Tagged with the sentinel so callers
 			// classify a probe failure as absence rather than a real error.
-			return "", false, fmt.Errorf("no checkpoint remote configured (no fetch URL: %w): %w", originErr, errNoCheckpointRemoteConfigured)
+			return "", false, fmt.Errorf("no fetch URL found: %w: %w", originErr, errNoCheckpointRemoteConfigured)
 		}
 		// No checkpoint_remote configured: origin IS the checkpoint host.
 		return originURL, true, nil
