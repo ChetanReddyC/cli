@@ -46,6 +46,39 @@ func TestValidateGitRemoteName(t *testing.T) {
 	}
 }
 
+func TestRedactGitArgs(t *testing.T) {
+	t.Parallel()
+	got := redactGitArgs([]string{
+		"remote", "add", "upstream",
+		"https://user:ghp_SECRET@github.com/octocat/hello-world",
+	})
+	require.Equal(t, []string{
+		"remote", "add", "upstream",
+		"https://github.com/octocat/hello-world",
+	}, got)
+
+	t.Run("leaves non-URL args untouched", func(t *testing.T) {
+		t.Parallel()
+		// RedactURL would mangle bare words into "://word", so they must be
+		// passed through rather than redacted blanket-fashion.
+		require.Equal(t, []string{"remote"}, redactGitArgs([]string{"remote"}))
+		require.Equal(t,
+			[]string{"remote", "set-url", "origin"},
+			redactGitArgs([]string{"remote", "set-url", "origin"}))
+	})
+
+	t.Run("passes through URL forms that carry no credentials", func(t *testing.T) {
+		t.Parallel()
+		require.Equal(t,
+			[]string{"entire://aws-us-east-2.entire.io/gh/octocat/hello-world"},
+			redactGitArgs([]string{"entire://aws-us-east-2.entire.io/gh/octocat/hello-world"}))
+		// SCP-style has no embeddable credentials; the "@" must not mangle it.
+		require.Equal(t,
+			[]string{"git@github.com:octocat/hello-world.git"},
+			redactGitArgs([]string{"git@github.com:octocat/hello-world.git"}))
+	})
+}
+
 func TestPlanMirrorRemote(t *testing.T) {
 	t.Parallel()
 	const mirrorURL = "entire://aws-us-east-2.entire.io/gh/octocat/hello-world"
@@ -195,6 +228,28 @@ func TestApplyMirrorRemotePlan(t *testing.T) {
 		cmd := exec.CommandContext(t.Context(), "git", "remote", "get-url", "upstream")
 		cmd.Dir = dir
 		require.Error(t, cmd.Run())
+	})
+
+	// A failing `git remote add` echoes its argv into the error, and that error is
+	// a plain (printed) error — so a credentialed replaced URL must not survive
+	// into it. Guards the same property reportMirrorRemotePlan already has.
+	t.Run("a failed git command does not leak credentials from the argv", func(t *testing.T) {
+		t.Parallel()
+		dir := applyPlanRepo(t, map[string]string{"origin": "git@github.com:octocat/hello-world.git"})
+		plan := mirrorRemotePlan{
+			remote:      "origin",
+			mirrorURL:   mirrorURL,
+			replacedURL: "https://user:ghp_SUPERSECRET@github.com/octocat/hello-world",
+			// Collides with the existing origin, so `git remote add` fails.
+			preserveAs: "origin",
+		}
+		err := applyMirrorRemotePlan(t.Context(), dir, plan)
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), "ghp_SUPERSECRET", "credentials must not reach the error message")
+		require.NotContains(t, err.Error(), "user:", "userinfo must not reach the error message")
+		// Still useful for diagnosis: the command and the host survive.
+		require.Contains(t, err.Error(), "git remote add")
+		require.Contains(t, err.Error(), "github.com/octocat/hello-world")
 	})
 
 	t.Run("a failed preserve leaves the target URL intact", func(t *testing.T) {

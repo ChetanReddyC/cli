@@ -56,6 +56,26 @@ func validateGitRemoteName(name string) error {
 	return nil
 }
 
+// redactGitArgs returns args with anything that could carry credentials replaced
+// by its redacted form, so the argv echoed in an error message is safe to print.
+// A replaced remote URL can embed a token (https://user:token@host/...), and
+// these errors reach stderr through main.go and from there into logs and pasted
+// transcripts — the same reason reportMirrorRemotePlan redacts what it prints.
+//
+// Only URL-shaped args are touched: gitremote.RedactURL would turn a bare word
+// like "remote" into "://remote", so it cannot be applied blanket-fashion.
+func redactGitArgs(args []string) []string {
+	safe := make([]string, len(args))
+	for i, a := range args {
+		if strings.Contains(a, "://") || strings.Contains(a, "@") {
+			safe[i] = gitremote.RedactURL(a)
+			continue
+		}
+		safe[i] = a
+	}
+	return safe
+}
+
 // gitRunner runs a git subcommand in dir. A package var so tests exercise the
 // planning and prompt logic without mutating a real repository's config.
 var gitRunner = func(ctx context.Context, dir string, args ...string) (string, error) {
@@ -63,7 +83,7 @@ var gitRunner = func(ctx context.Context, dir string, args ...string) (string, e
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		return "", fmt.Errorf("git %s: %w", strings.Join(redactGitArgs(args), " "), err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -267,9 +287,12 @@ func promptMirrorRemoteChoice(cmd *cobra.Command, remote, currentURL, mirrorURL,
 	case choiceAdd:
 		// fall through to the name prompt
 	default:
-		// Unreachable with the options above (huh always writes one of them).
-		// Kept so an unrecognised value can never fall through into a write.
-		return mirrorUseChoice{}, NewSilentError(errors.New("no remote update selected"))
+		// Unreachable with the options above (huh always writes one of them), and
+		// kept so an unrecognised value can never fall through into a write.
+		// Deliberately a plain error, not a SilentError: nothing has been printed
+		// on this path, and main.go suppresses SilentError — so a silent one would
+		// exit non-zero with no message at all, which is undiagnosable.
+		return mirrorUseChoice{}, errors.New("no remote update selected")
 	}
 
 	name := sideName

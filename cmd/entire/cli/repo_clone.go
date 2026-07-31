@@ -319,20 +319,23 @@ func selectPlacement(cmd *cobra.Command, placements []coreapi.ResolvedPlacement,
 				Value(&selected),
 		),
 	)
-	cancelled := NewSilentError(fmt.Errorf("%s cancelled", strings.ToLower(p.action)))
 	if err := form.RunWithContext(cmd.Context()); err != nil {
 		// handleFormCancellation prints "<action> cancelled." and returns nil for a
 		// Ctrl+C / cancelled-context abort. Surface that as a SilentError so the
 		// caller stops instead of falling through to act on a zero-value target
-		// (the `entire:///gh/...` empty-host bug); a real form error propagates.
+		// (the `entire:///gh/...` empty-host bug) without main.go reprinting the
+		// message handleFormCancellation already wrote; a real form error propagates.
 		if cerr := handleFormCancellation(cmd.ErrOrStderr(), p.action, err); cerr != nil {
 			return coreapi.ResolvedPlacement{}, cerr
 		}
-		return coreapi.ResolvedPlacement{}, cancelled
+		return coreapi.ResolvedPlacement{}, NewSilentError(fmt.Errorf("%s cancelled", strings.ToLower(p.action)))
 	}
 	match, ok := byHost[selected]
 	if !ok {
-		return coreapi.ResolvedPlacement{}, cancelled
+		// The form succeeded but handed back a host that is not on offer. Nothing
+		// has been printed here, so this must NOT be a SilentError — main.go
+		// suppresses those, and the command would exit non-zero with no message.
+		return coreapi.ResolvedPlacement{}, fmt.Errorf("no cluster selected from the %d offered", len(hosts))
 	}
 	return match, nil
 }
