@@ -94,3 +94,31 @@ func TestFetchCheckpointRef_UnreachableRemoteIsFailure(t *testing.T) {
 	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
 		"a transport failure must stay distinguishable from absence")
 }
+
+// TestFetchCheckpointRef_NoConfiguredRemoteIsAbsence: with no origin remote and
+// no configured checkpoint_remote, fetch-target resolution can resolve NOTHING
+// and falls back to the bare "origin" name, which is not a real git remote. The
+// ls-remote probe then fails — but that failure means only "there is nowhere to
+// fetch from", not "the checkpoint is missing on a real remote". It must
+// classify as absence (wrap plumbing.ErrReferenceNotFound) so the git-refs
+// store maps it to ErrCheckpointNotFound and write routing falls back to the
+// v1-branch store, instead of hard-erroring the whole save (the refs-primary
+// regression this fixes). This is the mirror of
+// TestFetchCheckpointRef_UnreachableRemoteIsFailure, where origin IS configured
+// (a real, resolved remote) and the same probe failure must propagate.
+func TestFetchCheckpointRef_NoConfiguredRemoteIsAbsence(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir) // no origin remote, no checkpoint_remote
+	testutil.WriteFile(t, workDir, "f.txt", "content")
+	testutil.GitAdd(t, workDir, "f.txt")
+	testutil.GitCommit(t, workDir, "init")
+	t.Chdir(workDir)
+
+	ref := plumbing.ReferenceName("refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9")
+	err := FetchCheckpointRef(context.Background(), ref)
+	require.Error(t, err)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"a probe failure with no configured/reachable checkpoint remote must classify as absence so callers fall back")
+}
