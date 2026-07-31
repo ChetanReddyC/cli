@@ -69,7 +69,7 @@ The git-refs store (`gitRefsStore`, `checkpoint/refs_store.go`) shares the check
 
 Every persistent write (`WriteSession`, and the `Backfill*` operations for transcript / summary / attribution) follows the same shape:
 
-1. **Resolve the ref's current tip** (`refBase`). A missing ref → `(ZeroHash, nil)`, so the first write to a checkpoint becomes an **orphan commit**. A real lookup failure (IO/corruption) is surfaced, never silently treated as "new checkpoint".
+1. **Resolve the ref's current tip.** Creates (`WriteSession`) use the local-only `refBase`: a missing ref → `(ZeroHash, nil)`, so the first write to a checkpoint becomes an **orphan commit**. The `Backfill*` operations use `refBaseForBackfill`, which first on-demand fetches a locally-missing ref (when a ref fetcher is configured — the checkpoint may have been written or migrated on another machine); a ref still absent after the fetch surfaces as `ErrCheckpointNotFound` rather than orphaning, and a fetch failure surfaces as a real error, never as absence. A real lookup failure (IO/corruption) is surfaced, never silently treated as "new checkpoint".
 2. **Build the updated checkpoint subtree** from the existing tree plus the new content (shared `treeWriter` logic).
 3. **Create a commit** with the current tip as parent (orphan on first write, parented thereafter), so each checkpoint accretes its **own per-checkpoint history**.
 4. **Point the ref at the new commit** (`setRef`) and **enqueue it for push**.
@@ -111,9 +111,9 @@ All checkpoint-ref pushes are **fast-forward-only — never a force push.** Ther
 
 When a push *is* rejected as non-fast-forward — genuine divergence, e.g. the same checkpoint was written on two machines — recovery **fetches the remote ref and replays the local-only commits on top** (`fetchAndRebaseRefCommon`), then retries. After the replay the local ref is a fast-forward over the remote, so the retry is *still* non-force and the remote commit is preserved as an ancestor rather than overwritten. A genuine cherry-pick conflict (both sides rewrote the same file, e.g. root `metadata.json`) leaves the ref queued — degrading to the safe state, never forcing.
 
-### On-demand fetch for reads
+### On-demand fetch (reads and backfill writes)
 
-A checkpoint written on another machine has no local ref. When a read misses locally and a **ref fetcher** is configured, `resolveRefMaybeFetch` fetches that one ref from the remote and retries once. It carefully distinguishes:
+A checkpoint written on another machine has no local ref. When a read — or a backfill write's base resolution (`refBaseForBackfill`) — misses locally and a **ref fetcher** is configured, `resolveRefMaybeFetch` fetches that one ref from the remote and retries once. It carefully distinguishes:
 
 - **genuinely absent** (remote has no such checkpoint) → maps to `ErrCheckpointNotFound`;
 - **a real failure** (IO, network, context cancellation) → returned as-is, never swallowed as "not found".
