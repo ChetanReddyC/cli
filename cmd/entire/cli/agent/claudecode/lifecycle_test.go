@@ -527,23 +527,77 @@ func TestWaitForTranscriptFlush_StaleFile_SkipsWait(t *testing.T) {
 	}
 }
 
-func TestWaitForTranscriptFlush_RecentFile_WaitsForSentinel(t *testing.T) {
+func TestWaitForTranscriptFlush_RecentStableFile_ReturnsFast(t *testing.T) {
 	t.Parallel()
 
-	// Create a transcript file with recent mtime (no sentinel present)
+	// A recent transcript that has stopped growing (the healthy turn-end case:
+	// the assistant finished streaming). Even though the "hooks claude-code stop"
+	// sentinel is never present in the file, the wait must settle on size
+	// stability and return quickly instead of burning the full 3s maxWait.
 	transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
 	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644); err != nil {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
-	// File was just created, so mtime is now — should NOT skip the wait
 
 	start := time.Now()
 	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
 	elapsed := time.Since(start)
 
-	// Should wait close to maxWait (3s) since no sentinel will be found
-	if elapsed < 2*time.Second {
-		t.Errorf("expected to wait ~3s for recent file without sentinel, but only took %v", elapsed)
+	// A stable file settles within a couple of poll intervals — well under the
+	// 3s cap that the old sentinel-only wait always hit.
+	if elapsed > time.Second {
+		t.Errorf("expected fast return for a stable recent transcript, but took %v", elapsed)
+	}
+}
+
+func TestWaitForTranscriptFlush_GrowingFile_WaitsUntilSettled(t *testing.T) {
+	t.Parallel()
+
+	// A transcript that is still being written must NOT be treated as settled
+	// while it grows; the wait returns only after the writes stop.
+	transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	const growFor = 600 * time.Millisecond
+	stop := make(chan struct{})
+	go func() {
+		f, err := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		ticker := time.NewTicker(40 * time.Millisecond)
+		defer ticker.Stop()
+		deadline := time.Now().Add(growFor)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if time.Now().After(deadline) {
+					return
+				}
+				if _, werr := f.WriteString(`{"type":"assistant"}` + "\n"); werr != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	start := time.Now()
+	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
+	elapsed := time.Since(start)
+	close(stop)
+
+	// It should keep waiting while the file grows (i.e. not return near-instantly),
+	// but still return once writes stop (bounded by the 3s cap).
+	if elapsed < 300*time.Millisecond {
+		t.Errorf("expected to keep waiting while transcript grew, returned after only %v", elapsed)
+	}
+	if elapsed > 3500*time.Millisecond {
+		t.Errorf("expected to return once settled/within cap, but took %v", elapsed)
 	}
 }
 

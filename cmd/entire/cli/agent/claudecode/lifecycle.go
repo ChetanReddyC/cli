@@ -187,14 +187,28 @@ func (c *ClaudeCodeAgent) parseSubagentEnd(stdin io.Reader) (*agent.Event, error
 // entry when the stop hook has been invoked, indicating the transcript is fully flushed.
 const stopHookSentinel = "hooks claude-code stop"
 
-// waitForTranscriptFlush polls the transcript file for the stop hook sentinel.
-// Falls back silently after a timeout.
+// waitForTranscriptFlush waits until Claude Code's async transcript writes have
+// settled before turn-end reads the file. It returns as soon as EITHER the stop
+// hook sentinel appears OR the file has stopped growing (size stable across
+// consecutive polls), and gives up after maxWait as a safety bound.
+//
+// Settle-on-stability is the primary signal: the historical sentinel ("hooks
+// claude-code stop" hook_progress entry) is not reliably present in the file
+// while this hook runs — Claude persists it around the hook boundary, so a poll
+// loop inside the stop hook essentially never observes it and burned the full
+// maxWait on every healthy turn-end. On a healthy turn-end the assistant has
+// already finished streaming, so the file is stable within a poll or two and we
+// return in tens of ms instead of 3s. When writes are genuinely still in
+// flight, the size keeps changing and we keep waiting up to maxWait.
 func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStartTime time.Time) {
 	const (
 		maxWait      = 3 * time.Second
 		pollInterval = 50 * time.Millisecond
 		tailBytes    = 4096
 		maxSkew      = 2 * time.Second
+		// stableChecks is how many consecutive polls the size must be unchanged
+		// before we treat the transcript as settled (~pollInterval of quiet).
+		stableChecks = 2
 	)
 
 	logCtx := logging.WithComponent(ctx, "agent.claudecode")
@@ -220,6 +234,8 @@ func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStar
 	}
 
 	deadline := time.Now().Add(maxWait)
+	lastSize := int64(-1)
+	stableStreak := 0
 	for time.Now().Before(deadline) {
 		if checkStopSentinel(transcriptPath, tailBytes, hookStartTime, maxSkew) {
 			logging.Debug(logCtx, "transcript flush sentinel found",
@@ -227,9 +243,27 @@ func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStar
 			)
 			return
 		}
+
+		// Settle-on-stability: return once the file has stopped growing.
+		if fi, statErr := os.Stat(transcriptPath); statErr == nil {
+			if fi.Size() == lastSize {
+				stableStreak++
+				if stableStreak >= stableChecks {
+					logging.Debug(logCtx, "transcript settled (size stable), proceeding",
+						slog.Duration("wait", time.Since(hookStartTime)),
+						slog.Int64("size", fi.Size()),
+					)
+					return
+				}
+			} else {
+				stableStreak = 0
+				lastSize = fi.Size()
+			}
+		}
+
 		time.Sleep(pollInterval)
 	}
-	logging.Warn(logCtx, "transcript flush sentinel not found within timeout, proceeding",
+	logging.Warn(logCtx, "transcript flush not settled within timeout, proceeding",
 		slog.Duration("timeout", maxWait),
 	)
 }
