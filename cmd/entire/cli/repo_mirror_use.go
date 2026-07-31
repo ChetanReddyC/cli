@@ -101,6 +101,13 @@ type mirrorRemotePlan struct {
 	// preserveAs, when non-empty, is a new remote that will be created holding
 	// replacedURL so the previous URL stays reachable.
 	preserveAs string
+	// preserveSkipped names the remote replacedURL would have been kept under,
+	// when preservation was asked for but could not be done (the name is already
+	// taken). Mutually exclusive with preserveAs, and empty when preservation was
+	// never requested (`--upstream ''`). Set so the report can say out loud that
+	// the previous URL did not make it into git config — the difference matters:
+	// this is the one path where a successful-looking run drops the old URL.
+	preserveSkipped string
 	// noop is true when remote already points at mirrorURL.
 	noop bool
 }
@@ -111,9 +118,11 @@ type mirrorRemotePlan struct {
 //
 // upstream is the requested preserve-under name; it is honored only when the
 // target remote is actually being repointed and the name is free. An occupied
-// name is skipped rather than clobbered — the replaced URL is echoed either way,
-// so nothing is lost, and silently rewriting an existing `upstream` would be the
-// one genuinely destructive thing this command could do.
+// name is never clobbered — silently rewriting an existing `upstream` would be
+// the one genuinely destructive thing this command could do — but it is recorded
+// in preserveSkipped rather than dropped quietly, because a fork checkout
+// (`origin` + `upstream` both already configured) hits that path by default and
+// would otherwise see a clean ✓ while the replaced URL left git config for good.
 func planMirrorRemote(remote, mirrorURL, currentURL, upstream string, remotes map[string]bool) mirrorRemotePlan {
 	plan := mirrorRemotePlan{remote: remote, mirrorURL: mirrorURL}
 	if !remotes[remote] {
@@ -125,8 +134,14 @@ func planMirrorRemote(remote, mirrorURL, currentURL, upstream string, remotes ma
 		return plan
 	}
 	plan.replacedURL = currentURL
-	if upstream != "" && upstream != remote && !remotes[upstream] {
-		plan.preserveAs = upstream
+	if upstream != "" {
+		// `remote` is known to exist in this branch, so an upstream naming it is
+		// "occupied" too and lands in the skipped case — no separate check needed.
+		if remotes[upstream] {
+			plan.preserveSkipped = upstream
+		} else {
+			plan.preserveAs = upstream
+		}
 	}
 	return plan
 }
@@ -155,7 +170,13 @@ func applyMirrorRemotePlan(ctx context.Context, dir string, plan mirrorRemotePla
 // reportMirrorRemotePlan echoes what was written, in recovery-friendly terms:
 // every replaced URL is printed even when it was also preserved under another
 // remote, so the previous value is always visible in the transcript.
-func reportMirrorRemotePlan(out io.Writer, plan mirrorRemotePlan) {
+//
+// When preservation was requested but skipped, that gets an explicit stderr
+// warning rather than just the absence of the "Kept the previous URL" line — the
+// old URL is then only in this output, and an omitted line is far too quiet a
+// signal for "your previous remote URL is no longer in git config" (a reader, or
+// an agent scanning for ✓, would miss it).
+func reportMirrorRemotePlan(out, errW io.Writer, plan mirrorRemotePlan) {
 	if plan.noop {
 		fmt.Fprintf(out, "Remote %q already points at the mirror:\n  %s\n", plan.remote, plan.mirrorURL)
 		return
@@ -170,6 +191,17 @@ func reportMirrorRemotePlan(out io.Writer, plan mirrorRemotePlan) {
 		}
 	}
 	fmt.Fprintf(out, "\nFetch through it:\n  git fetch %s\n", plan.remote)
+
+	if plan.preserveSkipped != "" {
+		// The URL is redacted here for the same reason it is on the "was:" line:
+		// a replaced URL can carry credentials, and this warning is as likely to
+		// end up in a log or a pasted transcript as anything else we print. Say so,
+		// so a reader who needs the credentialed original knows to reconstruct it.
+		fmt.Fprintf(errW, "\nWARNING: the previous URL of %q was NOT saved to git config — remote %q already exists.\n", plan.remote, plan.preserveSkipped)
+		fmt.Fprintf(errW, "         It now only appears in the output above. To keep it under another name:\n")
+		fmt.Fprintf(errW, "           git remote add <name> %s\n", gitremote.RedactURL(plan.replacedURL))
+		fmt.Fprintf(errW, "         (credentials, if the URL had any, are redacted and must be re-supplied.)\n")
+	}
 }
 
 // mirrorUseChoice is the outcome of the interactive replace-or-add prompt.
@@ -480,7 +512,7 @@ func newRepoMirrorUseCmd() *cobra.Command {
 			if err := applyMirrorRemotePlan(ctx, repoRoot, plan); err != nil {
 				return err
 			}
-			reportMirrorRemotePlan(cmd.OutOrStdout(), plan)
+			reportMirrorRemotePlan(cmd.OutOrStdout(), cmd.ErrOrStderr(), plan)
 			return nil
 		},
 	}
