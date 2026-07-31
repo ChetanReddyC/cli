@@ -119,10 +119,10 @@ func TestFetchCheckpointRef_NoRemoteAtAllIsAbsence(t *testing.T) {
 
 // TestFetchCheckpointRef_UnreadableSettingsNeverClassifiesAbsence: when the
 // checkpoint_remote configuration CANNOT BE READ (corrupt settings), whether a
-// checkpoint remote exists is undeterminable — the same case the fallback
-// emptiness path refuses to classify. The no-remotes absence shortcut must not
-// fire on a load error, only on a successful load that shows no
-// checkpoint_remote configured.
+// checkpoint remote exists is undeterminable. The no-remotes absence shortcut
+// must not fire on a load error — the run falls through to the ls-remote
+// probe, which surfaces the missing origin as a transport error, never as
+// absence.
 func TestFetchCheckpointRef_UnreadableSettingsNeverClassifiesAbsence(t *testing.T) {
 	workDir := t.TempDir()
 	testutil.InitRepo(t, workDir)
@@ -160,4 +160,49 @@ func TestFetchCheckpointRef_MalformedCheckpointRemoteNeverClassifiesAbsence(t *t
 	require.Error(t, err)
 	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
 		"a present-but-malformed checkpoint_remote must not classify as absence")
+}
+
+// TestFetchCheckpointRef_NonOriginRemoteNeverClassifiesAbsence: a repo whose
+// only remote is not named origin (git clone -o upstream is a common shape)
+// is NOT remoteless — checkpoint refs are pushed to whatever remote the
+// pre-push hook fires for, so they can legitimately live on a non-origin
+// remote. Classifying this repo as absence would misroute backfills; it must
+// stay a failure.
+func TestFetchCheckpointRef_NonOriginRemoteNeverClassifiesAbsence(t *testing.T) {
+	bareDir := t.TempDir()
+	out, err := exec.CommandContext(t.Context(), "git", "init", "--bare", bareDir).CombinedOutput()
+	require.NoError(t, err, "git init --bare: %s", out)
+
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.WriteFile(t, workDir, "f.txt", "content")
+	testutil.GitAdd(t, workDir, "f.txt")
+	testutil.GitCommit(t, workDir, "init")
+	out, err = exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "add", "upstream", bareDir).CombinedOutput()
+	require.NoError(t, err, "git remote add upstream: %s", out)
+	t.Chdir(workDir)
+
+	ref := plumbing.ReferenceName("refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9")
+	err = FetchCheckpointRef(context.Background(), ref)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"a repo with a non-origin remote must not classify as absence")
+}
+
+// TestFetchCheckpointRef_CanceledContextNeverClassifiesAbsence: a dead caller
+// context makes every git subprocess fail, which must surface as a transport
+// failure — never as absence. Regression: the no-remotes guard once inferred
+// "no origin" from a GetRemoteURL failure, which a canceled context also
+// produces, converting Ctrl-C in a healthy repo into a false "checkpoint does
+// not exist" verdict that write routing acts on.
+func TestFetchCheckpointRef_CanceledContextNeverClassifiesAbsence(t *testing.T) {
+	_, ref := checkpointRefFixture(t, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := FetchCheckpointRef(ctx, ref)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"a canceled context must stay a failure, never absence")
 }
