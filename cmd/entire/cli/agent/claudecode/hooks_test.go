@@ -467,6 +467,66 @@ func TestUninstallHooks_RemovesLocalDevHooks(t *testing.T) {
 	}
 }
 
+// TestInstallHooks_LocalDevSessionEndTimeout verifies the local-dev SessionEnd
+// hook carries an explicit timeout so Claude Code waits for it on exit instead
+// of cancelling it after its short default exit-grace. The timeout is scoped to
+// local-dev SessionEnd only: production and other local-dev hooks stay untimed.
+func TestInstallHooks_LocalDevSessionEndTimeout(t *testing.T) {
+	t.Run("local-dev SessionEnd gets the timeout", func(t *testing.T) {
+		tempDir := t.TempDir()
+		t.Chdir(tempDir)
+
+		agent := &ClaudeCodeAgent{}
+		if _, err := agent.InstallHooks(context.Background(), true, false); err != nil {
+			t.Fatalf("InstallHooks(localDev=true) error = %v", err)
+		}
+
+		settings := readClaudeSettings(t, tempDir)
+		if len(settings.Hooks.SessionEnd) == 0 || len(settings.Hooks.SessionEnd[0].Hooks) == 0 {
+			t.Fatal("expected a SessionEnd hook to be installed")
+		}
+		if got := settings.Hooks.SessionEnd[0].Hooks[0].Timeout; got != localDevSessionEndTimeoutSecs {
+			t.Errorf("local-dev SessionEnd timeout = %d, want %d", got, localDevSessionEndTimeoutSecs)
+		}
+
+		// Scoping: other local-dev hooks must not inherit the timeout.
+		if len(settings.Hooks.Stop) == 0 || len(settings.Hooks.Stop[0].Hooks) == 0 {
+			t.Fatal("expected a Stop hook to be installed")
+		}
+		if got := settings.Hooks.Stop[0].Hooks[0].Timeout; got != 0 {
+			t.Errorf("local-dev Stop timeout = %d, want 0 (timeout is SessionEnd-only)", got)
+		}
+	})
+
+	t.Run("production SessionEnd stays untimed", func(t *testing.T) {
+		tempDir := t.TempDir()
+		t.Chdir(tempDir)
+
+		agent := &ClaudeCodeAgent{}
+		if _, err := agent.InstallHooks(context.Background(), false, false); err != nil {
+			t.Fatalf("InstallHooks(localDev=false) error = %v", err)
+		}
+
+		settings := readClaudeSettings(t, tempDir)
+		if len(settings.Hooks.SessionEnd) == 0 || len(settings.Hooks.SessionEnd[0].Hooks) == 0 {
+			t.Fatal("expected a SessionEnd hook to be installed")
+		}
+		if got := settings.Hooks.SessionEnd[0].Hooks[0].Timeout; got != 0 {
+			t.Errorf("production SessionEnd timeout = %d, want 0 (dev-only)", got)
+		}
+
+		// Stronger than the parsed check: prove the field is omitted entirely
+		// (omitempty), not written as an explicit "timeout": 0.
+		raw, err := os.ReadFile(filepath.Join(tempDir, ".claude", "settings.json"))
+		if err != nil {
+			t.Fatalf("failed to read settings.json: %v", err)
+		}
+		if strings.Contains(string(raw), "timeout") {
+			t.Errorf("production settings.json must not contain any timeout field, got:\n%s", raw)
+		}
+	})
+}
+
 // readClaudeSettings reads and parses the Claude Code settings file
 func readClaudeSettings(t *testing.T, tempDir string) ClaudeSettings {
 	t.Helper()
@@ -729,6 +789,82 @@ func TestInstallHooks_UsesCurrentToolMatchers(t *testing.T) {
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "post-task subagent hook")
 	assertHookExists(t, settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate",
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "post-todo task-list hook")
+}
+
+func TestCheckHookConfig_Absent(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	if got := CheckHookConfig(context.Background()); got != HooksAbsent {
+		t.Errorf("CheckHookConfig() = %v, want HooksAbsent", got)
+	}
+}
+
+func TestCheckHookConfig_Current(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	if got := CheckHookConfig(context.Background()); got != HooksCurrent {
+		t.Errorf("CheckHookConfig() = %v, want HooksCurrent", got)
+	}
+}
+
+func TestCheckHookConfig_Outdated(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	// Config from an older CLI version: Entire installed (Stop present) but the
+	// tool-use hooks sit under the outdated Task/TodoWrite matchers.
+	stop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
+    "PreToolUse": [{"matcher": "Task", "hooks": [{"type": "command", "command": %q}]}],
+    "PostToolUse": [
+      {"matcher": "Task", "hooks": [{"type": "command", "command": %q}]},
+      {"matcher": "TodoWrite", "hooks": [{"type": "command", "command": %q}]}
+    ]
+  }
+}`, stop, pre, post, todo))
+
+	if got := CheckHookConfig(context.Background()); got != HooksOutdated {
+		t.Errorf("CheckHookConfig() = %v, want HooksOutdated", got)
+	}
+}
+
+// TestCheckHookConfig_SupersetMatchersAreCurrent verifies that widening a
+// matcher beyond what we install (still covering the required tools) is not
+// flagged as drift — matchers are |-lists of exact tool names, so a superset
+// still fires for the required tools.
+func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	stop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	// "Agent|Foo" still covers Agent; "TaskCreate|TaskUpdate|TaskGet" still
+	// covers TaskCreate and TaskUpdate.
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
+    "PreToolUse": [{"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]}],
+    "PostToolUse": [
+      {"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]},
+      {"matcher": "TaskCreate|TaskUpdate|TaskGet", "hooks": [{"type": "command", "command": %q}]}
+    ]
+  }
+}`, stop, pre, post, todo))
+
+	if got := CheckHookConfig(context.Background()); got != HooksCurrent {
+		t.Errorf("CheckHookConfig() = %v, want HooksCurrent (superset matcher)", got)
+	}
 }
 
 // TestInstallHooks_Force_ReinstallsStaleToolMatchers verifies that `--force`

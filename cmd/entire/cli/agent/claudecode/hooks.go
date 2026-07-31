@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -58,6 +59,13 @@ const metadataDenyRule = "Read(./.entire/metadata/**)"
 // merge-conflict-fix). ${CLAUDE_PROJECT_DIR} is set by Claude Code to the
 // repository root when it runs hooks.
 const localDevHookCmdPrefix = "${CLAUDE_PROJECT_DIR}/scripts/entire-dev "
+
+// localDevSessionEndTimeoutSecs gives the local-dev SessionEnd hook an explicit
+// timeout (seconds) so Claude Code waits for it on exit instead of cancelling it
+// after its short default exit-grace, which the build-from-source dev launcher
+// (scripts/entire-dev) can exceed. Only set in local-dev mode; production leaves
+// Claude Code's default in place.
+const localDevSessionEndTimeoutSecs = 60
 
 // entireHookPrefixes are command prefixes that identify Entire hooks. The
 // "go run" prefix is retained so hooks installed by older versions are still
@@ -167,33 +175,41 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 
 	count := 0
 
+	// The local-dev SessionEnd hook gets an explicit timeout so Claude Code
+	// waits for it on exit; every other hook (and all production hooks) keeps
+	// Claude Code's default.
+	sessionEndTimeoutSecs := 0
+	if localDev {
+		sessionEndTimeoutSecs = localDevSessionEndTimeoutSecs
+	}
+
 	// Add hooks if they don't exist
 	if !hookCommandExists(sessionStart, sessionStartCmd) {
-		sessionStart = addHookToMatcher(sessionStart, "", sessionStartCmd)
+		sessionStart = addHookToMatcher(sessionStart, "", sessionStartCmd, 0)
 		count++
 	}
 	if !hookCommandExists(sessionEnd, sessionEndCmd) {
-		sessionEnd = addHookToMatcher(sessionEnd, "", sessionEndCmd)
+		sessionEnd = addHookToMatcher(sessionEnd, "", sessionEndCmd, sessionEndTimeoutSecs)
 		count++
 	}
 	if !hookCommandExists(stop, stopCmd) {
-		stop = addHookToMatcher(stop, "", stopCmd)
+		stop = addHookToMatcher(stop, "", stopCmd, 0)
 		count++
 	}
 	if !hookCommandExists(userPromptSubmit, userPromptSubmitCmd) {
-		userPromptSubmit = addHookToMatcher(userPromptSubmit, "", userPromptSubmitCmd)
+		userPromptSubmit = addHookToMatcher(userPromptSubmit, "", userPromptSubmitCmd, 0)
 		count++
 	}
 	if !hookCommandExistsWithMatcher(preToolUse, subagentToolMatcher, preTaskCmd) {
-		preToolUse = addHookToMatcher(preToolUse, subagentToolMatcher, preTaskCmd)
+		preToolUse = addHookToMatcher(preToolUse, subagentToolMatcher, preTaskCmd, 0)
 		count++
 	}
 	if !hookCommandExistsWithMatcher(postToolUse, subagentToolMatcher, postTaskCmd) {
-		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd)
+		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd, 0)
 		count++
 	}
 	if !hookCommandExistsWithMatcher(postToolUse, taskToolMatcher, postTodoCmd) {
-		postToolUse = addHookToMatcher(postToolUse, taskToolMatcher, postTodoCmd)
+		postToolUse = addHookToMatcher(postToolUse, taskToolMatcher, postTodoCmd, 0)
 		count++
 	}
 
@@ -400,8 +416,9 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	return nil
 }
 
-// AreHooksInstalled checks if Entire hooks are installed.
-func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
+// loadClaudeSettings reads and parses .claude/settings.json from the repo root.
+// Returns ok=false when the file is missing or unparseable.
+func loadClaudeSettings(ctx context.Context) (ClaudeSettings, bool) {
 	// Use repo root to find .claude directory when run from a subdirectory
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -410,16 +427,59 @@ func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
 	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
-		return false
+		return ClaudeSettings{}, false
 	}
 
 	var settings ClaudeSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
+		return ClaudeSettings{}, false
+	}
+	return settings, true
+}
+
+// AreHooksInstalled checks if Entire hooks are installed.
+func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
+	settings, ok := loadClaudeSettings(ctx)
+	if !ok {
 		return false
 	}
-
 	// Check for at least one of our hooks (new, wrapped, or legacy format)
 	return hasEntireHook(settings.Hooks.Stop)
+}
+
+// HookConfigState describes how Entire's Claude Code hooks compare to what
+// InstallHooks would write today.
+type HookConfigState int
+
+const (
+	// HooksAbsent means Entire hooks are not installed in this repo.
+	HooksAbsent HookConfigState = iota
+	// HooksCurrent means the installed hooks match the current config.
+	HooksCurrent
+	// HooksOutdated means Entire hooks are installed but the current tool-use
+	// matchers no longer carry them (e.g. an older CLI wrote them under the now
+	// non-firing "Task"/"TodoWrite" matchers). Fix: `entire enable --force`.
+	HooksOutdated
+)
+
+// CheckHookConfig reports whether Entire's Claude Code hooks are absent,
+// current, or outdated. It is a read-only diagnostic used by `entire status`
+// and `entire doctor`; it never modifies settings. Outdated is detected on the
+// positive spec: Entire is installed (Stop hook present) yet one of the current
+// tool-use matchers does not carry its Entire hook.
+func CheckHookConfig(ctx context.Context) HookConfigState {
+	settings, ok := loadClaudeSettings(ctx)
+	if !ok || !hasEntireHook(settings.Hooks.Stop) {
+		return HooksAbsent
+	}
+	subagentTools := splitMatcherTools(subagentToolMatcher)
+	taskTools := splitMatcherTools(taskToolMatcher)
+	if !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
+		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) ||
+		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, taskTools) {
+		return HooksOutdated
+	}
+	return HooksCurrent
 }
 
 // Helper functions for hook management
@@ -446,6 +506,47 @@ func hasEntireHook(matchers []ClaudeHookMatcher) bool {
 	return false
 }
 
+// splitMatcherTools splits a Claude Code tool matcher into its exact tool
+// names. Matchers that InstallHooks writes are `|`-separated lists (Claude Code
+// also accepts `,`); whitespace around separators is ignored. Returns the tools
+// in order, dropping empties.
+func splitMatcherTools(matcher string) []string {
+	parts := strings.FieldsFunc(matcher, func(r rune) bool { return r == '|' || r == ',' })
+	tools := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			tools = append(tools, t)
+		}
+	}
+	return tools
+}
+
+// hasEntireHookCoveringTools reports whether an Entire hook is installed under a
+// matcher that covers every tool in want. A widened matcher still counts: a
+// matcher of "TaskCreate|TaskUpdate|TaskGet" covers {TaskCreate, TaskUpdate},
+// so users who broaden a matcher aren't falsely flagged as outdated.
+func hasEntireHookCoveringTools(matchers []ClaudeHookMatcher, want []string) bool {
+	for _, matcher := range matchers {
+		have := splitMatcherTools(matcher.Matcher)
+		coversAll := true
+		for _, w := range want {
+			if !slices.Contains(have, w) {
+				coversAll = false
+				break
+			}
+		}
+		if !coversAll {
+			continue
+		}
+		for _, hook := range matcher.Hooks {
+			if isEntireHook(hook.Command) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func hookCommandExistsWithMatcher(matchers []ClaudeHookMatcher, matcherName, command string) bool {
 	for _, matcher := range matchers {
 		if matcher.Matcher == matcherName {
@@ -459,10 +560,11 @@ func hookCommandExistsWithMatcher(matchers []ClaudeHookMatcher, matcherName, com
 	return false
 }
 
-func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string) []ClaudeHookMatcher {
+func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string, timeoutSecs int) []ClaudeHookMatcher {
 	entry := ClaudeHookEntry{
 		Type:    "command",
 		Command: command,
+		Timeout: timeoutSecs,
 	}
 
 	// If no matcher name, add to a matcher with empty string
