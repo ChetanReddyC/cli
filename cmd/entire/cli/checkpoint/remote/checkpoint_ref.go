@@ -3,6 +3,7 @@ package remote
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -39,18 +40,35 @@ func CheckpointFetchTarget(ctx context.Context) string {
 //     non-authoritative: they exist so a fetch can still be attempted, not to
 //     certify where checkpoint refs live.
 //   - resolved: whether a concrete fetch URL/remote was resolved at all. It is
-//     false ONLY when URL resolution produced nothing (no origin remote, no
-//     configured checkpoint_remote, unreadable settings) and we fell back to
-//     the bare "origin" name. That literal "origin" is not guaranteed to be a
-//     real git remote, so a probe failure against it says only "there is
-//     nowhere to fetch from", not "the checkpoint is missing on a real remote".
+//     false ONLY when no checkpoint remote is configured (no origin remote and
+//     no configured checkpoint_remote) and we fell back to the bare "origin"
+//     name. That literal "origin" is not guaranteed to be a real git remote, so
+//     a probe failure against it says only "there is nowhere to fetch from". If
+//     a checkpoint_remote IS configured but its URL can't be derived this call,
+//     resolved is true so a probe failure surfaces as a real error, not absence.
 func checkpointFetchTarget(ctx context.Context) (target string, authoritative, resolved bool) {
 	url, auth, err := fetchURLAuthoritative(ctx)
 	if err == nil && url != "" {
 		return url, auth, true
 	}
-	return "origin", false, false
+	if errors.Is(err, errNoCheckpointRemoteConfigured) {
+		// Genuinely no checkpoint remote configured: a probe failure against the
+		// bare "origin" fallback proves only "nowhere to fetch from", so callers
+		// classify it as checkpoint absence and fall back to the v1-branch store.
+		return "origin", false, false
+	}
+	// A checkpoint remote IS configured but its URL could not be derived this
+	// call (transient GetRemoteURL error, provider-host derivation failure). Mark
+	// resolved so a probe failure surfaces as a real error rather than being
+	// silently reclassified as checkpoint absence.
+	return "origin", false, true
 }
+
+// errNoCheckpointRemoteConfigured marks the "no checkpoint remote configured at
+// all" case (no origin remote and no configured checkpoint_remote) — the only
+// situation in which a probe failure against the bare "origin" fallback is
+// classified as checkpoint absence rather than surfaced as a real error.
+var errNoCheckpointRemoteConfigured = errors.New("no checkpoint remote configured")
 
 // FetchCheckpointRef fetches a single per-checkpoint ref
 // (refs/entire/checkpoints/<shard>/<id>) from the checkpoint remote into the
