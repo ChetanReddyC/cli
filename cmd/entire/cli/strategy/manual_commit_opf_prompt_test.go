@@ -179,7 +179,7 @@ func TestPrePush_OPFProgressUsesConfiguredWriter(t *testing.T) {
 	remoteDir := filepath.Join(t.TempDir(), "origin.git")
 	_, err := git.PlainInit(remoteDir, true)
 	require.NoError(t, err)
-	addRemote(t, tmpDir, "origin", remoteDir)
+	testutil.AddRemote(t, tmpDir, "origin", remoteDir)
 	t.Chdir(tmpDir)
 	configureFakeOPF(t, &fakeOPFForRewrite{})
 

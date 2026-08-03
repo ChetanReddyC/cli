@@ -13,25 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// addRemote adds a git remote named name pointing at url in repoDir.
-func addRemote(t *testing.T, repoDir, name, url string) {
-	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", name, url)
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
-}
-
-// writeCheckpointPushRemoteSetting writes .entire/settings.json configuring
-// strategy_options.checkpoint_push_remote to remoteName.
-func writeCheckpointPushRemoteSetting(t *testing.T, repoDir, remoteName string) {
-	t.Helper()
-	entireDir := filepath.Join(repoDir, ".entire")
-	require.NoError(t, os.MkdirAll(entireDir, 0o755))
-	content := `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "` + remoteName + `"}}`
-	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(content), 0o644))
-}
-
 // Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_ConfigSetting(t *testing.T) {
 	ctx := context.Background()
@@ -41,9 +22,9 @@ func TestResolveCheckpointSyncRemote_ConfigSetting(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "f.txt")
 	testutil.GitCommit(t, tmpDir, "init")
 
-	addRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-	addRemote(t, tmpDir, "private", "https://example.com/private.git")
-	writeCheckpointPushRemoteSetting(t, tmpDir, "private")
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, tmpDir, "private", "https://example.com/private.git")
+	testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "private")
 
 	t.Chdir(tmpDir)
 
@@ -61,8 +42,8 @@ func TestResolveCheckpointSyncRemote_ConfigSettingMissingRemote_FailsClosed(t *t
 	testutil.GitAdd(t, tmpDir, "f.txt")
 	testutil.GitCommit(t, tmpDir, "init")
 
-	addRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-	writeCheckpointPushRemoteSetting(t, tmpDir, "gone")
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+	testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "gone")
 
 	t.Chdir(tmpDir)
 
@@ -81,8 +62,8 @@ func TestResolveCheckpointSyncRemote_DefaultsToOrigin(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "f.txt")
 	testutil.GitCommit(t, tmpDir, "init")
 
-	addRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-	addRemote(t, tmpDir, "publish", "https://example.com/publish.git")
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, tmpDir, "publish", "https://example.com/publish.git")
 
 	t.Chdir(tmpDir)
 
@@ -100,7 +81,7 @@ func TestResolveCheckpointSyncRemote_SoleRemote(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "f.txt")
 	testutil.GitCommit(t, tmpDir, "init")
 
-	addRemote(t, tmpDir, "upstream", "https://example.com/upstream.git")
+	testutil.AddRemote(t, tmpDir, "upstream", "https://example.com/upstream.git")
 
 	t.Chdir(tmpDir)
 
@@ -120,8 +101,8 @@ func TestResolveCheckpointSyncRemote_FirstInConfigOrder(t *testing.T) {
 
 	// No "origin" remote. Add zeta before alpha; config-file order should win
 	// over alphabetical order.
-	addRemote(t, tmpDir, "zeta", "https://example.com/zeta.git")
-	addRemote(t, tmpDir, "alpha", "https://example.com/alpha.git")
+	testutil.AddRemote(t, tmpDir, "zeta", "https://example.com/zeta.git")
+	testutil.AddRemote(t, tmpDir, "alpha", "https://example.com/alpha.git")
 
 	t.Chdir(tmpDir)
 
@@ -139,8 +120,8 @@ func TestResolveCheckpointSyncRemote_SettingsLoadErrorFallsThroughToElection(t *
 	testutil.GitAdd(t, tmpDir, "f.txt")
 	testutil.GitCommit(t, tmpDir, "init")
 
-	addRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-	addRemote(t, tmpDir, "publish", "https://example.com/publish.git")
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, tmpDir, "publish", "https://example.com/publish.git")
 
 	// Corrupt settings.json: a load error must fall through to election
 	// rather than propagate or silently disable checkpoint sync.
@@ -191,8 +172,8 @@ func TestResolveCheckpointSyncRemote_PushurlOnlyRemoteIsInvisible(t *testing.T) 
 	// remote count at 2 so the resolver exercises the "first" precedence
 	// path (not "sole"), proving the pushurl-only entry is excluded from
 	// both the count and the ordering.
-	addRemote(t, tmpDir, "first-real", "https://example.com/first.git")
-	addRemote(t, tmpDir, "second-real", "https://example.com/second.git")
+	testutil.AddRemote(t, tmpDir, "first-real", "https://example.com/first.git")
+	testutil.AddRemote(t, tmpDir, "second-real", "https://example.com/second.git")
 
 	t.Chdir(tmpDir)
 
@@ -212,8 +193,8 @@ func TestCheckpointSyncAllowedForRemote(t *testing.T) {
 		testutil.GitAdd(t, tmpDir, "f.txt")
 		testutil.GitCommit(t, tmpDir, "init")
 
-		addRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-		addRemote(t, tmpDir, "publish", "https://example.com/publish.git")
+		testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+		testutil.AddRemote(t, tmpDir, "publish", "https://example.com/publish.git")
 
 		t.Chdir(tmpDir)
 
@@ -228,9 +209,9 @@ func TestCheckpointSyncAllowedForRemote(t *testing.T) {
 		testutil.GitAdd(t, tmpDir, "f.txt")
 		testutil.GitCommit(t, tmpDir, "init")
 
-		addRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-		addRemote(t, tmpDir, "publish", "https://example.com/publish.git")
-		writeCheckpointPushRemoteSetting(t, tmpDir, "gone")
+		testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+		testutil.AddRemote(t, tmpDir, "publish", "https://example.com/publish.git")
+		testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "gone")
 
 		t.Chdir(tmpDir)
 
@@ -245,7 +226,7 @@ func TestCheckpointSyncAllowedForRemote(t *testing.T) {
 		testutil.GitAdd(t, tmpDir, "f.txt")
 		testutil.GitCommit(t, tmpDir, "init")
 
-		addRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+		testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
 
 		t.Chdir(tmpDir)
 
