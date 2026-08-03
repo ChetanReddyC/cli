@@ -3,10 +3,14 @@ package remote
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
+	"log/slog"
+	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 
 	"github.com/go-git/go-git/v6/plumbing"
 )
@@ -29,46 +33,21 @@ const readFetchTimeout = 2 * time.Minute
 // resolution fails, it falls back to the origin remote name so callers can
 // still attempt a fetch.
 func CheckpointFetchTarget(ctx context.Context) string {
-	target, _, _ := checkpointFetchTarget(ctx)
+	target, _ := checkpointFetchTarget(ctx)
 	return target
 }
 
-// checkpointFetchTarget is CheckpointFetchTarget plus two facts about the
-// returned target:
-//   - authoritative: whether the target is certified as the host of checkpoint
-//     refs (see fetchURLAuthoritative). The bare "origin" fallbacks are
-//     non-authoritative: they exist so a fetch can still be attempted, not to
-//     certify where checkpoint refs live.
-//   - resolved: whether a concrete fetch URL/remote was resolved at all. It is
-//     false ONLY when no checkpoint remote is configured (no origin remote and
-//     no configured checkpoint_remote) and we fell back to the bare "origin"
-//     name. That literal "origin" is not guaranteed to be a real git remote, so
-//     a probe failure against it says only "there is nowhere to fetch from". If
-//     a checkpoint_remote IS configured but its URL can't be derived this call,
-//     resolved is true so a probe failure surfaces as a real error, not absence.
-func checkpointFetchTarget(ctx context.Context) (target string, authoritative, resolved bool) {
-	url, auth, err := fetchURLAuthoritative(ctx)
+// checkpointFetchTarget is CheckpointFetchTarget plus whether the target is
+// authoritative for checkpoint refs (see fetchURLAuthoritative). The bare
+// "origin" fallbacks are non-authoritative: they exist so a fetch can still
+// be attempted, not to certify where checkpoint refs live.
+func checkpointFetchTarget(ctx context.Context) (string, bool) {
+	url, authoritative, err := fetchURLAuthoritative(ctx)
 	if err == nil && url != "" {
-		return url, auth, true
+		return url, authoritative
 	}
-	if errors.Is(err, errNoCheckpointRemoteConfigured) {
-		// Genuinely no checkpoint remote configured: a probe failure against the
-		// bare "origin" fallback proves only "nowhere to fetch from", so callers
-		// classify it as checkpoint absence and fall back to the v1-branch store.
-		return "origin", false, false
-	}
-	// A checkpoint remote IS configured but its URL could not be derived this
-	// call (transient GetRemoteURL error, provider-host derivation failure). Mark
-	// resolved so a probe failure surfaces as a real error rather than being
-	// silently reclassified as checkpoint absence.
-	return "origin", false, true
+	return "origin", false
 }
-
-// errNoCheckpointRemoteConfigured marks the "no checkpoint remote configured at
-// all" case (no origin remote and no configured checkpoint_remote) — the only
-// situation in which a probe failure against the bare "origin" fallback is
-// classified as checkpoint absence rather than surfaced as a real error.
-var errNoCheckpointRemoteConfigured = errors.New("no checkpoint remote configured")
 
 // FetchCheckpointRef fetches a single per-checkpoint ref
 // (refs/entire/checkpoints/<shard>/<id>) from the checkpoint remote into the
@@ -84,28 +63,52 @@ var errNoCheckpointRemoteConfigured = errors.New("no checkpoint remote configure
 //   - Any transport-level failure (probe or fetch) is surfaced as a real
 //     error, never mapped to absence — a false "absent" would misdirect a
 //     backfill onto another backend instead of retrying.
+//   - A repository with no git remotes at all and no checkpoint_remote
+//     configured also returns an error wrapping plumbing.ErrReferenceNotFound
+//     without probing: there is no remote that could host the ref.
 func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 	ctx, cancel := context.WithTimeout(ctx, readFetchTimeout)
 	defer cancel()
 
-	fetchTarget, authoritative, resolved := checkpointFetchTarget(ctx)
+	fetchTarget, authoritative := checkpointFetchTarget(ctx)
+
+	// A fully local repository — no git remotes at all and no
+	// checkpoint_remote configured — has no remote that could host checkpoint
+	// refs, so the ref's local absence is the final verdict. Without this,
+	// the origin-name fallback below probes a remote git cannot resolve
+	// ("'origin' does not appear to be a git repository", exit 128) and a
+	// remoteless repo is misreported as a transport outage. Absence is only
+	// ever classified on positive evidence; each escape below keeps today's
+	// hard-failure probe:
+	//   - dead caller context: every subprocess fails for reasons that say
+	//     nothing about the repository
+	//   - unreadable settings: a configured checkpoint remote cannot be
+	//     ruled out
+	//   - checkpoint_remote key present in any form, valid or malformed
+	//     (see settings.HasCheckpointRemoteKey for why key presence, not
+	//     GetCheckpointRemote, is the signal)
+	//   - any remote listed, or the listing itself failing: checkpoint refs
+	//     are pushed to whatever remote the pre-push hook fires for, so a
+	//     repo with only non-origin remotes is NOT remoteless
+	// The skipped-guard cases surface through the ordinary probe paths: a
+	// missing origin fails the ls-remote probe as a transport error, and an
+	// origin that merely lacks the ref hits the fallback-emptiness refusal
+	// below — neither classifies as absence.
+	if fetchTarget == originRemote && !authoritative && ctx.Err() == nil {
+		s, loadErr := settings.Load(ctx)
+		switch {
+		case loadErr != nil:
+			logging.Warn(ctx, "checkpoint probe: settings unreadable; cannot rule out a configured checkpoint remote, probing anyway",
+				slog.String("error", loadErr.Error()))
+		case !s.HasCheckpointRemoteKey() && repoHasNoRemotes(ctx):
+			logging.Debug(ctx, "checkpoint probe: repository has no git remotes; classifying ref as absent",
+				slog.String("ref", ref.String()))
+			return fmt.Errorf("checkpoint ref %s: repository has no git remotes to fetch from: %w", ref, plumbing.ErrReferenceNotFound)
+		}
+	}
 
 	out, err := LsRemoteInDir(ctx, "", fetchTarget, ref.String())
 	if err != nil {
-		if !resolved {
-			// No checkpoint remote is configured or reachable — resolution fell
-			// back to the bare "origin" name, which need not be a real git
-			// remote (the local repo may have no origin at all). A probe failure
-			// here proves only that there is nowhere to fetch from, not that the
-			// checkpoint is missing on a real remote. Classify as absence so the
-			// git-refs store maps it to ErrCheckpointNotFound and write routing
-			// falls back to the v1-branch store, mirroring the branch-existence
-			// path (BranchExistsOnRemote treats an ls-remote failure as "not
-			// found"). A genuine transport failure against a *resolved* remote
-			// still propagates below, so real offline/network loss is never
-			// silently swallowed as absence.
-			return fmt.Errorf("probe checkpoint ref %s: no checkpoint remote configured: %w", ref, plumbing.ErrReferenceNotFound)
-		}
 		// Redact: fetchTarget can be a remote URL with embedded credentials
 		// (CI origin URLs), and this error is logged and shown to users.
 		return fmt.Errorf("probe checkpoint ref %s on %s: %w", ref, RedactURL(fetchTarget), err)
@@ -138,6 +141,16 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, RedactURL(fetchTarget), err)
 	}
 	return nil
+}
+
+// repoHasNoRemotes reports whether the repository at the current directory
+// definitively has no git remotes configured. Only a successful, empty
+// `git remote` listing counts as proof; any error (dead context, missing git
+// binary, not a repository) returns false so the caller falls through to the
+// probe instead of classifying absence off an undifferentiated failure.
+func repoHasNoRemotes(ctx context.Context) bool {
+	out, err := exec.CommandContext(ctx, "git", "remote").Output()
+	return err == nil && len(bytes.TrimSpace(out)) == 0
 }
 
 // HookCheckpointRefFetcher returns the write-probe fetcher for git-hook
