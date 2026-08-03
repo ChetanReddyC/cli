@@ -112,7 +112,7 @@ func TestResolveCheckpointSyncRemote_FirstInConfigOrder(t *testing.T) {
 }
 
 // Not parallel: uses t.Chdir()
-func TestResolveCheckpointSyncRemote_SettingsLoadErrorFallsThroughToElection(t *testing.T) {
+func TestResolveCheckpointSyncRemote_SettingsLoadErrorFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -123,8 +123,8 @@ func TestResolveCheckpointSyncRemote_SettingsLoadErrorFallsThroughToElection(t *
 	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
 	testutil.AddRemote(t, tmpDir, "publish", "https://example.com/publish.git")
 
-	// Corrupt settings.json: a load error must fall through to election
-	// rather than propagate or silently disable checkpoint sync.
+	// Corrupt settings.json: the file may contain a checkpoint_push_remote
+	// we cannot read, so election must not proceed.
 	entireDir := filepath.Join(tmpDir, ".entire")
 	require.NoError(t, os.MkdirAll(entireDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte("{not valid json"), 0o644))
@@ -132,8 +132,9 @@ func TestResolveCheckpointSyncRemote_SettingsLoadErrorFallsThroughToElection(t *
 	t.Chdir(tmpDir)
 
 	got, err := ResolveCheckpointSyncRemote(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, CheckpointSyncRemote{Name: "origin", Source: SyncRemoteSourceDefault}, got)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot read settings")
+	assert.Empty(t, got.Name)
 }
 
 // Not parallel: uses t.Chdir()

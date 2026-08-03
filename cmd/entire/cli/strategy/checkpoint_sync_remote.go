@@ -41,17 +41,20 @@ type CheckpointSyncRemote struct {
 // .git/config order. It knows nothing about the checkpoint_remote URL
 // feature; callers exempt that case themselves.
 func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, error) {
-	// A settings load error deliberately falls through to election below,
-	// matching resolvePushSettings's tolerance for a missing/unreadable
-	// settings file.
-	if s, err := settings.Load(ctx); err == nil {
-		if name := s.GetCheckpointPushRemote(); name != "" {
-			if !isConfiguredRemote(ctx, name) {
-				return CheckpointSyncRemote{}, fmt.Errorf(
-					"checkpoint_push_remote %q is not a configured git remote; checkpoint sync disabled until fixed", name)
-			}
-			return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceConfig}, nil
+	// Fail closed on an unreadable settings file: election must never
+	// override a checkpoint_push_remote the file may contain but we could
+	// not read, or checkpoints would silently re-route away from the remote
+	// the user configured for isolation.
+	s, err := settings.Load(ctx)
+	if err != nil {
+		return CheckpointSyncRemote{}, fmt.Errorf("cannot read settings to resolve the checkpoint sync remote: %w", err)
+	}
+	if name := s.GetCheckpointPushRemote(); name != "" {
+		if !isConfiguredRemote(ctx, name) {
+			return CheckpointSyncRemote{}, fmt.Errorf(
+				"checkpoint_push_remote %q is not a configured git remote; checkpoint sync disabled until fixed", name)
 		}
+		return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceConfig}, nil
 	}
 
 	remotes := configuredRemotesInConfigOrder(ctx)
