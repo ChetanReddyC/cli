@@ -281,27 +281,19 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	if err != nil {
 		// Fail-closed: checkpoint_push_remote names a remote that does not
 		// exist. The pre-push gate is silently skipping checkpoint sync, so
-		// status is the user's signal. (With a structured checkpoint_remote
-		// also configured, the pre-push exemption may still sync to the
-		// dedicated store — but the broken setting deserves the warning, and
-		// with no elected remote there is nothing representative to probe.)
+		// status is the user's signal.
 		return checkpointSyncInfo{Err: err.Error()}
 	}
 	if elected.Name == "" {
 		return checkpointSyncInfo{} // no remotes configured: show nothing
 	}
 
-	// Dedicated checkpoint_remote URL mode — reported only when push-URL
-	// derivation actually succeeds, mirroring the pre-push exemption
-	// (ps.hasCheckpointURL). When derivation fails or falls back (fork/owner
-	// mismatch, unparseable push-remote URL), the gate applies normal
-	// single-remote sync on the next push, so status must report that
-	// instead. PushURL is a local-only computation (git remote get-url,
-	// settings, URL parsing, repo remotes + env) and is safe for
-	// network-free status; do NOT call resolvePushSettings here — its
-	// follow-up metadata fetch does dial. The elected remote is the
-	// representative probe: a push to a *different* named remote may derive
-	// differently, which is the (narrow) accepted divergence.
+	// Dedicated checkpoint_remote mode is reported only when PushURL derives
+	// an eligible URL for the elected remote, mirroring the pre-push
+	// exemption (ps.hasCheckpointURL); otherwise the gate applies normal
+	// single-remote sync, so status reports that instead. PushURL is
+	// local-only; never call resolvePushSettings here — its follow-up
+	// metadata fetch dials, and status must stay network-free.
 	if cr := s.GetCheckpointRemote(); cr != nil {
 		if _, enabled, purlErr := checkpointremote.PushURL(ctx, elected.Name); purlErr == nil && enabled {
 			info := checkpointSyncInfo{Remote: cr.Repo, Source: checkpointSyncSourceDedicated}
