@@ -200,6 +200,17 @@ Tied to a base commit. Condensed to committed on user commit.
 
 Branch: `entire/checkpoints/v1`
 
+Committed checkpoints sync to exactly one git remote — the elected checkpoint
+sync remote: `strategy_options.checkpoint_push_remote` if set (fail-closed when
+it names a remote that is not configured), else `origin`, else the sole remote,
+else the first remote in `.git/config` order. The pre-push hook carries
+checkpoint data only when the push targets that remote; pushes to any other
+remote or to a raw URL sync nothing, on both the git-branch and git-refs
+backends (git-refs leaves its push queue intact for the next elected-remote
+push). The dedicated `checkpoint_remote` URL mode is exempt — it addresses a
+separate metadata store directly. `entire status` shows the sync destination
+and how many checkpoints have not reached it yet.
+
 Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkpoint**:
 
 ```
