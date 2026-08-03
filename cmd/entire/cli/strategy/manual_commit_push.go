@@ -75,6 +75,16 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		return nil
 	}
 
+	// Single-remote gate (ENT-1451): checkpoint data syncs only to the
+	// elected checkpoint sync remote. A dedicated checkpoint_remote URL is
+	// exempt — it is a dedicated metadata store addressed directly, not a
+	// remote selected by this push. The gate must stay BELOW
+	// resolvePushSettings: hasCheckpointURL is only known after resolution,
+	// so hoisting the gate above it would break the exemption.
+	if !ps.hasCheckpointURL() && !checkpointSyncAllowedForRemote(ctx, ps.remote) {
+		return nil
+	}
+
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
 	// instead of the single v1 branch. Those refs live under refs/entire/, not
 	// refs/heads/, so a forge can never pick them as a repository's default

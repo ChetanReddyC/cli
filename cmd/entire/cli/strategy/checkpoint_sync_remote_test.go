@@ -131,6 +131,31 @@ func TestResolveCheckpointSyncRemote_FirstInConfigOrder(t *testing.T) {
 }
 
 // Not parallel: uses t.Chdir()
+func TestResolveCheckpointSyncRemote_SettingsLoadErrorFallsThroughToElection(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "f.txt", "init")
+	testutil.GitAdd(t, tmpDir, "f.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+
+	addRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+	addRemote(t, tmpDir, "publish", "https://example.com/publish.git")
+
+	// Corrupt settings.json: a load error must fall through to election
+	// rather than propagate or silently disable checkpoint sync.
+	entireDir := filepath.Join(tmpDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte("{not valid json"), 0o644))
+
+	t.Chdir(tmpDir)
+
+	got, err := ResolveCheckpointSyncRemote(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, CheckpointSyncRemote{Name: "origin", Source: SyncRemoteSourceDefault}, got)
+}
+
+// Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_NoRemotes(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
@@ -174,4 +199,68 @@ func TestResolveCheckpointSyncRemote_PushurlOnlyRemoteIsInvisible(t *testing.T) 
 	got, err := ResolveCheckpointSyncRemote(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, CheckpointSyncRemote{Name: "first-real", Source: SyncRemoteSourceFirst}, got)
+}
+
+// Not parallel: uses t.Chdir()
+func TestCheckpointSyncAllowedForRemote(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("no setting: allowed only for the elected default remote", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testutil.InitRepo(t, tmpDir)
+		testutil.WriteFile(t, tmpDir, "f.txt", "init")
+		testutil.GitAdd(t, tmpDir, "f.txt")
+		testutil.GitCommit(t, tmpDir, "init")
+
+		addRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+		addRemote(t, tmpDir, "publish", "https://example.com/publish.git")
+
+		t.Chdir(tmpDir)
+
+		assert.True(t, checkpointSyncAllowedForRemote(ctx, "origin"))
+		assert.False(t, checkpointSyncAllowedForRemote(ctx, "publish"))
+	})
+
+	t.Run("misconfigured setting fails closed for every remote", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testutil.InitRepo(t, tmpDir)
+		testutil.WriteFile(t, tmpDir, "f.txt", "init")
+		testutil.GitAdd(t, tmpDir, "f.txt")
+		testutil.GitCommit(t, tmpDir, "init")
+
+		addRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+		addRemote(t, tmpDir, "publish", "https://example.com/publish.git")
+		writeCheckpointPushRemoteSetting(t, tmpDir, "gone")
+
+		t.Chdir(tmpDir)
+
+		assert.False(t, checkpointSyncAllowedForRemote(ctx, "origin"))
+		assert.False(t, checkpointSyncAllowedForRemote(ctx, "publish"))
+	})
+
+	t.Run("raw URL push argument is never allowed", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testutil.InitRepo(t, tmpDir)
+		testutil.WriteFile(t, tmpDir, "f.txt", "init")
+		testutil.GitAdd(t, tmpDir, "f.txt")
+		testutil.GitCommit(t, tmpDir, "init")
+
+		addRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+
+		t.Chdir(tmpDir)
+
+		assert.False(t, checkpointSyncAllowedForRemote(ctx, "https://github.com/o/r.git"))
+	})
+
+	t.Run("no remotes configured: never allowed", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testutil.InitRepo(t, tmpDir)
+		testutil.WriteFile(t, tmpDir, "f.txt", "init")
+		testutil.GitAdd(t, tmpDir, "f.txt")
+		testutil.GitCommit(t, tmpDir, "init")
+
+		t.Chdir(tmpDir)
+
+		assert.False(t, checkpointSyncAllowedForRemote(ctx, "origin"))
+	})
 }

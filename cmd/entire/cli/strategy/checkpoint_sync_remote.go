@@ -3,10 +3,12 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"slices"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -39,6 +41,9 @@ type CheckpointSyncRemote struct {
 // .git/config order. It knows nothing about the checkpoint_remote URL
 // feature; callers exempt that case themselves.
 func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, error) {
+	// A settings load error deliberately falls through to election below,
+	// matching resolvePushSettings's tolerance for a missing/unreadable
+	// settings file.
 	if s, err := settings.Load(ctx); err == nil {
 		if name := s.GetCheckpointPushRemote(); name != "" {
 			if !isConfiguredRemote(ctx, name) {
@@ -62,12 +67,33 @@ func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, err
 	}
 }
 
+// checkpointSyncAllowedForRemote reports whether a push to pushRemote may
+// carry checkpoint data. False for every remote except the elected
+// checkpoint sync remote — including raw-URL pushes (git passes the URL as
+// the hook arg) and the fail-closed misconfigured case. Callers exempt the
+// dedicated checkpoint_remote URL mode before calling.
+func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote string) bool {
+	syncRemote, err := ResolveCheckpointSyncRemote(ctx)
+	if err != nil {
+		logging.Warn(ctx, "checkpoint sync skipped: checkpoint_push_remote misconfigured",
+			slog.String("error", err.Error()))
+		return false
+	}
+	if syncRemote.Name == "" || syncRemote.Name != pushRemote {
+		logging.Debug(ctx, "checkpoint sync skipped: push remote is not the checkpoint sync remote",
+			slog.String("push_remote", pushRemote),
+			slog.String("checkpoint_sync_remote", syncRemote.Name))
+		return false
+	}
+	return true
+}
+
 // configuredRemotesInConfigOrder lists remote names in .git/config section
 // order (approximates "first remote added"; `git remote` output is
 // alphabetical and unsuitable). Remotes configured with only pushurl are
 // deliberately invisible (spec Unit 1). Errors yield an empty list.
 func configuredRemotesInConfigOrder(ctx context.Context) []string {
-	out, err := exec.CommandContext(ctx, "git", "config", "--get-regexp", `^remote\..*\.url$`).Output()
+	out, err := exec.CommandContext(ctx, "git", "config", "--local", "--get-regexp", `^remote\..*\.url$`).Output()
 	if err != nil {
 		return nil
 	}
