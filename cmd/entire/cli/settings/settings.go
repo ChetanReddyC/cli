@@ -1446,6 +1446,22 @@ func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
 	return &CheckpointRemoteConfig{Provider: provider, Repo: repo}
 }
 
+// GetCheckpointPushRemote returns the configured checkpoint push remote name.
+// Stored in strategy_options.checkpoint_push_remote as a plain git remote
+// name (e.g. "origin", "private"). This selects WHICH configured remote
+// carries checkpoint data — distinct from checkpoint_remote, which derives a
+// dedicated URL. Returns "" if unset, empty, or not a string.
+func (s *EntireSettings) GetCheckpointPushRemote() string {
+	if s.StrategyOptions == nil {
+		return ""
+	}
+	val, ok := s.StrategyOptions["checkpoint_push_remote"].(string)
+	if !ok {
+		return ""
+	}
+	return val
+}
+
 // IsFilteredFetchesEnabled checks if fetches should use --filter=blob:none.
 // When enabled, filtered fetches always use resolved URLs rather than remote
 // names to avoid persisting promisor settings onto named remotes.
