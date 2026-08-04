@@ -72,7 +72,14 @@ the commands are always runnable in every build.
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`
 - `repo`: control-plane repository lifecycle — `create`, `list`, `get`, `delete`,
   `clone`, plus the `mirror` and `visibility` subtrees. Git content operations
-  (log, diff, …) are intentionally out of scope.
+  (log, diff, …) are intentionally out of scope. The `mirror` subtree is
+  server-side (`create`, `list`, `get`, `remove`, `collaborators`) with one
+  exception: `mirror use` repoints the *current clone's* git remote at a mirror
+  (local git config only — it creates nothing server-side). Interactively it
+  picks among the repo's placements and asks whether to replace the remote
+  (preserving the old URL under `--upstream`) or add a separate one;
+  non-interactively it repoints `--remote` directly. Both `use` and `clone`
+  choose a placement through the shared `selectPlacement` picker.
 - `grant`: manage access grants and org membership — `org`, `project`, and `repo`
   each support `add` / `list` / `remove`
 
