@@ -341,92 +341,65 @@ func TestResolveEnvTokenCreds_TrustedAudSucceeds(t *testing.T) {
 	const core = "https://core.us.entire.io"
 	const audience = "https://us.entire.io"
 	srv, clusterHost := wellKnownServer(t, []string{core}, audience, core)
+	envToken := makeTestJWT(t, core)
 
 	creds, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, core), clusterHost, t.TempDir(), srv.Client(),
+		t.Context(), envToken, clusterHost, t.TempDir(), srv.Client(),
 	)
 	if err != nil {
 		t.Fatalf("expected trusted aud to succeed, got: %v", err)
 	}
-	if creds == nil {
-		t.Fatal("expected non-nil creds for trusted aud")
+	got, err := creds(t.Context())
+	if err != nil {
+		t.Fatalf("provider: %v", err)
 	}
-	// The exchange must be pinned to the token's own (trust-gated) core with
-	// the cluster's advertised jurisdiction audience, and must never touch
-	// the keychain — CI runners don't have one.
-	if creds.fixedCoreURL != core {
-		t.Errorf("fixedCoreURL = %q, want %q", creds.fixedCoreURL, core)
-	}
-	if creds.audience != audience {
-		t.Errorf("audience = %q, want %q", creds.audience, audience)
-	}
-	if creds.persists() {
-		t.Error("env-token creds must not persist to the keychain")
-	}
-	if creds.exchangeHint != "" {
-		t.Errorf("no cross-jurisdiction hint expected when the token's core is the jurisdiction core, got %q", creds.exchangeHint)
+	if got != envToken {
+		t.Errorf("creds = %q, want ENTIRE_TOKEN verbatim", got)
 	}
 }
 
-func TestResolveEnvTokenCreds_CrossJurisdictionTokenGetsHint(t *testing.T) {
+func TestResolveEnvTokenCreds_CrossJurisdictionTokenUsesBearer(t *testing.T) {
 	t.Parallel()
 	// Clusters advertise every jurisdiction's cores, so a token minted at a
-	// sibling core passes the trust gate — but the exchange at that core is
-	// doomed. The resolver must pre-compute the actionable hint that the
-	// eventual exchange failure surfaces.
+	// sibling core passes the trust gate and is used directly as the bearer.
 	const tokenCore = "https://core.eu.entire.io"
 	const jurisdictionCore = "https://core.us.entire.io"
 	srv, clusterHost := wellKnownServer(t, []string{tokenCore, jurisdictionCore}, "https://us.entire.io", jurisdictionCore)
+	envToken := makeTestJWT(t, tokenCore)
 
 	creds, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, tokenCore), clusterHost, t.TempDir(), srv.Client(),
+		t.Context(), envToken, clusterHost, t.TempDir(), srv.Client(),
 	)
 	if err != nil {
-		t.Fatalf("cross-jurisdiction token must still resolve (it fails at exchange time), got: %v", err)
+		t.Fatalf("cross-jurisdiction token must resolve, got: %v", err)
 	}
-	for _, want := range []string{tokenCore, clusterHost, "point your CI auth url at " + jurisdictionCore} {
-		if !strings.Contains(creds.exchangeHint, want) {
-			t.Errorf("exchangeHint missing %q, got %q", want, creds.exchangeHint)
-		}
+	got, err := creds(t.Context())
+	if err != nil {
+		t.Fatalf("provider: %v", err)
 	}
-}
-
-func TestCrossJurisdictionHint_SameCoreVariantsStaySilent(t *testing.T) {
-	t.Parallel()
-	// Trailing-slash and case differences are the same core — a hint there
-	// would cry wolf on healthy configs. An unadvertised jurisdiction core
-	// (pre-upgrade server) also stays silent: there is nothing to point at.
-	for _, tc := range []struct{ name, coreURL, jurisdictionCoreURL string }{
-		{"exact", "https://core.us.entire.io", "https://core.us.entire.io"},
-		{"trailing slash", "https://core.us.entire.io/", "https://core.us.entire.io"},
-		{"case", "https://CORE.us.entire.io", "https://core.us.entire.io"},
-		{"unadvertised", "https://core.us.entire.io", ""},
-	} {
-		if hint := crossJurisdictionHint(tc.coreURL, "cluster.example.com", tc.jurisdictionCoreURL); hint != "" {
-			t.Errorf("%s: expected no hint, got %q", tc.name, hint)
-		}
+	if got != envToken {
+		t.Errorf("creds = %q, want ENTIRE_TOKEN verbatim", got)
 	}
 }
 
-func TestResolveEnvTokenCreds_MissingJurisdictionAudienceAborts(t *testing.T) {
+func TestResolveEnvTokenCreds_DoesNotRequireJurisdictionAudience(t *testing.T) {
 	t.Parallel()
-	// The cluster's core set trusts the token, but the cluster predates
-	// jurisdiction-token git auth (no jurisdiction_audience). With no
-	// repo-scoped fallback left, this must fail closed with the upgrade hint.
 	const core = "https://core.us.entire.io"
 	srv, clusterHost := wellKnownServer(t, []string{core}, "", "")
+	envToken := makeTestJWT(t, core)
 
 	creds, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, core), clusterHost, t.TempDir(), srv.Client(),
+		t.Context(), envToken, clusterHost, t.TempDir(), srv.Client(),
 	)
-	if err == nil {
-		t.Fatal("expected missing jurisdiction_audience to be rejected")
+	if err != nil {
+		t.Fatalf("resolve direct bearer without jurisdiction audience: %v", err)
 	}
-	if creds != nil {
-		t.Fatal("expected nil creds when the cluster advertises no jurisdiction_audience")
+	got, err := creds(t.Context())
+	if err != nil {
+		t.Fatalf("provider: %v", err)
 	}
-	if !strings.Contains(err.Error(), "jurisdiction_audience") {
-		t.Fatalf("expected jurisdiction_audience error, got: %v", err)
+	if got != envToken {
+		t.Errorf("creds = %q, want ENTIRE_TOKEN verbatim", got)
 	}
 }
 
@@ -448,6 +421,31 @@ func TestResolveCreds_BlankEnvTokenFailsClosed(t *testing.T) {
 		if !strings.Contains(err.Error(), "blank") {
 			t.Fatalf("expected 'set but blank' error for %q, got: %v", blank, err)
 		}
+	}
+}
+
+func TestSetAuthWithProvider_ResolvesCredentialPerRequest(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	setAuth := setAuthWithProvider(func(context.Context) (string, error) {
+		calls++
+		return fmt.Sprintf("login-jwt-%d", calls), nil
+	})
+
+	for i, want := range []string{"Bearer login-jwt-1", "Bearer login-jwt-2"} {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://cluster.example.com/et/alice/repo/info/refs?service=git-upload-pack", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := setAuth(req); err != nil {
+			t.Fatalf("setAuth[%d]: %v", i, err)
+		}
+		if got := req.Header.Get("Authorization"); got != want {
+			t.Errorf("Authorization[%d] = %q, want %q", i, got, want)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("provider calls = %d, want 2", calls)
 	}
 }
 

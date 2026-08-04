@@ -14,8 +14,8 @@
 // Authentication resolves the login context for the target cluster from the
 // shared contexts.json: the cluster's cores come from the cluster_cores.json
 // cache (or a live /.well-known fetch on miss), then the account is selected
-// from local contexts. It then mints a jurisdiction access token by
-// exchanging that context's login JWT (or ENTIRE_TOKEN in CI).
+// from local contexts. It uses that context's login JWT (or ENTIRE_TOKEN in
+// CI) directly as the git-transport bearer.
 package main
 
 import (
@@ -127,23 +127,13 @@ func run(args []string) int {
 		return 128
 	}
 
-	setAuth := func(req *http.Request) error {
-		// Refuse to attach credentials to a request we can't classify as a
-		// known git smart-HTTP endpoint. The jurisdiction token doesn't
-		// need the action, but sending a bearer to an unexpected endpoint
-		// is never right.
-		action := gitActionFromRequest(req)
-		if action == "" {
-			return fmt.Errorf("refusing to attach credentials: %s %s is not a recognised git smart-HTTP endpoint", req.Method, req.URL.Path)
-		}
-		start := time.Now()
-		token, err := creds.Token(req.Context())
-		if err != nil {
-			return fmt.Errorf("git credential exchange: %w", err)
-		}
-		debuglog.Printf("timing: token-acquire action=%s dur_ms=%d (keychain + login refresh + exchange; ~0 when memoized)", action, time.Since(start).Milliseconds())
-		req.Header.Set("Authorization", "Bearer "+token)
-		return nil
+	setAuth := setAuthWithProvider(creds)
+	onUnauthorized := func() {
+		// The login provider owns refresh state and re-checks the persisted JWT
+		// on every call. There is no helper-local credential cache to clear; the
+		// retry rebuilds the request and calls the provider again. ENTIRE_TOKEN
+		// is intentionally static and is likewise re-read through its provider.
+		debuglog.Printf("data plane rejected bearer; re-resolving credential for retry")
 	}
 
 	var onNodeFailed func(string)
@@ -152,16 +142,11 @@ func run(args []string) int {
 	}
 
 	proxy := transport.New(transport.Config{
-		Nodes:   nodeCfg,
-		Path:    parsedURL.Path,
-		SkipTLS: skipTLS,
-		SetAuth: setAuth,
-		// A 401 means the data plane rejected the credential itself (e.g.
-		// signing-key rotation invalidated a persisted jurisdiction token) —
-		// drop it so the next invocation re-mints instead of failing until
-		// the token's recorded expiry. The env-token source persists
-		// nothing; it drops only its in-process memo.
-		OnUnauthorized: creds.Invalidate,
+		Nodes:          nodeCfg,
+		Path:           parsedURL.Path,
+		SkipTLS:        skipTLS,
+		SetAuth:        setAuth,
+		OnUnauthorized: onUnauthorized,
 		OnNodeFailed:   onNodeFailed,
 		UserAgent:      httpUserAgent,
 	})
@@ -176,6 +161,25 @@ func run(args []string) int {
 	}
 	debuglog.Printf("timing: helper-session dur_ms=%d", time.Since(helperStart).Milliseconds())
 	return 0
+}
+
+type credentialProvider func(context.Context) (string, error)
+
+func setAuthWithProvider(provider credentialProvider) transport.SetAuthFunc {
+	return func(req *http.Request) error {
+		// Refuse to attach credentials to a request we can't classify as a
+		// known git smart-HTTP endpoint. Sending a bearer to an unexpected
+		// endpoint is never right.
+		if gitActionFromRequest(req) == "" {
+			return fmt.Errorf("refusing to attach credentials: %s %s is not a recognised git smart-HTTP endpoint", req.Method, req.URL.Path)
+		}
+		token, err := provider(req.Context())
+		if err != nil {
+			return fmt.Errorf("resolve git credential: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		return nil
+	}
 }
 
 // wrongClusterRe extracts the host that actually serves the repo from the
@@ -297,19 +301,14 @@ func parseProtocolVersion(raw string, warn io.Writer) int {
 	return defaultVersion
 }
 
-// resolveCreds builds the git-credential source. Both paths mint a
-// jurisdiction access token; they differ in what session credential seeds
-// the exchange and where the token is cached:
+// resolveCreds returns the credential provider used by the git transport:
 //
-//   - ENTIRE_TOKEN set: use the env JWT verbatim as the session credential,
-//     exchanging it at the core derived from its aud claim. Skips
-//     contexts.json and the keyring entirely — the CI / workload path,
-//     memoized in-process only. A non-URL aud is a hard error, never a
-//     silent fallback to context resolution.
+//   - ENTIRE_TOKEN set: use the env JWT verbatim. Skips contexts.json and the
+//     keyring entirely — the CI / workload path. A non-URL aud is a hard error,
+//     never a silent fallback to context resolution.
 //   - otherwise: resolve the login context for this cluster from contexts.json
-//     and mint a keychain-persisted jurisdiction access token from its
-//     stored login JWT.
-func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (*jurisdictionTokenSource, error) {
+//     and use its refreshed login JWT.
+func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, error) {
 	// Presence of ENTIRE_TOKEN is the signal: if it's set at all (LookupEnv,
 	// not Getenv, so we can tell set-empty from unset), we commit to the
 	// env-token path and any failure to use it is fatal — never a silent
@@ -340,52 +339,33 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 
 	// The login-JWT provider transparently refreshes an expired login JWT
 	// from the stored refresh token (serialised across processes, rotated
-	// tokens persisted) before the jurisdiction-token exchange consumes it.
+	// tokens persisted) before the git transport uses it as the bearer.
 	loginProvider, err := auth.NewRefreshingLoginProvider(clusterCtx, httpClient.Transport, skipTLS)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // NewRefreshingLoginProvider already returns a user-facing error
 	}
 
-	// One keychain-persisted jurisdiction access token authenticates every
-	// repo (authorized live at the data plane) — there is no repo-scoped
-	// fallback on this path. The cluster must advertise its jurisdiction
-	// audience.
-	audience := clusterAuth.JurisdictionAudience
-	if audience == "" {
-		return nil, missingJurisdictionAudienceErr(parsedURL.Host)
-	}
-	debuglog.Printf("auth: jurisdiction access token (aud=%s, core=%s)", audience, clusterCtx.CoreURL)
-	// Passing a recorder is what selects the keychain-persisted flavour; it
-	// keeps this context's audience list current so logout can clean up.
-	recordAudience := func(aud string) error {
-		return auth.RememberJurisdictionAudience(clusterCtx.Name, aud)
-	}
-	return newJurisdictionTokenSource(clusterCtx.CoreURL, audience, clusterAuth.JurisdictionCoreURL, clusterCtx.Handle, loginProvider, recordAudience, httpClient), nil
+	debuglog.Printf("auth: login token bearer (core=%s)", clusterCtx.CoreURL)
+	return loginProvider, nil
 }
 
-// resolveEnvTokenCreds builds the jurisdiction-token source for the
-// ENTIRE_TOKEN path. Split out of resolveCreds with explicit
-// clusterHost/cacheDir params (no os.Getenv / userdirs.Cache globals) so the
-// trust gate below is unit-testable against a fake well-known server.
-//
-// The exchange runs at the env token's own core with the cluster's advertised
-// jurisdiction audience. No home/cross-jurisdiction routing is needed: the
-// trust gate guarantees that core fronts the target cluster, so it owns the
-// cluster's jurisdiction audience.
+// resolveEnvTokenCreds returns a fixed ENTIRE_TOKEN provider after validating
+// its control-plane audience against the target cluster. Split out of
+// resolveCreds with explicit clusterHost/cacheDir params (no os.Getenv /
+// userdirs.Cache globals) so the trust gate below is unit-testable against a
+// fake well-known server.
 //
 // SECURITY: coreURL is derived from the env token's *unverified* aud claim, and
-// it becomes the host the token is POSTed to as a subject_token during
-// exchange. Before trusting it, we confirm the core is one the target cluster
-// actually advertises — anchored to the clone URL's host the user typed (TLS to
-// its /.well-known/entire-cluster.json), not to the token's own claims. Without
-// this gate a forged aud could redirect the token to an attacker-chosen host.
+// we confirm the core is one the target cluster actually advertises — anchored
+// to the clone URL's host the user typed (TLS to its
+// /.well-known/entire-cluster.json), not to the token's own claims.
 //
 // The gate is only as strong as that TLS verification: with
 // ENTIRE_TLS_SKIP_VERIFY=true (a local-dev escape hatch) the well-known fetch
 // is no longer authenticated, so a MITM could advertise an attacker host as a
 // trusted core. Do not combine ENTIRE_TOKEN with ENTIRE_TLS_SKIP_VERIFY in
 // CI / workload environments.
-func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir string, httpClient *http.Client) (*jurisdictionTokenSource, error) {
+func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir string, httpClient *http.Client) (credentialProvider, error) {
 	coreURL, err := auth.CoreURLFromEnvToken(envToken)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // CoreURLFromEnvToken already returns a user-facing, ENTIRE_TOKEN-prefixed error
@@ -398,42 +378,8 @@ func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir s
 		return nil, fmt.Errorf("%s aud %q is not a trusted login server for cluster %s (advertised: %s); the token belongs to a different cluster",
 			auth.EnvTokenVar, coreURL, clusterHost, strings.Join(cluster.CoreURLs, ", "))
 	}
-	if cluster.JurisdictionAudience == "" {
-		return nil, missingJurisdictionAudienceErr(clusterHost)
-	}
-	hint := crossJurisdictionHint(coreURL, clusterHost, cluster.JurisdictionCoreURL)
-	if hint != "" {
-		debuglog.Printf("auth: %s core %s differs from cluster %s's jurisdiction core %s; the exchange will likely be refused", auth.EnvTokenVar, coreURL, clusterHost, cluster.JurisdictionCoreURL)
-	}
-	debuglog.Printf("auth: %s jurisdiction access token (aud=%s, core=%s)", auth.EnvTokenVar, cluster.JurisdictionAudience, coreURL)
-	return newEnvJurisdictionTokenSource(coreURL, cluster.JurisdictionAudience, envToken, hint, httpClient), nil
-}
-
-// crossJurisdictionHint pre-computes the actionable message for the one
-// misconfiguration the trust gate can't catch: an ENTIRE_TOKEN minted at a
-// core of a different jurisdiction than the cluster's. Clusters advertise
-// every jurisdiction's cores as trusted login servers, so such a token
-// passes the gate — but the exchange is doomed, because only the cluster's
-// own jurisdiction core mints for its audience, and the core-side refusal
-// is an opaque invalid_target. Returned as a suffix for that eventual
-// exchange error rather than a hard pre-flight failure: clusters may
-// advertise several same-jurisdiction core URLs, so inequality here is a
-// strong hint, not proof.
-func crossJurisdictionHint(coreURL, clusterHost, jurisdictionCoreURL string) string {
-	if jurisdictionCoreURL == "" {
-		return ""
-	}
-	if strings.EqualFold(strings.TrimRight(coreURL, "/"), strings.TrimRight(jurisdictionCoreURL, "/")) {
-		return ""
-	}
-	return fmt.Sprintf("\n%s was minted at %s, but cluster %s's jurisdiction core is %s — point your CI auth url at %s",
-		auth.EnvTokenVar, coreURL, clusterHost, jurisdictionCoreURL, jurisdictionCoreURL)
-}
-
-// missingJurisdictionAudienceErr names the one condition both auth paths
-// refuse on: a cluster that predates jurisdiction-token git auth.
-func missingJurisdictionAudienceErr(clusterHost string) error {
-	return fmt.Errorf("cluster %s advertises no jurisdiction_audience at %s; its entire-server predates jurisdiction-token git auth", clusterHost, clusterdiscovery.Path)
+	debuglog.Printf("auth: %s bearer (core=%s)", auth.EnvTokenVar, coreURL)
+	return func(context.Context) (string, error) { return envToken, nil }, nil
 }
 
 // coreTrusted reports whether coreURL is in the cluster's advertised core
