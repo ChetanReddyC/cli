@@ -21,18 +21,41 @@ import (
 //
 // Checkpoint data syncs to exactly one elected git remote:
 // strategy_options.checkpoint_push_remote (fail-closed when the named remote
-// is not configured) -> origin -> sole remote -> first remote in .git/config
-// order. The pre-push gate drops checkpoint sync for every other remote and
-// for raw-URL pushes, on both backends. The dedicated checkpoint_remote URL
-// mode is exempt. These are end-to-end acceptance tests through the simulated
-// hook flow; the election precedence itself is unit-tested in
-// strategy/checkpoint_sync_remote_test.go.
+// is not configured) -> the current branch's own push destination
+// (branch.<name>.pushRemote, remote.pushDefault, branch.<name>.remote --
+// mirroring git's own push resolution) -> origin -> sole remote -> first
+// remote in .git/config order. The pre-push gate drops checkpoint sync for
+// every other remote and for raw-URL pushes, on both backends. The dedicated
+// checkpoint_remote URL mode is exempt. These are end-to-end acceptance tests
+// through the simulated hook flow; the election precedence itself is
+// unit-tested in strategy/checkpoint_sync_remote_test.go.
 // =============================================================================
 
 // remoteTarget names a configured remote and the bare repo backing it.
 type remoteTarget struct {
 	name    string
 	bareDir string
+}
+
+// unsetBranchTracking removes the current branch's upstream tracking
+// (branch.<name>.remote/.merge). SetupBareRemote/SetupNamedBareRemote push
+// with `-u`, which sets tracking to whichever remote was pushed last — real
+// git behavior, but it defeats scenarios that specifically want to exercise
+// the "no override, no tracking" default-election tier: the branch's own
+// tracking config now outranks origin (ENT-1451 fork fix), so a leftover
+// tracking pointer to a non-origin remote would make that remote win instead
+// of exercising the fallback this test targets.
+func unsetBranchTracking(t *testing.T, env *TestEnv) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", "branch", "--unset-upstream")
+	cmd.Dir = env.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git branch --unset-upstream: %v\n%s", err, output)
+	}
+	// Re-baseline the git config drift guard, mirroring SetupNamedBareRemote's
+	// own re-baseline after it mutates .git/config.
+	env.setGitConfigBaseline()
 }
 
 // queuedCheckpointRefCount returns the git-refs push-discovery queue length
@@ -99,6 +122,10 @@ func TestCheckpointSyncRemote_DefaultElection_OnlyOriginReceivesCheckpoints(t *t
 
 		bareOrigin := env.SetupBareRemote()
 		barePublish := env.SetupNamedBareRemote("publish")
+		// SetupNamedBareRemote's `push -u` left the branch tracking "publish"
+		// (last push wins); clear it so this test genuinely exercises the
+		// no-tracking default-to-origin tier rather than the tracking tier.
+		unsetBranchTracking(t, env)
 
 		checkpointID := createCheckpointedCommit(t, env, "Add gate module", "gate.go", "package gate", "Add gate module")
 
@@ -137,6 +164,40 @@ func TestCheckpointSyncRemote_ConfigOverride_RoutesToNamedRemote(t *testing.T) {
 		if st.CheckpointSyncRemote != "publish" || st.CheckpointSyncRemoteSource != "config" {
 			t.Errorf("status should report remote %q from source %q, got %q from %q",
 				"publish", "config", st.CheckpointSyncRemote, st.CheckpointSyncRemoteSource)
+		}
+	})
+}
+
+// TestCheckpointSyncRemote_ForkSetup_TracksNonOriginRemote covers the fork
+// fix this election gained after the original matrix shipped: when the
+// current branch tracks a non-origin remote — the common "cloned the base
+// repo, added a fork as upstream, pushed -u upstream" setup — checkpoint data
+// follows that tracking, not origin. Without this tier, origin would win the
+// election merely by existing and every checkpoint would strand locally
+// forever, since the user cannot push to the base repo.
+func TestCheckpointSyncRemote_ForkSetup_TracksNonOriginRemote(t *testing.T) {
+	t.Parallel()
+	ForEachBackend(t, func(t *testing.T, backend string) {
+		env := NewFeatureBranchEnv(t)
+		env.CheckpointStore = backend
+
+		// origin: the base repo the user cloned. upstream: the user's own
+		// fork, added and pushed -u second — the last `-u` wins, so the
+		// branch ends up tracking upstream, exactly like the real scenario.
+		bareOrigin := env.SetupBareRemote()
+		bareUpstream := env.SetupNamedBareRemote("upstream")
+
+		checkpointID := createCheckpointedCommit(t, env, "Add fork module", "fork.go", "package fork", "Add fork module")
+
+		assertSingleRemoteRouting(t, env, checkpointID,
+			remoteTarget{name: "origin", bareDir: bareOrigin},
+			remoteTarget{name: "upstream", bareDir: bareUpstream})
+
+		// Status reflects the tracking-based election.
+		st := statusSyncJSONOutput(t, env)
+		if st.CheckpointSyncRemote != "upstream" || st.CheckpointSyncRemoteSource != "tracking" {
+			t.Errorf("status should report remote %q from source %q, got %q from %q",
+				"upstream", "tracking", st.CheckpointSyncRemote, st.CheckpointSyncRemoteSource)
 		}
 	})
 }
@@ -242,6 +303,10 @@ func TestCheckpointSyncRemote_StatusReportsDestinationAndUnpushed(t *testing.T) 
 
 		_ = env.SetupBareRemote()
 		_ = env.SetupNamedBareRemote("publish")
+		// See TestCheckpointSyncRemote_DefaultElection_OnlyOriginReceivesCheckpoints:
+		// clear the tracking left by the "publish" push -u so this test
+		// exercises the no-tracking default-to-origin tier.
+		unsetBranchTracking(t, env)
 
 		_ = createCheckpointedCommit(t, env, "Add status module", "status.go", "package status", "Add status module")
 

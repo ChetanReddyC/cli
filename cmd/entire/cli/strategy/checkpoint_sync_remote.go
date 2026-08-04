@@ -19,6 +19,9 @@ type CheckpointSyncRemoteSource string
 const (
 	// SyncRemoteSourceConfig: strategy_options.checkpoint_push_remote.
 	SyncRemoteSourceConfig CheckpointSyncRemoteSource = "config"
+	// SyncRemoteSourceTracking: the current branch's push destination —
+	// branch.<name>.pushRemote, remote.pushDefault, or branch.<name>.remote.
+	SyncRemoteSourceTracking CheckpointSyncRemoteSource = "tracking"
 	// SyncRemoteSourceDefault: "origin" exists.
 	SyncRemoteSourceDefault CheckpointSyncRemoteSource = "default"
 	// SyncRemoteSourceSole: exactly one remote configured.
@@ -37,9 +40,11 @@ type CheckpointSyncRemote struct {
 // ResolveCheckpointSyncRemote elects the one configured git remote that
 // checkpoint data syncs to. Pure local lookup — no network. Precedence:
 // checkpoint_push_remote setting (fail-closed if the named remote does not
-// exist), then "origin", then the sole remote, then the first remote in
-// .git/config order. It knows nothing about the checkpoint_remote URL
-// feature; callers exempt that case themselves.
+// exist), then the current branch's own push destination (mirroring git's
+// push resolution: branch.<name>.pushRemote, remote.pushDefault,
+// branch.<name>.remote), then "origin", then the sole remote, then the first
+// remote in .git/config order. It knows nothing about the checkpoint_remote
+// URL feature; callers exempt that case themselves.
 func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, error) {
 	// Fail closed on an unreadable settings file: election must never
 	// override a checkpoint_push_remote the file may contain but we could
@@ -57,6 +62,10 @@ func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, err
 		return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceConfig}, nil
 	}
 
+	if name := resolveBranchPushRemote(ctx); name != "" {
+		return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceTracking}, nil
+	}
+
 	remotes := configuredRemotesInConfigOrder(ctx)
 	switch {
 	case len(remotes) == 0:
@@ -68,6 +77,56 @@ func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, err
 	default:
 		return CheckpointSyncRemote{Name: remotes[0], Source: SyncRemoteSourceFirst}, nil
 	}
+}
+
+// resolveBranchPushRemote mirrors git's own resolution of where `git push`
+// would send the current branch: branch.<name>.pushRemote, then
+// remote.pushDefault, then branch.<name>.remote — the first non-empty value
+// wins (git's own precedence, not a cascade through all three). This is the
+// fix for the common fork setup where origin is a base repo the user cannot
+// push (cloned base, added a fork as "upstream", branched with `-u upstream`):
+// origin would otherwise win the election and every checkpoint would strand
+// locally.
+//
+// Returns "" on detached HEAD, when no tracking config applies, or when the
+// resolved name is not a configured remote (dangling tracking left over from
+// a removed remote) — that last case is git state, not user intent, so it
+// does not fail closed; the caller simply falls through to the next
+// precedence tier instead.
+func resolveBranchPushRemote(ctx context.Context) string {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return ""
+	}
+	defer repo.Close()
+
+	branch := GetCurrentBranchName(repo)
+	if branch == "" {
+		return ""
+	}
+
+	name := gitConfigValue(ctx, "branch."+branch+".pushRemote")
+	if name == "" {
+		name = gitConfigValue(ctx, "remote.pushDefault")
+	}
+	if name == "" {
+		name = gitConfigValue(ctx, "branch."+branch+".remote")
+	}
+	if name == "" || !isConfiguredRemote(ctx, name) {
+		return ""
+	}
+	return name
+}
+
+// gitConfigValue returns the effective value of a git config key (local
+// overriding global, matching git's own resolution), or "" if unset or on
+// error.
+func gitConfigValue(ctx context.Context, key string) string {
+	out, err := exec.CommandContext(ctx, "git", "config", "--get", key).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // checkpointSyncAllowedForRemote reports whether a push to pushRemote may
