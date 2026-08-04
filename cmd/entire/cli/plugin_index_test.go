@@ -110,11 +110,29 @@ func TestSyncPluginIndex_OfflineUsesStaleCopy(t *testing.T) { //nolint:parallelt
 	}
 }
 
-func TestSyncPluginIndex_UnsupportedVersion(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
+// version is advisory, not a gate. Enforcing it would guard a migration that
+// can never happen — the index is one shared resource read by every shipped
+// CLI, so a bump breaks discovery fleet-wide — while punishing the case that
+// does happen: an index (often hand-written, which plugins.index_url exists
+// for) that omits the field, or one that grows a field this CLI ignores.
+func TestSyncPluginIndex_VersionIsAdvisory(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	url, _ := newIndexRepo(t, `{"version":99,"plugins":[]}`)
-	if _, err := SyncPluginIndex(context.Background(), url, false); err == nil {
-		t.Error("SyncPluginIndex accepted unsupported index version")
+	entry := `{"name":"run","repo_url":"https://x.example/entire-run"}`
+	for _, tt := range []struct{ label, json string }{
+		{label: "omitted", json: `{"plugins":[` + entry + `]}`},
+		{label: "current", json: `{"version":1,"plugins":[` + entry + `]}`},
+		{label: "future", json: `{"version":99,"plugins":[` + entry + `]}`},
+		{label: "future with unknown fields", json: `{"version":99,"generated_at":"x","plugins":[` + entry + `]}`},
+	} {
+		url, _ := newIndexRepo(t, tt.json)
+		idx, err := SyncPluginIndex(context.Background(), url, false)
+		if err != nil {
+			t.Errorf("%s: SyncPluginIndex = %v, want the catalog to load", tt.label, err)
+			continue
+		}
+		if idx.Find("run") == nil {
+			t.Errorf("%s: entry dropped; got %+v", tt.label, idx.Plugins)
+		}
 	}
 }
 

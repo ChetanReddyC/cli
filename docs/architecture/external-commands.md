@@ -66,6 +66,8 @@ The effective index URL resolves as: `--index` flag > `ENTIRE_PLUGIN_INDEX_URL` 
 
 `index.json` schema (version 1): `{"version": 1, "plugins": [{"name", "repo_url", "description", "official", "platforms"}]}`. Entries with invalid names (e.g. the reserved `agent-` prefix) or unusable repo URLs are filtered on load, not fatal.
 
+`version` is **recorded, not enforced**: an index declaring a newer version (or omitting the field) still loads, logging a warning. Gating on it would guard a migration that can never happen — the index is one shared resource read by every CLI version ever shipped, so bumping it would break discovery fleet-wide with no gradual rollout and no undo for installed binaries. An incompatible schema therefore ships at a new path (`index-v2.json`, another branch, another repo). Meanwhile the changes that do happen are already absorbed: decoding ignores unknown fields, so new fields are free, and unreadable entries are dropped individually. Degrading per entry beats refusing the catalog — a company's hand-written internal index that forgets `"version"` should not be told to upgrade the CLI.
+
 ### Dependencies
 
 A plugin declares dependencies in `entire-plugin.yml`:

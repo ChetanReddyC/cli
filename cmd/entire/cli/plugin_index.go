@@ -30,6 +30,10 @@ const (
 	pluginIndexEnvVar = "ENTIRE_PLUGIN_INDEX_URL"
 	// pluginIndexFileName is the catalog file at the index repo root.
 	pluginIndexFileName = "index.json"
+	// pluginIndexSchemaVersion is the index schema this CLI reads. Advisory:
+	// a higher declared version logs a warning and is still read (see
+	// loadPluginIndexFromDir).
+	pluginIndexSchemaVersion = 1
 	// pluginIndexSyncMarker records the last successful sync time as the
 	// marker file's mtime. Untracked, so fetch/reset never touches it.
 	pluginIndexSyncMarker = ".entire-last-sync"
@@ -39,6 +43,8 @@ const (
 // (unknown fields ignored) so an index that grows new fields doesn't break
 // older CLI versions fleet-wide.
 type PluginIndex struct {
+	// Version is the declared schema version. Advisory only — see
+	// loadPluginIndexFromDir for why it isn't enforced.
 	Version int                `json:"version"`
 	Plugins []PluginIndexEntry `json:"plugins"`
 }
@@ -200,7 +206,7 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 		}
 	}
 
-	return loadPluginIndexFromDir(dir, indexURL)
+	return loadPluginIndexFromDir(ctx, dir, indexURL)
 }
 
 // refreshPluginIndexClone updates an existing shallow clone to the remote
@@ -225,7 +231,7 @@ func touchFile(path string) {
 	}
 }
 
-func loadPluginIndexFromDir(dir, indexURL string) (*PluginIndex, error) {
+func loadPluginIndexFromDir(ctx context.Context, dir, indexURL string) (*PluginIndex, error) {
 	data, err := os.ReadFile(filepath.Join(dir, pluginIndexFileName)) //nolint:gosec // file inside our cache dir
 	if err != nil {
 		return nil, fmt.Errorf("plugin index %s has no readable %s: %w", indexURL, pluginIndexFileName, err)
@@ -234,8 +240,25 @@ func loadPluginIndexFromDir(dir, indexURL string) (*PluginIndex, error) {
 	if err := json.Unmarshal(data, &idx); err != nil {
 		return nil, fmt.Errorf("parse %s from %s: %w", pluginIndexFileName, indexURL, err)
 	}
-	if idx.Version != 1 {
-		return nil, fmt.Errorf("plugin index %s declares unsupported version %d (this CLI understands 1; upgrade entire?)", indexURL, idx.Version)
+	// version is recorded, not enforced. Refusing an unrecognized value would
+	// protect against a migration that can never happen: the index is one
+	// shared resource read by every CLI version ever shipped, so bumping it
+	// would break discovery fleet-wide with no gradual rollout and no undo for
+	// installed binaries. An incompatible schema therefore ships at a new path
+	// (index-v2.json, another branch, another repo), which needs no gate here.
+	// Enforcing it only ever fired by accident — most painfully on an index
+	// that simply omits the field (version 0), which told the author to
+	// upgrade the CLI when the fix was in their own file. Hand-written
+	// internal catalogs are exactly what plugins.index_url exists for.
+	//
+	// Additive changes, the ones that actually happen, are already absorbed:
+	// decoding ignores unknown fields and unreadable entries are dropped
+	// below. Degrading per entry beats refusing the catalog.
+	if idx.Version > pluginIndexSchemaVersion {
+		logging.Warn(ctx, "plugin index declares a newer schema version; reading what this CLI understands",
+			slog.String("index", indexURL),
+			slog.Int("declared_version", idx.Version),
+			slog.Int("understood_version", pluginIndexSchemaVersion))
 	}
 	var valid []PluginIndexEntry
 	for _, e := range idx.Plugins {
