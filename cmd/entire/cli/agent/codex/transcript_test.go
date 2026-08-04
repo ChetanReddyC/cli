@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -326,7 +327,7 @@ func TestSanitizeRestoredTranscript_StripsEncryptedItems(t *testing.T) {
 {"timestamp":"2026-03-25T11:31:11.756Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}
 `)
 
-	got := string(sanitizeRestoredTranscript(input))
+	got := string(SanitizePortableTranscript(input))
 	require.Contains(t, got, `"type":"reasoning"`)
 	require.NotContains(t, got, `"encrypted_content":"REDACTED"`)
 	require.NotContains(t, got, `"type":"compaction"`)
@@ -340,11 +341,52 @@ func TestSanitizeRestoredTranscript_StripsEncryptedItemsFromCompactedHistory(t *
 {"timestamp":"2026-03-25T11:31:11.754Z","type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"reasoning","summary":[{"text":"brief"}],"encrypted_content":"REDACTED"},{"type":"compaction","encrypted_content":"REDACTED"},{"type":"compaction_summary","encrypted_content":"REDACTED"}]}}
 `)
 
-	got := string(sanitizeRestoredTranscript(input))
+	got := string(SanitizePortableTranscript(input))
 	require.Contains(t, got, `"type":"compacted"`)
 	require.Contains(t, got, `"type":"reasoning"`)
 	require.Contains(t, got, `"type":"message"`)
 	require.NotContains(t, got, `"encrypted_content":"REDACTED"`)
 	require.NotContains(t, got, `"type":"compaction"`)
 	require.NotContains(t, got, `"type":"compaction_summary"`)
+}
+
+// TestSanitizePortableTranscript_UnchangedInputReturnsSameBytes pins the fast path
+// that makes the "call it from every storage path" contract affordable: a transcript
+// with nothing to strip must come back as the identical backing array, not a
+// reassembled copy.
+func TestSanitizePortableTranscript_UnchangedInputReturnsSameBytes(t *testing.T) {
+	t.Parallel()
+
+	clean := []byte(`{"type":"session_meta","payload":{"id":"abc"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}` + "\n")
+
+	got := SanitizePortableTranscript(clean)
+	if !bytes.Equal(got, clean) {
+		t.Fatalf("clean transcript was altered:\nwant %s\ngot  %s", clean, got)
+	}
+	if len(got) > 0 && &got[0] != &clean[0] {
+		t.Error("clean transcript was copied; expected the original backing array (fast path missed)")
+	}
+}
+
+// TestSanitizePortableTranscript_IdempotentBytes proves a second pass over an
+// already-sanitized transcript is a no-op, which is what lets the Stop path,
+// condensation, finalize, and the checkpoint store each call it unconditionally.
+func TestSanitizePortableTranscript_IdempotentBytes(t *testing.T) {
+	t.Parallel()
+
+	input := []byte(`{"type":"session_meta","payload":{"id":"abc"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"c2VjcmV0"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"compaction","encrypted_content":"c2VjcmV0"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}` + "\n")
+
+	once := SanitizePortableTranscript(input)
+	if bytes.Contains(once, []byte("encrypted_content")) {
+		t.Fatalf("first pass left encrypted_content: %s", once)
+	}
+
+	twice := SanitizePortableTranscript(once)
+	if !bytes.Equal(once, twice) {
+		t.Errorf("not byte-idempotent:\n once=%s\ntwice=%s", once, twice)
+	}
 }

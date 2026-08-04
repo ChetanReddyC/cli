@@ -149,11 +149,11 @@ var extractSessionImages = func(agentType types.AgentType, transcript []byte) ([
 // unsupported for the agent, or on error it returns the transcript unchanged with
 // nil assets (the checkpoint then stores the inline transcript).
 //
-// It deliberately does NOT mutate the caller's transcript: the raw transcript is
-// still needed for CondenseResult.Transcript (trail titles) and, critically, as
-// the CheckpointTranscriptSize growth baseline, which is compared against the raw
-// inline shadow-branch blob — feeding it the shrunken externalized size would
-// report spurious growth on every subsequent commit.
+// It deliberately does NOT mutate the caller's transcript: the pre-externalization
+// bytes are what CondenseResult.TranscriptSizeBaseline is measured on, and that
+// baseline must stay in the shadow-branch blob's coordinate (sanitized but NOT
+// image-externalized, matching what the Stop path writes) — feeding it the shrunken
+// externalized size would report spurious growth on every subsequent commit.
 func externalizeSessionImages(ctx, logCtx context.Context, state *SessionState, transcript []byte) ([]byte, []cpkg.TranscriptAsset) {
 	if !settings.IsImageExternalizationEnabled(ctx) {
 		return transcript, nil
@@ -431,7 +431,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		FilesTouched:         sessionData.FilesTouched,
 		Prompts:              sessionData.Prompts,
 		TotalTranscriptLines: sessionData.FullTranscriptLines,
-		Transcript:           sessionData.Transcript,
+		// Measured on the sanitized transcript so it matches the shadow-branch blob
+		// coordinate — see CondenseResult.TranscriptSizeBaseline.
+		TranscriptSizeBaseline: int64(len(agent.SanitizeTranscriptForStorage(ag, sessionData.Transcript))),
 	}, nil
 }
 
@@ -1242,7 +1244,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 
 		resetCheckpointWindow(state)
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
-		state.CheckpointTranscriptSize = int64(len(result.Transcript))
+		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 		state.Phase = session.PhaseIdle
 		state.LastCheckpointID = checkpointID
 		state.LastCheckpointCommitHash = state.BaseCommit

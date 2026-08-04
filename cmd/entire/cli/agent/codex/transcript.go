@@ -22,6 +22,7 @@ var (
 	_ agent.TokenCalculator             = (*CodexAgent)(nil)
 	_ agent.PromptExtractor             = (*CodexAgent)(nil)
 	_ agent.RestoredSessionPathResolver = (*CodexAgent)(nil)
+	_ agent.TranscriptSanitizer         = (*CodexAgent)(nil)
 )
 
 // rolloutLine is the top-level JSONL line structure in Codex rollout files.
@@ -386,27 +387,71 @@ func (c *CodexAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string
 // replayed when Entire reconstructs a Codex rollout outside its original
 // session context.
 func SanitizePortableTranscript(data []byte) []byte {
+	if !mayNeedSanitizing(data) {
+		return data
+	}
+
 	lines := splitJSONL(data)
 	if len(lines) == 0 {
 		return data
 	}
 
 	sanitized := make([][]byte, 0, len(lines))
+	changed := false
 	for _, lineData := range lines {
 		updated, keep := sanitizeRolloutLine(lineData)
 		if !keep {
+			changed = true
 			continue
+		}
+		if !bytes.Equal(updated, lineData) {
+			changed = true
 		}
 		sanitized = append(sanitized, updated)
 	}
 
+	// Nothing to strip: hand back the original bytes rather than paying the
+	// reassembly copy. Callers rely on this being cheap — sanitization is
+	// idempotent precisely so every storage path can call it without tracking
+	// whether an upstream path already did.
+	if !changed {
+		return data
+	}
 	if len(sanitized) == 0 {
 		return data
 	}
 	return agent.ReassembleJSONL(sanitized)
 }
 
-func sanitizeRestoredTranscript(data []byte) []byte {
+// sanitizeMarkers are the substrings that gate every transformation
+// sanitizeRolloutLine performs: dropping "compaction"/"compaction_summary" items,
+// rewriting "compacted" lines, and deleting "encrypted_content" from "reasoning"
+// items. A transcript containing none of them cannot be altered, so one scan lets
+// us skip unmarshalling every line.
+//
+// Deliberately over-broad ("compact" covers compacted/compaction/
+// compaction_summary): a false positive just falls through to the full pass, while
+// a false negative would silently skip sanitization.
+var sanitizeMarkers = [][]byte{
+	[]byte("encrypted_content"),
+	[]byte("compact"),
+	[]byte("reasoning"),
+}
+
+func mayNeedSanitizing(data []byte) bool {
+	for _, marker := range sanitizeMarkers {
+		if bytes.Contains(data, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// SanitizeTranscriptForStorage implements agent.TranscriptSanitizer. Codex rollouts
+// embed encrypted reasoning payloads and compaction blobs that are bound to the
+// originating session, so Entire strips them from its stored copy while leaving
+// Codex's own rollout file untouched.
+func (c *CodexAgent) SanitizeTranscriptForStorage(data []byte) []byte {
 	return SanitizePortableTranscript(data)
 }
 
