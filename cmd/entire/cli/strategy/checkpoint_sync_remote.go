@@ -137,7 +137,10 @@ func gitConfigValue(ctx context.Context, key string) string {
 func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote string) bool {
 	syncRemote, err := ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
-		logging.Warn(ctx, "checkpoint sync skipped: checkpoint_push_remote misconfigured",
+		// Neutral wording: err covers both a misconfigured checkpoint_push_remote
+		// and an unreadable settings file, and the wrapped error already carries
+		// the specifics.
+		logging.Warn(ctx, "checkpoint sync skipped: cannot resolve checkpoint sync remote",
 			slog.String("error", err.Error()))
 		return false
 	}

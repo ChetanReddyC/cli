@@ -2047,6 +2047,7 @@ func checkpointSyncTestCommit(t *testing.T, name, content string) string {
 }
 
 func TestRunStatus_CheckpointSyncDestination_Origin(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
@@ -2070,6 +2071,7 @@ func TestRunStatus_CheckpointSyncDestination_Origin(t *testing.T) {
 }
 
 func TestRunStatus_CheckpointSyncDestination_ConfigAnnotated(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "private"}}`)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
@@ -2087,6 +2089,7 @@ func TestRunStatus_CheckpointSyncDestination_ConfigAnnotated(t *testing.T) {
 }
 
 func TestRunStatus_CheckpointSyncFailClosed(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "gone"}}`)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
@@ -2109,6 +2112,7 @@ func TestRunStatus_CheckpointSyncFailClosed(t *testing.T) {
 }
 
 func TestRunStatus_CheckpointSyncHiddenWhenNoRemotes(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 
@@ -2123,6 +2127,7 @@ func TestRunStatus_CheckpointSyncHiddenWhenNoRemotes(t *testing.T) {
 }
 
 func TestRunStatus_CheckpointSyncHiddenWhenDisabled(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, testSettingsDisabled)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
@@ -2138,6 +2143,7 @@ func TestRunStatus_CheckpointSyncHiddenWhenDisabled(t *testing.T) {
 }
 
 func TestRunStatus_CheckpointSyncCounter_GitBranchAhead(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
@@ -2159,6 +2165,7 @@ func TestRunStatus_CheckpointSyncCounter_GitBranchAhead(t *testing.T) {
 }
 
 func TestRunStatus_CheckpointSyncCounterOmitted_WhenSynced(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
@@ -2181,6 +2188,7 @@ func TestRunStatus_CheckpointSyncCounterOmitted_WhenSynced(t *testing.T) {
 }
 
 func TestRunStatus_CheckpointSyncDedicated_GitBranch_NoCounter(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
 	// Same owner ("org") as checkpoint_remote and a parseable GitHub URL, so
@@ -2207,6 +2215,7 @@ func TestRunStatus_CheckpointSyncDedicated_GitBranch_NoCounter(t *testing.T) {
 }
 
 func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}, "checkpoints": {"primary": {"type": "git-refs"}}}`)
 	testutil.AddRemote(t, ".", "origin", "https://github.com/org/repo.git")
@@ -2243,6 +2252,7 @@ func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
 }
 
 func TestRunStatusJSON_CheckpointSync_Elected(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
@@ -2274,6 +2284,7 @@ func TestRunStatusJSON_CheckpointSync_Elected(t *testing.T) {
 }
 
 func TestRunStatusJSON_CheckpointSync_FailClosed(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "gone"}}`)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
@@ -2299,6 +2310,7 @@ func TestRunStatusJSON_CheckpointSync_FailClosed(t *testing.T) {
 }
 
 func TestRunStatusJSON_CheckpointSync_Dedicated(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
 	testutil.AddRemote(t, ".", "origin", "https://github.com/org/repo.git")
@@ -2328,6 +2340,7 @@ func TestRunStatusJSON_CheckpointSync_Dedicated(t *testing.T) {
 // elected remote and checkpoint_remote makes derivation fall back, so the next
 // push uses normal single-remote sync — status must say so.
 func TestRunStatus_CheckpointSyncDedicated_IneligibleFallsBackToElected(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
 	// Remote owner "other" != checkpoint_remote owner "org": fork detection
@@ -2357,6 +2370,7 @@ func TestRunStatus_CheckpointSyncDedicated_IneligibleFallsBackToElected(t *testi
 }
 
 func TestRunStatusJSON_CheckpointSync_DedicatedIneligible(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
 	testutil.AddRemote(t, ".", "origin", "https://github.com/other/repo.git")
@@ -2382,6 +2396,7 @@ func TestRunStatusJSON_CheckpointSync_DedicatedIneligible(t *testing.T) {
 }
 
 func TestRunStatusJSON_CheckpointSync_AbsentWhenNoRemotes(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 

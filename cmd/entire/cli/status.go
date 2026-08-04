@@ -282,6 +282,10 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 		// Fail-closed: checkpoint_push_remote names a remote that does not
 		// exist. The pre-push gate is silently skipping checkpoint sync, so
 		// status is the user's signal.
+		// Accepted divergence: if a structured checkpoint_remote is also
+		// configured, the gate's dedicated exemption may still sync checkpoint
+		// data even while this fail-closed warning is shown, since there is no
+		// elected remote left to probe PushURL against here.
 		return checkpointSyncInfo{Err: err.Error()}
 	}
 	if elected.Name == "" {
@@ -294,6 +298,8 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	// single-remote sync, so status reports that instead. PushURL is
 	// local-only; never call resolvePushSettings here — its follow-up
 	// metadata fetch dials, and status must stay network-free.
+	// Accepted divergence: a real push to a different named remote may derive
+	// PushURL differently than this elected-remote probe does.
 	if cr := s.GetCheckpointRemote(); cr != nil {
 		if _, enabled, purlErr := checkpointremote.PushURL(ctx, elected.Name); purlErr == nil && enabled {
 			info := checkpointSyncInfo{Remote: cr.Repo, Source: checkpointSyncSourceDedicated}

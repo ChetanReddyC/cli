@@ -215,7 +215,10 @@ sync remote, resolved in this order:
    every checkpoint would strand locally forever. A dangling tracking entry
    (left over from a removed remote) is git state, not user intent, so it is
    skipped rather than failing closed — election just falls through to the
-   next tier. Detached HEAD also falls through.
+   next tier. Detached HEAD also falls through. Election follows the
+   checked-out branch, so an explicit push of a non-HEAD branch to its own
+   remote defers checkpoint sync (never leaks) until the user pushes from
+   that branch.
 3. `origin`, if configured.
 4. The sole configured remote.
 5. The first remote in `.git/config` order.

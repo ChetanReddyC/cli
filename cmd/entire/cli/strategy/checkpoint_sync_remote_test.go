@@ -36,6 +36,7 @@ func setGitConfig(t *testing.T, repoDir, key, value string) {
 
 // Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_ConfigSetting(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -56,6 +57,7 @@ func TestResolveCheckpointSyncRemote_ConfigSetting(t *testing.T) {
 
 // Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_ConfigSettingMissingRemote_FailsClosed(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -76,6 +78,7 @@ func TestResolveCheckpointSyncRemote_ConfigSettingMissingRemote_FailsClosed(t *t
 
 // Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_DefaultsToOrigin(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -95,6 +98,7 @@ func TestResolveCheckpointSyncRemote_DefaultsToOrigin(t *testing.T) {
 
 // Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_SoleRemote(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -113,6 +117,7 @@ func TestResolveCheckpointSyncRemote_SoleRemote(t *testing.T) {
 
 // Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_FirstInConfigOrder(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -134,6 +139,7 @@ func TestResolveCheckpointSyncRemote_FirstInConfigOrder(t *testing.T) {
 
 // Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_SettingsLoadErrorFailsClosed(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -160,6 +166,7 @@ func TestResolveCheckpointSyncRemote_SettingsLoadErrorFailsClosed(t *testing.T) 
 
 // Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_NoRemotes(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -176,6 +183,7 @@ func TestResolveCheckpointSyncRemote_NoRemotes(t *testing.T) {
 
 // Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_PushurlOnlyRemoteIsInvisible(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -210,6 +218,7 @@ func TestResolveCheckpointSyncRemote_PushurlOnlyRemoteIsInvisible(t *testing.T) 
 // win the election merely by existing — the branch's own tracking config
 // takes precedence.
 func TestResolveCheckpointSyncRemote_TracksNonOriginRemote(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -232,6 +241,7 @@ func TestResolveCheckpointSyncRemote_TracksNonOriginRemote(t *testing.T) {
 
 // Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_PushRemoteOverridesBranchRemote(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -258,6 +268,7 @@ func TestResolveCheckpointSyncRemote_PushRemoteOverridesBranchRemote(t *testing.
 // Exercises git's full three-way precedence: branch.<name>.pushRemote beats
 // remote.pushDefault, which beats branch.<name>.remote.
 func TestResolveCheckpointSyncRemote_PushDefaultBeatsBranchRemoteLosesToPushRemote(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -291,6 +302,7 @@ func TestResolveCheckpointSyncRemote_PushDefaultBeatsBranchRemoteLosesToPushRemo
 // not user intent — it must not fail closed, just fall through to the next
 // precedence tier.
 func TestResolveCheckpointSyncRemote_DanglingTrackingFallsThroughToOrigin(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -314,6 +326,7 @@ func TestResolveCheckpointSyncRemote_DanglingTrackingFallsThroughToOrigin(t *tes
 
 // Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_DetachedHEADFallsThroughToOrigin(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -338,6 +351,7 @@ func TestResolveCheckpointSyncRemote_DetachedHEADFallsThroughToOrigin(t *testing
 
 // Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_ConfigSettingBeatsTracking(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
@@ -362,6 +376,7 @@ func TestResolveCheckpointSyncRemote_ConfigSettingBeatsTracking(t *testing.T) {
 
 // Not parallel: uses t.Chdir()
 func TestCheckpointSyncAllowedForRemote(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 
 	t.Run("no setting: allowed only for the elected default remote", func(t *testing.T) {
@@ -390,6 +405,29 @@ func TestCheckpointSyncAllowedForRemote(t *testing.T) {
 		testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
 		testutil.AddRemote(t, tmpDir, "publish", "https://example.com/publish.git")
 		testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "gone")
+
+		t.Chdir(tmpDir)
+
+		assert.False(t, checkpointSyncAllowedForRemote(ctx, "origin"))
+		assert.False(t, checkpointSyncAllowedForRemote(ctx, "publish"))
+	})
+
+	t.Run("unreadable settings fails closed for every remote", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testutil.InitRepo(t, tmpDir)
+		testutil.WriteFile(t, tmpDir, "f.txt", "init")
+		testutil.GitAdd(t, tmpDir, "f.txt")
+		testutil.GitCommit(t, tmpDir, "init")
+
+		testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+		testutil.AddRemote(t, tmpDir, "publish", "https://example.com/publish.git")
+
+		// Corrupt settings.json, not a misconfigured setting: the gate must
+		// fail closed here too, not just when the resolver itself detects a
+		// bad checkpoint_push_remote value.
+		entireDir := filepath.Join(tmpDir, ".entire")
+		require.NoError(t, os.MkdirAll(entireDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte("{not valid json"), 0o644))
 
 		t.Chdir(tmpDir)
 
