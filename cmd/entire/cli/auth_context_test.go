@@ -31,7 +31,7 @@ func TestResolveStatusTarget_PrefersActiveContext(t *testing.T) {
 		t.Fatalf("record context: %v", err)
 	}
 
-	got, err := resolveStatusTarget(t.Context(), auth.NewContextStore(), auth.Contexts, auth.RefreshedLoginToken, "https://fallback.example.com")
+	got, err := resolveStatusTarget(t.Context(), auth.Contexts, auth.RefreshedLoginToken)
 	if err != nil {
 		t.Fatalf("resolveStatusTarget: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestResolveStatusTarget_PrefersRefreshedToken(t *testing.T) {
 	}
 
 	refreshed := func(_ context.Context, _ *contexts.Context) (string, error) { return "refreshed-jwt", nil }
-	got, err := resolveStatusTarget(t.Context(), auth.NewContextStore(), auth.Contexts, refreshed, "https://fallback.example.com")
+	got, err := resolveStatusTarget(t.Context(), auth.Contexts, refreshed)
 	if err != nil {
 		t.Fatalf("resolveStatusTarget: %v", err)
 	}
@@ -78,8 +78,8 @@ func TestResolveStatusTarget_PrefersRefreshedToken(t *testing.T) {
 
 // TestResolveStatusTarget_FallsBackToStoredWhenRefreshFails pins the safety net:
 // when refresh fails (revoked family, network, opaque token) status drops to the
-// stored token and lets the /me probe arbitrate — rather than skipping to the
-// legacy entry or losing the active context.
+// stored token and lets the /me probe arbitrate — rather than losing the active
+// context.
 func TestResolveStatusTarget_FallsBackToStoredWhenRefreshFails(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
@@ -95,7 +95,7 @@ func TestResolveStatusTarget_FallsBackToStoredWhenRefreshFails(t *testing.T) {
 	failRefresh := func(_ context.Context, _ *contexts.Context) (string, error) {
 		return "", auth.ErrNotLoggedIn
 	}
-	got, err := resolveStatusTarget(t.Context(), auth.NewContextStore(), auth.Contexts, failRefresh, "https://fallback.example.com")
+	got, err := resolveStatusTarget(t.Context(), auth.Contexts, failRefresh)
 	if err != nil {
 		t.Fatalf("resolveStatusTarget: %v", err)
 	}
@@ -108,8 +108,8 @@ func TestResolveStatusTarget_FallsBackToStoredWhenRefreshFails(t *testing.T) {
 }
 
 // A genuine contexts.json read/parse error is surfaced by resolveStatusTarget,
-// symmetric with the control-plane commands — not swallowed into the legacy
-// fallback. (A missing file reads as "no contexts" and is not an error.)
+// symmetric with the control-plane commands. (A missing file reads as "no
+// contexts" and is not an error.)
 func TestResolveStatusTarget_CorruptContextsErrors(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
@@ -119,8 +119,26 @@ func TestResolveStatusTarget_CorruptContextsErrors(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cfgDir, "contexts.json"), []byte("{ not valid json"), 0o600); err != nil {
 		t.Fatalf("write corrupt contexts.json: %v", err)
 	}
-	if _, err := resolveStatusTarget(t.Context(), auth.NewContextStore(), auth.Contexts, auth.RefreshedLoginToken, "https://fallback.example.com"); err == nil {
+	if _, err := resolveStatusTarget(t.Context(), auth.Contexts, auth.RefreshedLoginToken); err == nil {
 		t.Fatal("want an error when contexts.json is corrupt, got nil")
+	}
+}
+
+// With no contexts at all, the target is zero-valued: status renders the
+// informational "Not logged in." (exit 0) and logout no-ops — never a probe
+// against any default host.
+func TestResolveStatusTarget_NoContextsIsZeroTarget(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	got, err := resolveStatusTarget(t.Context(), auth.Contexts, auth.RefreshedLoginToken)
+	if err != nil {
+		t.Fatalf("resolveStatusTarget: %v", err)
+	}
+	if got.coreURL != "" || got.token != "" || got.activeContext != "" {
+		t.Fatalf("want zero target with no contexts, got %+v", got)
 	}
 }
 

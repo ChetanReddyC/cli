@@ -22,6 +22,8 @@ import (
 const (
 	trailReviewApplyOriginalContent = "hello\nold\n"
 	trailReviewTestCommentID        = "cmt_1"
+	trailReviewTestStartPath        = "/api/v1/trails/trl_1/reviews"
+	trailReviewTestCommentsPath     = "/api/v1/trails/trl_1/reviews/rvw_1/comments"
 )
 
 func TestTrailCommandSurfaceUsesFindings(t *testing.T) {
@@ -38,17 +40,20 @@ func TestTrailCommandSurfaceUsesFindings(t *testing.T) {
 	if children["review"] != nil {
 		t.Fatal("trail command should not register review subcommand")
 	}
+	if children["watch"] == nil {
+		t.Fatal("trail command should register watch subcommand")
+	}
 
 	subcommands := map[string]bool{}
 	for _, child := range findingCmd.Commands() {
 		subcommands[child.Name()] = true
 	}
-	for _, required := range []string{"list", "add", "show", "apply", "resolve", "dismiss", "reopen", "watch"} {
+	for _, required := range []string{"list", "add", "show", "update", "apply", "resolve", "dismiss", "reopen"} {
 		if !subcommands[required] {
 			t.Fatalf("trail finding missing %q subcommand", required)
 		}
 	}
-	for _, removed := range []string{"start", "comments", "approve", "request-changes"} {
+	for _, removed := range []string{"start", "comments", "approve", "request-changes", "watch"} {
 		if subcommands[removed] {
 			t.Fatalf("trail finding should not register removed %q subcommand", removed)
 		}
@@ -78,7 +83,7 @@ func TestResolveTrailReviewTargetRejectsUnsupportedForge(t *testing.T) {
 	}
 	t.Chdir(repoDir)
 
-	_, err := resolveTrailReviewTarget(context.Background(), api.NewClient("tok"), "")
+	_, err := resolveTrailReviewTarget(context.Background(), api.NewClient("tok"), "", "", "")
 	if err == nil {
 		t.Fatal("expected error for gitlab.com origin, got nil")
 	}
@@ -92,14 +97,54 @@ func TestTrailReviewCommentsPath(t *testing.T) {
 	got := trailReviewCommentsPath("trail id/with slash", trailReviewListOptions{
 		Status:           "open,resolved",
 		Severity:         "high,medium",
-		Stale:            "any",
+		Freshness:        "any",
 		IncludeDismissed: true,
 		Limit:            25,
 		Offset:           50,
 	})
-	want := "/api/v1/trails/trail%20id%2Fwith%20slash/reviews/comments?include_dismissed=true&limit=25&offset=50&severity=high%2Cmedium&status=open%2Cresolved"
+	want := "/api/v1/trails/trail%20id%2Fwith%20slash/reviews/comments?include_dismissed=true&limit=25&offset=50&severity=high%2Cmedium&stale=any&status=open%2Cresolved"
 	if got != want {
 		t.Fatalf("trailReviewCommentsPath = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeTrailReviewListOptionsIncludeDismissedBroadensDefaultStatus(t *testing.T) {
+	t.Parallel()
+	opts := defaultTrailReviewListOptions()
+	opts.IncludeDismissed = true
+	got, err := normalizeTrailReviewListOptions(opts)
+	if err != nil {
+		t.Fatalf("normalizeTrailReviewListOptions: %v", err)
+	}
+	if got.Status != trailReviewStatusAny {
+		t.Fatalf("Status = %q, want %q", got.Status, trailReviewStatusAny)
+	}
+
+	opts = defaultTrailReviewListOptions()
+	opts.IncludeDismissed = true
+	opts.StatusChanged = true
+	got, err = normalizeTrailReviewListOptions(opts)
+	if err != nil {
+		t.Fatalf("normalizeTrailReviewListOptions explicit status: %v", err)
+	}
+	if got.Status != trailReviewStatusOpen {
+		t.Fatalf("explicit Status = %q, want open", got.Status)
+	}
+}
+
+func TestNormalizeTrailReviewListOptionsRejectsInvalidFilters(t *testing.T) {
+	t.Parallel()
+	cases := []trailReviewListOptions{
+		{Status: "open,nope", Freshness: trailReviewFreshnessAny, Limit: 1},
+		{Status: trailReviewStatusAny, Severity: "urgent", Freshness: trailReviewFreshnessAny, Limit: 1},
+		{Status: trailReviewStatusAny, Freshness: "old", Limit: 1},
+		{Status: trailReviewStatusAny, Freshness: trailReviewFreshnessAny, Limit: 0},
+		{Status: trailReviewStatusAny, Freshness: trailReviewFreshnessAny, Limit: 1, Offset: -1},
+	}
+	for _, opts := range cases {
+		if _, err := normalizeTrailReviewListOptions(opts); err == nil {
+			t.Fatalf("normalizeTrailReviewListOptions(%+v) succeeded, want error", opts)
+		}
 	}
 }
 
@@ -138,6 +183,47 @@ func TestLoadTrailReviewCommentPatchFile(t *testing.T) {
 
 	if _, err := loadTrailReviewCommentPatchFile(trailReviewCommentAddOptions{Patch: "inline", PatchFile: "-"}, strings.NewReader("patch")); err == nil {
 		t.Fatal("expected error when --patch and --patch-file are both provided")
+	}
+}
+
+func TestBuildTrailReviewCommentPatchRequest(t *testing.T) {
+	t.Parallel()
+
+	req, err := buildTrailReviewCommentPatchRequest(trailReviewUpdateOptions{
+		Body:              "Allow a five minute skew.",
+		BodyChanged:       true,
+		Severity:          "HIGH",
+		SeverityChanged:   true,
+		Confidence:        0.94,
+		ConfidenceChanged: true,
+	})
+	if err != nil {
+		t.Fatalf("buildTrailReviewCommentPatchRequest: %v", err)
+	}
+	if req.Title != nil {
+		t.Fatalf("Title = %#v, want nil", req.Title)
+	}
+	if req.Body == nil || *req.Body != "Allow a five minute skew." {
+		t.Fatalf("Body = %#v", req.Body)
+	}
+	if req.Severity == nil || *req.Severity != trailReviewSeverityHigh {
+		t.Fatalf("Severity = %#v", req.Severity)
+	}
+	if req.Confidence == nil || *req.Confidence != 0.94 {
+		t.Fatalf("Confidence = %#v", req.Confidence)
+	}
+
+	if _, err := buildTrailReviewCommentPatchRequest(trailReviewUpdateOptions{}); err == nil {
+		t.Fatal("expected an error when no update fields are provided")
+	}
+	if _, err := buildTrailReviewCommentPatchRequest(trailReviewUpdateOptions{Severity: "urgent", SeverityChanged: true}); err == nil {
+		t.Fatal("expected an error for invalid severity")
+	}
+	if _, err := buildTrailReviewCommentPatchRequest(trailReviewUpdateOptions{Body: " ", BodyChanged: true}); err == nil {
+		t.Fatal("expected an error for empty body")
+	}
+	if _, err := buildTrailReviewCommentPatchRequest(trailReviewUpdateOptions{Severity: " ", SeverityChanged: true}); err == nil {
+		t.Fatal("expected an error for empty severity")
 	}
 }
 
@@ -198,10 +284,10 @@ func TestCreateTrailReviewFindingStartsReviewThenPostsBatch(t *testing.T) {
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/trails/trl_1/reviews":
+		case r.Method == http.MethodPost && r.URL.Path == trailReviewTestStartPath:
 			startCalled = true
 			encodeTrailReviewTestJSON(t, w, api.TrailReviewStartResponse{ReviewID: "rvw_1", TrailID: "trl_1"})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/trails/trl_1/reviews/rvw_1/comments":
+		case r.Method == http.MethodPost && r.URL.Path == trailReviewTestCommentsPath:
 			batchCalled = true
 			if err := json.NewDecoder(r.Body).Decode(&gotBatch); err != nil {
 				t.Fatalf("decode batch body: %v", err)
@@ -244,12 +330,134 @@ func TestCreateTrailReviewFindingStartsReviewThenPostsBatch(t *testing.T) {
 	}
 }
 
+func TestCreateTrailReviewFindingsPostsOneBatch(t *testing.T) {
+	var (
+		gotBatch   api.TrailReviewCommentBatchRequest
+		startCalls int
+		batchCalls int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == trailReviewTestStartPath:
+			startCalls++
+			encodeTrailReviewTestJSON(t, w, api.TrailReviewStartResponse{ReviewID: "rvw_1", TrailID: "trl_1", Limits: api.TrailReviewLimits{MaxCommentsPerBatch: 10}})
+		case r.Method == http.MethodPost && r.URL.Path == trailReviewTestCommentsPath:
+			batchCalls++
+			if err := json.NewDecoder(r.Body).Decode(&gotBatch); err != nil {
+				t.Fatalf("decode batch body: %v", err)
+			}
+			encodeTrailReviewTestJSON(t, w, api.TrailReviewCommentBatchResponse{Results: []api.TrailReviewCommentBatchResult{
+				{ClientID: "c1", Status: "created", Comment: &api.TrailReviewComment{ID: "cm_1", TrailID: "trl_1", ReviewID: "rvw_1", Status: trailReviewStatusOpen}},
+				{ClientID: "c2", Status: "created", Comment: &api.TrailReviewComment{ID: "cm_2", TrailID: "trl_1", ReviewID: "rvw_1", Status: trailReviewStatusOpen}},
+			}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	t.Setenv(api.BaseURLEnvVar, srv.URL)
+	client := api.NewClient("tok")
+
+	created, err := createTrailReviewFindings(context.Background(), client, "trl_1", []api.TrailReviewCommentInput{
+		{ClientID: "c1", Body: trailReviewStrPtr("first"), Location: api.TrailReviewLocationCreateRequest{Granularity: "whole_change"}},
+		{ClientID: "c2", Body: trailReviewStrPtr("second"), Location: api.TrailReviewLocationCreateRequest{Granularity: "whole_change"}},
+	})
+	if err != nil {
+		t.Fatalf("createTrailReviewFindings: %v", err)
+	}
+	if startCalls != 1 || batchCalls != 1 {
+		t.Fatalf("startCalls=%d batchCalls=%d, want 1/1", startCalls, batchCalls)
+	}
+	if len(created) != 2 {
+		t.Fatalf("created = %d, want 2", len(created))
+	}
+	if len(gotBatch.Comments) != 2 {
+		t.Fatalf("batch comments = %#v, want 2", gotBatch.Comments)
+	}
+}
+
+func TestCreateTrailReviewFindingsHydratesLineSelectedText(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	t.Chdir(tmp)
+	testutil.WriteFile(t, tmp, "src/app.go", "package main\nfunc main() {}\n")
+
+	var gotBatch api.TrailReviewCommentBatchRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == trailReviewTestStartPath:
+			encodeTrailReviewTestJSON(t, w, api.TrailReviewStartResponse{ReviewID: "rvw_1", TrailID: "trl_1", Limits: api.TrailReviewLimits{MaxCommentsPerBatch: 10}})
+		case r.Method == http.MethodPost && r.URL.Path == trailReviewTestCommentsPath:
+			if err := json.NewDecoder(r.Body).Decode(&gotBatch); err != nil {
+				t.Fatalf("decode batch body: %v", err)
+			}
+			encodeTrailReviewTestJSON(t, w, api.TrailReviewCommentBatchResponse{Results: []api.TrailReviewCommentBatchResult{
+				{ClientID: "c1", Status: "created", Comment: &api.TrailReviewComment{ID: "cm_1", TrailID: "trl_1", ReviewID: "rvw_1", Status: trailReviewStatusOpen}},
+			}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	t.Setenv(api.BaseURLEnvVar, srv.URL)
+	client := api.NewClient("tok")
+
+	filePath := "src/app.go"
+	line := 2
+	_, err := createTrailReviewFindings(context.Background(), client, "trl_1", []api.TrailReviewCommentInput{{
+		ClientID: "c1",
+		Body:     trailReviewStrPtr("body"),
+		Location: api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: &filePath, StartLine: &line},
+	}})
+	if err != nil {
+		t.Fatalf("createTrailReviewFindings: %v", err)
+	}
+	if len(gotBatch.Comments) != 1 {
+		t.Fatalf("posted comments = %d, want 1", len(gotBatch.Comments))
+	}
+	loc := gotBatch.Comments[0].Location
+	if loc.Granularity != reviewTrailGranularityLine || loc.SelectedText == nil || *loc.SelectedText != "func main() {}" {
+		t.Fatalf("posted location = %+v, want line selected_text", loc)
+	}
+}
+
+func TestPrepareTrailReviewCommentInputsForCreateDowngradesUnselectableLine(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	testutil.WriteFile(t, tmp, "src/app.go", "package main\n\n")
+
+	filePath := "src/app.go"
+	line := 2
+	got := prepareTrailReviewCommentInputsForCreate(tmp, []api.TrailReviewCommentInput{{
+		ClientID: "c1",
+		Body:     trailReviewStrPtr("body"),
+		Location: api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: &filePath, StartLine: &line},
+	}})
+	if len(got) != 1 {
+		t.Fatalf("inputs = %d, want 1", len(got))
+	}
+	loc := got[0].Location
+	if loc.Granularity != reviewTrailGranularityFile || loc.FilePath == nil || *loc.FilePath != filePath || loc.SelectedText != nil {
+		t.Fatalf("location = %+v, want file fallback without selected_text", loc)
+	}
+
+	missing := "src/missing.go"
+	got = prepareTrailReviewCommentInputsForCreate(tmp, []api.TrailReviewCommentInput{{
+		ClientID: "c2",
+		Body:     trailReviewStrPtr("body"),
+		Location: api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: &missing, StartLine: &line},
+	}})
+	if loc := got[0].Location; loc.Granularity != reviewTrailGranularityWholeChange {
+		t.Fatalf("missing-file location = %+v, want whole_change fallback", loc)
+	}
+}
+
 func TestCreateTrailReviewFindingSurfacesBatchError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/trails/trl_1/reviews":
+		case trailReviewTestStartPath:
 			encodeTrailReviewTestJSON(t, w, api.TrailReviewStartResponse{ReviewID: "rvw_1", TrailID: "trl_1"})
-		case "/api/v1/trails/trl_1/reviews/rvw_1/comments":
+		case trailReviewTestCommentsPath:
 			encodeTrailReviewTestJSON(t, w, api.TrailReviewCommentBatchResponse{Results: []api.TrailReviewCommentBatchResult{{
 				ClientID: "c1",
 				Status:   "error",
@@ -286,7 +494,7 @@ func TestPrintTrailReviewDashboard(t *testing.T) {
 		{
 			ID:       "comment-high-123",
 			ReviewID: "review-1",
-			Title:    trailReviewStrPtr("Missing expiry skew handling"),
+			Body:     trailReviewStrPtr("Missing expiry skew handling"),
 			Severity: &high,
 			Status:   trailReviewStatusOpen,
 			Location: api.TrailReviewLocation{
@@ -298,7 +506,7 @@ func TestPrintTrailReviewDashboard(t *testing.T) {
 		{
 			ID:       "comment-medium-123",
 			ReviewID: "review-1",
-			Title:    trailReviewStrPtr("Retry loop can spin forever"),
+			Body:     trailReviewStrPtr("Retry loop can spin forever"),
 			Severity: &medium,
 			Status:   trailReviewStatusResolved,
 			Location: api.TrailReviewLocation{Granularity: "whole_change"},
@@ -309,7 +517,7 @@ func TestPrintTrailReviewDashboard(t *testing.T) {
 		ID:     "trl_1",
 		Number: 42,
 		Title:  "Add token refresh",
-		Status: "in_review",
+		Status: "open",
 		Branch: "feat/token-refresh",
 		Base:   "main",
 	}}, comments, false, defaultTrailReviewListOptions(), countTrailReviewComments(comments))
@@ -318,6 +526,7 @@ func TestPrintTrailReviewDashboard(t *testing.T) {
 		"Trail #42  Add token refresh",
 		"Open findings: 1  high 1  medium 0  low 0",
 		"Resolved: 1",
+		"FRESHNESS",
 		"High",
 		"src/auth/session.ts:88",
 		"Missing expiry skew handling",
@@ -340,7 +549,7 @@ func TestPrintTrailReviewDashboard_UsesSeparateCountsWhenFilteredCommentsEmpty(t
 		ID:     "trl_1",
 		Number: 42,
 		Title:  "Add token refresh",
-		Status: "in_review",
+		Status: "open",
 		Branch: "feat/token-refresh",
 		Base:   "main",
 	}}, nil, false, defaultTrailReviewListOptions(), counts)

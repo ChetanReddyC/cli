@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
@@ -72,11 +72,11 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	}
 
 	// Check which settings files exist
-	_, projectErr := os.Stat(settingsPath)
+	_, projectErr := os.Lstat(settingsPath)
 	if projectErr != nil && !errors.Is(projectErr, fs.ErrNotExist) {
 		return fmt.Errorf("cannot access project settings file: %w", projectErr)
 	}
-	_, localErr := os.Stat(localSettingsPath)
+	_, localErr := os.Lstat(localSettingsPath)
 	if localErr != nil && !errors.Is(localErr, fs.ErrNotExist) {
 		return fmt.Errorf("cannot access local settings file: %w", localErr)
 	}
@@ -104,8 +104,23 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
+	writeAgentHelpHint(w, sty)
 
 	return nil
+}
+
+// agentHelpCommand is the invocation a coding agent runs to get machine-readable
+// usage. It is surfaced both in the human status footer (writeAgentHelpHint) and
+// in `entire status --json` (statusJSON.AgentHelp), so no-channel agents (Cursor,
+// Copilot CLI, Factory Droid, MCP hosts) can discover entire's surface by reading
+// either output.
+const agentHelpCommand = "entire agent-help"
+
+// writeAgentHelpHint prints a one-line pointer at `entire agent-help` for coding
+// agents that have no context-injection channel (Cursor, Copilot CLI, Factory
+// Droid) and so discover entire's surface only by reading command output.
+func writeAgentHelpHint(w io.Writer, sty statusStyles) {
+	fmt.Fprintln(w, sty.render(sty.dim, "Agents: run `"+agentHelpCommand+"` for machine-readable usage."))
 }
 
 // runStatusDetailed shows the effective status plus detailed status for each settings file.
@@ -139,15 +154,15 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 	if effectiveSettings.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
+	writeAgentHelpHint(w, sty)
 
 	return nil
 }
 
 // formatSettingsStatusShort formats a short settings status line.
-// Output format: "● Enabled · manual-commit · branch main" or "○ Disabled"
+// Output format: "● Enabled · branch main" or "○ Disabled · branch main"
+// (the branch segment is appended whenever it can be resolved).
 func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statusStyles) string {
-	displayName := strategy.StrategyNameManualCommit
-
 	var b strings.Builder
 
 	if s.Enabled {
@@ -159,9 +174,6 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		b.WriteString(" ")
 		b.WriteString(sty.render(sty.bold, "Disabled"))
 	}
-
-	b.WriteString(sty.render(sty.dim, " · "))
-	b.WriteString(displayName)
 
 	// Resolve branch from repo root
 	if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
@@ -179,6 +191,13 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 			b.WriteString(sty.render(sty.dim, "  Agents · "))
 
 			b.WriteString(strings.Join(displayNames, ", "))
+		}
+
+		// Warn when installed hooks are out of date (read-only; fix is manual).
+		if claudecode.CheckHookConfig(ctx) == claudecode.HooksOutdated {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.yellow, "  ! Claude Code hooks out of date"))
+			b.WriteString(sty.render(sty.dim, " · run 'entire enable --force'"))
 		}
 	}
 
@@ -206,10 +225,8 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 }
 
 // formatSettingsStatus formats a settings status line with source prefix.
-// Output format: "Project · enabled · manual-commit" or "Local · disabled"
+// Output format: "Project · enabled" or "Local · disabled"
 func formatSettingsStatus(prefix string, s *EntireSettings, sty statusStyles) string {
-	displayName := strategy.StrategyNameManualCommit
-
 	var b strings.Builder
 	b.WriteString(sty.render(sty.bold, prefix))
 	b.WriteString(sty.render(sty.dim, " · "))
@@ -219,9 +236,6 @@ func formatSettingsStatus(prefix string, s *EntireSettings, sty statusStyles) st
 	} else {
 		b.WriteString("disabled")
 	}
-
-	b.WriteString(sty.render(sty.dim, " · "))
-	b.WriteString(displayName)
 
 	return b.String()
 }
@@ -269,6 +283,14 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 	states, err := store.List(ctx)
 	if err != nil || len(states) == 0 {
 		return
+	}
+
+	// Finalize any ACTIVE session whose agent process has exited without a
+	// SessionStop hook firing, so it doesn't linger as "active" until the
+	// inactivity timeout. The sweep marks them ended in place, so the filter
+	// below drops them.
+	if n := finalizeExitedSessions(ctx, states); n > 0 {
+		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("Finalized %d exited session(s) (agent process gone).", n)))
 	}
 
 	// Filter to active sessions only
@@ -379,11 +401,18 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 			}
 
 			statsLine := strings.Join(stats, sty.render(sty.dim, " · "))
-			if st.IsStuckActive() {
+			switch {
+			case st.OwnerExited():
+				// Agent process is gone but the session couldn't be finalized
+				// above (e.g. condense/transition error); flag it explicitly.
+				fmt.Fprintf(w, "%s %s %s\n", sty.render(sty.dim, statsLine),
+					sty.render(sty.dim, "·"),
+					sty.render(sty.yellow, "exited")+" (run 'entire doctor')")
+			case st.IsStuckActive():
 				fmt.Fprintf(w, "%s %s %s\n", sty.render(sty.dim, statsLine),
 					sty.render(sty.dim, "·"),
 					sty.render(sty.yellow, "stale")+" (run 'entire doctor')")
-			} else {
+			default:
 				fmt.Fprintln(w, sty.render(sty.dim, statsLine))
 			}
 			if warning := divergenceWarnings[st.SessionID]; warning != "" {
@@ -564,7 +593,14 @@ type statusJSON struct {
 	Enabled        bool               `json:"enabled"`
 	Agents         []string           `json:"agents"`
 	ActiveSessions []sessionBriefJSON `json:"active_sessions"`
-	Error          string             `json:"error,omitempty"`
+	// AgentHelp is the machine-readable pointer for no-channel agents that parse
+	// `entire status --json` instead of the human footer. Set only on the
+	// success path (mirrors writeAgentHelpHint, which only renders when set up).
+	AgentHelp string `json:"agent_help,omitempty"`
+	// HooksOutdated lists agents whose installed hook config is out of date and
+	// should be refreshed with `entire enable --force`.
+	HooksOutdated []string `json:"hooks_outdated,omitempty"`
+	Error         string   `json:"error,omitempty"`
 }
 
 type sessionBriefJSON struct {
@@ -591,11 +627,11 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		localSettingsPath = EntireSettingsLocalFile
 	}
 
-	_, projectErr := os.Stat(settingsPath)
+	_, projectErr := os.Lstat(settingsPath)
 	if projectErr != nil && !errors.Is(projectErr, fs.ErrNotExist) {
 		return writeJSON(statusJSON{Error: fmt.Sprintf("cannot access project settings file: %v", projectErr)})
 	}
-	_, localErr := os.Stat(localSettingsPath)
+	_, localErr := os.Lstat(localSettingsPath)
 	if localErr != nil && !errors.Is(localErr, fs.ErrNotExist) {
 		return writeJSON(statusJSON{Error: fmt.Sprintf("cannot access local settings file: %v", localErr)})
 	}
@@ -613,6 +649,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		Enabled:        s.Enabled,
 		Agents:         []string{},
 		ActiveSessions: []sessionBriefJSON{},
+		AgentHelp:      agentHelpCommand,
 	}
 
 	if s.Enabled {
@@ -620,8 +657,16 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 			result.Agents = names
 		}
 
+		if claudecode.CheckHookConfig(ctx) == claudecode.HooksOutdated {
+			result.HooksOutdated = append(result.HooksOutdated, "claude-code")
+		}
+
 		if store, err := session.NewStateStore(ctx); err == nil {
 			if states, err := store.List(ctx); err == nil {
+				// Finalize sessions whose agent has exited (matches the human
+				// status path) so --json doesn't leave them orphaned ACTIVE or
+				// report them under active_sessions.
+				finalizeExitedSessions(ctx, states)
 				// Deduplicate by agent: one entry per agent, "active" wins over "idle".
 				type agentEntry struct {
 					brief    sessionBriefJSON
@@ -671,6 +716,10 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 func sessionStatusLabel(s *session.State) string {
 	if s.EndedAt != nil {
 		return "ended"
+	}
+	if s.OwnerExited() {
+		// ACTIVE on disk, but the owning agent process is gone.
+		return "exited"
 	}
 	if s.Phase != "" {
 		return string(s.Phase)

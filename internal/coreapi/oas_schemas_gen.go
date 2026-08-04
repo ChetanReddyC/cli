@@ -240,6 +240,200 @@ func (s *AuditEventMetadata) init() AuditEventMetadata {
 	return m
 }
 
+// Ref: #/components/schemas/AvailableMirror
+type AvailableMirror struct {
+	// Caller's effective GitHub access: read, write, or admin.
+	Access     AvailableMirrorAccess `json:"access"`
+	IsArchived OptBool               `json:"isArchived"`
+	IsPrivate  OptBool               `json:"isPrivate"`
+	Owner      string                `json:"owner"`
+	Repo       string                `json:"repo"`
+	// Available (can onboard), mirrored (already mirrored), or owner-only (personal repo of another
+	// user).
+	Status          AvailableMirrorStatus `json:"status"`
+	AdditionalProps AvailableMirrorAdditional
+}
+
+// GetAccess returns the value of Access.
+func (s *AvailableMirror) GetAccess() AvailableMirrorAccess {
+	return s.Access
+}
+
+// GetIsArchived returns the value of IsArchived.
+func (s *AvailableMirror) GetIsArchived() OptBool {
+	return s.IsArchived
+}
+
+// GetIsPrivate returns the value of IsPrivate.
+func (s *AvailableMirror) GetIsPrivate() OptBool {
+	return s.IsPrivate
+}
+
+// GetOwner returns the value of Owner.
+func (s *AvailableMirror) GetOwner() string {
+	return s.Owner
+}
+
+// GetRepo returns the value of Repo.
+func (s *AvailableMirror) GetRepo() string {
+	return s.Repo
+}
+
+// GetStatus returns the value of Status.
+func (s *AvailableMirror) GetStatus() AvailableMirrorStatus {
+	return s.Status
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *AvailableMirror) GetAdditionalProps() AvailableMirrorAdditional {
+	return s.AdditionalProps
+}
+
+// SetAccess sets the value of Access.
+func (s *AvailableMirror) SetAccess(val AvailableMirrorAccess) {
+	s.Access = val
+}
+
+// SetIsArchived sets the value of IsArchived.
+func (s *AvailableMirror) SetIsArchived(val OptBool) {
+	s.IsArchived = val
+}
+
+// SetIsPrivate sets the value of IsPrivate.
+func (s *AvailableMirror) SetIsPrivate(val OptBool) {
+	s.IsPrivate = val
+}
+
+// SetOwner sets the value of Owner.
+func (s *AvailableMirror) SetOwner(val string) {
+	s.Owner = val
+}
+
+// SetRepo sets the value of Repo.
+func (s *AvailableMirror) SetRepo(val string) {
+	s.Repo = val
+}
+
+// SetStatus sets the value of Status.
+func (s *AvailableMirror) SetStatus(val AvailableMirrorStatus) {
+	s.Status = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *AvailableMirror) SetAdditionalProps(val AvailableMirrorAdditional) {
+	s.AdditionalProps = val
+}
+
+// Caller's effective GitHub access: read, write, or admin.
+type AvailableMirrorAccess string
+
+const (
+	AvailableMirrorAccessRead  AvailableMirrorAccess = "read"
+	AvailableMirrorAccessWrite AvailableMirrorAccess = "write"
+	AvailableMirrorAccessAdmin AvailableMirrorAccess = "admin"
+)
+
+// AllValues returns all AvailableMirrorAccess values.
+func (AvailableMirrorAccess) AllValues() []AvailableMirrorAccess {
+	return []AvailableMirrorAccess{
+		AvailableMirrorAccessRead,
+		AvailableMirrorAccessWrite,
+		AvailableMirrorAccessAdmin,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s AvailableMirrorAccess) MarshalText() ([]byte, error) {
+	switch s {
+	case AvailableMirrorAccessRead:
+		return []byte(s), nil
+	case AvailableMirrorAccessWrite:
+		return []byte(s), nil
+	case AvailableMirrorAccessAdmin:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *AvailableMirrorAccess) UnmarshalText(data []byte) error {
+	switch AvailableMirrorAccess(data) {
+	case AvailableMirrorAccessRead:
+		*s = AvailableMirrorAccessRead
+		return nil
+	case AvailableMirrorAccessWrite:
+		*s = AvailableMirrorAccessWrite
+		return nil
+	case AvailableMirrorAccessAdmin:
+		*s = AvailableMirrorAccessAdmin
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type AvailableMirrorAdditional map[string]jx.Raw
+
+func (s *AvailableMirrorAdditional) init() AvailableMirrorAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Available (can onboard), mirrored (already mirrored), or owner-only (personal repo of another
+// user).
+type AvailableMirrorStatus string
+
+const (
+	AvailableMirrorStatusAvailable AvailableMirrorStatus = "available"
+	AvailableMirrorStatusMirrored  AvailableMirrorStatus = "mirrored"
+	AvailableMirrorStatusOwnerOnly AvailableMirrorStatus = "owner-only"
+)
+
+// AllValues returns all AvailableMirrorStatus values.
+func (AvailableMirrorStatus) AllValues() []AvailableMirrorStatus {
+	return []AvailableMirrorStatus{
+		AvailableMirrorStatusAvailable,
+		AvailableMirrorStatusMirrored,
+		AvailableMirrorStatusOwnerOnly,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s AvailableMirrorStatus) MarshalText() ([]byte, error) {
+	switch s {
+	case AvailableMirrorStatusAvailable:
+		return []byte(s), nil
+	case AvailableMirrorStatusMirrored:
+		return []byte(s), nil
+	case AvailableMirrorStatusOwnerOnly:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *AvailableMirrorStatus) UnmarshalText(data []byte) error {
+	switch AvailableMirrorStatus(data) {
+	case AvailableMirrorStatusAvailable:
+		*s = AvailableMirrorStatusAvailable
+		return nil
+	case AvailableMirrorStatusMirrored:
+		*s = AvailableMirrorStatusMirrored
+		return nil
+	case AvailableMirrorStatusOwnerOnly:
+		*s = AvailableMirrorStatusOwnerOnly
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/BatchLookupInputBody
 type BatchLookupInputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -456,6 +650,299 @@ func (s *BindingAdditional) init() BindingAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/CIWebhookView
+type CIWebhookView struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI    `json:"$schema"`
+	BkOrganization  string    `json:"bk_organization"`
+	BkPipeline      string    `json:"bk_pipeline"`
+	CreatedAt       time.Time `json:"created_at"`
+	DisplayName     string    `json:"display_name"`
+	Enabled         bool      `json:"enabled"`
+	Events          []string  `json:"events"`
+	ID              string    `json:"id"`
+	Provider        string    `json:"provider"`
+	RefFilter       string    `json:"ref_filter"`
+	RepoID          string    `json:"repo_id"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	AdditionalProps CIWebhookViewAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *CIWebhookView) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetBkOrganization returns the value of BkOrganization.
+func (s *CIWebhookView) GetBkOrganization() string {
+	return s.BkOrganization
+}
+
+// GetBkPipeline returns the value of BkPipeline.
+func (s *CIWebhookView) GetBkPipeline() string {
+	return s.BkPipeline
+}
+
+// GetCreatedAt returns the value of CreatedAt.
+func (s *CIWebhookView) GetCreatedAt() time.Time {
+	return s.CreatedAt
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *CIWebhookView) GetDisplayName() string {
+	return s.DisplayName
+}
+
+// GetEnabled returns the value of Enabled.
+func (s *CIWebhookView) GetEnabled() bool {
+	return s.Enabled
+}
+
+// GetEvents returns the value of Events.
+func (s *CIWebhookView) GetEvents() []string {
+	return s.Events
+}
+
+// GetID returns the value of ID.
+func (s *CIWebhookView) GetID() string {
+	return s.ID
+}
+
+// GetProvider returns the value of Provider.
+func (s *CIWebhookView) GetProvider() string {
+	return s.Provider
+}
+
+// GetRefFilter returns the value of RefFilter.
+func (s *CIWebhookView) GetRefFilter() string {
+	return s.RefFilter
+}
+
+// GetRepoID returns the value of RepoID.
+func (s *CIWebhookView) GetRepoID() string {
+	return s.RepoID
+}
+
+// GetUpdatedAt returns the value of UpdatedAt.
+func (s *CIWebhookView) GetUpdatedAt() time.Time {
+	return s.UpdatedAt
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CIWebhookView) GetAdditionalProps() CIWebhookViewAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *CIWebhookView) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetBkOrganization sets the value of BkOrganization.
+func (s *CIWebhookView) SetBkOrganization(val string) {
+	s.BkOrganization = val
+}
+
+// SetBkPipeline sets the value of BkPipeline.
+func (s *CIWebhookView) SetBkPipeline(val string) {
+	s.BkPipeline = val
+}
+
+// SetCreatedAt sets the value of CreatedAt.
+func (s *CIWebhookView) SetCreatedAt(val time.Time) {
+	s.CreatedAt = val
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *CIWebhookView) SetDisplayName(val string) {
+	s.DisplayName = val
+}
+
+// SetEnabled sets the value of Enabled.
+func (s *CIWebhookView) SetEnabled(val bool) {
+	s.Enabled = val
+}
+
+// SetEvents sets the value of Events.
+func (s *CIWebhookView) SetEvents(val []string) {
+	s.Events = val
+}
+
+// SetID sets the value of ID.
+func (s *CIWebhookView) SetID(val string) {
+	s.ID = val
+}
+
+// SetProvider sets the value of Provider.
+func (s *CIWebhookView) SetProvider(val string) {
+	s.Provider = val
+}
+
+// SetRefFilter sets the value of RefFilter.
+func (s *CIWebhookView) SetRefFilter(val string) {
+	s.RefFilter = val
+}
+
+// SetRepoID sets the value of RepoID.
+func (s *CIWebhookView) SetRepoID(val string) {
+	s.RepoID = val
+}
+
+// SetUpdatedAt sets the value of UpdatedAt.
+func (s *CIWebhookView) SetUpdatedAt(val time.Time) {
+	s.UpdatedAt = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CIWebhookView) SetAdditionalProps(val CIWebhookViewAdditional) {
+	s.AdditionalProps = val
+}
+
+type CIWebhookViewAdditional map[string]jx.Raw
+
+func (s *CIWebhookViewAdditional) init() CIWebhookViewAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// CancelDeletionOK is response for CancelDeletion operation.
+type CancelDeletionOK struct{}
+
+// Ref: #/components/schemas/Cluster
+type Cluster struct {
+	ApiUrl          OptString `json:"apiUrl"`
+	IsDefault       bool      `json:"isDefault"`
+	Jurisdiction    string    `json:"jurisdiction"`
+	PublicUrl       string    `json:"publicUrl"`
+	Slug            string    `json:"slug"`
+	AdditionalProps ClusterAdditional
+}
+
+// GetApiUrl returns the value of ApiUrl.
+func (s *Cluster) GetApiUrl() OptString {
+	return s.ApiUrl
+}
+
+// GetIsDefault returns the value of IsDefault.
+func (s *Cluster) GetIsDefault() bool {
+	return s.IsDefault
+}
+
+// GetJurisdiction returns the value of Jurisdiction.
+func (s *Cluster) GetJurisdiction() string {
+	return s.Jurisdiction
+}
+
+// GetPublicUrl returns the value of PublicUrl.
+func (s *Cluster) GetPublicUrl() string {
+	return s.PublicUrl
+}
+
+// GetSlug returns the value of Slug.
+func (s *Cluster) GetSlug() string {
+	return s.Slug
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *Cluster) GetAdditionalProps() ClusterAdditional {
+	return s.AdditionalProps
+}
+
+// SetApiUrl sets the value of ApiUrl.
+func (s *Cluster) SetApiUrl(val OptString) {
+	s.ApiUrl = val
+}
+
+// SetIsDefault sets the value of IsDefault.
+func (s *Cluster) SetIsDefault(val bool) {
+	s.IsDefault = val
+}
+
+// SetJurisdiction sets the value of Jurisdiction.
+func (s *Cluster) SetJurisdiction(val string) {
+	s.Jurisdiction = val
+}
+
+// SetPublicUrl sets the value of PublicUrl.
+func (s *Cluster) SetPublicUrl(val string) {
+	s.PublicUrl = val
+}
+
+// SetSlug sets the value of Slug.
+func (s *Cluster) SetSlug(val string) {
+	s.Slug = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *Cluster) SetAdditionalProps(val ClusterAdditional) {
+	s.AdditionalProps = val
+}
+
+type ClusterAdditional map[string]jx.Raw
+
+func (s *ClusterAdditional) init() ClusterAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/CompleteOnboardingOutputBody
+type CompleteOnboardingOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Always false after onboarding completion is recorded.
+	NeedsOnboarding bool `json:"needsOnboarding"`
+	AdditionalProps CompleteOnboardingOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *CompleteOnboardingOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetNeedsOnboarding returns the value of NeedsOnboarding.
+func (s *CompleteOnboardingOutputBody) GetNeedsOnboarding() bool {
+	return s.NeedsOnboarding
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CompleteOnboardingOutputBody) GetAdditionalProps() CompleteOnboardingOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *CompleteOnboardingOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetNeedsOnboarding sets the value of NeedsOnboarding.
+func (s *CompleteOnboardingOutputBody) SetNeedsOnboarding(val bool) {
+	s.NeedsOnboarding = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CompleteOnboardingOutputBody) SetAdditionalProps(val CompleteOnboardingOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CompleteOnboardingOutputBodyAdditional map[string]jx.Raw
+
+func (s *CompleteOnboardingOutputBodyAdditional) init() CompleteOnboardingOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/CreateBindingInputBody
 type CreateBindingInputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -521,7 +1008,7 @@ func (s *CreateBindingInputBodyAdditional) init() CreateBindingInputBodyAddition
 type CreateMirrorInputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema OptURI `json:"$schema"`
-	// DNS host of the destination cluster.
+	// Destination cluster, as either a bare DNS host or the publicUrl returned by GET /api/v1/clusters.
 	ClusterHost     string                        `json:"clusterHost"`
 	Owner           string                        `json:"owner"`
 	Provider        CreateMirrorInputBodyProvider `json:"provider"`
@@ -819,6 +1306,155 @@ func (s *CreateProjectInputBodyOwnerType) UnmarshalText(data []byte) error {
 	}
 }
 
+// Ref: #/components/schemas/CreateRepoCIWebhookInputBody
+type CreateRepoCIWebhookInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI                               `json:"$schema"`
+	BkClusterID     string                               `json:"bk_cluster_id"`
+	BkOrganization  string                               `json:"bk_organization"`
+	BkPipeline      OptString                            `json:"bk_pipeline"`
+	DisplayName     OptString                            `json:"display_name"`
+	Events          []string                             `json:"events"`
+	Provider        CreateRepoCIWebhookInputBodyProvider `json:"provider"`
+	RefFilter       OptString                            `json:"ref_filter"`
+	AdditionalProps CreateRepoCIWebhookInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *CreateRepoCIWebhookInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetBkClusterID returns the value of BkClusterID.
+func (s *CreateRepoCIWebhookInputBody) GetBkClusterID() string {
+	return s.BkClusterID
+}
+
+// GetBkOrganization returns the value of BkOrganization.
+func (s *CreateRepoCIWebhookInputBody) GetBkOrganization() string {
+	return s.BkOrganization
+}
+
+// GetBkPipeline returns the value of BkPipeline.
+func (s *CreateRepoCIWebhookInputBody) GetBkPipeline() OptString {
+	return s.BkPipeline
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *CreateRepoCIWebhookInputBody) GetDisplayName() OptString {
+	return s.DisplayName
+}
+
+// GetEvents returns the value of Events.
+func (s *CreateRepoCIWebhookInputBody) GetEvents() []string {
+	return s.Events
+}
+
+// GetProvider returns the value of Provider.
+func (s *CreateRepoCIWebhookInputBody) GetProvider() CreateRepoCIWebhookInputBodyProvider {
+	return s.Provider
+}
+
+// GetRefFilter returns the value of RefFilter.
+func (s *CreateRepoCIWebhookInputBody) GetRefFilter() OptString {
+	return s.RefFilter
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreateRepoCIWebhookInputBody) GetAdditionalProps() CreateRepoCIWebhookInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *CreateRepoCIWebhookInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetBkClusterID sets the value of BkClusterID.
+func (s *CreateRepoCIWebhookInputBody) SetBkClusterID(val string) {
+	s.BkClusterID = val
+}
+
+// SetBkOrganization sets the value of BkOrganization.
+func (s *CreateRepoCIWebhookInputBody) SetBkOrganization(val string) {
+	s.BkOrganization = val
+}
+
+// SetBkPipeline sets the value of BkPipeline.
+func (s *CreateRepoCIWebhookInputBody) SetBkPipeline(val OptString) {
+	s.BkPipeline = val
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *CreateRepoCIWebhookInputBody) SetDisplayName(val OptString) {
+	s.DisplayName = val
+}
+
+// SetEvents sets the value of Events.
+func (s *CreateRepoCIWebhookInputBody) SetEvents(val []string) {
+	s.Events = val
+}
+
+// SetProvider sets the value of Provider.
+func (s *CreateRepoCIWebhookInputBody) SetProvider(val CreateRepoCIWebhookInputBodyProvider) {
+	s.Provider = val
+}
+
+// SetRefFilter sets the value of RefFilter.
+func (s *CreateRepoCIWebhookInputBody) SetRefFilter(val OptString) {
+	s.RefFilter = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreateRepoCIWebhookInputBody) SetAdditionalProps(val CreateRepoCIWebhookInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreateRepoCIWebhookInputBodyAdditional map[string]jx.Raw
+
+func (s *CreateRepoCIWebhookInputBodyAdditional) init() CreateRepoCIWebhookInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type CreateRepoCIWebhookInputBodyProvider string
+
+const (
+	CreateRepoCIWebhookInputBodyProviderBuildkite CreateRepoCIWebhookInputBodyProvider = "buildkite"
+)
+
+// AllValues returns all CreateRepoCIWebhookInputBodyProvider values.
+func (CreateRepoCIWebhookInputBodyProvider) AllValues() []CreateRepoCIWebhookInputBodyProvider {
+	return []CreateRepoCIWebhookInputBodyProvider{
+		CreateRepoCIWebhookInputBodyProviderBuildkite,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s CreateRepoCIWebhookInputBodyProvider) MarshalText() ([]byte, error) {
+	switch s {
+	case CreateRepoCIWebhookInputBodyProviderBuildkite:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *CreateRepoCIWebhookInputBodyProvider) UnmarshalText(data []byte) error {
+	switch CreateRepoCIWebhookInputBodyProvider(data) {
+	case CreateRepoCIWebhookInputBodyProviderBuildkite:
+		*s = CreateRepoCIWebhookInputBodyProviderBuildkite
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/CreateRepoInputBody
 type CreateRepoInputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -1012,11 +1648,14 @@ type CreatedMirror struct {
 	Schema OptURI `json:"$schema"`
 	// True on fresh creation; false when an existing mirror was returned.
 	Created bool `json:"created"`
-	// True when the upstream has no refs to clone.
-	Empty           bool   `json:"empty"`
-	MirrorId        string `json:"mirrorId"`
-	MirrorUrl       string `json:"mirrorUrl"`
-	PublicUrl       string `json:"publicUrl"`
+	// Deprecated: always false. Poll the mirror status instead — an empty upstream still reaches
+	// 'ready'.
+	Empty     bool   `json:"empty"`
+	MirrorId  string `json:"mirrorId"`
+	MirrorUrl string `json:"mirrorUrl"`
+	PublicUrl string `json:"publicUrl"`
+	// True when an existing placement was returned that an admin suspended.
+	Suspended       bool `json:"suspended"`
 	AdditionalProps CreatedMirrorAdditional
 }
 
@@ -1048,6 +1687,11 @@ func (s *CreatedMirror) GetMirrorUrl() string {
 // GetPublicUrl returns the value of PublicUrl.
 func (s *CreatedMirror) GetPublicUrl() string {
 	return s.PublicUrl
+}
+
+// GetSuspended returns the value of Suspended.
+func (s *CreatedMirror) GetSuspended() bool {
+	return s.Suspended
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -1085,6 +1729,11 @@ func (s *CreatedMirror) SetPublicUrl(val string) {
 	s.PublicUrl = val
 }
 
+// SetSuspended sets the value of Suspended.
+func (s *CreatedMirror) SetSuspended(val bool) {
+	s.Suspended = val
+}
+
 // SetAdditionalProps sets the value of AdditionalProps.
 func (s *CreatedMirror) SetAdditionalProps(val CreatedMirrorAdditional) {
 	s.AdditionalProps = val
@@ -1103,6 +1752,9 @@ func (s *CreatedMirrorAdditional) init() CreatedMirrorAdditional {
 
 // DeleteBindingNoContent is response for DeleteBinding operation.
 type DeleteBindingNoContent struct{}
+
+// DeleteMeAccepted is response for DeleteMe operation.
+type DeleteMeAccepted struct{}
 
 // DeleteMirrorNoContent is response for DeleteMirror operation.
 type DeleteMirrorNoContent struct{}
@@ -1141,11 +1793,383 @@ func (s *DeleteMirrorProvider) UnmarshalText(data []byte) error {
 	}
 }
 
+// DeleteOrgNoContent is response for DeleteOrg operation.
+type DeleteOrgNoContent struct{}
+
+// DeleteProjectNoContent is response for DeleteProject operation.
+type DeleteProjectNoContent struct{}
+
+// DeleteRepoCIWebhookNoContent is response for DeleteRepoCIWebhook operation.
+type DeleteRepoCIWebhookNoContent struct{}
+
 // DeleteRepoNoContent is response for DeleteRepo operation.
 type DeleteRepoNoContent struct{}
 
 // DeleteServiceAccountNoContent is response for DeleteServiceAccount operation.
 type DeleteServiceAccountNoContent struct{}
+
+// Ref: #/components/schemas/DeletionBlocker
+type DeletionBlocker struct {
+	// True when the account can self-serve delete this org (it is the only member and the org has no
+	// projects). When false, the org has other members or data and must be transferred/removed via
+	// support. The UI should offer a delete action only when this is true.
+	Deletable bool `json:"deletable"`
+	// Resource ID (org ULID).
+	ID string `json:"id"`
+	// Blocker kind. Currently always 'owned_org'.
+	Kind DeletionBlockerKind `json:"kind"`
+	// Copy explaining how to clear the blocker.
+	Message string `json:"message"`
+	// Human-readable resource name.
+	Name            string `json:"name"`
+	AdditionalProps DeletionBlockerAdditional
+}
+
+// GetDeletable returns the value of Deletable.
+func (s *DeletionBlocker) GetDeletable() bool {
+	return s.Deletable
+}
+
+// GetID returns the value of ID.
+func (s *DeletionBlocker) GetID() string {
+	return s.ID
+}
+
+// GetKind returns the value of Kind.
+func (s *DeletionBlocker) GetKind() DeletionBlockerKind {
+	return s.Kind
+}
+
+// GetMessage returns the value of Message.
+func (s *DeletionBlocker) GetMessage() string {
+	return s.Message
+}
+
+// GetName returns the value of Name.
+func (s *DeletionBlocker) GetName() string {
+	return s.Name
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *DeletionBlocker) GetAdditionalProps() DeletionBlockerAdditional {
+	return s.AdditionalProps
+}
+
+// SetDeletable sets the value of Deletable.
+func (s *DeletionBlocker) SetDeletable(val bool) {
+	s.Deletable = val
+}
+
+// SetID sets the value of ID.
+func (s *DeletionBlocker) SetID(val string) {
+	s.ID = val
+}
+
+// SetKind sets the value of Kind.
+func (s *DeletionBlocker) SetKind(val DeletionBlockerKind) {
+	s.Kind = val
+}
+
+// SetMessage sets the value of Message.
+func (s *DeletionBlocker) SetMessage(val string) {
+	s.Message = val
+}
+
+// SetName sets the value of Name.
+func (s *DeletionBlocker) SetName(val string) {
+	s.Name = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *DeletionBlocker) SetAdditionalProps(val DeletionBlockerAdditional) {
+	s.AdditionalProps = val
+}
+
+type DeletionBlockerAdditional map[string]jx.Raw
+
+func (s *DeletionBlockerAdditional) init() DeletionBlockerAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Blocker kind. Currently always 'owned_org'.
+type DeletionBlockerKind string
+
+const (
+	DeletionBlockerKindOwnedOrg DeletionBlockerKind = "owned_org"
+)
+
+// AllValues returns all DeletionBlockerKind values.
+func (DeletionBlockerKind) AllValues() []DeletionBlockerKind {
+	return []DeletionBlockerKind{
+		DeletionBlockerKindOwnedOrg,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s DeletionBlockerKind) MarshalText() ([]byte, error) {
+	switch s {
+	case DeletionBlockerKindOwnedOrg:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *DeletionBlockerKind) UnmarshalText(data []byte) error {
+	switch DeletionBlockerKind(data) {
+	case DeletionBlockerKindOwnedOrg:
+		*s = DeletionBlockerKindOwnedOrg
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/DeletionGrant
+type DeletionGrant struct {
+	// Region the repo lives in (us/eu/au); empty for project grants.
+	Jurisdiction OptString `json:"jurisdiction"`
+	// Granted resource ULID.
+	ResourceId string `json:"resourceId"`
+	// Granted resource name.
+	ResourceName string `json:"resourceName"`
+	// Granted resource type.
+	ResourceType DeletionGrantResourceType `json:"resourceType"`
+	// Granted role.
+	Role            string `json:"role"`
+	AdditionalProps DeletionGrantAdditional
+}
+
+// GetJurisdiction returns the value of Jurisdiction.
+func (s *DeletionGrant) GetJurisdiction() OptString {
+	return s.Jurisdiction
+}
+
+// GetResourceId returns the value of ResourceId.
+func (s *DeletionGrant) GetResourceId() string {
+	return s.ResourceId
+}
+
+// GetResourceName returns the value of ResourceName.
+func (s *DeletionGrant) GetResourceName() string {
+	return s.ResourceName
+}
+
+// GetResourceType returns the value of ResourceType.
+func (s *DeletionGrant) GetResourceType() DeletionGrantResourceType {
+	return s.ResourceType
+}
+
+// GetRole returns the value of Role.
+func (s *DeletionGrant) GetRole() string {
+	return s.Role
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *DeletionGrant) GetAdditionalProps() DeletionGrantAdditional {
+	return s.AdditionalProps
+}
+
+// SetJurisdiction sets the value of Jurisdiction.
+func (s *DeletionGrant) SetJurisdiction(val OptString) {
+	s.Jurisdiction = val
+}
+
+// SetResourceId sets the value of ResourceId.
+func (s *DeletionGrant) SetResourceId(val string) {
+	s.ResourceId = val
+}
+
+// SetResourceName sets the value of ResourceName.
+func (s *DeletionGrant) SetResourceName(val string) {
+	s.ResourceName = val
+}
+
+// SetResourceType sets the value of ResourceType.
+func (s *DeletionGrant) SetResourceType(val DeletionGrantResourceType) {
+	s.ResourceType = val
+}
+
+// SetRole sets the value of Role.
+func (s *DeletionGrant) SetRole(val string) {
+	s.Role = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *DeletionGrant) SetAdditionalProps(val DeletionGrantAdditional) {
+	s.AdditionalProps = val
+}
+
+type DeletionGrantAdditional map[string]jx.Raw
+
+func (s *DeletionGrantAdditional) init() DeletionGrantAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Granted resource type.
+type DeletionGrantResourceType string
+
+const (
+	DeletionGrantResourceTypeProject DeletionGrantResourceType = "project"
+	DeletionGrantResourceTypeRepo    DeletionGrantResourceType = "repo"
+)
+
+// AllValues returns all DeletionGrantResourceType values.
+func (DeletionGrantResourceType) AllValues() []DeletionGrantResourceType {
+	return []DeletionGrantResourceType{
+		DeletionGrantResourceTypeProject,
+		DeletionGrantResourceTypeRepo,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s DeletionGrantResourceType) MarshalText() ([]byte, error) {
+	switch s {
+	case DeletionGrantResourceTypeProject:
+		return []byte(s), nil
+	case DeletionGrantResourceTypeRepo:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *DeletionGrantResourceType) UnmarshalText(data []byte) error {
+	switch DeletionGrantResourceType(data) {
+	case DeletionGrantResourceTypeProject:
+		*s = DeletionGrantResourceTypeProject
+		return nil
+	case DeletionGrantResourceTypeRepo:
+		*s = DeletionGrantResourceTypeRepo
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/DeletionMembership
+type DeletionMembership struct {
+	// Org name.
+	Name string `json:"name"`
+	// Org ULID.
+	OrgId           string `json:"orgId"`
+	AdditionalProps DeletionMembershipAdditional
+}
+
+// GetName returns the value of Name.
+func (s *DeletionMembership) GetName() string {
+	return s.Name
+}
+
+// GetOrgId returns the value of OrgId.
+func (s *DeletionMembership) GetOrgId() string {
+	return s.OrgId
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *DeletionMembership) GetAdditionalProps() DeletionMembershipAdditional {
+	return s.AdditionalProps
+}
+
+// SetName sets the value of Name.
+func (s *DeletionMembership) SetName(val string) {
+	s.Name = val
+}
+
+// SetOrgId sets the value of OrgId.
+func (s *DeletionMembership) SetOrgId(val string) {
+	s.OrgId = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *DeletionMembership) SetAdditionalProps(val DeletionMembershipAdditional) {
+	s.AdditionalProps = val
+}
+
+type DeletionMembershipAdditional map[string]jx.Raw
+
+func (s *DeletionMembershipAdditional) init() DeletionMembershipAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/DeletionRepo
+type DeletionRepo struct {
+	// Cluster slug the repo is placed on, if known.
+	Cluster OptString `json:"cluster"`
+	// Repo ULID.
+	ID string `json:"id"`
+	// Repo name.
+	Name            string `json:"name"`
+	AdditionalProps DeletionRepoAdditional
+}
+
+// GetCluster returns the value of Cluster.
+func (s *DeletionRepo) GetCluster() OptString {
+	return s.Cluster
+}
+
+// GetID returns the value of ID.
+func (s *DeletionRepo) GetID() string {
+	return s.ID
+}
+
+// GetName returns the value of Name.
+func (s *DeletionRepo) GetName() string {
+	return s.Name
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *DeletionRepo) GetAdditionalProps() DeletionRepoAdditional {
+	return s.AdditionalProps
+}
+
+// SetCluster sets the value of Cluster.
+func (s *DeletionRepo) SetCluster(val OptString) {
+	s.Cluster = val
+}
+
+// SetID sets the value of ID.
+func (s *DeletionRepo) SetID(val string) {
+	s.ID = val
+}
+
+// SetName sets the value of Name.
+func (s *DeletionRepo) SetName(val string) {
+	s.Name = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *DeletionRepo) SetAdditionalProps(val DeletionRepoAdditional) {
+	s.AdditionalProps = val
+}
+
+type DeletionRepoAdditional map[string]jx.Raw
+
+func (s *DeletionRepoAdditional) init() DeletionRepoAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
 
 // Ref: #/components/schemas/ErrorDetail
 type ErrorDetail struct {
@@ -1346,11 +2370,97 @@ func (s *ErrorModelStatusCode) SetResponse(val ErrorModel) {
 	s.Response = val
 }
 
+// Ref: #/components/schemas/GetDeletionPreviewOutputBody
+type GetDeletionPreviewOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// True when Blockers is non-empty: DELETE /me will be refused with 409.
+	Blocked bool `json:"blocked"`
+	// Resources that must be resolved before deletion (owned orgs).
+	Blockers        []DeletionBlocker `json:"blockers"`
+	WillDelete      WillDeleteStruct  `json:"willDelete"`
+	WillUnlink      WillUnlinkStruct  `json:"willUnlink"`
+	AdditionalProps GetDeletionPreviewOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *GetDeletionPreviewOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetBlocked returns the value of Blocked.
+func (s *GetDeletionPreviewOutputBody) GetBlocked() bool {
+	return s.Blocked
+}
+
+// GetBlockers returns the value of Blockers.
+func (s *GetDeletionPreviewOutputBody) GetBlockers() []DeletionBlocker {
+	return s.Blockers
+}
+
+// GetWillDelete returns the value of WillDelete.
+func (s *GetDeletionPreviewOutputBody) GetWillDelete() WillDeleteStruct {
+	return s.WillDelete
+}
+
+// GetWillUnlink returns the value of WillUnlink.
+func (s *GetDeletionPreviewOutputBody) GetWillUnlink() WillUnlinkStruct {
+	return s.WillUnlink
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GetDeletionPreviewOutputBody) GetAdditionalProps() GetDeletionPreviewOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *GetDeletionPreviewOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetBlocked sets the value of Blocked.
+func (s *GetDeletionPreviewOutputBody) SetBlocked(val bool) {
+	s.Blocked = val
+}
+
+// SetBlockers sets the value of Blockers.
+func (s *GetDeletionPreviewOutputBody) SetBlockers(val []DeletionBlocker) {
+	s.Blockers = val
+}
+
+// SetWillDelete sets the value of WillDelete.
+func (s *GetDeletionPreviewOutputBody) SetWillDelete(val WillDeleteStruct) {
+	s.WillDelete = val
+}
+
+// SetWillUnlink sets the value of WillUnlink.
+func (s *GetDeletionPreviewOutputBody) SetWillUnlink(val WillUnlinkStruct) {
+	s.WillUnlink = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GetDeletionPreviewOutputBody) SetAdditionalProps(val GetDeletionPreviewOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GetDeletionPreviewOutputBodyAdditional map[string]jx.Raw
+
+func (s *GetDeletionPreviewOutputBodyAdditional) init() GetDeletionPreviewOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/GetMeOutputBody
 type GetMeOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema              OptURI                   `json:"$schema"`
-	Auth                MeAuth                   `json:"auth"`
+	Schema OptURI `json:"$schema"`
+	Auth   MeAuth `json:"auth"`
+	// Present only when a deletion is pending; carries the cooldown window.
+	Deletion            OptMeDeletion            `json:"deletion"`
 	Global              MeGlobal                 `json:"global"`
 	Jurisdiction        OptString                `json:"jurisdiction"`
 	Mode                OptGetMeOutputBodyMode   `json:"mode"`
@@ -1367,6 +2477,11 @@ func (s *GetMeOutputBody) GetSchema() OptURI {
 // GetAuth returns the value of Auth.
 func (s *GetMeOutputBody) GetAuth() MeAuth {
 	return s.Auth
+}
+
+// GetDeletion returns the value of Deletion.
+func (s *GetMeOutputBody) GetDeletion() OptMeDeletion {
+	return s.Deletion
 }
 
 // GetGlobal returns the value of Global.
@@ -1407,6 +2522,11 @@ func (s *GetMeOutputBody) SetSchema(val OptURI) {
 // SetAuth sets the value of Auth.
 func (s *GetMeOutputBody) SetAuth(val MeAuth) {
 	s.Auth = val
+}
+
+// SetDeletion sets the value of Deletion.
+func (s *GetMeOutputBody) SetDeletion(val OptMeDeletion) {
+	s.Deletion = val
 }
 
 // SetGlobal sets the value of Global.
@@ -1496,6 +2616,56 @@ func (s *GetMeOutputBodyMode) UnmarshalText(data []byte) error {
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// Ref: #/components/schemas/GetOnboardingStatusOutputBody
+type GetOnboardingStatusOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// True until the account completes web onboarding at least once.
+	NeedsOnboarding bool `json:"needsOnboarding"`
+	AdditionalProps GetOnboardingStatusOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *GetOnboardingStatusOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetNeedsOnboarding returns the value of NeedsOnboarding.
+func (s *GetOnboardingStatusOutputBody) GetNeedsOnboarding() bool {
+	return s.NeedsOnboarding
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GetOnboardingStatusOutputBody) GetAdditionalProps() GetOnboardingStatusOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *GetOnboardingStatusOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetNeedsOnboarding sets the value of NeedsOnboarding.
+func (s *GetOnboardingStatusOutputBody) SetNeedsOnboarding(val bool) {
+	s.NeedsOnboarding = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GetOnboardingStatusOutputBody) SetAdditionalProps(val GetOnboardingStatusOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GetOnboardingStatusOutputBodyAdditional map[string]jx.Raw
+
+func (s *GetOnboardingStatusOutputBodyAdditional) init() GetOnboardingStatusOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // Ref: #/components/schemas/GetPermissionsOutputBody
@@ -1591,6 +2761,256 @@ func (s *GetPermissionsOutputBodyExplain) init() GetPermissionsOutputBodyExplain
 	return m
 }
 
+// Ref: #/components/schemas/GetRepoVisibilityOutputBody
+type GetRepoVisibilityOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI                                `json:"$schema"`
+	Visibility      GetRepoVisibilityOutputBodyVisibility `json:"visibility"`
+	AdditionalProps GetRepoVisibilityOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *GetRepoVisibilityOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetVisibility returns the value of Visibility.
+func (s *GetRepoVisibilityOutputBody) GetVisibility() GetRepoVisibilityOutputBodyVisibility {
+	return s.Visibility
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GetRepoVisibilityOutputBody) GetAdditionalProps() GetRepoVisibilityOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *GetRepoVisibilityOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetVisibility sets the value of Visibility.
+func (s *GetRepoVisibilityOutputBody) SetVisibility(val GetRepoVisibilityOutputBodyVisibility) {
+	s.Visibility = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GetRepoVisibilityOutputBody) SetAdditionalProps(val GetRepoVisibilityOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GetRepoVisibilityOutputBodyAdditional map[string]jx.Raw
+
+func (s *GetRepoVisibilityOutputBodyAdditional) init() GetRepoVisibilityOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type GetRepoVisibilityOutputBodyVisibility string
+
+const (
+	GetRepoVisibilityOutputBodyVisibilityPublic  GetRepoVisibilityOutputBodyVisibility = "public"
+	GetRepoVisibilityOutputBodyVisibilityPrivate GetRepoVisibilityOutputBodyVisibility = "private"
+)
+
+// AllValues returns all GetRepoVisibilityOutputBodyVisibility values.
+func (GetRepoVisibilityOutputBodyVisibility) AllValues() []GetRepoVisibilityOutputBodyVisibility {
+	return []GetRepoVisibilityOutputBodyVisibility{
+		GetRepoVisibilityOutputBodyVisibilityPublic,
+		GetRepoVisibilityOutputBodyVisibilityPrivate,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GetRepoVisibilityOutputBodyVisibility) MarshalText() ([]byte, error) {
+	switch s {
+	case GetRepoVisibilityOutputBodyVisibilityPublic:
+		return []byte(s), nil
+	case GetRepoVisibilityOutputBodyVisibilityPrivate:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GetRepoVisibilityOutputBodyVisibility) UnmarshalText(data []byte) error {
+	switch GetRepoVisibilityOutputBodyVisibility(data) {
+	case GetRepoVisibilityOutputBodyVisibilityPublic:
+		*s = GetRepoVisibilityOutputBodyVisibilityPublic
+		return nil
+	case GetRepoVisibilityOutputBodyVisibilityPrivate:
+		*s = GetRepoVisibilityOutputBodyVisibilityPrivate
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/GetTopologyOutputBody
+type GetTopologyOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI                 `json:"$schema"`
+	Jurisdictions   []TopologyJurisdiction `json:"jurisdictions"`
+	AdditionalProps GetTopologyOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *GetTopologyOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetJurisdictions returns the value of Jurisdictions.
+func (s *GetTopologyOutputBody) GetJurisdictions() []TopologyJurisdiction {
+	return s.Jurisdictions
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GetTopologyOutputBody) GetAdditionalProps() GetTopologyOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *GetTopologyOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetJurisdictions sets the value of Jurisdictions.
+func (s *GetTopologyOutputBody) SetJurisdictions(val []TopologyJurisdiction) {
+	s.Jurisdictions = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GetTopologyOutputBody) SetAdditionalProps(val GetTopologyOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GetTopologyOutputBodyAdditional map[string]jx.Raw
+
+func (s *GetTopologyOutputBodyAdditional) init() GetTopologyOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/GetVersionOutputBody
+type GetVersionOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Server mode.
+	Mode OptGetVersionOutputBodyMode `json:"mode"`
+	// Git commit SHA of the running entire-core binary, or "dev" for an untagged local build.
+	Version         string `json:"version"`
+	AdditionalProps GetVersionOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *GetVersionOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetMode returns the value of Mode.
+func (s *GetVersionOutputBody) GetMode() OptGetVersionOutputBodyMode {
+	return s.Mode
+}
+
+// GetVersion returns the value of Version.
+func (s *GetVersionOutputBody) GetVersion() string {
+	return s.Version
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GetVersionOutputBody) GetAdditionalProps() GetVersionOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *GetVersionOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetMode sets the value of Mode.
+func (s *GetVersionOutputBody) SetMode(val OptGetVersionOutputBodyMode) {
+	s.Mode = val
+}
+
+// SetVersion sets the value of Version.
+func (s *GetVersionOutputBody) SetVersion(val string) {
+	s.Version = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GetVersionOutputBody) SetAdditionalProps(val GetVersionOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GetVersionOutputBodyAdditional map[string]jx.Raw
+
+func (s *GetVersionOutputBodyAdditional) init() GetVersionOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Server mode.
+type GetVersionOutputBodyMode string
+
+const (
+	GetVersionOutputBodyModeStandalone GetVersionOutputBodyMode = "standalone"
+	GetVersionOutputBodyModeGlobal     GetVersionOutputBodyMode = "global"
+	GetVersionOutputBodyModeRegional   GetVersionOutputBodyMode = "regional"
+)
+
+// AllValues returns all GetVersionOutputBodyMode values.
+func (GetVersionOutputBodyMode) AllValues() []GetVersionOutputBodyMode {
+	return []GetVersionOutputBodyMode{
+		GetVersionOutputBodyModeStandalone,
+		GetVersionOutputBodyModeGlobal,
+		GetVersionOutputBodyModeRegional,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GetVersionOutputBodyMode) MarshalText() ([]byte, error) {
+	switch s {
+	case GetVersionOutputBodyModeStandalone:
+		return []byte(s), nil
+	case GetVersionOutputBodyModeGlobal:
+		return []byte(s), nil
+	case GetVersionOutputBodyModeRegional:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GetVersionOutputBodyMode) UnmarshalText(data []byte) error {
+	switch GetVersionOutputBodyMode(data) {
+	case GetVersionOutputBodyModeStandalone:
+		*s = GetVersionOutputBodyModeStandalone
+		return nil
+	case GetVersionOutputBodyModeGlobal:
+		*s = GetVersionOutputBodyModeGlobal
+		return nil
+	case GetVersionOutputBodyModeRegional:
+		*s = GetVersionOutputBodyModeRegional
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/GrantProjectAccessInputBody
 type GrantProjectAccessInputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -1598,7 +3018,7 @@ type GrantProjectAccessInputBody struct {
 	GranteeType     OptGrantProjectAccessInputBodyGranteeType `json:"granteeType"`
 	Provider        string                                    `json:"provider"`
 	ProviderUserId  string                                    `json:"providerUserId"`
-	Role            string                                    `json:"role"`
+	Role            GrantProjectAccessInputBodyRole           `json:"role"`
 	AdditionalProps GrantProjectAccessInputBodyAdditional
 }
 
@@ -1623,7 +3043,7 @@ func (s *GrantProjectAccessInputBody) GetProviderUserId() string {
 }
 
 // GetRole returns the value of Role.
-func (s *GrantProjectAccessInputBody) GetRole() string {
+func (s *GrantProjectAccessInputBody) GetRole() GrantProjectAccessInputBodyRole {
 	return s.Role
 }
 
@@ -1653,7 +3073,7 @@ func (s *GrantProjectAccessInputBody) SetProviderUserId(val string) {
 }
 
 // SetRole sets the value of Role.
-func (s *GrantProjectAccessInputBody) SetRole(val string) {
+func (s *GrantProjectAccessInputBody) SetRole(val GrantProjectAccessInputBodyRole) {
 	s.Role = val
 }
 
@@ -1677,16 +3097,12 @@ type GrantProjectAccessInputBodyGranteeType string
 
 const (
 	GrantProjectAccessInputBodyGranteeTypeAccount GrantProjectAccessInputBodyGranteeType = "account"
-	GrantProjectAccessInputBodyGranteeTypeOrg     GrantProjectAccessInputBodyGranteeType = "org"
-	GrantProjectAccessInputBodyGranteeTypeTeam    GrantProjectAccessInputBodyGranteeType = "team"
 )
 
 // AllValues returns all GrantProjectAccessInputBodyGranteeType values.
 func (GrantProjectAccessInputBodyGranteeType) AllValues() []GrantProjectAccessInputBodyGranteeType {
 	return []GrantProjectAccessInputBodyGranteeType{
 		GrantProjectAccessInputBodyGranteeTypeAccount,
-		GrantProjectAccessInputBodyGranteeTypeOrg,
-		GrantProjectAccessInputBodyGranteeTypeTeam,
 	}
 }
 
@@ -1694,10 +3110,6 @@ func (GrantProjectAccessInputBodyGranteeType) AllValues() []GrantProjectAccessIn
 func (s GrantProjectAccessInputBodyGranteeType) MarshalText() ([]byte, error) {
 	switch s {
 	case GrantProjectAccessInputBodyGranteeTypeAccount:
-		return []byte(s), nil
-	case GrantProjectAccessInputBodyGranteeTypeOrg:
-		return []byte(s), nil
-	case GrantProjectAccessInputBodyGranteeTypeTeam:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -1710,11 +3122,53 @@ func (s *GrantProjectAccessInputBodyGranteeType) UnmarshalText(data []byte) erro
 	case GrantProjectAccessInputBodyGranteeTypeAccount:
 		*s = GrantProjectAccessInputBodyGranteeTypeAccount
 		return nil
-	case GrantProjectAccessInputBodyGranteeTypeOrg:
-		*s = GrantProjectAccessInputBodyGranteeTypeOrg
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type GrantProjectAccessInputBodyRole string
+
+const (
+	GrantProjectAccessInputBodyRoleReader GrantProjectAccessInputBodyRole = "reader"
+	GrantProjectAccessInputBodyRoleWriter GrantProjectAccessInputBodyRole = "writer"
+	GrantProjectAccessInputBodyRoleAdmin  GrantProjectAccessInputBodyRole = "admin"
+)
+
+// AllValues returns all GrantProjectAccessInputBodyRole values.
+func (GrantProjectAccessInputBodyRole) AllValues() []GrantProjectAccessInputBodyRole {
+	return []GrantProjectAccessInputBodyRole{
+		GrantProjectAccessInputBodyRoleReader,
+		GrantProjectAccessInputBodyRoleWriter,
+		GrantProjectAccessInputBodyRoleAdmin,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GrantProjectAccessInputBodyRole) MarshalText() ([]byte, error) {
+	switch s {
+	case GrantProjectAccessInputBodyRoleReader:
+		return []byte(s), nil
+	case GrantProjectAccessInputBodyRoleWriter:
+		return []byte(s), nil
+	case GrantProjectAccessInputBodyRoleAdmin:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GrantProjectAccessInputBodyRole) UnmarshalText(data []byte) error {
+	switch GrantProjectAccessInputBodyRole(data) {
+	case GrantProjectAccessInputBodyRoleReader:
+		*s = GrantProjectAccessInputBodyRoleReader
 		return nil
-	case GrantProjectAccessInputBodyGranteeTypeTeam:
-		*s = GrantProjectAccessInputBodyGranteeTypeTeam
+	case GrantProjectAccessInputBodyRoleWriter:
+		*s = GrantProjectAccessInputBodyRoleWriter
+		return nil
+	case GrantProjectAccessInputBodyRoleAdmin:
+		*s = GrantProjectAccessInputBodyRoleAdmin
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -1777,7 +3231,7 @@ type GrantRepoAccessInputBody struct {
 	GranteeType     OptGrantRepoAccessInputBodyGranteeType `json:"granteeType"`
 	Provider        string                                 `json:"provider"`
 	ProviderUserId  string                                 `json:"providerUserId"`
-	Role            string                                 `json:"role"`
+	Role            GrantRepoAccessInputBodyRole           `json:"role"`
 	AdditionalProps GrantRepoAccessInputBodyAdditional
 }
 
@@ -1802,7 +3256,7 @@ func (s *GrantRepoAccessInputBody) GetProviderUserId() string {
 }
 
 // GetRole returns the value of Role.
-func (s *GrantRepoAccessInputBody) GetRole() string {
+func (s *GrantRepoAccessInputBody) GetRole() GrantRepoAccessInputBodyRole {
 	return s.Role
 }
 
@@ -1832,7 +3286,7 @@ func (s *GrantRepoAccessInputBody) SetProviderUserId(val string) {
 }
 
 // SetRole sets the value of Role.
-func (s *GrantRepoAccessInputBody) SetRole(val string) {
+func (s *GrantRepoAccessInputBody) SetRole(val GrantRepoAccessInputBodyRole) {
 	s.Role = val
 }
 
@@ -1856,16 +3310,12 @@ type GrantRepoAccessInputBodyGranteeType string
 
 const (
 	GrantRepoAccessInputBodyGranteeTypeAccount GrantRepoAccessInputBodyGranteeType = "account"
-	GrantRepoAccessInputBodyGranteeTypeOrg     GrantRepoAccessInputBodyGranteeType = "org"
-	GrantRepoAccessInputBodyGranteeTypeTeam    GrantRepoAccessInputBodyGranteeType = "team"
 )
 
 // AllValues returns all GrantRepoAccessInputBodyGranteeType values.
 func (GrantRepoAccessInputBodyGranteeType) AllValues() []GrantRepoAccessInputBodyGranteeType {
 	return []GrantRepoAccessInputBodyGranteeType{
 		GrantRepoAccessInputBodyGranteeTypeAccount,
-		GrantRepoAccessInputBodyGranteeTypeOrg,
-		GrantRepoAccessInputBodyGranteeTypeTeam,
 	}
 }
 
@@ -1873,10 +3323,6 @@ func (GrantRepoAccessInputBodyGranteeType) AllValues() []GrantRepoAccessInputBod
 func (s GrantRepoAccessInputBodyGranteeType) MarshalText() ([]byte, error) {
 	switch s {
 	case GrantRepoAccessInputBodyGranteeTypeAccount:
-		return []byte(s), nil
-	case GrantRepoAccessInputBodyGranteeTypeOrg:
-		return []byte(s), nil
-	case GrantRepoAccessInputBodyGranteeTypeTeam:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -1889,11 +3335,60 @@ func (s *GrantRepoAccessInputBodyGranteeType) UnmarshalText(data []byte) error {
 	case GrantRepoAccessInputBodyGranteeTypeAccount:
 		*s = GrantRepoAccessInputBodyGranteeTypeAccount
 		return nil
-	case GrantRepoAccessInputBodyGranteeTypeOrg:
-		*s = GrantRepoAccessInputBodyGranteeTypeOrg
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type GrantRepoAccessInputBodyRole string
+
+const (
+	GrantRepoAccessInputBodyRoleReader    GrantRepoAccessInputBodyRole = "reader"
+	GrantRepoAccessInputBodyRoleWriter    GrantRepoAccessInputBodyRole = "writer"
+	GrantRepoAccessInputBodyRoleAdmin     GrantRepoAccessInputBodyRole = "admin"
+	GrantRepoAccessInputBodyRoleCiManager GrantRepoAccessInputBodyRole = "ci_manager"
+)
+
+// AllValues returns all GrantRepoAccessInputBodyRole values.
+func (GrantRepoAccessInputBodyRole) AllValues() []GrantRepoAccessInputBodyRole {
+	return []GrantRepoAccessInputBodyRole{
+		GrantRepoAccessInputBodyRoleReader,
+		GrantRepoAccessInputBodyRoleWriter,
+		GrantRepoAccessInputBodyRoleAdmin,
+		GrantRepoAccessInputBodyRoleCiManager,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GrantRepoAccessInputBodyRole) MarshalText() ([]byte, error) {
+	switch s {
+	case GrantRepoAccessInputBodyRoleReader:
+		return []byte(s), nil
+	case GrantRepoAccessInputBodyRoleWriter:
+		return []byte(s), nil
+	case GrantRepoAccessInputBodyRoleAdmin:
+		return []byte(s), nil
+	case GrantRepoAccessInputBodyRoleCiManager:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GrantRepoAccessInputBodyRole) UnmarshalText(data []byte) error {
+	switch GrantRepoAccessInputBodyRole(data) {
+	case GrantRepoAccessInputBodyRoleReader:
+		*s = GrantRepoAccessInputBodyRoleReader
 		return nil
-	case GrantRepoAccessInputBodyGranteeTypeTeam:
-		*s = GrantRepoAccessInputBodyGranteeTypeTeam
+	case GrantRepoAccessInputBodyRoleWriter:
+		*s = GrantRepoAccessInputBodyRoleWriter
+		return nil
+	case GrantRepoAccessInputBodyRoleAdmin:
+		*s = GrantRepoAccessInputBodyRoleAdmin
+		return nil
+	case GrantRepoAccessInputBodyRoleCiManager:
+		*s = GrantRepoAccessInputBodyRoleCiManager
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -1955,7 +3450,7 @@ type GrantServiceAccountAccessInputBody struct {
 	Schema          OptURI                                         `json:"$schema"`
 	ResourceId      string                                         `json:"resourceId"`
 	ResourceType    GrantServiceAccountAccessInputBodyResourceType `json:"resourceType"`
-	Role            string                                         `json:"role"`
+	Role            GrantServiceAccountAccessInputBodyRole         `json:"role"`
 	AdditionalProps GrantServiceAccountAccessInputBodyAdditional
 }
 
@@ -1975,7 +3470,7 @@ func (s *GrantServiceAccountAccessInputBody) GetResourceType() GrantServiceAccou
 }
 
 // GetRole returns the value of Role.
-func (s *GrantServiceAccountAccessInputBody) GetRole() string {
+func (s *GrantServiceAccountAccessInputBody) GetRole() GrantServiceAccountAccessInputBodyRole {
 	return s.Role
 }
 
@@ -2000,7 +3495,7 @@ func (s *GrantServiceAccountAccessInputBody) SetResourceType(val GrantServiceAcc
 }
 
 // SetRole sets the value of Role.
-func (s *GrantServiceAccountAccessInputBody) SetRole(val string) {
+func (s *GrantServiceAccountAccessInputBody) SetRole(val GrantServiceAccountAccessInputBodyRole) {
 	s.Role = val
 }
 
@@ -2061,6 +3556,54 @@ func (s *GrantServiceAccountAccessInputBodyResourceType) UnmarshalText(data []by
 	}
 }
 
+type GrantServiceAccountAccessInputBodyRole string
+
+const (
+	GrantServiceAccountAccessInputBodyRoleReader GrantServiceAccountAccessInputBodyRole = "reader"
+	GrantServiceAccountAccessInputBodyRoleWriter GrantServiceAccountAccessInputBodyRole = "writer"
+	GrantServiceAccountAccessInputBodyRoleAdmin  GrantServiceAccountAccessInputBodyRole = "admin"
+)
+
+// AllValues returns all GrantServiceAccountAccessInputBodyRole values.
+func (GrantServiceAccountAccessInputBodyRole) AllValues() []GrantServiceAccountAccessInputBodyRole {
+	return []GrantServiceAccountAccessInputBodyRole{
+		GrantServiceAccountAccessInputBodyRoleReader,
+		GrantServiceAccountAccessInputBodyRoleWriter,
+		GrantServiceAccountAccessInputBodyRoleAdmin,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GrantServiceAccountAccessInputBodyRole) MarshalText() ([]byte, error) {
+	switch s {
+	case GrantServiceAccountAccessInputBodyRoleReader:
+		return []byte(s), nil
+	case GrantServiceAccountAccessInputBodyRoleWriter:
+		return []byte(s), nil
+	case GrantServiceAccountAccessInputBodyRoleAdmin:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GrantServiceAccountAccessInputBodyRole) UnmarshalText(data []byte) error {
+	switch GrantServiceAccountAccessInputBodyRole(data) {
+	case GrantServiceAccountAccessInputBodyRoleReader:
+		*s = GrantServiceAccountAccessInputBodyRoleReader
+		return nil
+	case GrantServiceAccountAccessInputBodyRoleWriter:
+		*s = GrantServiceAccountAccessInputBodyRoleWriter
+		return nil
+	case GrantServiceAccountAccessInputBodyRoleAdmin:
+		*s = GrantServiceAccountAccessInputBodyRoleAdmin
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/GrantServiceAccountAccessOutputBody
 type GrantServiceAccountAccessOutputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -2113,8 +3656,10 @@ func (s *GrantServiceAccountAccessOutputBodyAdditional) init() GrantServiceAccou
 // Ref: #/components/schemas/ListAuditEventsOutputBody
 type ListAuditEventsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI       `json:"$schema"`
-	Events          []AuditEvent `json:"events"`
+	Schema OptURI       `json:"$schema"`
+	Events []AuditEvent `json:"events"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListAuditEventsOutputBodyAdditional
 }
 
@@ -2126,6 +3671,11 @@ func (s *ListAuditEventsOutputBody) GetSchema() OptURI {
 // GetEvents returns the value of Events.
 func (s *ListAuditEventsOutputBody) GetEvents() []AuditEvent {
 	return s.Events
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListAuditEventsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -2141,6 +3691,11 @@ func (s *ListAuditEventsOutputBody) SetSchema(val OptURI) {
 // SetEvents sets the value of Events.
 func (s *ListAuditEventsOutputBody) SetEvents(val []AuditEvent) {
 	s.Events = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListAuditEventsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -2159,11 +3714,62 @@ func (s *ListAuditEventsOutputBodyAdditional) init() ListAuditEventsOutputBodyAd
 	return m
 }
 
+// Ref: #/components/schemas/ListAvailableMirrorsOutputBody
+type ListAvailableMirrorsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI            `json:"$schema"`
+	Available       []AvailableMirror `json:"available"`
+	AdditionalProps ListAvailableMirrorsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListAvailableMirrorsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAvailable returns the value of Available.
+func (s *ListAvailableMirrorsOutputBody) GetAvailable() []AvailableMirror {
+	return s.Available
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListAvailableMirrorsOutputBody) GetAdditionalProps() ListAvailableMirrorsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListAvailableMirrorsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAvailable sets the value of Available.
+func (s *ListAvailableMirrorsOutputBody) SetAvailable(val []AvailableMirror) {
+	s.Available = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListAvailableMirrorsOutputBody) SetAdditionalProps(val ListAvailableMirrorsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListAvailableMirrorsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListAvailableMirrorsOutputBodyAdditional) init() ListAvailableMirrorsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListBindingsOutputBody
 type ListBindingsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI    `json:"$schema"`
-	Bindings        []Binding `json:"bindings"`
+	Schema   OptURI    `json:"$schema"`
+	Bindings []Binding `json:"bindings"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListBindingsOutputBodyAdditional
 }
 
@@ -2175,6 +3781,11 @@ func (s *ListBindingsOutputBody) GetSchema() OptURI {
 // GetBindings returns the value of Bindings.
 func (s *ListBindingsOutputBody) GetBindings() []Binding {
 	return s.Bindings
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListBindingsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -2190,6 +3801,11 @@ func (s *ListBindingsOutputBody) SetSchema(val OptURI) {
 // SetBindings sets the value of Bindings.
 func (s *ListBindingsOutputBody) SetBindings(val []Binding) {
 	s.Bindings = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListBindingsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -2208,11 +3824,145 @@ func (s *ListBindingsOutputBodyAdditional) init() ListBindingsOutputBodyAddition
 	return m
 }
 
+// Ref: #/components/schemas/ListClustersOutputBody
+type ListClustersOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI    `json:"$schema"`
+	Clusters        []Cluster `json:"clusters"`
+	AdditionalProps ListClustersOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListClustersOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetClusters returns the value of Clusters.
+func (s *ListClustersOutputBody) GetClusters() []Cluster {
+	return s.Clusters
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListClustersOutputBody) GetAdditionalProps() ListClustersOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListClustersOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetClusters sets the value of Clusters.
+func (s *ListClustersOutputBody) SetClusters(val []Cluster) {
+	s.Clusters = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListClustersOutputBody) SetAdditionalProps(val ListClustersOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListClustersOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListClustersOutputBodyAdditional) init() ListClustersOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ListMirrorCollaboratorsOutputBody
+type ListMirrorCollaboratorsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI               `json:"$schema"`
+	Collaborators   []MirrorCollaborator `json:"collaborators"`
+	AdditionalProps ListMirrorCollaboratorsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListMirrorCollaboratorsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetCollaborators returns the value of Collaborators.
+func (s *ListMirrorCollaboratorsOutputBody) GetCollaborators() []MirrorCollaborator {
+	return s.Collaborators
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListMirrorCollaboratorsOutputBody) GetAdditionalProps() ListMirrorCollaboratorsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListMirrorCollaboratorsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetCollaborators sets the value of Collaborators.
+func (s *ListMirrorCollaboratorsOutputBody) SetCollaborators(val []MirrorCollaborator) {
+	s.Collaborators = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListMirrorCollaboratorsOutputBody) SetAdditionalProps(val ListMirrorCollaboratorsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListMirrorCollaboratorsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListMirrorCollaboratorsOutputBodyAdditional) init() ListMirrorCollaboratorsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type ListMirrorCollaboratorsProvider string
+
+const (
+	ListMirrorCollaboratorsProviderGithub ListMirrorCollaboratorsProvider = "github"
+)
+
+// AllValues returns all ListMirrorCollaboratorsProvider values.
+func (ListMirrorCollaboratorsProvider) AllValues() []ListMirrorCollaboratorsProvider {
+	return []ListMirrorCollaboratorsProvider{
+		ListMirrorCollaboratorsProviderGithub,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListMirrorCollaboratorsProvider) MarshalText() ([]byte, error) {
+	switch s {
+	case ListMirrorCollaboratorsProviderGithub:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListMirrorCollaboratorsProvider) UnmarshalText(data []byte) error {
+	switch ListMirrorCollaboratorsProvider(data) {
+	case ListMirrorCollaboratorsProviderGithub:
+		*s = ListMirrorCollaboratorsProviderGithub
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/ListMirrorsOutputBody
 type ListMirrorsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI   `json:"$schema"`
-	Mirrors         []Mirror `json:"mirrors"`
+	Schema  OptURI   `json:"$schema"`
+	Mirrors []Mirror `json:"mirrors"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListMirrorsOutputBodyAdditional
 }
 
@@ -2224,6 +3974,11 @@ func (s *ListMirrorsOutputBody) GetSchema() OptURI {
 // GetMirrors returns the value of Mirrors.
 func (s *ListMirrorsOutputBody) GetMirrors() []Mirror {
 	return s.Mirrors
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListMirrorsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -2239,6 +3994,11 @@ func (s *ListMirrorsOutputBody) SetSchema(val OptURI) {
 // SetMirrors sets the value of Mirrors.
 func (s *ListMirrorsOutputBody) SetMirrors(val []Mirror) {
 	s.Mirrors = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListMirrorsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -2260,7 +4020,9 @@ func (s *ListMirrorsOutputBodyAdditional) init() ListMirrorsOutputBodyAdditional
 // Ref: #/components/schemas/ListOIDCProvidersOutputBody
 type ListOIDCProvidersOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI         `json:"$schema"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString      `json:"nextPageToken"`
 	Providers       []OIDCProvider `json:"providers"`
 	AdditionalProps ListOIDCProvidersOutputBodyAdditional
 }
@@ -2268,6 +4030,11 @@ type ListOIDCProvidersOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *ListOIDCProvidersOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListOIDCProvidersOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetProviders returns the value of Providers.
@@ -2283,6 +4050,11 @@ func (s *ListOIDCProvidersOutputBody) GetAdditionalProps() ListOIDCProvidersOutp
 // SetSchema sets the value of Schema.
 func (s *ListOIDCProvidersOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListOIDCProvidersOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetProviders sets the value of Providers.
@@ -2309,8 +4081,10 @@ func (s *ListOIDCProvidersOutputBodyAdditional) init() ListOIDCProvidersOutputBo
 // Ref: #/components/schemas/ListOrgMembersOutputBody
 type ListOrgMembersOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI       `json:"$schema"`
-	Members         []Membership `json:"members"`
+	Schema  OptURI       `json:"$schema"`
+	Members []Membership `json:"members"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListOrgMembersOutputBodyAdditional
 }
 
@@ -2322,6 +4096,11 @@ func (s *ListOrgMembersOutputBody) GetSchema() OptURI {
 // GetMembers returns the value of Members.
 func (s *ListOrgMembersOutputBody) GetMembers() []Membership {
 	return s.Members
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListOrgMembersOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -2337,6 +4116,11 @@ func (s *ListOrgMembersOutputBody) SetSchema(val OptURI) {
 // SetMembers sets the value of Members.
 func (s *ListOrgMembersOutputBody) SetMembers(val []Membership) {
 	s.Members = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListOrgMembersOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -2358,14 +4142,27 @@ func (s *ListOrgMembersOutputBodyAdditional) init() ListOrgMembersOutputBodyAddi
 // Ref: #/components/schemas/ListOrgProjectsOutputBody
 type ListOrgProjectsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI    `json:"$schema"`
-	Projects        []Project `json:"projects"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString  `json:"nextPageToken"`
+	Project         OptProject `json:"project"`
+	Projects        []Project  `json:"projects"`
 	AdditionalProps ListOrgProjectsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
 func (s *ListOrgProjectsOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListOrgProjectsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
+}
+
+// GetProject returns the value of Project.
+func (s *ListOrgProjectsOutputBody) GetProject() OptProject {
+	return s.Project
 }
 
 // GetProjects returns the value of Projects.
@@ -2381,6 +4178,16 @@ func (s *ListOrgProjectsOutputBody) GetAdditionalProps() ListOrgProjectsOutputBo
 // SetSchema sets the value of Schema.
 func (s *ListOrgProjectsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListOrgProjectsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
+}
+
+// SetProject sets the value of Project.
+func (s *ListOrgProjectsOutputBody) SetProject(val OptProject) {
+	s.Project = val
 }
 
 // SetProjects sets the value of Projects.
@@ -2407,14 +4214,27 @@ func (s *ListOrgProjectsOutputBodyAdditional) init() ListOrgProjectsOutputBodyAd
 // Ref: #/components/schemas/ListOrgsOutputBody
 type ListOrgsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI `json:"$schema"`
-	Orgs            []Org  `json:"orgs"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
+	Org             OptOrg    `json:"org"`
+	Orgs            []Org     `json:"orgs"`
 	AdditionalProps ListOrgsOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
 func (s *ListOrgsOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListOrgsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
+}
+
+// GetOrg returns the value of Org.
+func (s *ListOrgsOutputBody) GetOrg() OptOrg {
+	return s.Org
 }
 
 // GetOrgs returns the value of Orgs.
@@ -2430,6 +4250,16 @@ func (s *ListOrgsOutputBody) GetAdditionalProps() ListOrgsOutputBodyAdditional {
 // SetSchema sets the value of Schema.
 func (s *ListOrgsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListOrgsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
+}
+
+// SetOrg sets the value of Org.
+func (s *ListOrgsOutputBody) SetOrg(val OptOrg) {
+	s.Org = val
 }
 
 // SetOrgs sets the value of Orgs.
@@ -2453,11 +4283,61 @@ func (s *ListOrgsOutputBodyAdditional) init() ListOrgsOutputBodyAdditional {
 	return m
 }
 
+// ListOrgsOutputBodyHeaders wraps ListOrgsOutputBody with response headers.
+type ListOrgsOutputBodyHeaders struct {
+	CacheControl OptString
+	ETag         OptString
+	Vary         OptString
+	Response     ListOrgsOutputBody
+}
+
+// GetCacheControl returns the value of CacheControl.
+func (s *ListOrgsOutputBodyHeaders) GetCacheControl() OptString {
+	return s.CacheControl
+}
+
+// GetETag returns the value of ETag.
+func (s *ListOrgsOutputBodyHeaders) GetETag() OptString {
+	return s.ETag
+}
+
+// GetVary returns the value of Vary.
+func (s *ListOrgsOutputBodyHeaders) GetVary() OptString {
+	return s.Vary
+}
+
+// GetResponse returns the value of Response.
+func (s *ListOrgsOutputBodyHeaders) GetResponse() ListOrgsOutputBody {
+	return s.Response
+}
+
+// SetCacheControl sets the value of CacheControl.
+func (s *ListOrgsOutputBodyHeaders) SetCacheControl(val OptString) {
+	s.CacheControl = val
+}
+
+// SetETag sets the value of ETag.
+func (s *ListOrgsOutputBodyHeaders) SetETag(val OptString) {
+	s.ETag = val
+}
+
+// SetVary sets the value of Vary.
+func (s *ListOrgsOutputBodyHeaders) SetVary(val OptString) {
+	s.Vary = val
+}
+
+// SetResponse sets the value of Response.
+func (s *ListOrgsOutputBodyHeaders) SetResponse(val ListOrgsOutputBody) {
+	s.Response = val
+}
+
 // Ref: #/components/schemas/ListProjectMembersOutputBody
 type ListProjectMembersOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI         `json:"$schema"`
-	Members         []ProjectGrant `json:"members"`
+	Schema  OptURI         `json:"$schema"`
+	Members []ProjectGrant `json:"members"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListProjectMembersOutputBodyAdditional
 }
 
@@ -2469,6 +4349,11 @@ func (s *ListProjectMembersOutputBody) GetSchema() OptURI {
 // GetMembers returns the value of Members.
 func (s *ListProjectMembersOutputBody) GetMembers() []ProjectGrant {
 	return s.Members
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListProjectMembersOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -2484,6 +4369,11 @@ func (s *ListProjectMembersOutputBody) SetSchema(val OptURI) {
 // SetMembers sets the value of Members.
 func (s *ListProjectMembersOutputBody) SetMembers(val []ProjectGrant) {
 	s.Members = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListProjectMembersOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -2505,14 +4395,27 @@ func (s *ListProjectMembersOutputBodyAdditional) init() ListProjectMembersOutput
 // Ref: #/components/schemas/ListProjectReposOutputBody
 type ListProjectReposOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI `json:"$schema"`
-	Repos           []Repo `json:"repos"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
+	Repo            OptRepo   `json:"repo"`
+	Repos           []Repo    `json:"repos"`
 	AdditionalProps ListProjectReposOutputBodyAdditional
 }
 
 // GetSchema returns the value of Schema.
 func (s *ListProjectReposOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListProjectReposOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
+}
+
+// GetRepo returns the value of Repo.
+func (s *ListProjectReposOutputBody) GetRepo() OptRepo {
+	return s.Repo
 }
 
 // GetRepos returns the value of Repos.
@@ -2528,6 +4431,16 @@ func (s *ListProjectReposOutputBody) GetAdditionalProps() ListProjectReposOutput
 // SetSchema sets the value of Schema.
 func (s *ListProjectReposOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListProjectReposOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
+}
+
+// SetRepo sets the value of Repo.
+func (s *ListProjectReposOutputBody) SetRepo(val OptRepo) {
+	s.Repo = val
 }
 
 // SetRepos sets the value of Repos.
@@ -2554,7 +4467,9 @@ func (s *ListProjectReposOutputBodyAdditional) init() ListProjectReposOutputBody
 // Ref: #/components/schemas/ListProjectsOutputBody
 type ListProjectsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI     `json:"$schema"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString  `json:"nextPageToken"`
 	Project         OptProject `json:"project"`
 	Projects        []Project  `json:"projects"`
 	AdditionalProps ListProjectsOutputBodyAdditional
@@ -2563,6 +4478,11 @@ type ListProjectsOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *ListProjectsOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListProjectsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetProject returns the value of Project.
@@ -2583,6 +4503,11 @@ func (s *ListProjectsOutputBody) GetAdditionalProps() ListProjectsOutputBodyAddi
 // SetSchema sets the value of Schema.
 func (s *ListProjectsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListProjectsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetProject sets the value of Project.
@@ -2611,11 +4536,237 @@ func (s *ListProjectsOutputBodyAdditional) init() ListProjectsOutputBodyAddition
 	return m
 }
 
+// Ref: #/components/schemas/ListRepoCIWebhooksOutputBody
+type ListRepoCIWebhooksOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI          `json:"$schema"`
+	Subscriptions   []CIWebhookView `json:"subscriptions"`
+	AdditionalProps ListRepoCIWebhooksOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListRepoCIWebhooksOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetSubscriptions returns the value of Subscriptions.
+func (s *ListRepoCIWebhooksOutputBody) GetSubscriptions() []CIWebhookView {
+	return s.Subscriptions
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListRepoCIWebhooksOutputBody) GetAdditionalProps() ListRepoCIWebhooksOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListRepoCIWebhooksOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetSubscriptions sets the value of Subscriptions.
+func (s *ListRepoCIWebhooksOutputBody) SetSubscriptions(val []CIWebhookView) {
+	s.Subscriptions = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListRepoCIWebhooksOutputBody) SetAdditionalProps(val ListRepoCIWebhooksOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListRepoCIWebhooksOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListRepoCIWebhooksOutputBodyAdditional) init() ListRepoCIWebhooksOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ListRepoGrantsOutputBody
+type ListRepoGrantsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI      `json:"$schema"`
+	Grants []RepoGrant `json:"grants"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
+	AdditionalProps ListRepoGrantsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListRepoGrantsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetGrants returns the value of Grants.
+func (s *ListRepoGrantsOutputBody) GetGrants() []RepoGrant {
+	return s.Grants
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListRepoGrantsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListRepoGrantsOutputBody) GetAdditionalProps() ListRepoGrantsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListRepoGrantsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetGrants sets the value of Grants.
+func (s *ListRepoGrantsOutputBody) SetGrants(val []RepoGrant) {
+	s.Grants = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListRepoGrantsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListRepoGrantsOutputBody) SetAdditionalProps(val ListRepoGrantsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListRepoGrantsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListRepoGrantsOutputBodyAdditional) init() ListRepoGrantsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ListReposOutputBody
+type ListReposOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString        `json:"nextPageToken"`
+	Repos           []RepoIndexEntry `json:"repos"`
+	Truncated       bool             `json:"truncated"`
+	AdditionalProps ListReposOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListReposOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListReposOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
+}
+
+// GetRepos returns the value of Repos.
+func (s *ListReposOutputBody) GetRepos() []RepoIndexEntry {
+	return s.Repos
+}
+
+// GetTruncated returns the value of Truncated.
+func (s *ListReposOutputBody) GetTruncated() bool {
+	return s.Truncated
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListReposOutputBody) GetAdditionalProps() ListReposOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListReposOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListReposOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
+}
+
+// SetRepos sets the value of Repos.
+func (s *ListReposOutputBody) SetRepos(val []RepoIndexEntry) {
+	s.Repos = val
+}
+
+// SetTruncated sets the value of Truncated.
+func (s *ListReposOutputBody) SetTruncated(val bool) {
+	s.Truncated = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListReposOutputBody) SetAdditionalProps(val ListReposOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListReposOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListReposOutputBodyAdditional) init() ListReposOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Onboarded (default): repos in Entire; all: also include onboardable GitHub candidates.
+type ListReposScope string
+
+const (
+	ListReposScopeOnboarded ListReposScope = "onboarded"
+	ListReposScopeAll       ListReposScope = "all"
+)
+
+// AllValues returns all ListReposScope values.
+func (ListReposScope) AllValues() []ListReposScope {
+	return []ListReposScope{
+		ListReposScopeOnboarded,
+		ListReposScopeAll,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListReposScope) MarshalText() ([]byte, error) {
+	switch s {
+	case ListReposScopeOnboarded:
+		return []byte(s), nil
+	case ListReposScopeAll:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListReposScope) UnmarshalText(data []byte) error {
+	switch ListReposScope(data) {
+	case ListReposScopeOnboarded:
+		*s = ListReposScopeOnboarded
+		return nil
+	case ListReposScopeAll:
+		*s = ListReposScopeAll
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/ListServiceAccountGrantsOutputBody
 type ListServiceAccountGrantsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI                `json:"$schema"`
-	Grants          []ServiceAccountGrant `json:"grants"`
+	Schema OptURI                `json:"$schema"`
+	Grants []ServiceAccountGrant `json:"grants"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListServiceAccountGrantsOutputBodyAdditional
 }
 
@@ -2627,6 +4778,11 @@ func (s *ListServiceAccountGrantsOutputBody) GetSchema() OptURI {
 // GetGrants returns the value of Grants.
 func (s *ListServiceAccountGrantsOutputBody) GetGrants() []ServiceAccountGrant {
 	return s.Grants
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListServiceAccountGrantsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -2642,6 +4798,11 @@ func (s *ListServiceAccountGrantsOutputBody) SetSchema(val OptURI) {
 // SetGrants sets the value of Grants.
 func (s *ListServiceAccountGrantsOutputBody) SetGrants(val []ServiceAccountGrant) {
 	s.Grants = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListServiceAccountGrantsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -2663,7 +4824,9 @@ func (s *ListServiceAccountGrantsOutputBodyAdditional) init() ListServiceAccount
 // Ref: #/components/schemas/ListServiceAccountsOutputBody
 type ListServiceAccountsOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI                     `json:"$schema"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString                  `json:"nextPageToken"`
 	ServiceAccounts []ServiceAccountWithGrants `json:"serviceAccounts"`
 	AdditionalProps ListServiceAccountsOutputBodyAdditional
 }
@@ -2671,6 +4834,11 @@ type ListServiceAccountsOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *ListServiceAccountsOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListServiceAccountsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetServiceAccounts returns the value of ServiceAccounts.
@@ -2688,6 +4856,11 @@ func (s *ListServiceAccountsOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
 }
 
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListServiceAccountsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
+}
+
 // SetServiceAccounts sets the value of ServiceAccounts.
 func (s *ListServiceAccountsOutputBody) SetServiceAccounts(val []ServiceAccountWithGrants) {
 	s.ServiceAccounts = val
@@ -2701,6 +4874,99 @@ func (s *ListServiceAccountsOutputBody) SetAdditionalProps(val ListServiceAccoun
 type ListServiceAccountsOutputBodyAdditional map[string]jx.Raw
 
 func (s *ListServiceAccountsOutputBodyAdditional) init() ListServiceAccountsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/LookupBySlugOutputBody
+type LookupBySlugOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI `json:"$schema"`
+	Cell            string `json:"cell"`
+	Jurisdiction    string `json:"jurisdiction"`
+	Owner           string `json:"owner"`
+	Repo            string `json:"repo"`
+	RepoId          string `json:"repoId"`
+	AdditionalProps LookupBySlugOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *LookupBySlugOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetCell returns the value of Cell.
+func (s *LookupBySlugOutputBody) GetCell() string {
+	return s.Cell
+}
+
+// GetJurisdiction returns the value of Jurisdiction.
+func (s *LookupBySlugOutputBody) GetJurisdiction() string {
+	return s.Jurisdiction
+}
+
+// GetOwner returns the value of Owner.
+func (s *LookupBySlugOutputBody) GetOwner() string {
+	return s.Owner
+}
+
+// GetRepo returns the value of Repo.
+func (s *LookupBySlugOutputBody) GetRepo() string {
+	return s.Repo
+}
+
+// GetRepoId returns the value of RepoId.
+func (s *LookupBySlugOutputBody) GetRepoId() string {
+	return s.RepoId
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *LookupBySlugOutputBody) GetAdditionalProps() LookupBySlugOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *LookupBySlugOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetCell sets the value of Cell.
+func (s *LookupBySlugOutputBody) SetCell(val string) {
+	s.Cell = val
+}
+
+// SetJurisdiction sets the value of Jurisdiction.
+func (s *LookupBySlugOutputBody) SetJurisdiction(val string) {
+	s.Jurisdiction = val
+}
+
+// SetOwner sets the value of Owner.
+func (s *LookupBySlugOutputBody) SetOwner(val string) {
+	s.Owner = val
+}
+
+// SetRepo sets the value of Repo.
+func (s *LookupBySlugOutputBody) SetRepo(val string) {
+	s.Repo = val
+}
+
+// SetRepoId sets the value of RepoId.
+func (s *LookupBySlugOutputBody) SetRepoId(val string) {
+	s.RepoId = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *LookupBySlugOutputBody) SetAdditionalProps(val LookupBySlugOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type LookupBySlugOutputBodyAdditional map[string]jx.Raw
+
+func (s *LookupBySlugOutputBodyAdditional) init() LookupBySlugOutputBodyAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
@@ -2905,7 +5171,9 @@ func (s *LookupRefResultOwnerType) UnmarshalText(data []byte) error {
 // Ref: #/components/schemas/LookupResourcesOutputBody
 type LookupResourcesOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI           `json:"$schema"`
+	Schema OptURI `json:"$schema"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString        `json:"nextPageToken"`
 	Permission      OptString        `json:"permission"`
 	ResourceIds     []string         `json:"resourceIds"`
 	ResourceType    string           `json:"resourceType"`
@@ -2916,6 +5184,11 @@ type LookupResourcesOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *LookupResourcesOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *LookupResourcesOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
 }
 
 // GetPermission returns the value of Permission.
@@ -2946,6 +5219,11 @@ func (s *LookupResourcesOutputBody) GetAdditionalProps() LookupResourcesOutputBo
 // SetSchema sets the value of Schema.
 func (s *LookupResourcesOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *LookupResourcesOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
 }
 
 // SetPermission sets the value of Permission.
@@ -3032,10 +5310,62 @@ func (s *MeAuthAdditional) init() MeAuthAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/MeDeletion
+type MeDeletion struct {
+	// When the cooldown elapses and the account becomes eligible for irreversible hard-deletion.
+	CooldownEndsAt time.Time `json:"cooldownEndsAt"`
+	// When deletion was requested (deletion_requested_at).
+	RequestedAt     time.Time `json:"requestedAt"`
+	AdditionalProps MeDeletionAdditional
+}
+
+// GetCooldownEndsAt returns the value of CooldownEndsAt.
+func (s *MeDeletion) GetCooldownEndsAt() time.Time {
+	return s.CooldownEndsAt
+}
+
+// GetRequestedAt returns the value of RequestedAt.
+func (s *MeDeletion) GetRequestedAt() time.Time {
+	return s.RequestedAt
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *MeDeletion) GetAdditionalProps() MeDeletionAdditional {
+	return s.AdditionalProps
+}
+
+// SetCooldownEndsAt sets the value of CooldownEndsAt.
+func (s *MeDeletion) SetCooldownEndsAt(val time.Time) {
+	s.CooldownEndsAt = val
+}
+
+// SetRequestedAt sets the value of RequestedAt.
+func (s *MeDeletion) SetRequestedAt(val time.Time) {
+	s.RequestedAt = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *MeDeletion) SetAdditionalProps(val MeDeletionAdditional) {
+	s.AdditionalProps = val
+}
+
+type MeDeletionAdditional map[string]jx.Raw
+
+func (s *MeDeletionAdditional) init() MeDeletionAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/MeGlobal
 type MeGlobal struct {
-	AccountId        string             `json:"accountId"`
-	AvatarUrl        OptString          `json:"avatarUrl"`
+	AccountId string    `json:"accountId"`
+	AvatarUrl OptString `json:"avatarUrl"`
+	// When the account was created (accounts.created_at).
+	CreatedAt        time.Time          `json:"createdAt"`
 	Handle           OptString          `json:"handle"`
 	Handles          []MeIdentityHandle `json:"handles"`
 	HomeJurisdiction OptString          `json:"homeJurisdiction"`
@@ -3050,6 +5380,11 @@ func (s *MeGlobal) GetAccountId() string {
 // GetAvatarUrl returns the value of AvatarUrl.
 func (s *MeGlobal) GetAvatarUrl() OptString {
 	return s.AvatarUrl
+}
+
+// GetCreatedAt returns the value of CreatedAt.
+func (s *MeGlobal) GetCreatedAt() time.Time {
+	return s.CreatedAt
 }
 
 // GetHandle returns the value of Handle.
@@ -3080,6 +5415,11 @@ func (s *MeGlobal) SetAccountId(val string) {
 // SetAvatarUrl sets the value of AvatarUrl.
 func (s *MeGlobal) SetAvatarUrl(val OptString) {
 	s.AvatarUrl = val
+}
+
+// SetCreatedAt sets the value of CreatedAt.
+func (s *MeGlobal) SetCreatedAt(val time.Time) {
+	s.CreatedAt = val
 }
 
 // SetHandle sets the value of Handle.
@@ -3115,10 +5455,18 @@ func (s *MeGlobalAdditional) init() MeGlobalAdditional {
 
 // Ref: #/components/schemas/MeIdentityHandle
 type MeIdentityHandle struct {
-	Handle          string `json:"handle"`
-	Provider        string `json:"provider"`
-	ProviderUserId  string `json:"providerUserId"`
+	// The provider's publicly-visible profile email (from the provider at login; may be empty). NOT the
+	// account's contact email.
+	Email           OptString `json:"email"`
+	Handle          string    `json:"handle"`
+	Provider        string    `json:"provider"`
+	ProviderUserId  string    `json:"providerUserId"`
 	AdditionalProps MeIdentityHandleAdditional
+}
+
+// GetEmail returns the value of Email.
+func (s *MeIdentityHandle) GetEmail() OptString {
+	return s.Email
 }
 
 // GetHandle returns the value of Handle.
@@ -3139,6 +5487,11 @@ func (s *MeIdentityHandle) GetProviderUserId() string {
 // GetAdditionalProps returns the value of AdditionalProps.
 func (s *MeIdentityHandle) GetAdditionalProps() MeIdentityHandleAdditional {
 	return s.AdditionalProps
+}
+
+// SetEmail sets the value of Email.
+func (s *MeIdentityHandle) SetEmail(val OptString) {
+	s.Email = val
 }
 
 // SetHandle sets the value of Handle.
@@ -3481,24 +5834,34 @@ func (s *MembershipAdditional) init() MembershipAdditional {
 type Mirror struct {
 	// A URL to the JSON Schema for this object.
 	Schema OptURI `json:"$schema"`
+	// Physical cell the mirror's cluster runs in, e.g. aws-us-east-2.
+	Cell OptString `json:"cell"`
 	// Public host of the cluster serving this mirror.
-	ClusterHost     string      `json:"clusterHost"`
-	CreatedAt       time.Time   `json:"createdAt"`
-	InstallationId  OptInt64    `json:"installationId"`
-	IsArchived      OptBool     `json:"isArchived"`
-	IsPrivate       OptBool     `json:"isPrivate"`
-	Jurisdiction    OptString   `json:"jurisdiction"`
-	MirrorId        string      `json:"mirrorId"`
-	Owner           string      `json:"owner"`
-	Provider        string      `json:"provider"`
-	Repo            string      `json:"repo"`
-	SuspendedAt     OptDateTime `json:"suspendedAt"`
+	ClusterHost    string    `json:"clusterHost"`
+	CreatedAt      time.Time `json:"createdAt"`
+	InstallationId OptInt64  `json:"installationId"`
+	IsArchived     OptBool   `json:"isArchived"`
+	IsPrivate      OptBool   `json:"isPrivate"`
+	Jurisdiction   OptString `json:"jurisdiction"`
+	MirrorId       string    `json:"mirrorId"`
+	Owner          string    `json:"owner"`
+	Provider       string    `json:"provider"`
+	Repo           string    `json:"repo"`
+	// Clone lifecycle: processing (cloning), ready (clonable), failed (initial clone failed), or
+	// suspended.
+	Status          OptMirrorStatus `json:"status"`
+	SuspendedAt     OptDateTime     `json:"suspendedAt"`
 	AdditionalProps MirrorAdditional
 }
 
 // GetSchema returns the value of Schema.
 func (s *Mirror) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetCell returns the value of Cell.
+func (s *Mirror) GetCell() OptString {
+	return s.Cell
 }
 
 // GetClusterHost returns the value of ClusterHost.
@@ -3551,6 +5914,11 @@ func (s *Mirror) GetRepo() string {
 	return s.Repo
 }
 
+// GetStatus returns the value of Status.
+func (s *Mirror) GetStatus() OptMirrorStatus {
+	return s.Status
+}
+
 // GetSuspendedAt returns the value of SuspendedAt.
 func (s *Mirror) GetSuspendedAt() OptDateTime {
 	return s.SuspendedAt
@@ -3564,6 +5932,11 @@ func (s *Mirror) GetAdditionalProps() MirrorAdditional {
 // SetSchema sets the value of Schema.
 func (s *Mirror) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetCell sets the value of Cell.
+func (s *Mirror) SetCell(val OptString) {
+	s.Cell = val
 }
 
 // SetClusterHost sets the value of ClusterHost.
@@ -3616,6 +5989,11 @@ func (s *Mirror) SetRepo(val string) {
 	s.Repo = val
 }
 
+// SetStatus sets the value of Status.
+func (s *Mirror) SetStatus(val OptMirrorStatus) {
+	s.Status = val
+}
+
 // SetSuspendedAt sets the value of SuspendedAt.
 func (s *Mirror) SetSuspendedAt(val OptDateTime) {
 	s.SuspendedAt = val
@@ -3635,6 +6013,124 @@ func (s *MirrorAdditional) init() MirrorAdditional {
 		*s = m
 	}
 	return m
+}
+
+// Ref: #/components/schemas/MirrorCollaborator
+type MirrorCollaborator struct {
+	AccountId string `json:"accountId"`
+	// Primary handle (provider:label), empty if none resolves.
+	Handle OptString `json:"handle"`
+	// Reader (pull) or writer (pull+push).
+	Role            string `json:"role"`
+	AdditionalProps MirrorCollaboratorAdditional
+}
+
+// GetAccountId returns the value of AccountId.
+func (s *MirrorCollaborator) GetAccountId() string {
+	return s.AccountId
+}
+
+// GetHandle returns the value of Handle.
+func (s *MirrorCollaborator) GetHandle() OptString {
+	return s.Handle
+}
+
+// GetRole returns the value of Role.
+func (s *MirrorCollaborator) GetRole() string {
+	return s.Role
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *MirrorCollaborator) GetAdditionalProps() MirrorCollaboratorAdditional {
+	return s.AdditionalProps
+}
+
+// SetAccountId sets the value of AccountId.
+func (s *MirrorCollaborator) SetAccountId(val string) {
+	s.AccountId = val
+}
+
+// SetHandle sets the value of Handle.
+func (s *MirrorCollaborator) SetHandle(val OptString) {
+	s.Handle = val
+}
+
+// SetRole sets the value of Role.
+func (s *MirrorCollaborator) SetRole(val string) {
+	s.Role = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *MirrorCollaborator) SetAdditionalProps(val MirrorCollaboratorAdditional) {
+	s.AdditionalProps = val
+}
+
+type MirrorCollaboratorAdditional map[string]jx.Raw
+
+func (s *MirrorCollaboratorAdditional) init() MirrorCollaboratorAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Clone lifecycle: processing (cloning), ready (clonable), failed (initial clone failed), or
+// suspended.
+type MirrorStatus string
+
+const (
+	MirrorStatusProcessing MirrorStatus = "processing"
+	MirrorStatusReady      MirrorStatus = "ready"
+	MirrorStatusFailed     MirrorStatus = "failed"
+	MirrorStatusSuspended  MirrorStatus = "suspended"
+)
+
+// AllValues returns all MirrorStatus values.
+func (MirrorStatus) AllValues() []MirrorStatus {
+	return []MirrorStatus{
+		MirrorStatusProcessing,
+		MirrorStatusReady,
+		MirrorStatusFailed,
+		MirrorStatusSuspended,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s MirrorStatus) MarshalText() ([]byte, error) {
+	switch s {
+	case MirrorStatusProcessing:
+		return []byte(s), nil
+	case MirrorStatusReady:
+		return []byte(s), nil
+	case MirrorStatusFailed:
+		return []byte(s), nil
+	case MirrorStatusSuspended:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *MirrorStatus) UnmarshalText(data []byte) error {
+	switch MirrorStatus(data) {
+	case MirrorStatusProcessing:
+		*s = MirrorStatusProcessing
+		return nil
+	case MirrorStatusReady:
+		*s = MirrorStatusReady
+		return nil
+	case MirrorStatusFailed:
+		*s = MirrorStatusFailed
+		return nil
+	case MirrorStatusSuspended:
+		*s = MirrorStatusSuspended
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // Ref: #/components/schemas/OIDCProvider
@@ -4029,6 +6525,52 @@ func (o OptGetPermissionsOutputBodyExplain) Or(d GetPermissionsOutputBodyExplain
 	return d
 }
 
+// NewOptGetVersionOutputBodyMode returns new OptGetVersionOutputBodyMode with value set to v.
+func NewOptGetVersionOutputBodyMode(v GetVersionOutputBodyMode) OptGetVersionOutputBodyMode {
+	return OptGetVersionOutputBodyMode{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptGetVersionOutputBodyMode is optional GetVersionOutputBodyMode.
+type OptGetVersionOutputBodyMode struct {
+	Value GetVersionOutputBodyMode
+	Set   bool
+}
+
+// IsSet returns true if OptGetVersionOutputBodyMode was set.
+func (o OptGetVersionOutputBodyMode) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptGetVersionOutputBodyMode) Reset() {
+	var v GetVersionOutputBodyMode
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptGetVersionOutputBodyMode) SetTo(v GetVersionOutputBodyMode) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptGetVersionOutputBodyMode) Get() (v GetVersionOutputBodyMode, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptGetVersionOutputBodyMode) Or(d GetVersionOutputBodyMode) GetVersionOutputBodyMode {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptGrantProjectAccessInputBodyGranteeType returns new OptGrantProjectAccessInputBodyGranteeType with value set to v.
 func NewOptGrantProjectAccessInputBodyGranteeType(v GrantProjectAccessInputBodyGranteeType) OptGrantProjectAccessInputBodyGranteeType {
 	return OptGrantProjectAccessInputBodyGranteeType{
@@ -4121,6 +6663,52 @@ func (o OptGrantRepoAccessInputBodyGranteeType) Or(d GrantRepoAccessInputBodyGra
 	return d
 }
 
+// NewOptInt32 returns new OptInt32 with value set to v.
+func NewOptInt32(v int32) OptInt32 {
+	return OptInt32{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptInt32 is optional int32.
+type OptInt32 struct {
+	Value int32
+	Set   bool
+}
+
+// IsSet returns true if OptInt32 was set.
+func (o OptInt32) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptInt32) Reset() {
+	var v int32
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptInt32) SetTo(v int32) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptInt32) Get() (v int32, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptInt32) Or(d int32) int32 {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptInt64 returns new OptInt64 with value set to v.
 func NewOptInt64(v int64) OptInt64 {
 	return OptInt64{
@@ -4167,6 +6755,52 @@ func (o OptInt64) Or(d int64) int64 {
 	return d
 }
 
+// NewOptListReposScope returns new OptListReposScope with value set to v.
+func NewOptListReposScope(v ListReposScope) OptListReposScope {
+	return OptListReposScope{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptListReposScope is optional ListReposScope.
+type OptListReposScope struct {
+	Value ListReposScope
+	Set   bool
+}
+
+// IsSet returns true if OptListReposScope was set.
+func (o OptListReposScope) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptListReposScope) Reset() {
+	var v ListReposScope
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptListReposScope) SetTo(v ListReposScope) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptListReposScope) Get() (v ListReposScope, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptListReposScope) Or(d ListReposScope) ListReposScope {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptLookupRefResultOwnerType returns new OptLookupRefResultOwnerType with value set to v.
 func NewOptLookupRefResultOwnerType(v LookupRefResultOwnerType) OptLookupRefResultOwnerType {
 	return OptLookupRefResultOwnerType{
@@ -4207,6 +6841,52 @@ func (o OptLookupRefResultOwnerType) Get() (v LookupRefResultOwnerType, ok bool)
 
 // Or returns value if set, or given parameter if does not.
 func (o OptLookupRefResultOwnerType) Or(d LookupRefResultOwnerType) LookupRefResultOwnerType {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptMeDeletion returns new OptMeDeletion with value set to v.
+func NewOptMeDeletion(v MeDeletion) OptMeDeletion {
+	return OptMeDeletion{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptMeDeletion is optional MeDeletion.
+type OptMeDeletion struct {
+	Value MeDeletion
+	Set   bool
+}
+
+// IsSet returns true if OptMeDeletion was set.
+func (o OptMeDeletion) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptMeDeletion) Reset() {
+	var v MeDeletion
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptMeDeletion) SetTo(v MeDeletion) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptMeDeletion) Get() (v MeDeletion, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptMeDeletion) Or(d MeDeletion) MeDeletion {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -4305,6 +6985,98 @@ func (o OptMeRegionalUnavailable) Or(d MeRegionalUnavailable) MeRegionalUnavaila
 	return d
 }
 
+// NewOptMirrorStatus returns new OptMirrorStatus with value set to v.
+func NewOptMirrorStatus(v MirrorStatus) OptMirrorStatus {
+	return OptMirrorStatus{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptMirrorStatus is optional MirrorStatus.
+type OptMirrorStatus struct {
+	Value MirrorStatus
+	Set   bool
+}
+
+// IsSet returns true if OptMirrorStatus was set.
+func (o OptMirrorStatus) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptMirrorStatus) Reset() {
+	var v MirrorStatus
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptMirrorStatus) SetTo(v MirrorStatus) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptMirrorStatus) Get() (v MirrorStatus, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptMirrorStatus) Or(d MirrorStatus) MirrorStatus {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptOrg returns new OptOrg with value set to v.
+func NewOptOrg(v Org) OptOrg {
+	return OptOrg{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptOrg is optional Org.
+type OptOrg struct {
+	Value Org
+	Set   bool
+}
+
+// IsSet returns true if OptOrg was set.
+func (o OptOrg) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptOrg) Reset() {
+	var v Org
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptOrg) SetTo(v Org) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptOrg) Get() (v Org, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptOrg) Or(d Org) Org {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptProject returns new OptProject with value set to v.
 func NewOptProject(v Project) OptProject {
 	return OptProject{
@@ -4351,38 +7123,38 @@ func (o OptProject) Or(d Project) Project {
 	return d
 }
 
-// NewOptRepoObjectFormat returns new OptRepoObjectFormat with value set to v.
-func NewOptRepoObjectFormat(v RepoObjectFormat) OptRepoObjectFormat {
-	return OptRepoObjectFormat{
+// NewOptRepo returns new OptRepo with value set to v.
+func NewOptRepo(v Repo) OptRepo {
+	return OptRepo{
 		Value: v,
 		Set:   true,
 	}
 }
 
-// OptRepoObjectFormat is optional RepoObjectFormat.
-type OptRepoObjectFormat struct {
-	Value RepoObjectFormat
+// OptRepo is optional Repo.
+type OptRepo struct {
+	Value Repo
 	Set   bool
 }
 
-// IsSet returns true if OptRepoObjectFormat was set.
-func (o OptRepoObjectFormat) IsSet() bool { return o.Set }
+// IsSet returns true if OptRepo was set.
+func (o OptRepo) IsSet() bool { return o.Set }
 
 // Reset unsets value.
-func (o *OptRepoObjectFormat) Reset() {
-	var v RepoObjectFormat
+func (o *OptRepo) Reset() {
+	var v Repo
 	o.Value = v
 	o.Set = false
 }
 
 // SetTo sets value to v.
-func (o *OptRepoObjectFormat) SetTo(v RepoObjectFormat) {
+func (o *OptRepo) SetTo(v Repo) {
 	o.Set = true
 	o.Value = v
 }
 
 // Get returns value and boolean that denotes whether value was set.
-func (o OptRepoObjectFormat) Get() (v RepoObjectFormat, ok bool) {
+func (o OptRepo) Get() (v Repo, ok bool) {
 	if !o.Set {
 		return v, false
 	}
@@ -4390,45 +7162,45 @@ func (o OptRepoObjectFormat) Get() (v RepoObjectFormat, ok bool) {
 }
 
 // Or returns value if set, or given parameter if does not.
-func (o OptRepoObjectFormat) Or(d RepoObjectFormat) RepoObjectFormat {
+func (o OptRepo) Or(d Repo) Repo {
 	if v, ok := o.Get(); ok {
 		return v
 	}
 	return d
 }
 
-// NewOptRepoState returns new OptRepoState with value set to v.
-func NewOptRepoState(v RepoState) OptRepoState {
-	return OptRepoState{
+// NewOptRepoCandidate returns new OptRepoCandidate with value set to v.
+func NewOptRepoCandidate(v RepoCandidate) OptRepoCandidate {
+	return OptRepoCandidate{
 		Value: v,
 		Set:   true,
 	}
 }
 
-// OptRepoState is optional RepoState.
-type OptRepoState struct {
-	Value RepoState
+// OptRepoCandidate is optional RepoCandidate.
+type OptRepoCandidate struct {
+	Value RepoCandidate
 	Set   bool
 }
 
-// IsSet returns true if OptRepoState was set.
-func (o OptRepoState) IsSet() bool { return o.Set }
+// IsSet returns true if OptRepoCandidate was set.
+func (o OptRepoCandidate) IsSet() bool { return o.Set }
 
 // Reset unsets value.
-func (o *OptRepoState) Reset() {
-	var v RepoState
+func (o *OptRepoCandidate) Reset() {
+	var v RepoCandidate
 	o.Value = v
 	o.Set = false
 }
 
 // SetTo sets value to v.
-func (o *OptRepoState) SetTo(v RepoState) {
+func (o *OptRepoCandidate) SetTo(v RepoCandidate) {
 	o.Set = true
 	o.Value = v
 }
 
 // Get returns value and boolean that denotes whether value was set.
-func (o OptRepoState) Get() (v RepoState, ok bool) {
+func (o OptRepoCandidate) Get() (v RepoCandidate, ok bool) {
 	if !o.Set {
 		return v, false
 	}
@@ -4436,7 +7208,53 @@ func (o OptRepoState) Get() (v RepoState, ok bool) {
 }
 
 // Or returns value if set, or given parameter if does not.
-func (o OptRepoState) Or(d RepoState) RepoState {
+func (o OptRepoCandidate) Or(d RepoCandidate) RepoCandidate {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptRepoPrimaries returns new OptRepoPrimaries with value set to v.
+func NewOptRepoPrimaries(v RepoPrimaries) OptRepoPrimaries {
+	return OptRepoPrimaries{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptRepoPrimaries is optional RepoPrimaries.
+type OptRepoPrimaries struct {
+	Value RepoPrimaries
+	Set   bool
+}
+
+// IsSet returns true if OptRepoPrimaries was set.
+func (o OptRepoPrimaries) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptRepoPrimaries) Reset() {
+	var v RepoPrimaries
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptRepoPrimaries) SetTo(v RepoPrimaries) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptRepoPrimaries) Get() (v RepoPrimaries, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptRepoPrimaries) Or(d RepoPrimaries) RepoPrimaries {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -4628,6 +7446,88 @@ func (s *OrgAdditional) init() OrgAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/PatchRepoCIWebhookInputBody
+type PatchRepoCIWebhookInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI    `json:"$schema"`
+	DisplayName     OptString `json:"display_name"`
+	Enabled         OptBool   `json:"enabled"`
+	Events          []string  `json:"events"`
+	RefFilter       OptString `json:"ref_filter"`
+	AdditionalProps PatchRepoCIWebhookInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *PatchRepoCIWebhookInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *PatchRepoCIWebhookInputBody) GetDisplayName() OptString {
+	return s.DisplayName
+}
+
+// GetEnabled returns the value of Enabled.
+func (s *PatchRepoCIWebhookInputBody) GetEnabled() OptBool {
+	return s.Enabled
+}
+
+// GetEvents returns the value of Events.
+func (s *PatchRepoCIWebhookInputBody) GetEvents() []string {
+	return s.Events
+}
+
+// GetRefFilter returns the value of RefFilter.
+func (s *PatchRepoCIWebhookInputBody) GetRefFilter() OptString {
+	return s.RefFilter
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *PatchRepoCIWebhookInputBody) GetAdditionalProps() PatchRepoCIWebhookInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *PatchRepoCIWebhookInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *PatchRepoCIWebhookInputBody) SetDisplayName(val OptString) {
+	s.DisplayName = val
+}
+
+// SetEnabled sets the value of Enabled.
+func (s *PatchRepoCIWebhookInputBody) SetEnabled(val OptBool) {
+	s.Enabled = val
+}
+
+// SetEvents sets the value of Events.
+func (s *PatchRepoCIWebhookInputBody) SetEvents(val []string) {
+	s.Events = val
+}
+
+// SetRefFilter sets the value of RefFilter.
+func (s *PatchRepoCIWebhookInputBody) SetRefFilter(val OptString) {
+	s.RefFilter = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *PatchRepoCIWebhookInputBody) SetAdditionalProps(val PatchRepoCIWebhookInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type PatchRepoCIWebhookInputBodyAdditional map[string]jx.Raw
+
+func (s *PatchRepoCIWebhookInputBodyAdditional) init() PatchRepoCIWebhookInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/Project
 type Project struct {
 	// A URL to the JSON Schema for this object.
@@ -4734,15 +7634,22 @@ func (s *ProjectAdditional) init() ProjectAdditional {
 
 // Ref: #/components/schemas/ProjectGrant
 type ProjectGrant struct {
-	GranteeId       string `json:"granteeId"`
-	GranteeType     string `json:"granteeType"`
-	Role            string `json:"role"`
+	GranteeId       string    `json:"granteeId"`
+	GranteeName     OptString `json:"granteeName"`
+	GranteeType     string    `json:"granteeType"`
+	Role            string    `json:"role"`
+	Source          string    `json:"source"`
 	AdditionalProps ProjectGrantAdditional
 }
 
 // GetGranteeId returns the value of GranteeId.
 func (s *ProjectGrant) GetGranteeId() string {
 	return s.GranteeId
+}
+
+// GetGranteeName returns the value of GranteeName.
+func (s *ProjectGrant) GetGranteeName() OptString {
+	return s.GranteeName
 }
 
 // GetGranteeType returns the value of GranteeType.
@@ -4755,6 +7662,11 @@ func (s *ProjectGrant) GetRole() string {
 	return s.Role
 }
 
+// GetSource returns the value of Source.
+func (s *ProjectGrant) GetSource() string {
+	return s.Source
+}
+
 // GetAdditionalProps returns the value of AdditionalProps.
 func (s *ProjectGrant) GetAdditionalProps() ProjectGrantAdditional {
 	return s.AdditionalProps
@@ -4765,6 +7677,11 @@ func (s *ProjectGrant) SetGranteeId(val string) {
 	s.GranteeId = val
 }
 
+// SetGranteeName sets the value of GranteeName.
+func (s *ProjectGrant) SetGranteeName(val OptString) {
+	s.GranteeName = val
+}
+
 // SetGranteeType sets the value of GranteeType.
 func (s *ProjectGrant) SetGranteeType(val string) {
 	s.GranteeType = val
@@ -4773,6 +7690,11 @@ func (s *ProjectGrant) SetGranteeType(val string) {
 // SetRole sets the value of Role.
 func (s *ProjectGrant) SetRole(val string) {
 	s.Role = val
+}
+
+// SetSource sets the value of Source.
+func (s *ProjectGrant) SetSource(val string) {
+	s.Source = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -4838,17 +7760,22 @@ type RemoveOrgMemberNoContent struct{}
 // Ref: #/components/schemas/Repo
 type Repo struct {
 	// A URL to the JSON Schema for this object.
-	Schema            OptURI              `json:"$schema"`
-	ClusterHost       OptString           `json:"clusterHost"`
-	Foreign           OptBool             `json:"foreign"`
-	ID                string              `json:"id"`
-	Name              string              `json:"name"`
-	ObjectFormat      OptRepoObjectFormat `json:"objectFormat"`
-	OwningProjectId   string              `json:"owningProjectId"`
-	Path              OptString           `json:"path"`
-	ProvisionAttempts OptInt64            `json:"provisionAttempts"`
-	ProvisionReason   OptString           `json:"provisionReason"`
-	State             OptRepoState        `json:"state"`
+	Schema            OptURI    `json:"$schema"`
+	ClusterHost       OptString `json:"clusterHost"`
+	Foreign           OptBool   `json:"foreign"`
+	FullName          OptString `json:"fullName"`
+	ID                string    `json:"id"`
+	MirrorSuspended   OptBool   `json:"mirrorSuspended"`
+	MirrorSuspendedAt OptString `json:"mirrorSuspendedAt"`
+	Name              string    `json:"name"`
+	ObjectFormat      OptString `json:"objectFormat"`
+	OwningProjectId   string    `json:"owningProjectId"`
+	Path              OptString `json:"path"`
+	ProvisionAttempts OptInt64  `json:"provisionAttempts"`
+	ProvisionReason   OptString `json:"provisionReason"`
+	RepoGroupId       OptString `json:"repoGroupId"`
+	State             OptString `json:"state"`
+	Visibility        OptString `json:"visibility"`
 	AdditionalProps   RepoAdditional
 }
 
@@ -4867,9 +7794,24 @@ func (s *Repo) GetForeign() OptBool {
 	return s.Foreign
 }
 
+// GetFullName returns the value of FullName.
+func (s *Repo) GetFullName() OptString {
+	return s.FullName
+}
+
 // GetID returns the value of ID.
 func (s *Repo) GetID() string {
 	return s.ID
+}
+
+// GetMirrorSuspended returns the value of MirrorSuspended.
+func (s *Repo) GetMirrorSuspended() OptBool {
+	return s.MirrorSuspended
+}
+
+// GetMirrorSuspendedAt returns the value of MirrorSuspendedAt.
+func (s *Repo) GetMirrorSuspendedAt() OptString {
+	return s.MirrorSuspendedAt
 }
 
 // GetName returns the value of Name.
@@ -4878,7 +7820,7 @@ func (s *Repo) GetName() string {
 }
 
 // GetObjectFormat returns the value of ObjectFormat.
-func (s *Repo) GetObjectFormat() OptRepoObjectFormat {
+func (s *Repo) GetObjectFormat() OptString {
 	return s.ObjectFormat
 }
 
@@ -4902,9 +7844,19 @@ func (s *Repo) GetProvisionReason() OptString {
 	return s.ProvisionReason
 }
 
+// GetRepoGroupId returns the value of RepoGroupId.
+func (s *Repo) GetRepoGroupId() OptString {
+	return s.RepoGroupId
+}
+
 // GetState returns the value of State.
-func (s *Repo) GetState() OptRepoState {
+func (s *Repo) GetState() OptString {
 	return s.State
+}
+
+// GetVisibility returns the value of Visibility.
+func (s *Repo) GetVisibility() OptString {
+	return s.Visibility
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -4927,9 +7879,24 @@ func (s *Repo) SetForeign(val OptBool) {
 	s.Foreign = val
 }
 
+// SetFullName sets the value of FullName.
+func (s *Repo) SetFullName(val OptString) {
+	s.FullName = val
+}
+
 // SetID sets the value of ID.
 func (s *Repo) SetID(val string) {
 	s.ID = val
+}
+
+// SetMirrorSuspended sets the value of MirrorSuspended.
+func (s *Repo) SetMirrorSuspended(val OptBool) {
+	s.MirrorSuspended = val
+}
+
+// SetMirrorSuspendedAt sets the value of MirrorSuspendedAt.
+func (s *Repo) SetMirrorSuspendedAt(val OptString) {
+	s.MirrorSuspendedAt = val
 }
 
 // SetName sets the value of Name.
@@ -4938,7 +7905,7 @@ func (s *Repo) SetName(val string) {
 }
 
 // SetObjectFormat sets the value of ObjectFormat.
-func (s *Repo) SetObjectFormat(val OptRepoObjectFormat) {
+func (s *Repo) SetObjectFormat(val OptString) {
 	s.ObjectFormat = val
 }
 
@@ -4962,9 +7929,19 @@ func (s *Repo) SetProvisionReason(val OptString) {
 	s.ProvisionReason = val
 }
 
+// SetRepoGroupId sets the value of RepoGroupId.
+func (s *Repo) SetRepoGroupId(val OptString) {
+	s.RepoGroupId = val
+}
+
 // SetState sets the value of State.
-func (s *Repo) SetState(val OptRepoState) {
+func (s *Repo) SetState(val OptString) {
 	s.State = val
+}
+
+// SetVisibility sets the value of Visibility.
+func (s *Repo) SetVisibility(val OptString) {
+	s.Visibility = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -4983,27 +7960,68 @@ func (s *RepoAdditional) init() RepoAdditional {
 	return m
 }
 
-type RepoObjectFormat string
+// Ref: #/components/schemas/RepoCandidate
+type RepoCandidate struct {
+	Access          RepoCandidateAccess `json:"access"`
+	Onboardable     bool                `json:"onboardable"`
+	AdditionalProps RepoCandidateAdditional
+}
+
+// GetAccess returns the value of Access.
+func (s *RepoCandidate) GetAccess() RepoCandidateAccess {
+	return s.Access
+}
+
+// GetOnboardable returns the value of Onboardable.
+func (s *RepoCandidate) GetOnboardable() bool {
+	return s.Onboardable
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *RepoCandidate) GetAdditionalProps() RepoCandidateAdditional {
+	return s.AdditionalProps
+}
+
+// SetAccess sets the value of Access.
+func (s *RepoCandidate) SetAccess(val RepoCandidateAccess) {
+	s.Access = val
+}
+
+// SetOnboardable sets the value of Onboardable.
+func (s *RepoCandidate) SetOnboardable(val bool) {
+	s.Onboardable = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *RepoCandidate) SetAdditionalProps(val RepoCandidateAdditional) {
+	s.AdditionalProps = val
+}
+
+type RepoCandidateAccess string
 
 const (
-	RepoObjectFormatSHA1   RepoObjectFormat = "sha1"
-	RepoObjectFormatSHA256 RepoObjectFormat = "sha256"
+	RepoCandidateAccessRead  RepoCandidateAccess = "read"
+	RepoCandidateAccessWrite RepoCandidateAccess = "write"
+	RepoCandidateAccessAdmin RepoCandidateAccess = "admin"
 )
 
-// AllValues returns all RepoObjectFormat values.
-func (RepoObjectFormat) AllValues() []RepoObjectFormat {
-	return []RepoObjectFormat{
-		RepoObjectFormatSHA1,
-		RepoObjectFormatSHA256,
+// AllValues returns all RepoCandidateAccess values.
+func (RepoCandidateAccess) AllValues() []RepoCandidateAccess {
+	return []RepoCandidateAccess{
+		RepoCandidateAccessRead,
+		RepoCandidateAccessWrite,
+		RepoCandidateAccessAdmin,
 	}
 }
 
 // MarshalText implements encoding.TextMarshaler.
-func (s RepoObjectFormat) MarshalText() ([]byte, error) {
+func (s RepoCandidateAccess) MarshalText() ([]byte, error) {
 	switch s {
-	case RepoObjectFormatSHA1:
+	case RepoCandidateAccessRead:
 		return []byte(s), nil
-	case RepoObjectFormatSHA256:
+	case RepoCandidateAccessWrite:
+		return []byte(s), nil
+	case RepoCandidateAccessAdmin:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -5011,44 +8029,385 @@ func (s RepoObjectFormat) MarshalText() ([]byte, error) {
 }
 
 // UnmarshalText implements encoding.TextUnmarshaler.
-func (s *RepoObjectFormat) UnmarshalText(data []byte) error {
-	switch RepoObjectFormat(data) {
-	case RepoObjectFormatSHA1:
-		*s = RepoObjectFormatSHA1
+func (s *RepoCandidateAccess) UnmarshalText(data []byte) error {
+	switch RepoCandidateAccess(data) {
+	case RepoCandidateAccessRead:
+		*s = RepoCandidateAccessRead
 		return nil
-	case RepoObjectFormatSHA256:
-		*s = RepoObjectFormatSHA256
+	case RepoCandidateAccessWrite:
+		*s = RepoCandidateAccessWrite
+		return nil
+	case RepoCandidateAccessAdmin:
+		*s = RepoCandidateAccessAdmin
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
 }
 
-type RepoState string
+type RepoCandidateAdditional map[string]jx.Raw
+
+func (s *RepoCandidateAdditional) init() RepoCandidateAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/RepoGrant
+type RepoGrant struct {
+	GranteeId       string    `json:"granteeId"`
+	GranteeName     OptString `json:"granteeName"`
+	GranteeType     string    `json:"granteeType"`
+	Role            string    `json:"role"`
+	Source          string    `json:"source"`
+	AdditionalProps RepoGrantAdditional
+}
+
+// GetGranteeId returns the value of GranteeId.
+func (s *RepoGrant) GetGranteeId() string {
+	return s.GranteeId
+}
+
+// GetGranteeName returns the value of GranteeName.
+func (s *RepoGrant) GetGranteeName() OptString {
+	return s.GranteeName
+}
+
+// GetGranteeType returns the value of GranteeType.
+func (s *RepoGrant) GetGranteeType() string {
+	return s.GranteeType
+}
+
+// GetRole returns the value of Role.
+func (s *RepoGrant) GetRole() string {
+	return s.Role
+}
+
+// GetSource returns the value of Source.
+func (s *RepoGrant) GetSource() string {
+	return s.Source
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *RepoGrant) GetAdditionalProps() RepoGrantAdditional {
+	return s.AdditionalProps
+}
+
+// SetGranteeId sets the value of GranteeId.
+func (s *RepoGrant) SetGranteeId(val string) {
+	s.GranteeId = val
+}
+
+// SetGranteeName sets the value of GranteeName.
+func (s *RepoGrant) SetGranteeName(val OptString) {
+	s.GranteeName = val
+}
+
+// SetGranteeType sets the value of GranteeType.
+func (s *RepoGrant) SetGranteeType(val string) {
+	s.GranteeType = val
+}
+
+// SetRole sets the value of Role.
+func (s *RepoGrant) SetRole(val string) {
+	s.Role = val
+}
+
+// SetSource sets the value of Source.
+func (s *RepoGrant) SetSource(val string) {
+	s.Source = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *RepoGrant) SetAdditionalProps(val RepoGrantAdditional) {
+	s.AdditionalProps = val
+}
+
+type RepoGrantAdditional map[string]jx.Raw
+
+func (s *RepoGrantAdditional) init() RepoGrantAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/RepoIndexEntry
+type RepoIndexEntry struct {
+	Candidate OptRepoCandidate `json:"candidate"`
+	// Deprecated: schema marks this property as deprecated.
+	Cell string `json:"cell"`
+	// Deprecated: schema marks this property as deprecated.
+	ClusterSlug string `json:"clusterSlug"`
+	FullName    string `json:"full_name"`
+	ID          string `json:"id"`
+	// Deprecated: schema marks this property as deprecated.
+	Jurisdiction    string           `json:"jurisdiction"`
+	Name            string           `json:"name"`
+	Placements      []RepoPlacement  `json:"placements"`
+	Primaries       OptRepoPrimaries `json:"primaries"`
+	Stars           OptInt64         `json:"stars"`
+	Visibility      string           `json:"visibility"`
+	AdditionalProps RepoIndexEntryAdditional
+}
+
+// GetCandidate returns the value of Candidate.
+func (s *RepoIndexEntry) GetCandidate() OptRepoCandidate {
+	return s.Candidate
+}
+
+// GetCell returns the value of Cell.
+func (s *RepoIndexEntry) GetCell() string {
+	return s.Cell
+}
+
+// GetClusterSlug returns the value of ClusterSlug.
+func (s *RepoIndexEntry) GetClusterSlug() string {
+	return s.ClusterSlug
+}
+
+// GetFullName returns the value of FullName.
+func (s *RepoIndexEntry) GetFullName() string {
+	return s.FullName
+}
+
+// GetID returns the value of ID.
+func (s *RepoIndexEntry) GetID() string {
+	return s.ID
+}
+
+// GetJurisdiction returns the value of Jurisdiction.
+func (s *RepoIndexEntry) GetJurisdiction() string {
+	return s.Jurisdiction
+}
+
+// GetName returns the value of Name.
+func (s *RepoIndexEntry) GetName() string {
+	return s.Name
+}
+
+// GetPlacements returns the value of Placements.
+func (s *RepoIndexEntry) GetPlacements() []RepoPlacement {
+	return s.Placements
+}
+
+// GetPrimaries returns the value of Primaries.
+func (s *RepoIndexEntry) GetPrimaries() OptRepoPrimaries {
+	return s.Primaries
+}
+
+// GetStars returns the value of Stars.
+func (s *RepoIndexEntry) GetStars() OptInt64 {
+	return s.Stars
+}
+
+// GetVisibility returns the value of Visibility.
+func (s *RepoIndexEntry) GetVisibility() string {
+	return s.Visibility
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *RepoIndexEntry) GetAdditionalProps() RepoIndexEntryAdditional {
+	return s.AdditionalProps
+}
+
+// SetCandidate sets the value of Candidate.
+func (s *RepoIndexEntry) SetCandidate(val OptRepoCandidate) {
+	s.Candidate = val
+}
+
+// SetCell sets the value of Cell.
+func (s *RepoIndexEntry) SetCell(val string) {
+	s.Cell = val
+}
+
+// SetClusterSlug sets the value of ClusterSlug.
+func (s *RepoIndexEntry) SetClusterSlug(val string) {
+	s.ClusterSlug = val
+}
+
+// SetFullName sets the value of FullName.
+func (s *RepoIndexEntry) SetFullName(val string) {
+	s.FullName = val
+}
+
+// SetID sets the value of ID.
+func (s *RepoIndexEntry) SetID(val string) {
+	s.ID = val
+}
+
+// SetJurisdiction sets the value of Jurisdiction.
+func (s *RepoIndexEntry) SetJurisdiction(val string) {
+	s.Jurisdiction = val
+}
+
+// SetName sets the value of Name.
+func (s *RepoIndexEntry) SetName(val string) {
+	s.Name = val
+}
+
+// SetPlacements sets the value of Placements.
+func (s *RepoIndexEntry) SetPlacements(val []RepoPlacement) {
+	s.Placements = val
+}
+
+// SetPrimaries sets the value of Primaries.
+func (s *RepoIndexEntry) SetPrimaries(val OptRepoPrimaries) {
+	s.Primaries = val
+}
+
+// SetStars sets the value of Stars.
+func (s *RepoIndexEntry) SetStars(val OptInt64) {
+	s.Stars = val
+}
+
+// SetVisibility sets the value of Visibility.
+func (s *RepoIndexEntry) SetVisibility(val string) {
+	s.Visibility = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *RepoIndexEntry) SetAdditionalProps(val RepoIndexEntryAdditional) {
+	s.AdditionalProps = val
+}
+
+type RepoIndexEntryAdditional map[string]jx.Raw
+
+func (s *RepoIndexEntryAdditional) init() RepoIndexEntryAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/RepoPlacement
+type RepoPlacement struct {
+	Cell            string              `json:"cell"`
+	ClusterSlug     string              `json:"clusterSlug"`
+	ID              string              `json:"id"`
+	Jurisdiction    string              `json:"jurisdiction"`
+	Mirror          bool                `json:"mirror"`
+	Status          RepoPlacementStatus `json:"status"`
+	AdditionalProps RepoPlacementAdditional
+}
+
+// GetCell returns the value of Cell.
+func (s *RepoPlacement) GetCell() string {
+	return s.Cell
+}
+
+// GetClusterSlug returns the value of ClusterSlug.
+func (s *RepoPlacement) GetClusterSlug() string {
+	return s.ClusterSlug
+}
+
+// GetID returns the value of ID.
+func (s *RepoPlacement) GetID() string {
+	return s.ID
+}
+
+// GetJurisdiction returns the value of Jurisdiction.
+func (s *RepoPlacement) GetJurisdiction() string {
+	return s.Jurisdiction
+}
+
+// GetMirror returns the value of Mirror.
+func (s *RepoPlacement) GetMirror() bool {
+	return s.Mirror
+}
+
+// GetStatus returns the value of Status.
+func (s *RepoPlacement) GetStatus() RepoPlacementStatus {
+	return s.Status
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *RepoPlacement) GetAdditionalProps() RepoPlacementAdditional {
+	return s.AdditionalProps
+}
+
+// SetCell sets the value of Cell.
+func (s *RepoPlacement) SetCell(val string) {
+	s.Cell = val
+}
+
+// SetClusterSlug sets the value of ClusterSlug.
+func (s *RepoPlacement) SetClusterSlug(val string) {
+	s.ClusterSlug = val
+}
+
+// SetID sets the value of ID.
+func (s *RepoPlacement) SetID(val string) {
+	s.ID = val
+}
+
+// SetJurisdiction sets the value of Jurisdiction.
+func (s *RepoPlacement) SetJurisdiction(val string) {
+	s.Jurisdiction = val
+}
+
+// SetMirror sets the value of Mirror.
+func (s *RepoPlacement) SetMirror(val bool) {
+	s.Mirror = val
+}
+
+// SetStatus sets the value of Status.
+func (s *RepoPlacement) SetStatus(val RepoPlacementStatus) {
+	s.Status = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *RepoPlacement) SetAdditionalProps(val RepoPlacementAdditional) {
+	s.AdditionalProps = val
+}
+
+type RepoPlacementAdditional map[string]jx.Raw
+
+func (s *RepoPlacementAdditional) init() RepoPlacementAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type RepoPlacementStatus string
 
 const (
-	RepoStateProvisioning RepoState = "provisioning"
-	RepoStateActive       RepoState = "active"
-	RepoStateFailed       RepoState = "failed"
+	RepoPlacementStatusProcessing RepoPlacementStatus = "processing"
+	RepoPlacementStatusReady      RepoPlacementStatus = "ready"
+	RepoPlacementStatusFailed     RepoPlacementStatus = "failed"
+	RepoPlacementStatusSuspended  RepoPlacementStatus = "suspended"
 )
 
-// AllValues returns all RepoState values.
-func (RepoState) AllValues() []RepoState {
-	return []RepoState{
-		RepoStateProvisioning,
-		RepoStateActive,
-		RepoStateFailed,
+// AllValues returns all RepoPlacementStatus values.
+func (RepoPlacementStatus) AllValues() []RepoPlacementStatus {
+	return []RepoPlacementStatus{
+		RepoPlacementStatusProcessing,
+		RepoPlacementStatusReady,
+		RepoPlacementStatusFailed,
+		RepoPlacementStatusSuspended,
 	}
 }
 
 // MarshalText implements encoding.TextMarshaler.
-func (s RepoState) MarshalText() ([]byte, error) {
+func (s RepoPlacementStatus) MarshalText() ([]byte, error) {
 	switch s {
-	case RepoStateProvisioning:
+	case RepoPlacementStatusProcessing:
 		return []byte(s), nil
-	case RepoStateActive:
+	case RepoPlacementStatusReady:
 		return []byte(s), nil
-	case RepoStateFailed:
+	case RepoPlacementStatusFailed:
+		return []byte(s), nil
+	case RepoPlacementStatusSuspended:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -5056,20 +8415,154 @@ func (s RepoState) MarshalText() ([]byte, error) {
 }
 
 // UnmarshalText implements encoding.TextUnmarshaler.
-func (s *RepoState) UnmarshalText(data []byte) error {
-	switch RepoState(data) {
-	case RepoStateProvisioning:
-		*s = RepoStateProvisioning
+func (s *RepoPlacementStatus) UnmarshalText(data []byte) error {
+	switch RepoPlacementStatus(data) {
+	case RepoPlacementStatusProcessing:
+		*s = RepoPlacementStatusProcessing
 		return nil
-	case RepoStateActive:
-		*s = RepoStateActive
+	case RepoPlacementStatusReady:
+		*s = RepoPlacementStatusReady
 		return nil
-	case RepoStateFailed:
-		*s = RepoStateFailed
+	case RepoPlacementStatusFailed:
+		*s = RepoPlacementStatusFailed
+		return nil
+	case RepoPlacementStatusSuspended:
+		*s = RepoPlacementStatusSuspended
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// Ref: #/components/schemas/RepoPrimaries
+type RepoPrimaries struct {
+	GitData         string `json:"git_data"`
+	Processing      string `json:"processing"`
+	AdditionalProps RepoPrimariesAdditional
+}
+
+// GetGitData returns the value of GitData.
+func (s *RepoPrimaries) GetGitData() string {
+	return s.GitData
+}
+
+// GetProcessing returns the value of Processing.
+func (s *RepoPrimaries) GetProcessing() string {
+	return s.Processing
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *RepoPrimaries) GetAdditionalProps() RepoPrimariesAdditional {
+	return s.AdditionalProps
+}
+
+// SetGitData sets the value of GitData.
+func (s *RepoPrimaries) SetGitData(val string) {
+	s.GitData = val
+}
+
+// SetProcessing sets the value of Processing.
+func (s *RepoPrimaries) SetProcessing(val string) {
+	s.Processing = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *RepoPrimaries) SetAdditionalProps(val RepoPrimariesAdditional) {
+	s.AdditionalProps = val
+}
+
+type RepoPrimariesAdditional map[string]jx.Raw
+
+func (s *RepoPrimariesAdditional) init() RepoPrimariesAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type ResolveMirrorPlacementsProvider string
+
+const (
+	ResolveMirrorPlacementsProviderGithub ResolveMirrorPlacementsProvider = "github"
+)
+
+// AllValues returns all ResolveMirrorPlacementsProvider values.
+func (ResolveMirrorPlacementsProvider) AllValues() []ResolveMirrorPlacementsProvider {
+	return []ResolveMirrorPlacementsProvider{
+		ResolveMirrorPlacementsProviderGithub,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ResolveMirrorPlacementsProvider) MarshalText() ([]byte, error) {
+	switch s {
+	case ResolveMirrorPlacementsProviderGithub:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ResolveMirrorPlacementsProvider) UnmarshalText(data []byte) error {
+	switch ResolveMirrorPlacementsProvider(data) {
+	case ResolveMirrorPlacementsProviderGithub:
+		*s = ResolveMirrorPlacementsProviderGithub
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/ResolvePlacementsOutputBody
+type ResolvePlacementsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI              `json:"$schema"`
+	Placements      []ResolvedPlacement `json:"placements"`
+	AdditionalProps ResolvePlacementsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ResolvePlacementsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetPlacements returns the value of Placements.
+func (s *ResolvePlacementsOutputBody) GetPlacements() []ResolvedPlacement {
+	return s.Placements
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ResolvePlacementsOutputBody) GetAdditionalProps() ResolvePlacementsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ResolvePlacementsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetPlacements sets the value of Placements.
+func (s *ResolvePlacementsOutputBody) SetPlacements(val []ResolvedPlacement) {
+	s.Placements = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ResolvePlacementsOutputBody) SetAdditionalProps(val ResolvePlacementsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ResolvePlacementsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ResolvePlacementsOutputBodyAdditional) init() ResolvePlacementsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // Ref: #/components/schemas/ResolvedIdentity
@@ -5154,6 +8647,78 @@ func (s *ResolvedIdentityAdditional) init() ResolvedIdentityAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/ResolvedPlacement
+type ResolvedPlacement struct {
+	// Physical cell the mirror's cluster runs in, e.g. aws-us-east-2.
+	Cell OptString `json:"cell"`
+	// Public host of the cluster serving this mirror.
+	ClusterHost     string    `json:"clusterHost"`
+	Jurisdiction    OptString `json:"jurisdiction"`
+	MirrorId        string    `json:"mirrorId"`
+	AdditionalProps ResolvedPlacementAdditional
+}
+
+// GetCell returns the value of Cell.
+func (s *ResolvedPlacement) GetCell() OptString {
+	return s.Cell
+}
+
+// GetClusterHost returns the value of ClusterHost.
+func (s *ResolvedPlacement) GetClusterHost() string {
+	return s.ClusterHost
+}
+
+// GetJurisdiction returns the value of Jurisdiction.
+func (s *ResolvedPlacement) GetJurisdiction() OptString {
+	return s.Jurisdiction
+}
+
+// GetMirrorId returns the value of MirrorId.
+func (s *ResolvedPlacement) GetMirrorId() string {
+	return s.MirrorId
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ResolvedPlacement) GetAdditionalProps() ResolvedPlacementAdditional {
+	return s.AdditionalProps
+}
+
+// SetCell sets the value of Cell.
+func (s *ResolvedPlacement) SetCell(val OptString) {
+	s.Cell = val
+}
+
+// SetClusterHost sets the value of ClusterHost.
+func (s *ResolvedPlacement) SetClusterHost(val string) {
+	s.ClusterHost = val
+}
+
+// SetJurisdiction sets the value of Jurisdiction.
+func (s *ResolvedPlacement) SetJurisdiction(val OptString) {
+	s.Jurisdiction = val
+}
+
+// SetMirrorId sets the value of MirrorId.
+func (s *ResolvedPlacement) SetMirrorId(val string) {
+	s.MirrorId = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ResolvedPlacement) SetAdditionalProps(val ResolvedPlacementAdditional) {
+	s.AdditionalProps = val
+}
+
+type ResolvedPlacementAdditional map[string]jx.Raw
+
+func (s *ResolvedPlacementAdditional) init() ResolvedPlacementAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ResourceAccess
 type ResourceAccess struct {
 	Permissions     []string `json:"permissions"`
@@ -5207,6 +8772,12 @@ type RevokeProjectAccessByProviderNoContent struct{}
 
 // RevokeProjectAccessNoContent is response for RevokeProjectAccess operation.
 type RevokeProjectAccessNoContent struct{}
+
+// RevokeRepoAccessByProviderNoContent is response for RevokeRepoAccessByProvider operation.
+type RevokeRepoAccessByProviderNoContent struct{}
+
+// RevokeRepoAccessNoContent is response for RevokeRepoAccess operation.
+type RevokeRepoAccessNoContent struct{}
 
 // RevokeServiceAccountAccessNoContent is response for RevokeServiceAccountAccess operation.
 type RevokeServiceAccountAccessNoContent struct{}
@@ -5552,4 +9123,489 @@ func (s *SessionAuth) SetAPIKey(val string) {
 // SetRoles sets the value of Roles.
 func (s *SessionAuth) SetRoles(val []string) {
 	s.Roles = val
+}
+
+// Ref: #/components/schemas/SetRepoVisibilityInputBody
+type SetRepoVisibilityInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI                               `json:"$schema"`
+	Visibility      SetRepoVisibilityInputBodyVisibility `json:"visibility"`
+	AdditionalProps SetRepoVisibilityInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *SetRepoVisibilityInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetVisibility returns the value of Visibility.
+func (s *SetRepoVisibilityInputBody) GetVisibility() SetRepoVisibilityInputBodyVisibility {
+	return s.Visibility
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *SetRepoVisibilityInputBody) GetAdditionalProps() SetRepoVisibilityInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *SetRepoVisibilityInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetVisibility sets the value of Visibility.
+func (s *SetRepoVisibilityInputBody) SetVisibility(val SetRepoVisibilityInputBodyVisibility) {
+	s.Visibility = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *SetRepoVisibilityInputBody) SetAdditionalProps(val SetRepoVisibilityInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type SetRepoVisibilityInputBodyAdditional map[string]jx.Raw
+
+func (s *SetRepoVisibilityInputBodyAdditional) init() SetRepoVisibilityInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type SetRepoVisibilityInputBodyVisibility string
+
+const (
+	SetRepoVisibilityInputBodyVisibilityPublic  SetRepoVisibilityInputBodyVisibility = "public"
+	SetRepoVisibilityInputBodyVisibilityPrivate SetRepoVisibilityInputBodyVisibility = "private"
+)
+
+// AllValues returns all SetRepoVisibilityInputBodyVisibility values.
+func (SetRepoVisibilityInputBodyVisibility) AllValues() []SetRepoVisibilityInputBodyVisibility {
+	return []SetRepoVisibilityInputBodyVisibility{
+		SetRepoVisibilityInputBodyVisibilityPublic,
+		SetRepoVisibilityInputBodyVisibilityPrivate,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s SetRepoVisibilityInputBodyVisibility) MarshalText() ([]byte, error) {
+	switch s {
+	case SetRepoVisibilityInputBodyVisibilityPublic:
+		return []byte(s), nil
+	case SetRepoVisibilityInputBodyVisibilityPrivate:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *SetRepoVisibilityInputBodyVisibility) UnmarshalText(data []byte) error {
+	switch SetRepoVisibilityInputBodyVisibility(data) {
+	case SetRepoVisibilityInputBodyVisibilityPublic:
+		*s = SetRepoVisibilityInputBodyVisibilityPublic
+		return nil
+	case SetRepoVisibilityInputBodyVisibilityPrivate:
+		*s = SetRepoVisibilityInputBodyVisibilityPrivate
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/SetRepoVisibilityOutputBody
+type SetRepoVisibilityOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI                                `json:"$schema"`
+	Visibility      SetRepoVisibilityOutputBodyVisibility `json:"visibility"`
+	AdditionalProps SetRepoVisibilityOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *SetRepoVisibilityOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetVisibility returns the value of Visibility.
+func (s *SetRepoVisibilityOutputBody) GetVisibility() SetRepoVisibilityOutputBodyVisibility {
+	return s.Visibility
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *SetRepoVisibilityOutputBody) GetAdditionalProps() SetRepoVisibilityOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *SetRepoVisibilityOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetVisibility sets the value of Visibility.
+func (s *SetRepoVisibilityOutputBody) SetVisibility(val SetRepoVisibilityOutputBodyVisibility) {
+	s.Visibility = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *SetRepoVisibilityOutputBody) SetAdditionalProps(val SetRepoVisibilityOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type SetRepoVisibilityOutputBodyAdditional map[string]jx.Raw
+
+func (s *SetRepoVisibilityOutputBodyAdditional) init() SetRepoVisibilityOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type SetRepoVisibilityOutputBodyVisibility string
+
+const (
+	SetRepoVisibilityOutputBodyVisibilityPublic  SetRepoVisibilityOutputBodyVisibility = "public"
+	SetRepoVisibilityOutputBodyVisibilityPrivate SetRepoVisibilityOutputBodyVisibility = "private"
+)
+
+// AllValues returns all SetRepoVisibilityOutputBodyVisibility values.
+func (SetRepoVisibilityOutputBodyVisibility) AllValues() []SetRepoVisibilityOutputBodyVisibility {
+	return []SetRepoVisibilityOutputBodyVisibility{
+		SetRepoVisibilityOutputBodyVisibilityPublic,
+		SetRepoVisibilityOutputBodyVisibilityPrivate,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s SetRepoVisibilityOutputBodyVisibility) MarshalText() ([]byte, error) {
+	switch s {
+	case SetRepoVisibilityOutputBodyVisibilityPublic:
+		return []byte(s), nil
+	case SetRepoVisibilityOutputBodyVisibilityPrivate:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *SetRepoVisibilityOutputBodyVisibility) UnmarshalText(data []byte) error {
+	switch SetRepoVisibilityOutputBodyVisibility(data) {
+	case SetRepoVisibilityOutputBodyVisibilityPublic:
+		*s = SetRepoVisibilityOutputBodyVisibilityPublic
+		return nil
+	case SetRepoVisibilityOutputBodyVisibilityPrivate:
+		*s = SetRepoVisibilityOutputBodyVisibilityPrivate
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/TopologyCluster
+type TopologyCluster struct {
+	// DNS host of this cluster; pass verbatim as clusterHost to POST /api/v1/mirrors.
+	Host      string `json:"host"`
+	IsDefault bool   `json:"isDefault"`
+	// Human cluster label (the cluster's display name).
+	Label           string `json:"label"`
+	PublicUrl       string `json:"publicUrl"`
+	Slug            string `json:"slug"`
+	AdditionalProps TopologyClusterAdditional
+}
+
+// GetHost returns the value of Host.
+func (s *TopologyCluster) GetHost() string {
+	return s.Host
+}
+
+// GetIsDefault returns the value of IsDefault.
+func (s *TopologyCluster) GetIsDefault() bool {
+	return s.IsDefault
+}
+
+// GetLabel returns the value of Label.
+func (s *TopologyCluster) GetLabel() string {
+	return s.Label
+}
+
+// GetPublicUrl returns the value of PublicUrl.
+func (s *TopologyCluster) GetPublicUrl() string {
+	return s.PublicUrl
+}
+
+// GetSlug returns the value of Slug.
+func (s *TopologyCluster) GetSlug() string {
+	return s.Slug
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *TopologyCluster) GetAdditionalProps() TopologyClusterAdditional {
+	return s.AdditionalProps
+}
+
+// SetHost sets the value of Host.
+func (s *TopologyCluster) SetHost(val string) {
+	s.Host = val
+}
+
+// SetIsDefault sets the value of IsDefault.
+func (s *TopologyCluster) SetIsDefault(val bool) {
+	s.IsDefault = val
+}
+
+// SetLabel sets the value of Label.
+func (s *TopologyCluster) SetLabel(val string) {
+	s.Label = val
+}
+
+// SetPublicUrl sets the value of PublicUrl.
+func (s *TopologyCluster) SetPublicUrl(val string) {
+	s.PublicUrl = val
+}
+
+// SetSlug sets the value of Slug.
+func (s *TopologyCluster) SetSlug(val string) {
+	s.Slug = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *TopologyCluster) SetAdditionalProps(val TopologyClusterAdditional) {
+	s.AdditionalProps = val
+}
+
+type TopologyClusterAdditional map[string]jx.Raw
+
+func (s *TopologyClusterAdditional) init() TopologyClusterAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/TopologyJurisdiction
+type TopologyJurisdiction struct {
+	// Jurisdiction id from the cluster registry (e.g. "us").
+	ID              string           `json:"id"`
+	Label           string           `json:"label"`
+	Regions         []TopologyRegion `json:"regions"`
+	AdditionalProps TopologyJurisdictionAdditional
+}
+
+// GetID returns the value of ID.
+func (s *TopologyJurisdiction) GetID() string {
+	return s.ID
+}
+
+// GetLabel returns the value of Label.
+func (s *TopologyJurisdiction) GetLabel() string {
+	return s.Label
+}
+
+// GetRegions returns the value of Regions.
+func (s *TopologyJurisdiction) GetRegions() []TopologyRegion {
+	return s.Regions
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *TopologyJurisdiction) GetAdditionalProps() TopologyJurisdictionAdditional {
+	return s.AdditionalProps
+}
+
+// SetID sets the value of ID.
+func (s *TopologyJurisdiction) SetID(val string) {
+	s.ID = val
+}
+
+// SetLabel sets the value of Label.
+func (s *TopologyJurisdiction) SetLabel(val string) {
+	s.Label = val
+}
+
+// SetRegions sets the value of Regions.
+func (s *TopologyJurisdiction) SetRegions(val []TopologyRegion) {
+	s.Regions = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *TopologyJurisdiction) SetAdditionalProps(val TopologyJurisdictionAdditional) {
+	s.AdditionalProps = val
+}
+
+type TopologyJurisdictionAdditional map[string]jx.Raw
+
+func (s *TopologyJurisdictionAdditional) init() TopologyJurisdictionAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/TopologyRegion
+type TopologyRegion struct {
+	Clusters []TopologyCluster `json:"clusters"`
+	// Region id (the cell id from the cluster registry).
+	ID              string `json:"id"`
+	Label           string `json:"label"`
+	AdditionalProps TopologyRegionAdditional
+}
+
+// GetClusters returns the value of Clusters.
+func (s *TopologyRegion) GetClusters() []TopologyCluster {
+	return s.Clusters
+}
+
+// GetID returns the value of ID.
+func (s *TopologyRegion) GetID() string {
+	return s.ID
+}
+
+// GetLabel returns the value of Label.
+func (s *TopologyRegion) GetLabel() string {
+	return s.Label
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *TopologyRegion) GetAdditionalProps() TopologyRegionAdditional {
+	return s.AdditionalProps
+}
+
+// SetClusters sets the value of Clusters.
+func (s *TopologyRegion) SetClusters(val []TopologyCluster) {
+	s.Clusters = val
+}
+
+// SetID sets the value of ID.
+func (s *TopologyRegion) SetID(val string) {
+	s.ID = val
+}
+
+// SetLabel sets the value of Label.
+func (s *TopologyRegion) SetLabel(val string) {
+	s.Label = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *TopologyRegion) SetAdditionalProps(val TopologyRegionAdditional) {
+	s.AdditionalProps = val
+}
+
+type TopologyRegionAdditional map[string]jx.Raw
+
+func (s *TopologyRegionAdditional) init() TopologyRegionAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/WillDeleteStruct
+type WillDeleteStruct struct {
+	// Blanket note: profile PII is erased across all regions the account has data in (per-region
+	// residency is not globally tracked).
+	ProfileDataNote string `json:"profileDataNote"`
+	// Repos in the account's home region that will be permanently deleted (personal + mirror).
+	// Foreign-region repos are also erased by the fan-out but not enumerated here.
+	Repos           []DeletionRepo `json:"repos"`
+	AdditionalProps WillDeleteStructAdditional
+}
+
+// GetProfileDataNote returns the value of ProfileDataNote.
+func (s *WillDeleteStruct) GetProfileDataNote() string {
+	return s.ProfileDataNote
+}
+
+// GetRepos returns the value of Repos.
+func (s *WillDeleteStruct) GetRepos() []DeletionRepo {
+	return s.Repos
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *WillDeleteStruct) GetAdditionalProps() WillDeleteStructAdditional {
+	return s.AdditionalProps
+}
+
+// SetProfileDataNote sets the value of ProfileDataNote.
+func (s *WillDeleteStruct) SetProfileDataNote(val string) {
+	s.ProfileDataNote = val
+}
+
+// SetRepos sets the value of Repos.
+func (s *WillDeleteStruct) SetRepos(val []DeletionRepo) {
+	s.Repos = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *WillDeleteStruct) SetAdditionalProps(val WillDeleteStructAdditional) {
+	s.AdditionalProps = val
+}
+
+type WillDeleteStructAdditional map[string]jx.Raw
+
+func (s *WillDeleteStructAdditional) init() WillDeleteStructAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/WillUnlinkStruct
+type WillUnlinkStruct struct {
+	// Collaborator grants that will be unlinked.
+	Grants []DeletionGrant `json:"grants"`
+	// Org memberships that will be dropped (non-owned).
+	Memberships     []DeletionMembership `json:"memberships"`
+	AdditionalProps WillUnlinkStructAdditional
+}
+
+// GetGrants returns the value of Grants.
+func (s *WillUnlinkStruct) GetGrants() []DeletionGrant {
+	return s.Grants
+}
+
+// GetMemberships returns the value of Memberships.
+func (s *WillUnlinkStruct) GetMemberships() []DeletionMembership {
+	return s.Memberships
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *WillUnlinkStruct) GetAdditionalProps() WillUnlinkStructAdditional {
+	return s.AdditionalProps
+}
+
+// SetGrants sets the value of Grants.
+func (s *WillUnlinkStruct) SetGrants(val []DeletionGrant) {
+	s.Grants = val
+}
+
+// SetMemberships sets the value of Memberships.
+func (s *WillUnlinkStruct) SetMemberships(val []DeletionMembership) {
+	s.Memberships = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *WillUnlinkStruct) SetAdditionalProps(val WillUnlinkStructAdditional) {
+	s.AdditionalProps = val
+}
+
+type WillUnlinkStructAdditional map[string]jx.Raw
+
+func (s *WillUnlinkStructAdditional) init() WillUnlinkStructAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }

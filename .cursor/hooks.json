@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "beforeSubmitPrompt": [
+      {
+        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor before-submit-prompt"
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor pre-compact"
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor session-end"
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor session-start"
+      }
+    ],
+    "stop": [
+      {
+        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor stop"
+      }
+    ],
+    "subagentStart": [
+      {
+        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor subagent-start"
+      }
+    ],
+    "subagentStop": [
+      {
+        "command": "\"$(git rev-parse --show-toplevel)\"/scripts/entire-dev hooks cursor subagent-stop"
+      }
+    ]
+  },
+  "version": 1
+}

@@ -4,22 +4,35 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/entireio/auth-go/tokens"
-	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // defaultContextTokenTTL is the encoded keychain expiry used when a login
-// token carries no usable exp claim (e.g. an opaque, non-JWT bearer). The
-// server is the real authority on validity; this only governs when local
-// readers consider the token stale, and we hold no refresh token to act on
-// it, so a conservative non-zero value is enough to keep the entry usable.
+// JWT carries no usable exp claim. The server is the real authority on
+// validity; this only governs when local readers consider the token stale,
+// so a conservative non-zero value is enough to keep the entry usable.
 const defaultContextTokenTTL = time.Hour
+
+// ErrCredentialStoreWrite marks a failure writing tokens to the configured
+// credential backend (OS keyring or file store), as opposed to claim
+// validation or contexts.json failures. Login UX branches on it via
+// errors.Is to decide whether pointing the user at the file token store
+// would actually help.
+var ErrCredentialStoreWrite = errors.New("credential store write failed")
+
+// credStoreWriteError tags an underlying store error with
+// ErrCredentialStoreWrite without changing its message.
+type credStoreWriteError struct{ inner error }
+
+func (e *credStoreWriteError) Error() string   { return e.inner.Error() }
+func (e *credStoreWriteError) Unwrap() []error { return []error{e.inner, ErrCredentialStoreWrite} }
 
 // RecordLoginContext records a freshly obtained login token in the
 // shared contexts.json credential model: it derives the issuer (core
@@ -32,19 +45,17 @@ const defaultContextTokenTTL = time.Hour
 // the same core gets its own context (named handle@host) instead of
 // clobbering the first.
 //
-// activate controls current_context: login passes true (the just-completed
-// login becomes active, kubectl use-context style); read-time migration
-// passes false so it never silently switches the user's active account —
-// it still sets current_context when none exists yet.
+// activate controls current_context: true makes the just-completed login
+// active (kubectl use-context style); false records it without switching
+// the user's active account, though it still sets current_context when
+// none exists yet.
 //
-// This is the contexts.json half of login's dual-write: the legacy
-// entire-cli/<authBaseURL> keyring entry is still written by the caller so
-// the control-plane readers keep working untouched during the transition.
-// A login recorded here is visible to entiredb's CLIs (and the in-CLI git
-// remote helper) because they share this file and keychain layout.
+// This is the CLI's only credential write: a login recorded here is what
+// every consumer resolves against — the control plane, the data API, the
+// in-CLI git remote helper, and entiredb's CLIs, which share this file and
+// keychain layout.
 //
-// Returns the context name on success. Errors are returned (not swallowed)
-// so the caller can warn; login still succeeds on the legacy entry.
+// Returns the context name on success.
 func RecordLoginContext(rawToken, refreshToken string, activate bool) (string, error) {
 	claims, err := tokens.ParseClaims(rawToken)
 	if err != nil {
@@ -85,7 +96,7 @@ func RecordLoginContext(rawToken, refreshToken string, activate bool) (string, e
 	refreshSlot := tokenstore.RefreshService(keychainService)
 	if refreshToken != "" {
 		if err := tokenstore.Set(refreshSlot, handle, refreshToken); err != nil {
-			return "", fmt.Errorf("store refresh token in keyring: %w", err)
+			return "", fmt.Errorf("store refresh token in credential store: %w", &credStoreWriteError{err})
 		}
 	} else {
 		_ = tokenstore.Delete(refreshSlot, handle) //nolint:errcheck // best-effort cleanup of a stale refresh token
@@ -93,19 +104,26 @@ func RecordLoginContext(rawToken, refreshToken string, activate bool) (string, e
 
 	encoded := tokenstore.EncodeTokenWithExpiration(rawToken, expiresIn)
 	if err := tokenstore.Set(keychainService, handle, encoded); err != nil {
-		return "", fmt.Errorf("store login token in keyring: %w", err)
+		return "", fmt.Errorf("store login token in credential store: %w", &credStoreWriteError{err})
 	}
 
 	var name string
 	cfgDir := userdirs.Config()
 	if modErr := contexts.Modify(cfgDir, func(f *contexts.File) (bool, error) {
 		name = pickContextName(f, coreURL, handle)
-		f.Upsert(&contexts.Context{
+		next := &contexts.Context{
 			Name:            name,
 			CoreURL:         coreURL,
 			Handle:          handle,
 			KeychainService: keychainService,
-		})
+		}
+		// Upsert replaces the whole entry, so carry the audiences over: the
+		// jurisdiction tokens are keyed by audience + handle, not by login
+		// session, so they survive this re-login and must stay findable.
+		if prev := f.Find(name); prev != nil {
+			next.JurisdictionAudiences = prev.JurisdictionAudiences
+		}
+		f.Upsert(next)
 		if activate || f.CurrentContext == "" {
 			f.CurrentContext = name
 		}
@@ -151,53 +169,36 @@ func sameIssuer(a, b string) bool {
 	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
 }
 
-// MigrateLegacyLoginContext bridges users who logged in before the
-// contexts.json dual-write existed: if the legacy entire-cli/<authBaseURL>
-// keyring entry holds a usable JWT and no context yet covers its issuer,
-// it records an equivalent context (and keychain entry under the shared
-// scheme) so the git remote helper can authenticate without a re-login.
-//
-// Returns (true, nil) when it created a context. No-ops — returning
-// (false, nil) — when there's no legacy token, the token is opaque
-// (no derivable issuer), or a context for that issuer already exists.
-// Idempotent: safe to call on every helper invocation.
-func MigrateLegacyLoginContext() (migrated bool, err error) {
-	legacy, err := NewStore().GetToken(api.AuthBaseURL())
-	if err != nil {
-		return false, fmt.Errorf("read legacy login token: %w", err)
-	}
-	if legacy == "" {
-		return false, nil
-	}
-	claims, parseErr := tokens.ParseClaims(legacy)
-	if parseErr != nil || claims.Issuer == "" {
-		// Opaque/unsigned legacy token — can't derive a context from it.
-		return false, nil //nolint:nilerr // absence of a JWT issuer is not an error here
-	}
-	handle := claims.Handle
-	if handle == "" {
-		handle = claims.Subject
-	}
-	f, err := contexts.Load(userdirs.Config())
-	if err != nil {
-		return false, fmt.Errorf("load contexts: %w", err)
-	}
-	// Skip only when this exact identity is already represented. Keying on
-	// issuer alone would skip a legacy bob@core just because alice@core (e.g.
-	// from another CLI) already exists, leaving Bob without a context.
-	for _, c := range f.Contexts {
-		if sameIssuer(c.CoreURL, claims.Issuer) && c.Handle == handle {
-			return false, nil
+// LocalIdentityCacheKey returns a non-secret local auth identity key.
+func LocalIdentityCacheKey() (string, error) {
+	if raw := strings.TrimSpace(os.Getenv(EnvTokenVar)); raw != "" {
+		claims, err := tokens.ParseClaims(raw)
+		if err != nil {
+			return "", fmt.Errorf("parse %s claims: %w", EnvTokenVar, err)
 		}
+		return strings.Join([]string{
+			"env",
+			strings.TrimRight(claims.Issuer, "/"),
+			claims.Subject,
+			claims.Handle,
+			strings.Join(claims.Audience, ","),
+		}, "|"), nil
 	}
-	// activate=false: migrating an old login (e.g. on first `git clone`) must
-	// not silently switch the user's active context. RecordLoginContext still
-	// sets current_context when none exists yet.
-	// No refresh token: the legacy entry is access-token-only.
-	if _, err := RecordLoginContext(legacy, "", false); err != nil {
-		return false, err
+
+	c, ok, err := activeContext()
+	if err != nil {
+		return "", err
 	}
-	return true, nil
+	if !ok {
+		return "", nil
+	}
+	return strings.Join([]string{
+		"context",
+		strings.TrimRight(c.CoreURL, "/"),
+		c.Name,
+		c.Handle,
+		c.KeychainService,
+	}, "|"), nil
 }
 
 // LoginTokenForContext returns the login JWT stored for c, read from the

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
@@ -14,8 +15,8 @@ import (
 )
 
 // dataAPIDiscoveryTimeout bounds the one /.well-known/entire-api.json GET we
-// add per data-API command. Kept short: on any failure we fall back to static
-// resolution, so a slow or absent endpoint must not stall the command.
+// add per data-API command. Kept short so a slow or absent endpoint fails the
+// command promptly rather than stalling it.
 const dataAPIDiscoveryTimeout = 8 * time.Second
 
 // resolveContextFunc is the shape of a context-discovery seam: it mirrors
@@ -31,21 +32,12 @@ var resolveContextForAPI resolveContextFunc = clusterdiscovery.ResolveContextFor
 // discovery seam and returns a cleanup func. Tests in other packages that
 // exercise a data-API command (activity/search/dispatch/recap) MUST install
 // this — otherwise ResolveDataAPIToken makes a real network call to the
-// configured data host and bypasses any SetManagerForTest fallback seam. Pass
-// a func returning clusterdiscovery.ErrDiscoveryUnavailable to force the static
-// fallback path. Test-only.
+// configured data host. Test-only.
 func SetResolveContextForAPIForTest(t interface{ Helper() }, fn resolveContextFunc) func() {
 	t.Helper()
 	prev := resolveContextForAPI
 	resolveContextForAPI = fn
 	return func() { resolveContextForAPI = prev }
-}
-
-// DiscoveryUnavailableForTest is a ready-made SetResolveContextForAPIForTest
-// value that forces the discovery-unavailable fallback (no network), so a
-// cross-package test exercises the static TokenForResource path deterministically.
-func DiscoveryUnavailableForTest(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
-	return nil, clusterdiscovery.ErrDiscoveryUnavailable
 }
 
 // ResolveDataAPIToken returns a bearer for the data API at dataBaseURL.
@@ -61,37 +53,28 @@ func DiscoveryUnavailableForTest(context.Context, string, string, string, *http.
 // authenticate as the partial.to login even while the active context is a
 // prod entire.io login — with no per-command override needed.
 //
-// When the API doesn't advertise discovery (404 / unreachable / 503 /
-// malformed — e.g. a deployment predating the well-known), it falls back to
-// the pre-discovery static path (TokenForResource through the singleton
-// manager) so behaviour is never worse than before. A reachable API whose
-// context selection fails (no eligible context, or several with none active)
-// surfaces that error directly — the user must log in or pick one.
+// Discovery is the only path: an API host that doesn't advertise
+// /.well-known/entire-api.json (unreachable / 404 / 503 / malformed) is an
+// error — without it we can't know which login servers the host trusts, and
+// guessing risks exchanging a token at a core the host doesn't accept.
 //
 // Callers that honour --insecure-http-auth must call EnableInsecureHTTP before
-// invoking this (as they already do); the per-context exchange and the static
-// fallback both read that global opt-in.
+// invoking this (as they already do); the per-context exchange reads that
+// global opt-in.
 func ResolveDataAPIToken(ctx context.Context, dataBaseURL string) (string, error) {
 	dataOrigin := api.OriginOnly(dataBaseURL)
 	host, ok := hostOf(dataOrigin)
 	if !ok {
-		// Can't derive a host to discover against — use static resolution.
-		return TokenForResource(ctx, dataOrigin)
+		return "", fmt.Errorf("data API URL %q has no host to discover against", dataBaseURL)
 	}
-
-	// Bridge any pre-contexts.json login so the resolver can match it, mirroring
-	// the git remote helper's cold-boot path. Best-effort: a migration failure
-	// must not block resolution.
-	_, _ = MigrateLegacyLoginContext() //nolint:errcheck // best-effort bridge; resolution proceeds regardless
 
 	dctx, cancel := context.WithTimeout(ctx, dataAPIDiscoveryTimeout)
 	defer cancel()
-	httpClient := &http.Client{Timeout: dataAPIDiscoveryTimeout}
+	httpClient := dataAPIDiscoveryClient(dataOrigin)
 
 	selected, err := resolveContextForAPI(dctx, userdirs.Config(), userdirs.Cache(), host, httpClient, nil)
 	if errors.Is(err, clusterdiscovery.ErrDiscoveryUnavailable) {
-		// Old deployment / not rolled out / transient — preserve today's behaviour.
-		return TokenForResource(ctx, dataOrigin)
+		return "", fmt.Errorf("%s does not advertise its trusted login servers (/.well-known/entire-api.json missing or unreachable); cannot authenticate: %w", host, err)
 	}
 	if err != nil {
 		return "", err
@@ -105,6 +88,43 @@ func ResolveDataAPIToken(ctx context.Context, dataBaseURL string) (string, error
 		return "", err
 	}
 	return provider(ctx)
+}
+
+type dataAPIHTTPDiscoveryTransport struct {
+	base http.RoundTripper
+}
+
+func (t dataAPIHTTPDiscoveryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.URL.Scheme = schemeHTTP
+	resp, err := t.base.RoundTrip(clone)
+	if err != nil {
+		return nil, fmt.Errorf("plain HTTP data API discovery: %w", err)
+	}
+	return resp, nil
+}
+
+func dataAPIDiscoveryClient(dataOrigin string) *http.Client {
+	client := &http.Client{Timeout: dataAPIDiscoveryTimeout}
+	if !shouldUsePlainHTTPDiscovery(dataOrigin) {
+		return client
+	}
+
+	var base http.RoundTripper
+	base = http.DefaultTransport
+	if client.Transport != nil {
+		base = client.Transport
+	}
+	client.Transport = dataAPIHTTPDiscoveryTransport{base: base}
+	return client
+}
+
+func shouldUsePlainHTTPDiscovery(dataOrigin string) bool {
+	u, err := url.Parse(dataOrigin)
+	if err != nil || u.Scheme != schemeHTTP {
+		return false
+	}
+	return insecureHTTPEnabled() || isLoopbackHTTP(dataOrigin)
 }
 
 // hostOf returns the host[:port] of an origin URL, ok=false when it can't be

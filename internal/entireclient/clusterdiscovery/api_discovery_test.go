@@ -172,7 +172,7 @@ func TestResolveContextForAPI(t *testing.T) {
 
 	// The cross-core case the slice exists to fix: the active context is a prod
 	// login, but the only context eligible for the partial.to API is the
-	// staging one — pick it without any operator override.
+	// staging one — pick it without any operator-side configuration.
 	t.Run("sole eligible context used despite unrelated active", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(apiHandler(t, "https://us.auth.partial.to", "https://eu.auth.partial.to"))
@@ -294,10 +294,10 @@ func TestResolveContextForAPI_CachedAcrossCalls(t *testing.T) {
 	// The trusted issuers are persisted (in the cores cache, separate file).
 	cache, err := discovery.LoadAPICores(cacheDir)
 	require.NoError(t, err)
-	urls, fresh, ok := cache.Get("partial.to")
+	entry, fresh, ok := cache.GetEntry("partial.to")
 	require.True(t, ok)
 	assert.True(t, fresh)
-	assert.Equal(t, []string{"https://us.auth.partial.to"}, urls)
+	assert.Equal(t, []string{"https://us.auth.partial.to"}, entry.CoreURLs)
 }
 
 // TestResolveContextForAPI_StaleFallbackOnFetchFailure: a present-but-stale

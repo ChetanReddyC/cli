@@ -1,7 +1,6 @@
 package paths
 
 import (
-	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -19,6 +18,7 @@ func TestIsSubpath(t *testing.T) {
 		{name: "equal paths", parent: "/a/b", child: "/a/b", want: true},
 		{name: "child outside parent", parent: "/a/b", child: "/a/c", want: false},
 		{name: "parent prefix but not subpath", parent: "/a/b", child: "/a/bc", want: false},
+		{name: "dot-dot prefixed child inside parent", parent: "/a/b", child: "/a/b/..generated/schema.json", want: true},
 
 		// Traversal attacks
 		{name: "dot-dot escape", parent: "/a/b", child: "/a/b/../../../etc/passwd", want: false},
@@ -46,6 +46,35 @@ func TestIsSubpath(t *testing.T) {
 	}
 }
 
+func TestIsRelativeTraversal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		rel  string
+		want bool
+	}{
+		{name: "exact dot-dot", rel: "..", want: true},
+		{name: "dot-dot child", rel: filepath.Join("..", "outside.txt"), want: true},
+		{name: "slash dot-dot child", rel: "../outside.txt", want: true},
+		{name: "backslash dot-dot child", rel: `..\outside.txt`, want: true},
+		{name: "dot-dot prefixed name", rel: filepath.Join("..generated", "schema.json"), want: false},
+		{name: "slash dot-dot prefixed name", rel: "../generated/schema.json", want: true},
+		{name: "backslash dot-dot prefixed name", rel: `..\generated\schema.json`, want: true},
+		{name: "ordinary child", rel: filepath.Join("dir", "file.txt"), want: false},
+		{name: "current dir", rel: ".", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := IsRelativeTraversal(tt.rel)
+			if got != tt.want {
+				t.Errorf("IsRelativeTraversal(%q) = %v, want %v", tt.rel, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsInfrastructurePath(t *testing.T) {
 	tests := []struct {
 		path string
@@ -67,59 +96,62 @@ func TestIsInfrastructurePath(t *testing.T) {
 	}
 }
 
-func TestSanitizePathForClaude(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"/Users/test/myrepo", "-Users-test-myrepo"},
-		{"/home/user/project", "-home-user-project"},
-		{"simple", "simple"},
-		{"/path/with spaces/here", "-path-with-spaces-here"},
-		{"/path.with.dots/file", "-path-with-dots-file"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := SanitizePathForClaude(tt.input)
-			if got != tt.want {
-				t.Errorf("SanitizePathForClaude(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
+func TestCaseInsensitiveFS(t *testing.T) {
+	t.Parallel()
+	want := runtime.GOOS == osWindows || runtime.GOOS == osDarwin
+	if got := CaseInsensitiveFS(); got != want {
+		t.Errorf("CaseInsensitiveFS() = %v, want %v (GOOS=%s)", got, want, runtime.GOOS)
 	}
 }
 
-func TestGetClaudeProjectDir_Override(t *testing.T) {
-	// Set the override environment variable
-	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", "/tmp/test-claude-project")
-
-	result, err := GetClaudeProjectDir("/some/repo/path")
-	if err != nil {
-		t.Fatalf("GetClaudeProjectDir() error = %v", err)
+// TestIsSubpath_AlwaysCaseSensitive locks in that IsSubpath — the fail-closed
+// containment primitive used by allow gates (rewind/utils) — never folds case
+// on any OS. A differently-cased path must not count as contained, or a
+// crafted, attacker-influenced value could fail open on a case-sensitive volume.
+func TestIsSubpath_AlwaysCaseSensitive(t *testing.T) {
+	t.Parallel()
+	if IsSubpath(".entire/metadata", ".Entire/metadata") {
+		t.Error("IsSubpath must be case-sensitive (fail-closed); .Entire/metadata must not be under .entire/metadata")
 	}
-
-	if result != "/tmp/test-claude-project" {
-		t.Errorf("GetClaudeProjectDir() = %q, want %q", result, "/tmp/test-claude-project")
+	if !IsSubpath(".claude", ".claude/marker.txt") {
+		t.Error("IsSubpath(.claude, .claude/marker.txt) = false, want true")
+	}
+	if IsSubpath(".claude", ".claude/../../etc/passwd") {
+		t.Error("IsSubpath must reject traversal")
 	}
 }
 
-func TestGetClaudeProjectDir_Default(t *testing.T) {
-	// Ensure env var is not set by setting it to empty string
-	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", "")
-
-	result, err := GetClaudeProjectDir("/Users/test/myrepo")
-	if err != nil {
-		t.Fatalf("GetClaudeProjectDir() error = %v", err)
+// TestIsProtectedSubpath_CaseSensitivity asserts OS-based folding for the
+// EXCLUSION helper: case variants match on Windows/macOS (where they name the
+// same on-disk path), stay distinct on case-sensitive Linux, and traversal is
+// always rejected.
+func TestIsProtectedSubpath_CaseSensitivity(t *testing.T) {
+	t.Parallel()
+	got := IsProtectedSubpath(".claude", ".Claude/marker.txt")
+	if got != CaseInsensitiveFS() {
+		t.Errorf("IsProtectedSubpath(.claude, .Claude/marker.txt) = %v, want %v (GOOS=%s)",
+			got, CaseInsensitiveFS(), runtime.GOOS)
 	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("os.UserHomeDir() error = %v", err)
+	if !IsProtectedSubpath(".claude", ".claude/marker.txt") {
+		t.Error("IsProtectedSubpath(.claude, .claude/marker.txt) = false, want true")
 	}
-	expected := filepath.Join(homeDir, ".claude", "projects", "-Users-test-myrepo")
+	if IsProtectedSubpath(".claude", ".Claude/../../etc/passwd") {
+		t.Error("IsProtectedSubpath must reject traversal even when case-folding")
+	}
+}
 
-	if result != expected {
-		t.Errorf("GetClaudeProjectDir() = %q, want %q", result, expected)
+func TestEqual_CaseSensitivity(t *testing.T) {
+	t.Parallel()
+	if !Equal(".terminalhirerc", ".terminalhirerc") {
+		t.Error("Equal should match identical paths")
+	}
+	got := Equal(".terminalhirerc", ".TerminalHireRC")
+	if got != CaseInsensitiveFS() {
+		t.Errorf("Equal(case variant) = %v, want %v (GOOS=%s)",
+			got, CaseInsensitiveFS(), runtime.GOOS)
+	}
+	if Equal(".terminalhirerc", "other") {
+		t.Error("Equal should not match distinct paths")
 	}
 }
 
@@ -162,6 +194,29 @@ func TestToRelativePath_MSYSPaths(t *testing.T) {
 				t.Errorf("ToRelativePath(%q, %q) = %q, want %q", tt.absPath, tt.cwd, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestToRelativePath_AllowsDotDotPrefixedRepoPath(t *testing.T) {
+	t.Parallel()
+	cwd := t.TempDir()
+	absPath := filepath.Join(cwd, "..generated", "schema.json")
+	want := filepath.Join("..generated", "schema.json")
+
+	got := ToRelativePath(absPath, cwd)
+	if got != want {
+		t.Errorf("ToRelativePath(%q, %q) = %q, want %q", absPath, cwd, got, want)
+	}
+}
+
+func TestToRelativePath_RejectsDotDotTraversal(t *testing.T) {
+	t.Parallel()
+	cwd := t.TempDir()
+	absPath := filepath.Join(filepath.Dir(cwd), "..generated", "schema.json")
+
+	got := ToRelativePath(absPath, cwd)
+	if got != "" {
+		t.Errorf("ToRelativePath(%q, %q) = %q, want empty string", absPath, cwd, got)
 	}
 }
 

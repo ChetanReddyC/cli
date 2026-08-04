@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 	"unicode"
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
@@ -19,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
-	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -79,8 +77,12 @@ your agent's context.`,
 			external.DiscoverAndRegister(ctx)
 			w := cmd.OutOrStdout()
 			errW := cmd.ErrOrStderr()
+			// --list is a hidden deprecated bridge for external scripts that still
+			// invoke rewind --list. Same JSON bytes as checkpoint list --pending
+			// --json; remove together with the rewind command itself.
 			if listFlag {
-				return runRewindList(ctx, w)
+				fmt.Fprintln(errW, "note: 'rewind --list' is deprecated; use 'entire checkpoint list --pending --json'")
+				return runCheckpointPendingListJSON(ctx, w)
 			}
 			if toFlag != "" {
 				return runRewindToWithOptions(ctx, w, errW, toFlag, logsOnlyFlag, resetFlag)
@@ -89,7 +91,8 @@ your agent's context.`,
 		},
 	}
 
-	cmd.Flags().BoolVar(&listFlag, "list", false, "List available rewind points (JSON output)")
+	cmd.Flags().BoolVar(&listFlag, "list", false, "List available rewind points (JSON output); deprecated, use checkpoint list --pending --json")
+	_ = cmd.Flags().MarkHidden("list") //nolint:errcheck // flag is defined above
 	cmd.Flags().StringVar(&toFlag, "to", "", "Rewind to specific commit ID (non-interactive)")
 	cmd.Flags().BoolVar(&logsOnlyFlag, "logs-only", false, "Only restore logs, don't modify working directory (for logs-only points)")
 	cmd.Flags().BoolVar(&resetFlag, "reset", false, "Reset branch to commit (destructive, for logs-only points)")
@@ -124,43 +127,12 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 	}
 
 	// Check if there are multiple sessions (to show session identifier)
-	sessionIDs := make(map[string]bool)
-	for _, p := range points {
-		if p.SessionID != "" {
-			sessionIDs[p.SessionID] = true
-		}
-	}
-	hasMultipleSessions := len(sessionIDs) > 1
+	multi := hasMultipleSessions(points)
 
 	// Build options for the select menu
 	options := make([]huh.Option[string], 0, len(points)+1)
 	for _, p := range points {
-		var label string
-		timestamp := p.Date.Format("2006-01-02 15:04")
-
-		// Build session identifier for display when multiple sessions exist
-		sessionLabel := ""
-		if hasMultipleSessions && p.SessionPrompt != "" {
-			// Show truncated prompt to identify the session
-			sessionLabel = fmt.Sprintf(" [%s]", sanitizeForTerminal(p.SessionPrompt))
-		}
-
-		switch {
-		case p.IsLogsOnly:
-			// Committed checkpoint - show commit sha (this is the real user commit)
-			shortID := p.ID
-			if len(shortID) >= 7 {
-				shortID = shortID[:7]
-			}
-			label = fmt.Sprintf("%s (%s) %s%s", shortID, timestamp, sanitizeForTerminal(p.Message), sessionLabel)
-		case p.IsTaskCheckpoint:
-			// Task checkpoint (uncommitted) - no sha shown
-			label = fmt.Sprintf("        (%s) [Task] %s%s", timestamp, sanitizeForTerminal(p.Message), sessionLabel)
-		default:
-			// Shadow checkpoint (uncommitted) - no sha shown (internal commit)
-			label = fmt.Sprintf("        (%s) %s%s", timestamp, sanitizeForTerminal(p.Message), sessionLabel)
-		}
-		options = append(options, huh.NewOption(label, p.ID))
+		options = append(options, huh.NewOption(rewindPointLabel(p, multi), p.ID))
 	}
 	options = append(options, huh.NewOption("Cancel", "cancel"))
 
@@ -224,17 +196,7 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 		return handleLogsOnlyRewindInteractive(ctx, w, errW, start, *selectedPoint, shortID)
 	}
 
-	// Preview rewind to show warnings about files that will be deleted
-	preview, previewErr := start.PreviewRewind(ctx, *selectedPoint)
-	if previewErr != nil {
-		fmt.Fprintf(errW, "Warning: could not preview rewind effects: %v\n", previewErr)
-	} else if preview != nil && len(preview.FilesToDelete) > 0 {
-		fmt.Fprintf(errW, "\nWarning: The following untracked files will be DELETED:\n")
-		for _, f := range preview.FilesToDelete {
-			fmt.Fprintf(errW, "  - %s\n", f)
-		}
-		fmt.Fprintf(errW, "\n")
-	}
+	printRewindPreviewWarnings(ctx, errW, start, *selectedPoint)
 
 	// Confirm rewind
 	var confirm bool
@@ -320,7 +282,7 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 		if sessionID == "" {
 			sessionID = filepath.Base(selectedPoint.MetadataDir)
 		}
-		transcriptFile = filepath.Join(selectedPoint.MetadataDir, paths.TranscriptFileNameLegacy)
+		transcriptFile = legacyFallbackTranscriptPath(selectedPoint.MetadataDir)
 	}
 
 	// Try to restore transcript using the appropriate method:
@@ -344,7 +306,7 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 		}
 	}
 
-	if !restored {
+	if !restored && transcriptFile != "" {
 		// Fall back to local file
 		if err := restoreSessionTranscript(ctx, w, transcriptFile, sessionID, agent); err != nil {
 			fmt.Fprintf(errW, "Warning: failed to restore session transcript: %v\n", err)
@@ -357,59 +319,51 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 	return nil
 }
 
-func runRewindList(ctx context.Context, w io.Writer) error {
-	start := GetStrategy(ctx)
-
-	points, err := start.GetRewindPoints(ctx, 20)
-	if err != nil {
-		return fmt.Errorf("failed to find rewind points: %w", err)
-	}
-
-	// Output as JSON for programmatic use
-	type jsonPoint struct {
-		ID               string `json:"id"`
-		Message          string `json:"message"`
-		MetadataDir      string `json:"metadata_dir"`
-		Date             string `json:"date"`
-		IsTaskCheckpoint bool   `json:"is_task_checkpoint"`
-		ToolUseID        string `json:"tool_use_id,omitempty"`
-		IsLogsOnly       bool   `json:"is_logs_only"`
-		CondensationID   string `json:"condensation_id,omitempty"`
-		SessionID        string `json:"session_id,omitempty"`
-		SessionPrompt    string `json:"session_prompt,omitempty"`
-	}
-
-	output := make([]jsonPoint, len(points))
-	for i, p := range points {
-		output[i] = jsonPoint{
-			ID:               p.ID,
-			Message:          p.Message,
-			MetadataDir:      p.MetadataDir,
-			Date:             p.Date.Format(time.RFC3339),
-			IsTaskCheckpoint: p.IsTaskCheckpoint,
-			ToolUseID:        p.ToolUseID,
-			IsLogsOnly:       p.IsLogsOnly,
-			CondensationID:   p.CheckpointID.String(),
-			SessionID:        p.SessionID,
-			SessionPrompt:    p.SessionPrompt,
-		}
-	}
-
-	// Print as JSON
-	data, err := jsonutil.MarshalIndentWithNewline(output, "", "  ")
-	if err != nil {
-		return err //nolint:wrapcheck // already present in codebase
-	}
-	fmt.Fprintln(w, string(data))
-	return nil
-}
-
 func runRewindToWithOptions(ctx context.Context, w, errW io.Writer, commitID string, logsOnly bool, reset bool) error {
 	return runRewindToInternal(ctx, w, errW, commitID, logsOnly, reset)
 }
 
+// refuseIfImportedCheckpoint blocks rewinding to imported (read-only,
+// commit-less) checkpoints. Imported checkpoints live on the v1 metadata
+// branch tagged Imported; this matches commitID against those IDs (full or
+// >=7-char prefix). Best-effort: on read failure it returns nil so normal
+// rewind proceeds.
+func refuseIfImportedCheckpoint(ctx context.Context, errW io.Writer, commitID string) error {
+	repo, err := strategy.OpenRepository(ctx)
+	if err != nil {
+		return nil
+	}
+	defer repo.Close()
+
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	if err != nil {
+		return nil
+	}
+	infos, err := stores.Persistent.List(ctx)
+	if err != nil {
+		return nil
+	}
+	for _, in := range infos {
+		if !in.Imported {
+			continue
+		}
+		idStr := in.CheckpointID.String()
+		if idStr == commitID || (len(commitID) >= 7 && strings.HasPrefix(idStr, commitID)) {
+			fmt.Fprintln(errW, "This checkpoint was imported from existing agent history. Imported history is read-only and not rewindable.")
+			return NewSilentError(errors.New("rewind refused: imported checkpoint"))
+		}
+	}
+	return nil
+}
+
 func runRewindToInternal(ctx context.Context, w, errW io.Writer, commitID string, logsOnly bool, reset bool) error {
 	start := GetStrategy(ctx)
+
+	// Imported history is read-only: refuse rewinding to it with a clear message
+	// rather than a confusing "rewind point not found".
+	if err := refuseIfImportedCheckpoint(ctx, errW, commitID); err != nil {
+		return err
+	}
 
 	// Check for uncommitted changes (skip for reset which handles this itself)
 	if !reset {
@@ -454,17 +408,7 @@ func runRewindToInternal(ctx context.Context, w, errW io.Writer, commitID string
 		return handleLogsOnlyRewindNonInteractive(ctx, w, errW, start, *selectedPoint)
 	}
 
-	// Preview rewind to show warnings about files that will be deleted
-	preview, previewErr := start.PreviewRewind(ctx, *selectedPoint)
-	if previewErr != nil {
-		fmt.Fprintf(errW, "Warning: could not preview rewind effects: %v\n", previewErr)
-	} else if preview != nil && len(preview.FilesToDelete) > 0 {
-		fmt.Fprintf(errW, "\nWarning: The following untracked files will be DELETED:\n")
-		for _, f := range preview.FilesToDelete {
-			fmt.Fprintf(errW, "  - %s\n", f)
-		}
-		fmt.Fprintf(errW, "\n")
-	}
+	printRewindPreviewWarnings(ctx, errW, start, *selectedPoint)
 
 	// Resolve agent once for use throughout
 	agent, err := getAgent(selectedPoint.Agent)
@@ -523,7 +467,7 @@ func runRewindToInternal(ctx context.Context, w, errW io.Writer, commitID string
 		if sessionID == "" {
 			sessionID = filepath.Base(selectedPoint.MetadataDir)
 		}
-		transcriptFile = filepath.Join(selectedPoint.MetadataDir, paths.TranscriptFileNameLegacy)
+		transcriptFile = legacyFallbackTranscriptPath(selectedPoint.MetadataDir)
 	}
 
 	// Try to restore transcript using the appropriate method:
@@ -547,7 +491,7 @@ func runRewindToInternal(ctx context.Context, w, errW io.Writer, commitID string
 		}
 	}
 
-	if !restored {
+	if !restored && transcriptFile != "" {
 		// Fall back to local file
 		if err := restoreSessionTranscript(ctx, w, transcriptFile, sessionID, agent); err != nil {
 			fmt.Fprintf(errW, "Warning: failed to restore session transcript: %v\n", err)
@@ -665,6 +609,46 @@ func handleLogsOnlyResetNonInteractive(ctx context.Context, w, errW io.Writer, s
 	return nil
 }
 
+// legacyFallbackTranscriptPath builds the local-disk fallback transcript path
+// (<metadataDir>/full.log) used when checkpoint-storage and shadow-branch
+// restores are unavailable. metadataDir originates from the Entire-Metadata
+// commit trailer, which is attacker-influenceable, and the result is read via
+// copyFile -> os.ReadFile with no root containment on the source.
+//
+// Legitimate values are always Entire-owned metadata under .entire/metadata/, so
+// require the cleaned path to stay within that subtree. paths.IsSubpath also
+// rejects absolute, volume-relative, and traversing paths, so a crafted trailer
+// cannot redirect the read to arbitrary in-repo or CWD-relative locations (e.g.
+// "notes/full.log" or "."). Returns "" when the metadata dir is empty or unsafe,
+// which makes the local-file fallback fail closed. filepath.Join cleans the
+// result, avoiding surprising ".//a/../b" forms.
+func legacyFallbackTranscriptPath(metadataDir string) string {
+	if metadataDir == "" {
+		return ""
+	}
+	cleaned := filepath.Clean(metadataDir)
+	if !paths.IsSubpath(paths.EntireMetadataDir, cleaned) {
+		return ""
+	}
+	return filepath.Join(cleaned, paths.TranscriptFileNameLegacy)
+}
+
+// printRewindPreviewWarnings previews the rewind and warns about untracked
+// files it would delete. Preview failures are non-fatal — the rewind itself
+// still runs, so the warning degrades to a notice.
+func printRewindPreviewWarnings(ctx context.Context, errW io.Writer, start *strategy.ManualCommitStrategy, point strategy.RewindPoint) {
+	preview, previewErr := start.PreviewRewind(ctx, point)
+	if previewErr != nil {
+		fmt.Fprintf(errW, "Warning: could not preview rewind effects: %v\n", previewErr)
+	} else if preview != nil && len(preview.FilesToDelete) > 0 {
+		fmt.Fprintf(errW, "\nWarning: The following untracked files will be DELETED:\n")
+		for _, f := range preview.FilesToDelete {
+			fmt.Fprintf(errW, "  - %s\n", f)
+		}
+		fmt.Fprintf(errW, "\n")
+	}
+}
+
 func restoreSessionTranscript(ctx context.Context, w io.Writer, transcriptFile, sessionID string, agent agentpkg.Agent) error {
 	sessionFile, err := resolveTranscriptPath(ctx, sessionID, agent)
 	if err != nil {
@@ -694,14 +678,15 @@ func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.Checkpoin
 	}
 	defer repo.Close()
 
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
-	content, returnedSessionID, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, store, cpID)
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	if err != nil {
+		return "", fmt.Errorf("open checkpoint store: %w", err)
+	}
+	logContent, returnedSessionID, err := checkpoint.ReadRawSessionLogForCheckpoint(ctx, stores.Persistent, cpID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get session log: %w", err)
 	}
 
-	// Use session ID returned from checkpoint if available
-	// Otherwise fall back to the passed-in sessionID
 	if returnedSessionID != "" {
 		sessionID = returnedSessionID
 	}
@@ -717,7 +702,7 @@ func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.Checkpoin
 		SessionID:  sessionID,
 		AgentName:  agent.Name(),
 		SessionRef: sessionFile,
-		NativeData: content,
+		NativeData: logContent,
 	}
 	if err := agent.WriteSession(ctx, agentSession); err != nil {
 		return "", fmt.Errorf("failed to write session: %w", err)
@@ -742,8 +727,11 @@ func restoreSessionTranscriptFromShadow(ctx context.Context, commitHash, metadat
 	}
 
 	// Get transcript from shadow branch commit tree
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(ctx))
-	content, err := store.GetTranscriptFromCommit(ctx, hash, metadataDir, agent.Type())
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	if err != nil {
+		return "", fmt.Errorf("open checkpoint store: %w", err)
+	}
+	content, err := stores.Ephemeral().GetTranscriptFromCommit(ctx, hash, metadataDir, agent.Type())
 	if err != nil {
 		return "", fmt.Errorf("failed to get transcript from shadow branch: %w", err)
 	}

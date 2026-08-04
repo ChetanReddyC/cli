@@ -42,6 +42,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 
 	type state struct {
 		sync.Mutex
+
 		approved bool
 		polls    int
 	}
@@ -49,7 +50,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 	serverState := &state{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/device_authorization":
+		case r.Method == http.MethodPost && r.URL.Path == pathDeviceAuthorization:
 			writeJSON(t, w, http.StatusOK, map[string]any{
 				"device_code":               "device-123",
 				"user_code":                 "ABCD-EFGH",
@@ -58,7 +59,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 				"expires_in":                10,
 				"interval":                  1,
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
 			serverState.Lock()
 			serverState.polls++
 			approved := serverState.approved
@@ -92,7 +93,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 		t.Fatalf("approval URL = %q, want prefix %q", approvalURL, server.URL+"/")
 	}
 
-	approveReq, reqErr := http.NewRequest(http.MethodPost, approvalURL, http.NoBody)
+	approveReq, reqErr := http.NewRequestWithContext(t.Context(), http.MethodPost, approvalURL, http.NoBody)
 	if reqErr != nil {
 		t.Fatalf("create approve request: %v", reqErr)
 	}
@@ -116,9 +117,8 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 		t.Fatalf("output missing login complete message (token save likely failed):\n%s", output)
 	}
 
-	// A --server login is recorded as a contexts.json context (the legacy
-	// keyring entry is only written for the default login server, whose key
-	// is the only one legacy readers consult).
+	// The login is recorded as a contexts.json context — the only
+	// credential store.
 	contextsPath := filepath.Join(proc.configDir, "contexts.json")
 	data, readErr := os.ReadFile(contextsPath)
 	if readErr != nil {
@@ -141,7 +141,7 @@ func TestLogin_ExpiredFlow(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/device_authorization":
+		case r.Method == http.MethodPost && r.URL.Path == pathDeviceAuthorization:
 			writeJSON(t, w, http.StatusOK, map[string]any{
 				"device_code":               "device-expired",
 				"user_code":                 "WXYZ-0000",
@@ -150,7 +150,7 @@ func TestLogin_ExpiredFlow(t *testing.T) {
 				"expires_in":                10,
 				"interval":                  1,
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
 			writeJSON(t, w, http.StatusBadRequest, map[string]any{"error": "expired_token"})
 		default:
 			http.NotFound(w, r)
@@ -180,7 +180,7 @@ func TestLogin_DeniedFlow(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/device_authorization":
+		case r.Method == http.MethodPost && r.URL.Path == pathDeviceAuthorization:
 			writeJSON(t, w, http.StatusOK, map[string]any{
 				"device_code":               "device-denied",
 				"user_code":                 "QRST-9999",
@@ -189,7 +189,7 @@ func TestLogin_DeniedFlow(t *testing.T) {
 				"expires_in":                10,
 				"interval":                  1,
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
 			writeJSON(t, w, http.StatusBadRequest, map[string]any{"error": "access_denied"})
 		default:
 			http.NotFound(w, r)
@@ -224,7 +224,7 @@ func TestLogin_BrowserFlow_SavesToken(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/oauth/token" {
+		if r.Method == http.MethodPost && r.URL.Path == pathOAuthToken {
 			if err := r.ParseForm(); err != nil {
 				t.Errorf("parse token form: %v", err)
 			}
@@ -292,9 +292,10 @@ func startLoginProcess(t *testing.T, apiBaseURL string, extraEnv []string, args 
 	env := NewTestEnv(t)
 	configDir := filepath.Join(env.RepoDir, ".entire-test-config")
 
-	// ENTIRE_AUTH_BASE_URL is retired (commands reject it when set at all);
-	// --server is how a login targets the test server instead of the
-	// production default.
+	// --server pins the login at the in-process test server instead of the
+	// production default. The login lands in contexts.json + the file token
+	// store, both sandboxed below so the test never touches the developer's
+	// real config or OS keychain.
 	args = append(args, "--server", apiBaseURL)
 	cmd := execx.NonInteractive(context.Background(), getTestBinary(), args...)
 	cmd.Dir = env.RepoDir
@@ -303,10 +304,9 @@ func startLoginProcess(t *testing.T, apiBaseURL string, extraEnv []string, args 
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_API_BASE_URL="+apiBaseURL,
-		"ENTIRE_TEST_AUTH_STORE_FILE="+filepath.Join(env.RepoDir, ".entire-test-auth-store.json"),
-		// A --server login records its credential in contexts.json and the
-		// token store; point both at the test sandbox so the spawned binary
-		// can't touch the real ~/.config/entire or the OS keychain.
+		// The login records its credential in contexts.json and the token
+		// store; point both at the test sandbox so the spawned binary can't
+		// touch the real ~/.config/entire or the OS keychain.
 		"ENTIRE_CONFIG_DIR="+configDir,
 		"ENTIRE_TOKEN_STORE=file",
 		"ENTIRE_TOKEN_STORE_PATH="+filepath.Join(env.RepoDir, ".entire-test-tokens.json"),

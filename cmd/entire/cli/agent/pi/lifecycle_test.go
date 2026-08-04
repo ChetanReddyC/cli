@@ -312,3 +312,35 @@ func TestHookNamesMatchesParser(t *testing.T) {
 		}
 	}
 }
+
+func TestPiAgent_ContextInjector(t *testing.T) {
+	t.Parallel()
+	a := &PiAgent{}
+
+	// Pi injects model context at TurnStart (before_agent_start).
+	if got := a.InjectionEvent(); got != agent.TurnStart {
+		t.Errorf("InjectionEvent = %v, want TurnStart", got)
+	}
+
+	// Non-empty text renders a newline-terminated {"inject_context":...} line.
+	out, err := a.RenderContextInjection(agent.ContextInjection{Text: "use entire trail"})
+	if err != nil {
+		t.Fatalf("RenderContextInjection: %v", err)
+	}
+	got := string(out)
+	if !strings.HasSuffix(got, "\n") {
+		t.Errorf("payload must be newline-terminated, got %q", got)
+	}
+	if !strings.Contains(got, `"inject_context":"use entire trail"`) {
+		t.Errorf("payload missing inject_context envelope: %q", got)
+	}
+
+	// Empty text renders nothing.
+	out, err = a.RenderContextInjection(agent.ContextInjection{Text: "   "})
+	if err != nil {
+		t.Fatalf("RenderContextInjection(empty): %v", err)
+	}
+	if len(out) != 0 {
+		t.Errorf("empty text must render no payload, got %q", string(out))
+	}
+}

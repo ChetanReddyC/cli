@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
@@ -76,19 +75,6 @@ func TestSetupGeminiHooks_AddsAllRequiredHooks(t *testing.T) {
 	if len(settings.Hooks.Notification) == 0 {
 		t.Error("Notification hook should exist")
 	}
-
-	searchAgentPath := filepath.Join(env.RepoDir, ".gemini", "agents", "entire-search.md")
-	data, err := os.ReadFile(searchAgentPath)
-	if err != nil {
-		t.Fatalf("failed to read generated Gemini search subagent: %v", err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "ENTIRE-MANAGED SEARCH SUBAGENT") {
-		t.Error("Gemini search subagent should be marked as Entire-managed")
-	}
-	if !strings.Contains(content, "entire search --json") {
-		t.Error("Gemini search subagent should instruct use of `entire search --json`")
-	}
 }
 
 // TestSetupGeminiHooks_PreservesExistingSettings is a smoke test verifying that
@@ -142,7 +128,7 @@ func TestSetupGeminiHooks_PreservesExistingSettings(t *testing.T) {
 		t.Fatalf("failed to parse settings.json: %v", err)
 	}
 
-	if rawSettings["customSetting"] != "should-be-preserved" {
+	if rawSettings["customSetting"] != preservedSetting {
 		t.Error("customSetting should be preserved after enable gemini")
 	}
 

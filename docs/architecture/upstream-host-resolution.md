@@ -48,26 +48,15 @@ The host *is* a core, so there is no discovery. `coreapi.New()` consults
    and an expired access token is silently re-minted from the stored refresh
    token. This is what makes `entire auth use <ctx>` actually retarget
    `org`/`repo`/`project`/`grant`.
-2. **else** (no active context) → the default auth origin +
-   `TokenForResource` — the pre-contexts fallback.
-
-The default auth origin is the fallback host, **not** an override: a token
-minted by the active context's core can't authenticate against a different
-host, so the active context always wins when present. (At login time
-`entire login --server` chooses where to authenticate, and the resulting
-context's `CoreURL` *is* that host — so local-dev / split-host setups keep
-working. `ENTIRE_AUTH_BASE_URL` is retired and rejected when set.)
+2. **else** (no active context) → an error wrapping `ErrNotLoggedIn` with the
+   `entire login` hint. There is no fallback host: a control-plane command
+   without a login has no identity to act as. (At login time `entire login
+   --server` chooses where to authenticate, and the resulting context's
+   `CoreURL` *is* that host — so local-dev setups keep working.)
 
 Key files: `cmd/entire/cli/auth/control_plane.go` (resolver),
 `cmd/entire/cli/auth/refresh.go` (per-context refreshing provider),
-`internal/coreapi/client.go` (`New()` + `providerSource`),
-`cmd/entire/cli/api/base_url.go` (`AuthBaseURL`).
-
-Why the per-context path and not the singleton manager: the singleton
-(`auth/exchange.go:defaultManager`) is built once with `Issuer =
-api.AuthBaseURL()`. When the active context lives on a *different* core, both
-its token-store reads and its STS/refresh endpoint are keyed on the wrong
-host. The per-context provider fixes that by keying on `c.CoreURL`.
+`internal/coreapi/client.go` (`New()` + `providerSource`).
 
 ### Web/data API (done)
 
@@ -116,22 +105,21 @@ Resolution (`auth.ResolveDataAPIToken`):
    active-context-wins-if-eligible → sole eligible → explicit-choice error.
    This is the lever that makes `ENTIRE_API_BASE_URL=https://partial.to entire
    activity` authenticate as the partial.to login even while the active context
-   is a prod entire.io login — with no env override needed.
+   is a prod entire.io login.
 3. Exchange that context's login JWT at **its** core for the data host origin
    (`auth.NewRefreshingResourceProvider`, keyed on `c.CoreURL` like the
    control-plane provider; the token manager sets `aud` = that origin).
-4. **Fallback**: if the host doesn't advertise discovery (404 / unreachable /
-   503 / malformed) *and* no cache entry exists, fall back to the pre-discovery
-   static path (`TokenForResource` via the singleton manager), so behaviour is
-   never worse than before. A *reachable* host whose context selection fails
-   surfaces that error — the user must log in or pick one. (A transient outage
-   with a warm cache uses the stale entry, not the fallback.)
+4. **No fallback**: a host that doesn't advertise discovery (404 / unreachable /
+   503 / malformed) with no cache entry is an error naming the host — without
+   the well-known we can't know which login servers it trusts. A *reachable*
+   host whose context selection fails surfaces that error — the user must log
+   in or pick one. (A transient outage with a warm cache uses the stale entry.)
 
 The selection rule differs from the control plane (where the active context
 *always* wins because there's no host to match): here a host **is** matched, so
 the active context wins only when eligible.
 
-Key files: `cmd/entire/cli/auth/data_api.go` (`ResolveDataAPIToken` + fallback),
+Key files: `cmd/entire/cli/auth/data_api.go` (`ResolveDataAPIToken`),
 `cmd/entire/cli/auth/refresh.go` (`NewRefreshingResourceProvider`),
 `internal/entireclient/clusterdiscovery/api_discovery.go` (`DiscoverAPI`,
 `ResolveContextForAPI`, sharing `selectContext` *and* the cores cache with the

@@ -1,93 +1,132 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
-	"github.com/entireio/auth-go/tokens"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
-// CurrentContextToken returns the login JWT for the active context in
-// contexts.json, or ("", false) when there is no current context or it
-// has no stored token. This is the contexts.json half of the CLI's
-// credential resolution; callers fall back to the legacy keyring entry so
-// pre-contexts logins keep working until migrated.
-func CurrentContextToken() (string, bool) {
-	f, err := contexts.Load(userdirs.Config())
-	if err != nil {
-		return "", false
-	}
-	c := f.Find(f.CurrentContext)
-	if c == nil {
-		return "", false
-	}
-	tok, err := LoginTokenForContext(c)
-	if err != nil || tok == "" {
-		return "", false
-	}
-	return tok, true
-}
-
-// RemoveCurrentContext deletes the active context from contexts.json and
-// its keyring token, clearing current_context. It is a no-op (returns nil)
+// RemoveCurrentContext deletes the active context's keyring tokens and its
+// contexts.json entry, clearing current_context. It is a no-op (returns nil)
 // when there is no current context. Used by logout.
 func RemoveCurrentContext() error {
-	// Read-modify-write in a single locked Modify so the context we delete
-	// is exactly the one we capture the keychain slot from (separate Load +
-	// Modify would race a concurrent `auth use`).
-	var svc, handle string
-	if err := contexts.Modify(userdirs.Config(), func(f *contexts.File) (bool, error) {
-		current := f.Find(f.CurrentContext)
-		if current == nil {
-			return false, nil
-		}
-		svc, handle = current.KeychainService, current.Handle
-		// Delete clears current_context because we're deleting the active
-		// one — logged out means logged out, no switch to another identity.
-		f.Delete(current.Name)
-		return true, nil
+	if err := removeContextLocked(func(f *contexts.File) *contexts.Context {
+		return f.Find(f.CurrentContext)
 	}); err != nil {
 		return fmt.Errorf("remove current context: %w", err)
 	}
-	deleteContextKeychain(svc, handle)
 	return nil
 }
 
-// RemoveContext deletes the named context from contexts.json and its keyring
-// tokens. A missing context is a no-op. Used by `logout --all-contexts` to
-// drain every saved login. File.Delete clears current_context when name was
+// RemoveContext deletes the named context's keyring tokens, then its
+// contexts.json entry. A missing context is a no-op. Used by logout and
+// `logout --all-contexts`. File.Delete clears current_context when name was
 // the active one, so removing the current context this way also logs it out.
 func RemoveContext(name string) error {
-	var svc, handle string
-	if err := contexts.Modify(userdirs.Config(), func(f *contexts.File) (bool, error) {
-		c := f.Find(name)
-		if c == nil {
-			return false, nil
-		}
-		svc, handle = c.KeychainService, c.Handle
-		f.Delete(name)
-		return true, nil
+	if err := removeContextLocked(func(f *contexts.File) *contexts.Context {
+		return f.Find(name)
 	}); err != nil {
 		return fmt.Errorf("remove context %q: %w", name, err)
 	}
-	deleteContextKeychain(svc, handle)
 	return nil
 }
 
-// deleteContextKeychain best-effort removes a context's keyring slots,
-// sequenced off the context just removed from contexts.json. A missing entry
-// is fine — the contexts.json removal is what makes us "logged out". Both the
-// access slot and its paired refresh slot must go: leaving the long-lived
-// refresh token behind would let any later keyring-capable process mint fresh
-// access tokens after logout.
-func deleteContextKeychain(svc, handle string) {
-	if svc == "" || handle == "" {
-		return
+// RememberJurisdictionAudience adds audience to context `name`'s
+// JurisdictionAudiences, so logout can find the matching keyring slot.
+// Idempotent: an already-recorded audience rewrites nothing.
+//
+// Callers MUST record before writing the token to the credential store — a
+// persisted-but-unrecorded token is a bearer logout can't find, whereas a
+// failed record that aborts the write costs only one token exchange.
+func RememberJurisdictionAudience(name, audience string) error {
+	aud := strings.TrimRight(strings.TrimSpace(audience), "/")
+	if name == "" || aud == "" {
+		return errors.New("context name and jurisdiction audience are both required")
 	}
-	_ = tokenstore.Delete(svc, handle)                            //nolint:errcheck // best-effort; contexts.json removal is the source of truth for logout
-	_ = tokenstore.Delete(tokenstore.RefreshService(svc), handle) //nolint:errcheck // best-effort; absent refresh slot is fine
+	if err := contexts.Modify(userdirs.Config(), func(f *contexts.File) (bool, error) {
+		c := f.Find(name)
+		if c == nil {
+			return false, fmt.Errorf("no login context named %q", name)
+		}
+		if slices.Contains(c.JurisdictionAudiences, aud) {
+			return false, nil
+		}
+		c.JurisdictionAudiences = append(c.JurisdictionAudiences, aud)
+		return true, nil
+	}); err != nil {
+		return fmt.Errorf("record jurisdiction audience %q for context %q: %w", aud, name, err)
+	}
+	return nil
+}
+
+// removeContextLocked deletes the context selected by pick — keyring slots
+// first, then the contexts.json entry — inside a single locked Modify, so
+// selection, credential deletion, and entry removal can't interleave with a
+// concurrent `auth use` or login. A nil pick result is a no-op.
+//
+// Credential deletion comes first and is part of the success contract:
+// removing the entry and then failing the keyring delete would report
+// "Logged out." while the long-lived refresh token survives on the machine,
+// mintable by any keyring-capable process. A delete error aborts the Modify,
+// leaving the entry intact for a retry. The inverse partial failure (slots
+// deleted, entry write fails) is benign — the context reads as not logged in
+// and a retried logout no-ops the deletes.
+func removeContextLocked(pick func(*contexts.File) *contexts.Context) error {
+	//nolint:wrapcheck // callers wrap with their own operation context
+	return contexts.Modify(userdirs.Config(), func(f *contexts.File) (bool, error) {
+		c := pick(f)
+		if c == nil {
+			return false, nil
+		}
+		if err := deleteContextKeychain(c); err != nil {
+			return false, fmt.Errorf("remove credentials for %q: %w", c.Name, err)
+		}
+		f.Delete(c.Name)
+		return true, nil
+	})
+}
+
+// deleteContextKeychain removes every keyring slot a context owns: the paired
+// refresh + access tokens, plus one jurisdiction (data-plane) access token per
+// recorded audience — each of those authorizes git against every repo the
+// account can reach. A missing entry is fine; any other failure surfaces so
+// logout doesn't claim success over surviving credentials.
+//
+// Deletion runs longest-lived-first — refresh (indefinite), jurisdiction (8h),
+// access (an hour at most) — so a mid-sequence failure leaves behind only the
+// shorter-lived credential. Unrecorded jurisdiction slots are unreachable (no
+// enumeration API) and left to expire.
+func deleteContextKeychain(c *contexts.Context) error {
+	if c == nil || c.Handle == "" {
+		return nil
+	}
+	if c.KeychainService != "" {
+		if err := tokenstore.Delete(tokenstore.RefreshService(c.KeychainService), c.Handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
+			return fmt.Errorf("delete refresh token: %w", err)
+		}
+	}
+	for _, audience := range c.JurisdictionAudiences {
+		// A blank entry can only come from a hand-edited or corrupted
+		// contexts.json, and would resolve to the bare service prefix — no
+		// token lives there, so skip rather than round-trip the keyring.
+		if strings.TrimSpace(audience) == "" {
+			continue
+		}
+		if err := tokenstore.Delete(tokenstore.JurisdictionService(audience), c.Handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
+			return fmt.Errorf("delete jurisdiction token for %s: %w", audience, err)
+		}
+	}
+	if c.KeychainService != "" {
+		if err := tokenstore.Delete(c.KeychainService, c.Handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
+			return fmt.Errorf("delete access token: %w", err)
+		}
+	}
+	return nil
 }
 
 // SetCurrentContext makes name the active context. Returns an error when
@@ -116,42 +155,4 @@ func Contexts() ([]*contexts.Context, string, error) {
 		return nil, "", fmt.Errorf("load contexts: %w", err)
 	}
 	return f.Contexts, f.CurrentContext, nil
-}
-
-// ContextStore wraps the legacy keyring Store so token *reads* prefer the
-// active contexts.json context, falling back to the legacy
-// entire-cli/<authBaseURL> entry. Writes are inherited from Store
-// unchanged — login dual-writes the context via RecordLoginContext, so the
-// write side needs no override here.
-//
-// This is the single seam that lets the control-plane readers (the
-// tokenmanager, LookupCurrentToken, and `auth status`/`list`) honor a
-// contexts.json login — including one created by entiredb's CLIs that
-// share this file. *ContextStore satisfies both the cli package's
-// tokenStore interface and auth-go's tokenstore.Store.
-type ContextStore struct {
-	*Store
-}
-
-// NewContextStore returns a context-preferring view over the legacy store.
-func NewContextStore() *ContextStore {
-	return &ContextStore{Store: NewStore()}
-}
-
-// GetToken prefers the active context's token, falling back to the legacy
-// entry keyed by baseURL.
-func (s *ContextStore) GetToken(baseURL string) (string, error) {
-	if tok, ok := CurrentContextToken(); ok {
-		return tok, nil
-	}
-	return s.Store.GetToken(baseURL)
-}
-
-// LoadTokens (the tokenstore.Store method the tokenmanager calls) prefers
-// the active context's token, falling back to the legacy profile entry.
-func (s *ContextStore) LoadTokens(profile string) (tokens.TokenSet, error) {
-	if tok, ok := CurrentContextToken(); ok {
-		return tokens.TokenSet{AccessToken: tok}, nil
-	}
-	return s.Store.LoadTokens(profile)
 }

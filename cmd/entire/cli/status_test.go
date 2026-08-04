@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -29,10 +30,7 @@ func TestResolveWorktreeBranch_RegularRepo(t *testing.T) {
 		dir = resolved
 	}
 
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("git init: %v", err)
-	}
+	testutil.InitRepo(t, dir)
 
 	// Read the default branch name directly from HEAD to avoid hard-coding it
 	headData, err := os.ReadFile(filepath.Join(dir, ".git", "HEAD"))
@@ -53,9 +51,10 @@ func TestResolveWorktreeBranch_DetachedHEAD(t *testing.T) {
 		dir = resolved
 	}
 
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("git init: %v", err)
+		t.Fatalf("git open: %v", err)
 	}
 
 	// Create a commit so we can detach HEAD
@@ -212,6 +211,47 @@ func TestRunStatus_Enabled(t *testing.T) {
 	}
 }
 
+// `entire status` surfaces the agent-help pointer for agents on transports
+// without context injection (Cursor / Copilot / Droid), but only once entire is
+// set up — not for not-set-up or not-a-git-repo states.
+func TestRunStatus_ShowsAgentHelpHintWhenSetUp(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), agentHelpCommand) {
+		t.Errorf("expected agent-help hint in status output, got: %s", stdout.String())
+	}
+}
+
+func TestRunStatus_NoAgentHelpHintWhenNotSetUp(t *testing.T) {
+	setupTestRepo(t)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if strings.Contains(stdout.String(), agentHelpCommand) {
+		t.Errorf("agent-help hint should not appear when not set up, got: %s", stdout.String())
+	}
+}
+
+// agentHelpCommand is user-facing — docs, the installed skills, and agents key
+// off the exact string — so pin its value here. Every other assertion uses the
+// const; this guards against it silently drifting.
+func TestAgentHelpCommandValue(t *testing.T) {
+	t.Parallel()
+	const want = "entire agent-help"
+	if agentHelpCommand != want {
+		t.Errorf("agentHelpCommand = %q, want %q", agentHelpCommand, want)
+	}
+}
+
 func TestRunStatus_Disabled(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsDisabled)
@@ -223,6 +263,10 @@ func TestRunStatus_Disabled(t *testing.T) {
 
 	if !strings.Contains(stdout.String(), "Disabled") {
 		t.Errorf("Expected output to show 'Disabled', got: %s", stdout.String())
+	}
+	// The agent-help footer renders whenever entire is set up, including disabled.
+	if !strings.Contains(stdout.String(), agentHelpCommand) {
+		t.Errorf("Expected agent-help hint in disabled (but set-up) status, got: %s", stdout.String())
 	}
 }
 
@@ -281,8 +325,8 @@ func TestRunStatus_LocalSettingsOnly(t *testing.T) {
 
 func TestRunStatus_BothProjectAndLocal(t *testing.T) {
 	setupTestRepo(t)
-	// Project: enabled=true, strategy=manual-commit
-	// Local: enabled=false, strategy=manual-commit
+	// Project: enabled=true
+	// Local: enabled=false
 	// Detailed mode shows effective status first, then each file separately
 	writeSettings(t, `{"enabled": true}`)
 	writeLocalSettings(t, `{"enabled": false}`)
@@ -294,12 +338,12 @@ func TestRunStatus_BothProjectAndLocal(t *testing.T) {
 
 	output := stdout.String()
 	// Should show effective status first (local overrides project)
-	if !strings.Contains(output, "Disabled") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show effective 'Disabled' with 'manual-commit', got: %s", output)
+	if !strings.Contains(output, "Disabled") {
+		t.Errorf("Expected output to show effective 'Disabled', got: %s", output)
 	}
 	// Should show both settings separately
-	if !strings.Contains(output, "Project") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show Project with manual-commit, got: %s", output)
+	if !strings.Contains(output, "Project") || !strings.Contains(output, "enabled") {
+		t.Errorf("Expected output to show Project with enabled, got: %s", output)
 	}
 	if !strings.Contains(output, "Local") || !strings.Contains(output, "disabled") {
 		t.Errorf("Expected output to show Local with disabled, got: %s", output)
@@ -308,8 +352,8 @@ func TestRunStatus_BothProjectAndLocal(t *testing.T) {
 
 func TestRunStatus_BothProjectAndLocal_Short(t *testing.T) {
 	setupTestRepo(t)
-	// Project: enabled=true, strategy=manual-commit
-	// Local: enabled=false, strategy=manual-commit
+	// Project: enabled=true
+	// Local: enabled=false
 	// Short mode shows merged/effective settings
 	writeSettings(t, `{"enabled": true}`)
 	writeLocalSettings(t, `{"enabled": false}`)
@@ -321,28 +365,8 @@ func TestRunStatus_BothProjectAndLocal_Short(t *testing.T) {
 
 	output := stdout.String()
 	// Should show merged/effective state (local overrides project)
-	if !strings.Contains(output, "Disabled") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show 'Disabled' with 'manual-commit', got: %s", output)
-	}
-}
-
-func TestRunStatus_ShowsManualCommitStrategy(t *testing.T) {
-	setupTestRepo(t)
-	writeSettings(t, `{"enabled": false}`)
-
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, true, false); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
-	}
-
-	output := stdout.String()
-	// Should show effective status first
-	if !strings.Contains(output, "Disabled") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show effective 'Disabled' with 'manual-commit', got: %s", output)
-	}
-	// Should show per-file details
-	if !strings.Contains(output, "Project") || !strings.Contains(output, "disabled") {
-		t.Errorf("Expected output to show 'Project' and 'disabled', got: %s", output)
+	if !strings.Contains(output, "Disabled") {
+		t.Errorf("Expected output to show 'Disabled', got: %s", output)
 	}
 }
 
@@ -893,6 +917,21 @@ func TestTotalTokens_DeepSubagentNesting(t *testing.T) {
 	}
 }
 
+func TestTotalTokens_SaturatesOverflow(t *testing.T) {
+	t.Parallel()
+
+	maxInt := int(^uint(0) >> 1)
+	tu := &agent.TokenUsage{
+		InputTokens: maxInt,
+		SubagentTokens: &agent.TokenUsage{
+			OutputTokens: 1,
+		},
+	}
+	if got := totalTokens(tu); got != maxInt {
+		t.Errorf("totalTokens() = %d, want %d", got, maxInt)
+	}
+}
+
 func TestActiveTimeDisplay(t *testing.T) {
 	t.Parallel()
 
@@ -1164,8 +1203,7 @@ func TestFormatSettingsStatusShort_Enabled(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  true,
-		Strategy: "manual-commit",
+		Enabled: true,
 	}
 
 	result := formatSettingsStatusShort(context.Background(), s, sty)
@@ -1176,9 +1214,6 @@ func TestFormatSettingsStatusShort_Enabled(t *testing.T) {
 	if !strings.Contains(result, "Enabled") {
 		t.Errorf("Expected 'Enabled' in output, got: %q", result)
 	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
-	}
 }
 
 func TestFormatSettingsStatusShort_Disabled(t *testing.T) {
@@ -1186,8 +1221,7 @@ func TestFormatSettingsStatusShort_Disabled(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  false,
-		Strategy: "manual-commit",
+		Enabled: false,
 	}
 
 	result := formatSettingsStatusShort(context.Background(), s, sty)
@@ -1197,9 +1231,6 @@ func TestFormatSettingsStatusShort_Disabled(t *testing.T) {
 	}
 	if !strings.Contains(result, "Disabled") {
 		t.Errorf("Expected 'Disabled' in output, got: %q", result)
-	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
 	}
 }
 
@@ -1379,8 +1410,7 @@ func TestFormatSettingsStatus_Project(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  true,
-		Strategy: "manual-commit",
+		Enabled: true,
 	}
 
 	result := formatSettingsStatus("Project", s, sty)
@@ -1391,9 +1421,6 @@ func TestFormatSettingsStatus_Project(t *testing.T) {
 	if !strings.Contains(result, "enabled") {
 		t.Errorf("Expected 'enabled' in output, got: %q", result)
 	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
-	}
 }
 
 func TestFormatSettingsStatus_LocalDisabled(t *testing.T) {
@@ -1401,8 +1428,7 @@ func TestFormatSettingsStatus_LocalDisabled(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  false,
-		Strategy: "manual-commit",
+		Enabled: false,
 	}
 
 	result := formatSettingsStatus("Local", s, sty)
@@ -1412,9 +1438,6 @@ func TestFormatSettingsStatus_LocalDisabled(t *testing.T) {
 	}
 	if !strings.Contains(result, "disabled") {
 		t.Errorf("Expected 'disabled' in output, got: %q", result)
-	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
 	}
 }
 
@@ -1644,8 +1667,7 @@ func TestFormatSettingsStatus_Separators(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  true,
-		Strategy: "manual-commit",
+		Enabled: true,
 	}
 
 	result := formatSettingsStatus("Project", s, sty)
@@ -1687,6 +1709,49 @@ func TestRunStatusJSON_Enabled(t *testing.T) {
 	if result.Error != "" {
 		t.Errorf("Expected no error, got %q", result.Error)
 	}
+	// No-channel agents (Cursor/Copilot/Droid/MCP) parse --json, not the text
+	// footer, so the agent-help pointer must be present once entire is set up.
+	if result.AgentHelp != agentHelpCommand {
+		t.Errorf("Expected agent_help='entire agent-help', got %q", result.AgentHelp)
+	}
+}
+
+// TestRunStatusJSON_HooksOutdated — when Claude Code hooks are installed under
+// the outdated Task/TodoWrite matchers, `entire status --json` reports the agent
+// under hooks_outdated so scripts/agents can detect the drift.
+func TestRunStatusJSON_HooksOutdated(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	if err := os.MkdirAll(".claude", 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	stale := `{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "entire hooks claude-code stop"}]}],
+    "PreToolUse": [{"matcher": "Task", "hooks": [{"type": "command", "command": "entire hooks claude-code pre-task"}]}],
+    "PostToolUse": [
+      {"matcher": "Task", "hooks": [{"type": "command", "command": "entire hooks claude-code post-task"}]},
+      {"matcher": "TodoWrite", "hooks": [{"type": "command", "command": "entire hooks claude-code post-todo"}]}
+    ]
+  }
+}`
+	if err := os.WriteFile(".claude/settings.json", []byte(stale), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if !slices.Contains(result.HooksOutdated, "claude-code") {
+		t.Errorf("Expected hooks_outdated to contain 'claude-code', got %v", result.HooksOutdated)
+	}
 }
 
 func TestRunStatusJSON_Disabled(t *testing.T) {
@@ -1705,6 +1770,11 @@ func TestRunStatusJSON_Disabled(t *testing.T) {
 
 	if result.Enabled {
 		t.Error("Expected enabled=false")
+	}
+	// Disabled-but-set-up still advertises the passive agent-help pointer (the
+	// hint is gated on "set up", not on "enabled") — matches the text footer.
+	if result.AgentHelp != agentHelpCommand {
+		t.Errorf("Expected agent_help='entire agent-help' when disabled-but-set-up, got %q", result.AgentHelp)
 	}
 }
 
@@ -1727,6 +1797,10 @@ func TestRunStatusJSON_NotSetUp(t *testing.T) {
 	if result.Error != "not set up" {
 		t.Errorf("Expected error='not set up', got %q", result.Error)
 	}
+	// Mirrors the text footer: no agent-help pointer until entire is set up.
+	if result.AgentHelp != "" {
+		t.Errorf("agent_help should be empty when not set up, got %q", result.AgentHelp)
+	}
 }
 
 func TestRunStatusJSON_NotGitRepo(t *testing.T) {
@@ -1747,6 +1821,9 @@ func TestRunStatusJSON_NotGitRepo(t *testing.T) {
 	}
 	if result.Error != "not a git repository" {
 		t.Errorf("Expected error='not a git repository', got %q", result.Error)
+	}
+	if result.AgentHelp != "" {
+		t.Errorf("agent_help should be empty when not a git repo, got %q", result.AgentHelp)
 	}
 }
 
@@ -1794,6 +1871,9 @@ func TestRunStatusJSON_WithActiveSessions(t *testing.T) {
 	}
 	if s.Status != "active" {
 		t.Errorf("Expected status='active', got %q", s.Status)
+	}
+	if result.AgentHelp != agentHelpCommand {
+		t.Errorf("Expected agent_help='entire agent-help' with active sessions, got %q", result.AgentHelp)
 	}
 }
 
@@ -1891,7 +1971,7 @@ func writeStatusHeadCheckpoint(t *testing.T, hasReview, hasInvestigation bool) {
 	}
 	cpID := id.MustCheckpointID(cpHex)
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	if err := store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	if err := store.Write(context.Background(), checkpoint.Session{
 		CheckpointID:     cpID,
 		SessionID:        "status-test-session",
 		Strategy:         "manual-commit",

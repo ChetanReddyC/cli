@@ -107,13 +107,9 @@ func (s contextTokenStore) DeleteTokens(string) error {
 // newContextTokenManager builds the per-context auth-go tokenmanager that both
 // NewRefreshingLoginProvider and NewRefreshingResourceProvider sit on. Keying
 // Issuer on c.CoreURL is the whole point: store reads, the refresh grant, and
-// the STS exchange all target that context's core (the bug the singleton
-// manager — pinned to AuthBaseURL — has when the active context lives on a
-// different core).
-//
-// STSPath is set unconditionally even for the login-only provider: Refresh()
-// never reaches the exchange path, so an unused STSPath is harmless, and a
-// single config keeps the two providers from drifting.
+// the STS exchange all target that context's core, so a multi-core user's
+// credentials never travel to (or get keyed under) a host the context
+// doesn't belong to.
 //
 // transport carries the caller's TLS configuration; allowInsecureHTTP permits
 // an http:// core/resource for loopback/dev.
@@ -126,13 +122,13 @@ func newContextTokenManager(c *contexts.Context, transport http.RoundTripper, al
 	}
 	mgr, err := tokenmanager.New(tokenmanager.Config{
 		Issuer:            strings.TrimRight(c.CoreURL, "/"),
-		ClientID:          CurrentProvider().ClientID,
-		STSPath:           CurrentProvider().STSPath,
-		RefreshPath:       CurrentProvider().TokenPath,
+		ClientID:          oauthClientID,
+		STSPath:           oauthSTSPath,
+		RefreshPath:       oauthTokenPath,
 		Store:             contextTokenStore{service: c.KeychainService, handle: c.Handle},
 		Transport:         transport,
 		AllowInsecureHTTP: allowInsecureHTTP,
-		UserAgent:         CurrentProvider().ClientID,
+		UserAgent:         oauthClientID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init token manager for context %q: %w", c.Name, err)
@@ -141,13 +137,10 @@ func newContextTokenManager(c *contexts.Context, transport http.RoundTripper, al
 }
 
 // reauthError carries a friendly, context-named re-login message while still
-// unwrapping to the underlying tokenmanager sentinel. Callers that branch on
-// errors.Is(err, ErrNotLoggedIn) (NewAuthenticatedAPIClient, search, dispatch)
-// keep matching — without this, the discovery path turned a missing keyring
-// token into an opaque string and those callers fell through to their generic
-// error, a regression vs the pre-discovery TokenForResource path. Error()
-// returns only msg so the sentinel's terse text ("not logged in") doesn't leak
-// into the rendered message.
+// unwrapping to the underlying tokenmanager sentinel, so callers that branch
+// on errors.Is(err, ErrNotLoggedIn) (NewAuthenticatedAPIClient, search,
+// dispatch) keep matching. Error() returns only msg so the sentinel's terse
+// text ("not logged in") doesn't leak into the rendered message.
 type reauthError struct {
 	msg      string
 	sentinel error
@@ -158,10 +151,11 @@ func (e *reauthError) Unwrap() error { return e.sentinel }
 
 // contextReauthError maps the two re-auth sentinels a per-context manager can
 // return into a friendly message that names the context and its core (so a
-// multi-core user logs back into the right one — matching
-// clusterdiscovery.RenderLoginHint's idiom), preserving the sentinel for
-// errors.Is. Returns nil when err is neither sentinel, leaving the caller to
-// wrap the residual error in its own terms (refresh vs exchange).
+// multi-core user logs back into the right one — matching the
+// "no auth context, run `entire login`" hint style used by clusterdiscovery),
+// preserving the sentinel for errors.Is. Returns nil when err is neither
+// sentinel, leaving the caller to wrap the residual error in its own terms
+// (refresh vs exchange).
 func contextReauthError(c *contexts.Context, err error) error {
 	coreURL := strings.TrimRight(c.CoreURL, "/")
 	switch {
@@ -192,10 +186,9 @@ func contextReauthError(c *contexts.Context, err error) error {
 // fetch) could replay the same single-use token and trip the server's
 // reuse detection, revoking the whole family.
 //
-// Behaviour is a strict superset of the old read-only provider: a still
-// valid token is returned with no network call; a context with no refresh
-// token (e.g. a login predating offline_access) behaves exactly as before
-// — valid token used, expired token surfaces a re-login error.
+// A still-valid token is returned with no network call. A context with no
+// stored refresh token degrades gracefully: valid token used, expired token
+// surfaces a re-login error.
 //
 // transport carries the caller's TLS configuration; allowInsecureHTTP
 // permits an http:// core for loopback/dev.

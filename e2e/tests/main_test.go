@@ -26,17 +26,12 @@ func TestMain(m *testing.M) {
 	testutil.SetRunDir(runDir)
 
 	// Route every spawned entire binary (and the git hooks that invoke it) at
-	// file-backed token stores so e2e never touches the developer's real OS
-	// keychain. These env vars are inherited by child processes:
-	//   - internal/entireclient/tokenstore honors ENTIRE_TOKEN_STORE/_PATH
-	//     unconditionally (always compiled).
-	//   - the auth package's legacy keyring store honors
-	//     ENTIRE_TEST_AUTH_STORE_FILE only in -tags=authfilestore builds, which
-	//     the build:e2e task produces.
+	// the file-backed token store so e2e never touches the developer's real
+	// OS keychain. internal/entireclient/tokenstore honors these env vars
+	// unconditionally, and they are inherited by child processes.
 	// In-process keyring.MockInit() cannot help here: the binary is a subprocess.
 	os.Setenv("ENTIRE_TOKEN_STORE", "file")
 	os.Setenv("ENTIRE_TOKEN_STORE_PATH", filepath.Join(runDir, "e2e-tokenstore.json"))
-	os.Setenv("ENTIRE_TEST_AUTH_STORE_FILE", filepath.Join(runDir, "e2e-auth-tokens.json"))
 
 	// Same for the CLI's config and cache directories: contexts.json,
 	// version_check.json, and the discovery caches must never resolve to the
@@ -45,6 +40,20 @@ func TestMain(m *testing.M) {
 	// fallback cannot protect it).
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(runDir, "entire-config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(runDir, "entire-cache"))
+
+	// Select the checkpoint storage backend for the whole suite. E2E_CHECKPOINT_STORE
+	// (e.g. "git-refs") maps to the ENTIRE_CHECKPOINTS_PRIMARY override the spawned
+	// binary honors, so every condensation/read/push in the run exercises that
+	// backend. Unset pins git-branch: the harness's backend-aware assertions
+	// (testutil.checkpointStoreMode) default to the v1 branch while first-run
+	// enable now defaults new setups to git-refs — without the pin the binary
+	// writes refs and every branch-shaped assertion times out. The env also
+	// suppresses that first-run settings write.
+	store := os.Getenv("E2E_CHECKPOINT_STORE")
+	if store == "" {
+		store = "git-branch"
+	}
+	os.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", store)
 
 	// Resolve the entire binary (set by mise run build via E2E_ENTIRE_BIN).
 	entireBin := entire.BinPath()

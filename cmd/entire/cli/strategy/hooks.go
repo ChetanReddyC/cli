@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -178,7 +180,25 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 	commitMsgCmd := gitHookCommand(cmdPrefix, `commit-msg "$1" || true`, true)
 	postCommitCmd := gitHookCommand(cmdPrefix, `post-commit 2>/dev/null || true`, false)
 	postRewriteCmd := gitHookCommand(cmdPrefix, `post-rewrite "$1" 2>/dev/null || true`, false)
-	prePushCmd := gitHookCommand(cmdPrefix, `pre-push "$1" || true`, false)
+	// pre-push intentionally does NOT swallow exit codes — the OPF
+	// rewrite returns errors when it detects a privacy-critical
+	// condition (diverged remote, oversized bootstrap, CAS conflict,
+	// OPF runtime failure) and the user's git push must abort.
+	// Transient checkpoint-push failures (e.g. the
+	// entire/checkpoints/v1 push itself failing) are NOT returned
+	// from PrePush — they're logged and swallowed at the CLI level
+	// so they never reach this point as non-zero exits.
+	//
+	// Trade-off: an unrelated `entire` crash (segfault, panic in
+	// non-OPF code) ALSO aborts the user's push. This is the safer
+	// failure mode — we cannot distinguish from the shell's point of
+	// view whether a non-zero exit means "OPF declined to redact" or
+	// "entire crashed mid-rewrite", and silently letting potentially-
+	// unredacted content reach the remote would violate the contract
+	// the user opted into by enabling OPF. Users hit by unrelated
+	// bugs can `ENTIRE_OPF=no git push` for a one-off bypass while
+	// the bug is fixed.
+	prePushCmd := gitHookCommand(cmdPrefix, `pre-push "$1"`, false)
 
 	return []hookSpec{
 		{
@@ -273,6 +293,17 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
 		return 0, err
+	}
+
+	info, statErr := os.Stat(hooksDir)
+	notDir := statErr == nil && !info.IsDir()
+	// ENOTDIR: a path component of hooksDir is itself a non-directory
+	// (e.g. core.hooksPath=/dev/null/hooks) — same misconfiguration.
+	if notDir || errors.Is(statErr, syscall.ENOTDIR) {
+		return 0, fmt.Errorf("git resolves the hooks directory to %s, which is not a directory — core.hooksPath is likely set to disable git hooks\n"+
+			"Entire requires git hooks to capture sessions. See where it is set with:\n"+
+			"  git config --show-origin --get-all core.hooksPath\n"+
+			"then unset it (git config --global --unset core.hooksPath) or override for this repo (git config core.hooksPath .git/hooks) and re-run 'entire enable'", hooksDir)
 	}
 
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil { //nolint:gosec // Git hooks require executable permissions
@@ -443,13 +474,34 @@ func hookCmdPrefix(localDev, absolutePath bool) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve binary path: %w", err)
 		}
-		resolved, err := filepath.EvalSymlinks(exe)
+		resolved, err := resolveHookExePath(exe, filepath.EvalSymlinks, runtime.GOOS)
 		if err != nil {
-			return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve symlinks for %s: %w", exe, err)
+			return "", err
 		}
 		return shellQuote(resolved), nil
 	}
 	return "entire", nil
+}
+
+// resolveHookExePath resolves exe through symlinks for embedding as an absolute
+// path in a git hook. On Windows, filepath.EvalSymlinks can fail when a path
+// component is an NTFS directory junction rather than a plain symlink — notably
+// Scoop's `…\scoop\apps\<app>\current\` junction, which yields "The system
+// cannot find the path specified" (issue #1424). The unresolved os.Executable()
+// path is itself a valid, launchable absolute path (and on Scoop the stable
+// `current\` junction path is actually preferable, since it survives version
+// updates that repoint the junction), so on Windows we fall back to it rather
+// than failing the hook install outright. Off Windows, an EvalSymlinks failure
+// is unexpected and still surfaced as an error.
+func resolveHookExePath(exe string, evalSymlinks func(string) (string, error), goos string) (string, error) {
+	resolved, err := evalSymlinks(exe)
+	if err != nil {
+		if goos == "windows" {
+			return exe, nil
+		}
+		return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve symlinks for %s: %w", exe, err)
+	}
+	return resolved, nil
 }
 
 // shellQuote wraps a string in single quotes for safe use in #!/bin/sh scripts.
