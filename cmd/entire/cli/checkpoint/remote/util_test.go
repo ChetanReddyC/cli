@@ -222,15 +222,17 @@ func TestFetchURL_EdgeCases(t *testing.T) {
 
 func TestPushURL(t *testing.T) {
 	tests := []struct {
-		name         string
-		originURL    string
-		pushRemote   string
-		pushURL      string
-		settingsJSON string
-		token        string
-		wantURL      string
-		wantEnabled  bool
-		wantErr      bool
+		name              string
+		originURL         string
+		originPushURL     string
+		pushRemote        string
+		pushURL           string
+		settingsJSON      string
+		settingsLocalJSON string
+		token             string
+		wantURL           string
+		wantEnabled       bool
+		wantErr           bool
 	}{
 		{
 			name:         "no checkpoint remote falls back to origin https url and reports disabled",
@@ -382,6 +384,43 @@ func TestPushURL(t *testing.T) {
 			wantURL:      "https://github.com/acme/app.git",
 			wantEnabled:  false,
 		},
+		{
+			// Ownership follows origin, so pushing to a differently-owned remote
+			// (a backup, a colleague's fork) no longer disables our own
+			// checkpoint_remote — which previously sent the checkpoints to that
+			// remote instead of the configured checkpoint repo.
+			name:         "differently owned push remote still uses our checkpoint remote when origin owner matches",
+			originURL:    "https://github.com/acme/app.git",
+			pushRemote:   "backup",
+			pushURL:      "https://github.com/otherorg/backup.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "https://github.com/acme/checkpoints.git",
+			wantEnabled:  true,
+		},
+		{
+			// The escape hatch for a checkpoint repo owned by a different account
+			// or org than origin: settings.local.json is gitignored and per-clone,
+			// so a setting there cannot have been inherited by forking.
+			name:              "checkpoint remote from settings.local.json is honored despite mismatched origin owner",
+			originURL:         "https://github.com/fork/app.git",
+			pushRemote:        "origin",
+			settingsJSON:      `{"enabled":true}`,
+			settingsLocalJSON: `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:           "https://github.com/acme/checkpoints.git",
+			wantEnabled:       true,
+		},
+		{
+			// Transport comes from where the push actually goes: a remote with a
+			// pushurl pushes there, not to its (fetch) url. Reading the plain url
+			// would derive https here.
+			name:          "checkpoint url derives transport from the push url, not the fetch url",
+			originURL:     "https://github.com/acme/app.git",
+			originPushURL: "git@github.com:acme/app.git",
+			pushRemote:    "origin",
+			settingsJSON:  `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:       "git@github.com:acme/checkpoints.git",
+			wantEnabled:   true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -391,10 +430,16 @@ func TestPushURL(t *testing.T) {
 			if tt.originURL != "" {
 				runGit(t, repoDir, "remote", "add", "origin", tt.originURL)
 			}
+			if tt.originPushURL != "" {
+				runGit(t, repoDir, "remote", "set-url", "--push", "origin", tt.originPushURL)
+			}
 			if tt.pushURL != "" {
 				runGit(t, repoDir, "remote", "add", tt.pushRemote, tt.pushURL)
 			}
 			writeSettings(t, repoDir, tt.settingsJSON)
+			if tt.settingsLocalJSON != "" {
+				writeLocalSettings(t, repoDir, tt.settingsLocalJSON)
+			}
 			t.Chdir(repoDir)
 			if tt.token != "" {
 				t.Setenv(CheckpointTokenEnvVar, tt.token)
@@ -523,6 +568,20 @@ func writeSettings(t *testing.T, repoDir, content string) {
 	}
 	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile(settings.json) error = %v", err)
+	}
+}
+
+// writeLocalSettings writes .entire/settings.local.json — the gitignored
+// per-developer override, which is what marks a checkpoint_remote as this
+// developer's own rather than inherited from an upstream project.
+func writeLocalSettings(t *testing.T, repoDir, content string) {
+	t.Helper()
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", entireDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(settings.local.json) error = %v", err)
 	}
 }
 
