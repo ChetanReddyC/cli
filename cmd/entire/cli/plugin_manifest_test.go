@@ -107,4 +107,16 @@ requires:
 	if _, err := ParsePluginMetadata([]byte("name: ok\nrequires:\n  - name: agent-evil\n")); err == nil {
 		t.Error("ParsePluginMetadata accepted reserved requirement name")
 	}
+	// A requirement's repo_url is author-controlled and reaches the git CLI
+	// during dependency planning — which runs before the confirmation prompt.
+	for _, bad := range []string{
+		"--upload-pack=touch /tmp/pwned; git-upload-pack",
+		"ext::sh -c whoami",
+		"not-a-url",
+	} {
+		yml := "name: ok\nrequires:\n  - name: dep\n    repo_url: \"" + bad + "\"\n"
+		if _, err := ParsePluginMetadata([]byte(yml)); err == nil {
+			t.Errorf("ParsePluginMetadata accepted requirement repo_url %q", bad)
+		}
+	}
 }

@@ -48,13 +48,23 @@ Remote installs are deliberately forge-agnostic:
 
 Installing from a URL not listed in the index prints the source and asks for confirmation (`--yes` to skip; required in non-interactive runs). Index-listed repos install without prompting.
 
+#### Repository URLs are a security boundary
+
+Every repo URL is validated by `validatePluginRepoURL` before it reaches the git CLI, and every git invocation passes `--` before its positionals. Both layers exist because repo URLs are attacker-influenced: they arrive from `index.json` entries, from another plugin's `requires[].repo_url`, and from `--index`/`ENTIRE_PLUGIN_INDEX_URL`.
+
+git parses an option-shaped positional as an option, and `--upload-pack=<cmd>` is shell-interpreted — with no positional repository left, it runs against the *ambient* repo's `origin`. So a catalog entry like `--upload-pack=curl … | sh; git-upload-pack` would execute arbitrary commands during an index-resolved install, which by design never prompts. Dependency planning is the tightest path: it inspects `requires[].repo_url` *before* the install confirmation.
+
+Accepted forms are `https://`, `http://`, `ssh://`, `git://`, `file://`, git's `user@host:path` scp-like syntax, and absolute local paths. Anything else — a leading `-`, a bare name, a relative path, git's command-executing `ext::` transport — is rejected. Invalid index entries are dropped like invalid names (one bad row can't take out the catalog); an invalid `requires[].repo_url` fails metadata parsing, surfacing the author's mistake at install time.
+
+This mirrors `validatePluginName`, which refuses a leading `-` on names for the same reason. Regression coverage asserts the payload never executes, not merely that the call errors.
+
 ### Plugin index (discovery)
 
 Discovery rides on a git-synced index, krew-style: the index is itself a git repository containing `index.json`, shallow-cloned into the user cache (keyed by a hash of the URL) and refreshed on a TTL. `entire plugin search [term]`, `info <name>`, and `browse` read it; `entire plugin index update` forces a refresh. When a refresh fails but a cached copy exists, the stale copy is used — discovery doesn't hard-fail offline.
 
 The effective index URL resolves as: `--index` flag > `ENTIRE_PLUGIN_INDEX_URL` > `plugins.index_url` in `.entire/settings.local.json`/`.entire/settings.json` > the built-in default (`https://github.com/entireio/plugin-index`). The repo-level setting is deliberate: a company can commit `plugins.index_url` to point contributors at an internal catalog. `plugins.index_ttl_hours` tunes freshness (default 24).
 
-`index.json` schema (version 1): `{"version": 1, "plugins": [{"name", "repo_url", "description", "official", "platforms"}]}`. Entries with invalid names (e.g. the reserved `agent-` prefix) or missing repo URLs are filtered on load, not fatal.
+`index.json` schema (version 1): `{"version": 1, "plugins": [{"name", "repo_url", "description", "official", "platforms"}]}`. Entries with invalid names (e.g. the reserved `agent-` prefix) or unusable repo URLs are filtered on load, not fatal.
 
 ### Dependencies
 

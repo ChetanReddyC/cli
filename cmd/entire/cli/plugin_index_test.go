@@ -118,6 +118,38 @@ func TestSyncPluginIndex_UnsupportedVersion(t *testing.T) { //nolint:paralleltes
 	}
 }
 
+// An index entry whose repo_url is option-shaped would reach the git CLI on
+// an index-resolved install, which is treated as trusted and never prompts.
+// Bad entries are dropped the same way an invalid name is, so one hostile
+// row can't take out the whole catalog.
+func TestSyncPluginIndex_DropsEntriesWithUnusableRepoURL(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	url, _ := newIndexRepo(t, `{"version":1,"plugins":[
+		{"name":"evil","repo_url":"--upload-pack=touch /tmp/pwned; git-upload-pack"},
+		{"name":"alsoevil","repo_url":"ext::sh -c whoami"},
+		{"name":"good","repo_url":"https://github.com/entireio/entire-good"}
+	]}`)
+	idx, err := SyncPluginIndex(context.Background(), url, false)
+	if err != nil {
+		t.Fatalf("SyncPluginIndex: %v", err)
+	}
+	if idx.Find("evil") != nil || idx.Find("alsoevil") != nil {
+		t.Error("index kept an entry whose repo_url is not a usable git URL")
+	}
+	if idx.Find("good") == nil {
+		t.Error("index dropped the valid entry alongside the bad ones")
+	}
+}
+
+// The index URL itself reaches `git clone` as a positional, and --index /
+// ENTIRE_PLUGIN_INDEX_URL bypass the settings validator entirely.
+func TestSyncPluginIndex_RejectsUnusableIndexURL(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if _, err := SyncPluginIndex(context.Background(), "--upload-pack=touch /tmp/pwned; git-upload-pack", false); err == nil {
+		t.Error("SyncPluginIndex accepted an option-shaped index URL")
+	}
+}
+
 func TestResolvePluginIndexURL_Precedence(t *testing.T) { //nolint:paralleltest // mutates env
 	ctx := context.Background()
 	t.Setenv(pluginIndexEnvVar, "")

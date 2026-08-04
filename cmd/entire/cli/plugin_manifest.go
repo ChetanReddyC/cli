@@ -109,6 +109,14 @@ func ParsePluginMetadata(data []byte) (*PluginMetadata, error) {
 		if err := validatePluginName(req.Name); err != nil {
 			return nil, fmt.Errorf("%s declares invalid requirement: %w", pluginMetadataFileName, err)
 		}
+		// A requirement's repo_url is author-controlled and reaches the git
+		// CLI during dependency planning — which runs before the install
+		// confirmation prompt. Reject non-URLs at the parse boundary.
+		if req.RepoURL != "" {
+			if err := validatePluginRepoURL(req.RepoURL); err != nil {
+				return nil, fmt.Errorf("%s declares invalid repo_url for requirement %q: %w", pluginMetadataFileName, req.Name, err)
+			}
+		}
 	}
 	return &meta, nil
 }

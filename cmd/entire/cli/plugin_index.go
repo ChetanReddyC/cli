@@ -154,6 +154,12 @@ func pluginIndexCacheDir(indexURL string) (string, error) {
 // but a previous copy exists, the stale copy is used with a warning logged
 // — discovery shouldn't hard-fail because a laptop is offline.
 func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginIndex, error) {
+	// The index URL reaches `git clone` as a positional; it can come from
+	// --index or ENTIRE_PLUGIN_INDEX_URL, neither of which the settings
+	// validator sees. Reject non-URLs before git can read one as an option.
+	if err := validatePluginRepoURL(indexURL); err != nil {
+		return nil, fmt.Errorf("plugin index URL: %w", err)
+	}
 	dir, err := pluginIndexCacheDir(indexURL)
 	if err != nil {
 		return nil, err
@@ -181,7 +187,7 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 		if err := os.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
 			return nil, fmt.Errorf("create index cache dir: %w", err)
 		}
-		if _, err := gitQuiet(ctx, "clone", "--depth", "1", "--quiet", indexURL, dir).Output(); err != nil {
+		if _, err := gitQuiet(ctx, "clone", "--depth", "1", "--quiet", "--", indexURL, dir).Output(); err != nil {
 			return nil, fmt.Errorf("clone plugin index %s: %w%s", indexURL, err, stderrSuffix(err))
 		}
 		touchFile(marker)
@@ -233,7 +239,10 @@ func loadPluginIndexFromDir(dir, indexURL string) (*PluginIndex, error) {
 	}
 	var valid []PluginIndexEntry
 	for _, e := range idx.Plugins {
-		if validatePluginName(e.Name) != nil || e.RepoURL == "" {
+		// repo_url is validated here, not just at the git boundary: an
+		// index-resolved install is treated as trusted and never prompts, so
+		// a hostile catalog entry must not reach the git CLI at all.
+		if validatePluginName(e.Name) != nil || validatePluginRepoURL(e.RepoURL) != nil {
 			continue // tolerate bad entries rather than failing the catalog
 		}
 		valid = append(valid, e)
