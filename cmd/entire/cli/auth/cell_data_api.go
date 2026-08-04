@@ -114,8 +114,8 @@ type CellClientFactory struct {
 	subject cellSubject
 }
 
-// NewEntireAPICellClientFactory resolves the exchange subject (active stored
-// login context) once, for building clients aimed at several cells. See
+// NewEntireAPICellClientFactory resolves the active stored login credential
+// once, for building clients aimed at several cells. See
 // NewEntireAPICellClient for the single-cell convenience wrapper.
 func NewEntireAPICellClientFactory(ctx context.Context, insecureHTTP bool) (*CellClientFactory, error) {
 	subject, err := resolveStoredCellSubject(ctx, insecureHTTP)

@@ -30,6 +30,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -121,20 +122,13 @@ func run(args []string) int {
 		},
 	}
 
-	creds, err := resolveCreds(ctx, parsedURL, skipTLS, httpClient)
+	creds, onUnauthorized, err := resolveCreds(ctx, parsedURL, skipTLS, httpClient)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		return 128
 	}
 
 	setAuth := setAuthWithProvider(creds)
-	onUnauthorized := func() {
-		// The login provider owns refresh state and re-checks the persisted JWT
-		// on every call. There is no helper-local credential cache to clear; the
-		// retry rebuilds the request and calls the provider again. ENTIRE_TOKEN
-		// is intentionally static and is likewise re-read through its provider.
-		debuglog.Printf("data plane rejected bearer; re-resolving credential for retry")
-	}
 
 	var onNodeFailed func(string)
 	if nodeCfg.Caching() {
@@ -164,6 +158,57 @@ func run(args []string) int {
 }
 
 type credentialProvider func(context.Context) (string, error)
+
+type refreshableCredential interface {
+	Token(ctx context.Context) (string, error)
+	ForceRefresh(ctx context.Context, staleToken string) (string, error)
+}
+
+// refreshingProvider defers reactive refresh work until the transport rebuilds
+// a request after a 401, so the network call uses that request's context. The
+// observer itself only marks the last bearer stale.
+func refreshingProvider(credential refreshableCredential) (credentialProvider, func()) {
+	var mu sync.Mutex
+	var lastToken, rejectedToken string
+
+	provider := func(ctx context.Context) (string, error) {
+		mu.Lock()
+		stale := rejectedToken
+		rejectedToken = ""
+		mu.Unlock()
+
+		var token string
+		var err error
+		if stale != "" {
+			token, err = credential.ForceRefresh(ctx, stale)
+		} else {
+			token, err = credential.Token(ctx)
+		}
+		if err != nil {
+			if stale != "" {
+				mu.Lock()
+				if rejectedToken == "" {
+					rejectedToken = stale
+				}
+				mu.Unlock()
+			}
+			return "", fmt.Errorf("resolve login credential: %w", err)
+		}
+
+		mu.Lock()
+		lastToken = token
+		mu.Unlock()
+		return token, nil
+	}
+
+	onUnauthorized := func() {
+		mu.Lock()
+		rejectedToken = lastToken
+		mu.Unlock()
+		debuglog.Printf("data plane rejected login bearer; marked it stale for the transport's retry")
+	}
+	return provider, onUnauthorized
+}
 
 func setAuthWithProvider(provider credentialProvider) transport.SetAuthFunc {
 	return func(req *http.Request) error {
@@ -308,7 +353,7 @@ func parseProtocolVersion(raw string, warn io.Writer) int {
 //     never a silent fallback to context resolution.
 //   - otherwise: resolve the login context for this cluster from contexts.json
 //     and use its refreshed login JWT.
-func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, error) {
+func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, func(), error) {
 	// Presence of ENTIRE_TOKEN is the signal: if it's set at all (LookupEnv,
 	// not Getenv, so we can tell set-empty from unset), we commit to the
 	// env-token path and any failure to use it is fatal — never a silent
@@ -320,7 +365,7 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
 		envToken := strings.TrimSpace(raw)
 		if envToken == "" {
-			return nil, fmt.Errorf("%s is set but blank", auth.EnvTokenVar)
+			return nil, nil, fmt.Errorf("%s is set but blank", auth.EnvTokenVar)
 		}
 		return resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, userdirs.Cache(), httpClient)
 	}
@@ -333,20 +378,21 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 	cfgDir := userdirs.Config()
 	clusterAuth, err := clusterdiscovery.ResolveClusterAuth(ctx, cfgDir, userdirs.Cache(), parsedURL.Host, httpClient, debuglog.Printf)
 	if err != nil {
-		return nil, err //nolint:wrapcheck // ResolveClusterAuth already returns a user-facing error; preserved verbatim for the "fatal: <msg>" surface
+		return nil, nil, err //nolint:wrapcheck // ResolveClusterAuth already returns a user-facing error; preserved verbatim for the "fatal: <msg>" surface
 	}
 	clusterCtx := clusterAuth.Context
 
 	// The login-JWT provider transparently refreshes an expired login JWT
 	// from the stored refresh token (serialised across processes, rotated
 	// tokens persisted) before the git transport uses it as the bearer.
-	loginProvider, err := auth.NewRefreshingLoginProvider(clusterCtx, httpClient.Transport, skipTLS)
+	loginCredential, err := auth.NewRefreshingLoginCredential(clusterCtx, httpClient.Transport, skipTLS)
 	if err != nil {
-		return nil, err //nolint:wrapcheck // NewRefreshingLoginProvider already returns a user-facing error
+		return nil, nil, err //nolint:wrapcheck // NewRefreshingLoginCredential already returns a user-facing error
 	}
 
 	debuglog.Printf("auth: login token bearer (core=%s)", clusterCtx.CoreURL)
-	return loginProvider, nil
+	provider, onUnauthorized := refreshingProvider(loginCredential)
+	return provider, onUnauthorized, nil
 }
 
 // resolveEnvTokenCreds returns a fixed ENTIRE_TOKEN provider after validating
@@ -365,21 +411,25 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 // is no longer authenticated, so a MITM could advertise an attacker host as a
 // trusted core. Do not combine ENTIRE_TOKEN with ENTIRE_TLS_SKIP_VERIFY in
 // CI / workload environments.
-func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir string, httpClient *http.Client) (credentialProvider, error) {
+func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir string, httpClient *http.Client) (credentialProvider, func(), error) {
 	coreURL, err := auth.CoreURLFromEnvToken(envToken)
 	if err != nil {
-		return nil, err //nolint:wrapcheck // CoreURLFromEnvToken already returns a user-facing, ENTIRE_TOKEN-prefixed error
+		return nil, nil, err //nolint:wrapcheck // CoreURLFromEnvToken already returns a user-facing, ENTIRE_TOKEN-prefixed error
 	}
 	cluster, err := clusterdiscovery.ResolveClusterCores(ctx, cacheDir, clusterHost, httpClient, debuglog.Printf)
 	if err != nil {
-		return nil, err //nolint:wrapcheck // ResolveClusterCores returns a user-facing discovery error
+		return nil, nil, err //nolint:wrapcheck // ResolveClusterCores returns a user-facing discovery error
 	}
 	if !coreTrusted(coreURL, cluster.CoreURLs) {
-		return nil, fmt.Errorf("%s aud %q is not a trusted login server for cluster %s (advertised: %s); the token belongs to a different cluster",
+		return nil, nil, fmt.Errorf("%s aud %q is not a trusted login server for cluster %s (advertised: %s); the token belongs to a different cluster",
 			auth.EnvTokenVar, coreURL, clusterHost, strings.Join(cluster.CoreURLs, ", "))
 	}
 	debuglog.Printf("auth: %s bearer (core=%s)", auth.EnvTokenVar, coreURL)
-	return func(context.Context) (string, error) { return envToken, nil }, nil
+	provider := func(context.Context) (string, error) { return envToken, nil }
+	onUnauthorized := func() {
+		debuglog.Printf("data plane rejected static %s bearer; transport will retry once with the configured token", auth.EnvTokenVar)
+	}
+	return provider, onUnauthorized, nil
 }
 
 // coreTrusted reports whether coreURL is in the cluster's advertised core
