@@ -63,6 +63,25 @@ func TestExpandDownloadTemplate(t *testing.T) {
 	}
 }
 
+// A fully-specified download_url may carry a query string (signed URLs,
+// artifact proxies). path.Base on the whole URL folds it into the filename,
+// which then misses the archive-extension sniff in extractPluginBinary and
+// gets written out as a raw binary — a silently broken install.
+func TestAssetNameFromURL(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ url, want string }{
+		{url: "https://ex.com/rel/v1/entire-foo.tar.gz", want: "entire-foo.tar.gz"},
+		{url: "https://ex.com/rel/entire-foo.tar.gz?token=abc", want: "entire-foo.tar.gz"},
+		{url: "https://ex.com/rel/entire-foo.zip#frag", want: "entire-foo.zip"},
+		{url: "https://ex.com/rel/entire-foo", want: "entire-foo"},
+	}
+	for _, tt := range tests {
+		if got := assetNameFromURL(tt.url); got != tt.want {
+			t.Errorf("assetNameFromURL(%q) = %q, want %q", tt.url, got, tt.want)
+		}
+	}
+}
+
 func TestAssetCandidates_CoverConventions(t *testing.T) {
 	t.Parallel()
 	cands := assetCandidates("run", "v1.2.3")

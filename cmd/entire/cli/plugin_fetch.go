@@ -193,7 +193,7 @@ func downloadPluginAsset(ctx context.Context, meta *PluginMetadata, repoURL, nam
 	// URL; there is nothing to select.
 	if meta != nil && meta.DownloadURL != "" && !strings.Contains(meta.DownloadURL, "{asset}") {
 		u := expandDownloadTemplate(meta.DownloadURL, name, tag, "")
-		return fetchAndVerify(ctx, u, path.Base(u), "", stagingDir)
+		return fetchAndVerify(ctx, u, assetNameFromURL(u), "", stagingDir)
 	}
 
 	// Preferred path: fetch the checksum manifest and pick from what was
@@ -242,6 +242,23 @@ func downloadPluginAsset(ctx context.Context, meta *PluginMetadata, repoURL, nam
 		}
 	}
 	return nil, fmt.Errorf("%w for %s/%s at %s %s", errAssetNotFound, runtime.GOOS, runtime.GOARCH, repoURL, tag)
+}
+
+// assetNameFromURL derives the staging filename for a fully-specified
+// download_url. Only the URL path contributes: path.Base on the whole URL
+// folds a query string into the name ("entire-run.tar.gz?token=abc"), which
+// then misses extractPluginBinary's extension sniff and gets written out as
+// a raw binary — a silently broken install (and an invalid filename on
+// Windows).
+func assetNameFromURL(rawURL string) string {
+	if u, err := url.Parse(rawURL); err == nil && u.Path != "" {
+		return path.Base(u.Path)
+	}
+	trimmed := rawURL
+	if i := strings.IndexAny(trimmed, "?#"); i >= 0 {
+		trimmed = trimmed[:i]
+	}
+	return path.Base(trimmed)
 }
 
 // httpGetSmall fetches a small text resource (checksum manifests).
