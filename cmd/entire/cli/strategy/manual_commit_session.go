@@ -277,6 +277,53 @@ func sessionsFromSingleWorktree(candidates []*SessionState) []*SessionState {
 	return candidates
 }
 
+// reconcileWorktreePathForResumedTurn repoints a session's recorded WorktreePath
+// when a turn starts from a worktree that differs from the one on file AND the
+// recorded path no longer resolves to this repository's git common dir. That is
+// the repo-relocation case (#1890): the whole repo directory was renamed or
+// moved while the session was stopped, then the agent resumed the same session
+// from the new location. WorktreePath is matched by exact string equality at
+// commit time (findSessionsForWorktree), so without this the resumed session's
+// commits silently lose their Entire-Checkpoint trailer.
+//
+// The session store lives in the git common dir, so a state loaded here is by
+// construction the same repo; when its recorded worktree no longer maps back to
+// that common dir, the only safe target is the current worktree. A still-valid
+// recorded path (e.g. a concurrent sibling worktree that resolves to the same
+// common dir) is left untouched so we never steal a session from a live sibling.
+func reconcileWorktreePathForResumedTurn(ctx context.Context, state *SessionState) {
+	current, err := paths.WorktreeRoot(ctx)
+	if err != nil || current == "" || state.WorktreePath == "" {
+		return
+	}
+	if filepath.Clean(current) == filepath.Clean(state.WorktreePath) {
+		return
+	}
+
+	// Resolve both through the same probe so normalization matches. An empty
+	// current common dir means we can't establish our own repo — bail. When the
+	// recorded path still resolves to our common dir it remains a valid
+	// worktree, so leave it alone.
+	currentCommonDir := gitCommonDirForWorktreeOrEmpty(ctx, current)
+	if currentCommonDir == "" {
+		return
+	}
+	if gitCommonDirForWorktreeOrEmpty(ctx, state.WorktreePath) == currentCommonDir {
+		return
+	}
+
+	old := state.WorktreePath
+	state.WorktreePath = current
+	if worktreeID, idErr := paths.GetWorktreeID(current); idErr == nil {
+		state.WorktreeID = worktreeID
+	}
+	logging.Info(logging.WithComponent(ctx, "hooks"), "reconciled session worktree path after relocation",
+		slog.String("session_id", state.SessionID),
+		slog.String("from", old),
+		slog.String("to", current),
+	)
+}
+
 func gitCommonDirForWorktreeOrEmpty(ctx context.Context, worktreePath string) string {
 	commonDir, err := gitCommonDirForWorktree(ctx, worktreePath)
 	if err != nil {
