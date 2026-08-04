@@ -99,19 +99,18 @@ func newIndexRepo(t *testing.T, indexJSON string) string {
 	return "file://" + filepath.ToSlash(dir)
 }
 
-// pluginEnv builds the child env: isolated plugin dir + cache + index URL.
-func pluginTestEnv(t *testing.T, indexURL string) ([]string, string) {
+// pluginTestEnv builds the child env: isolated plugin dir + cache + index URL.
+func pluginTestEnv(t *testing.T, indexURL string) []string {
 	t.Helper()
-	pluginDir := t.TempDir()
 	env := os.Environ()
 	env = append(env,
-		"ENTIRE_PLUGIN_DIR="+pluginDir,
+		"ENTIRE_PLUGIN_DIR="+t.TempDir(),
 		"XDG_CACHE_HOME="+t.TempDir(),
 	)
 	if indexURL != "" {
 		env = append(env, "ENTIRE_PLUGIN_INDEX_URL="+indexURL)
 	}
-	return env, pluginDir
+	return env
 }
 
 func runEntire(t *testing.T, env []string, args ...string) (stdout, stderr string, err error) {
@@ -127,13 +126,13 @@ func runEntire(t *testing.T, env []string, args ...string) (stdout, stderr strin
 
 func TestPluginRemoteInstall_FromIndexAndDispatch(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("shell-script plugin payloads are Unix-only")
 	}
 	srv := startReleaseServer(t, map[string][]string{"demo": {"0.1.0"}})
 	repoURL := newPluginRepo(t, fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL), "v0.1.0")
 	indexURL := newIndexRepo(t, fmt.Sprintf(`{"version":1,"plugins":[{"name":"demo","repo_url":"%s","description":"Demo plugin","official":true}]}`, repoURL))
-	env, _ := pluginTestEnv(t, indexURL)
+	env := pluginTestEnv(t, indexURL)
 
 	// Bare-name install resolves through the index; index-listed repos
 	// need no --yes.
@@ -166,14 +165,14 @@ func TestPluginRemoteInstall_FromIndexAndDispatch(t *testing.T) {
 
 func TestPluginRemoteInstall_URLNeedsYesWhenUnlisted(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("shell-script plugin payloads are Unix-only")
 	}
 	srv := startReleaseServer(t, map[string][]string{"solo": {"0.1.0"}})
 	repoURL := newPluginRepo(t, fmt.Sprintf("name: solo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL), "v0.1.0")
 	// Empty index: the URL is unlisted → untrusted.
 	indexURL := newIndexRepo(t, `{"version":1,"plugins":[]}`)
-	env, _ := pluginTestEnv(t, indexURL)
+	env := pluginTestEnv(t, indexURL)
 
 	// Non-interactive without --yes refuses.
 	_, stderr, err := runEntire(t, env, "plugin", "install", repoURL)
@@ -196,7 +195,7 @@ func TestPluginRemoteInstall_URLNeedsYesWhenUnlisted(t *testing.T) {
 
 func TestPluginRemoteInstall_DependenciesAndRemoveGuard(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("shell-script plugin payloads are Unix-only")
 	}
 	srv := startReleaseServer(t, map[string][]string{"brainy": {"0.1.0"}, "semy": {"0.1.0"}})
@@ -205,7 +204,7 @@ func TestPluginRemoteInstall_DependenciesAndRemoveGuard(t *testing.T) {
 		"name: brainy\ndownload_url: \"%s/dl/{tag}/{asset}\"\nrequires:\n  - name: semy\n    repo_url: %s\n", srv.URL, semRepo), "v0.1.0")
 	indexURL := newIndexRepo(t, fmt.Sprintf(
 		`{"version":1,"plugins":[{"name":"brainy","repo_url":"%s"},{"name":"semy","repo_url":"%s"}]}`, brainRepo, semRepo))
-	env, _ := pluginTestEnv(t, indexURL)
+	env := pluginTestEnv(t, indexURL)
 
 	stdout, stderr, err := runEntire(t, env, "plugin", "install", "brainy", "--yes")
 	if err != nil {
@@ -247,13 +246,13 @@ func TestPluginRemoteInstall_DependenciesAndRemoveGuard(t *testing.T) {
 
 func TestPluginSearchAndInfo(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("shell-script plugin payloads are Unix-only")
 	}
 	indexURL := newIndexRepo(t, `{"version":1,"plugins":[
 		{"name":"alpha","repo_url":"https://example.com/entire-alpha","description":"First letter","official":true},
 		{"name":"beta","repo_url":"https://example.com/entire-beta","description":"Second letter"}]}`)
-	env, _ := pluginTestEnv(t, indexURL)
+	env := pluginTestEnv(t, indexURL)
 
 	stdout, stderr, err := runEntire(t, env, "plugin", "search", "letter")
 	if err != nil {
