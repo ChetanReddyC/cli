@@ -220,6 +220,7 @@ func TestFetchURL_EdgeCases(t *testing.T) {
 	}
 }
 
+//nolint:maintidx // table-driven: the score tracks the size of the case table (data), not branching logic; splitting the table would scatter closely related URL-resolution cases
 func TestPushURL(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -408,6 +409,27 @@ func TestPushURL(t *testing.T) {
 			settingsLocalJSON: `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
 			wantURL:           "https://github.com/acme/checkpoints.git",
 			wantEnabled:       true,
+		},
+		{
+			// Regression: ownership is decided by origin, but a repo can have no
+			// remote named origin at all. The push remote is then the only identity
+			// it has, and a matching owner must keep the configured checkpoint
+			// remote rather than silently falling back.
+			name:         "no origin remote falls back to the push remote owner and keeps the checkpoint remote",
+			pushRemote:   "upstream",
+			pushURL:      "https://github.com/acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "https://github.com/acme/checkpoints.git",
+			wantEnabled:  true,
+		},
+		{
+			// The same topology with a mismatched owner still reads as inherited.
+			name:         "no origin remote with a differently owned push remote stays disabled",
+			pushRemote:   "upstream",
+			pushURL:      "https://github.com/fork/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "https://github.com/fork/app.git",
+			wantEnabled:  false,
 		},
 		{
 			// Transport comes from where the push actually goes: a remote with a

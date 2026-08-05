@@ -182,23 +182,6 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 		return fallbackURL, false, nil
 	}
 
-	// Whether to use the checkpoint remote at all is a question about THIS repo
-	// ("is this checkpoint_remote mine, or did I inherit it by forking?"), not
-	// about where the current push happens to be headed. Resolve it before
-	// looking at the push remote, which only supplies transport details below.
-	if inherited, reason := checkpointRemoteIsInherited(ctx, config, originURL); inherited {
-		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
-		if fallbackErr != nil {
-			return "", false, fmt.Errorf("no push URL found: %w", fallbackErr)
-		}
-		logging.Warn(ctx, "checkpoint-remote: ignoring checkpoint_remote that appears to belong to another owner; pushing checkpoints to the push remote instead",
-			slog.String("checkpoint_repo", config.Repo),
-			slog.String("reason", reason),
-			slog.String("hint", "if this checkpoint repo is yours, configure checkpoint_remote in .entire/settings.local.json"),
-		)
-		return fallbackURL, false, nil
-	}
-
 	pushRemoteURL, err := GetPushURL(ctx, pushRemoteName)
 	if err != nil {
 		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
@@ -209,6 +192,24 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 			return fallbackURL, false, nil
 		}
 		return "", true, fmt.Errorf("no push URL found: %w", err)
+	}
+
+	// Whether to use the checkpoint remote at all is a question about THIS repo
+	// ("is this checkpoint_remote mine, or did I inherit it by forking?"), not
+	// about where the current push happens to be headed — origin decides. The
+	// push remote is passed only as the fallback identity for a repo that has no
+	// origin at all; see checkpointRemoteIsInherited.
+	if inherited, reason := checkpointRemoteIsInherited(ctx, config, originURL, pushRemoteURL); inherited {
+		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
+		if fallbackErr != nil {
+			return "", false, fmt.Errorf("no push URL found: %w", fallbackErr)
+		}
+		logging.Warn(ctx, "checkpoint-remote: ignoring checkpoint_remote that appears to belong to another owner; pushing checkpoints to the push remote instead",
+			slog.String("checkpoint_repo", config.Repo),
+			slog.String("reason", reason),
+			slog.String("hint", "if this checkpoint repo is yours, configure checkpoint_remote in .entire/settings.local.json"),
+		)
+		return fallbackURL, false, nil
 	}
 
 	pushInfo, err := ParseURL(pushRemoteURL)
@@ -357,7 +358,7 @@ func GetPushURL(ctx context.Context, remoteName string) (string, error) {
 // cannot confirm ownership, and falling back preserves the previous behavior for
 // those repos. settings.local.json is the escape hatch when the checkpoint repo
 // is genuinely ours but owned by a different account or org than origin.
-func checkpointRemoteIsInherited(ctx context.Context, config *settings.CheckpointRemoteConfig, originURL string) (bool, string) {
+func checkpointRemoteIsInherited(ctx context.Context, config *settings.CheckpointRemoteConfig, originURL, pushRemoteURL string) (bool, string) {
 	checkpointOwner := config.Owner()
 	if checkpointOwner == "" {
 		// No owner to compare (malformed repo field). Matches the predecessor,
@@ -367,17 +368,29 @@ func checkpointRemoteIsInherited(ctx context.Context, config *settings.Checkpoin
 	if settings.CheckpointRemoteIsLocalOnly(ctx) {
 		return false, ""
 	}
-	if originURL == "" {
-		return true, "no origin remote to establish ownership"
+
+	// Origin identifies the repo we are working in. Without one, the push remote
+	// is the only identity available, and using it is what the predecessor
+	// effectively did — a repo whose only remote is e.g. "upstream" must not lose
+	// its configured checkpoint remote just because nothing is named "origin".
+	// There is no origin-vs-push-remote divergence to worry about in that case:
+	// the repo has exactly one identity.
+	identityURL, identitySource := originURL, "origin"
+	if identityURL == "" {
+		identityURL, identitySource = pushRemoteURL, "push remote"
 	}
-	info, err := ParseURL(originURL)
+	if identityURL == "" {
+		return true, "no remote to establish ownership"
+	}
+
+	info, err := ParseURL(identityURL)
 	if err != nil || info.Owner == "" {
-		return true, "origin URL owner could not be determined"
+		return true, identitySource + " URL owner could not be determined"
 	}
 	if strings.EqualFold(info.Owner, checkpointOwner) {
 		return false, ""
 	}
-	return true, fmt.Sprintf("origin owner %q differs from checkpoint owner %q", info.Owner, checkpointOwner)
+	return true, fmt.Sprintf("%s owner %q differs from checkpoint owner %q", identitySource, info.Owner, checkpointOwner)
 }
 
 // GetRemoteURLInDir returns the URL configured for the named git remote in dir.
