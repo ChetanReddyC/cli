@@ -477,10 +477,18 @@ func sanitizeRolloutLine(lineData []byte) ([]byte, bool) {
 		return lineData, true
 	}
 	switch itemType {
-	case "reasoning":
+	case "reasoning", "compaction", "compaction_summary":
+		// Strip the non-replayable payload but KEEP the line. Dropping these lines
+		// (as this used to) shortened the stored transcript relative to the agent's
+		// rollout, while CheckpointTranscriptStart is counted on the rollout — so
+		// every offset into a stored Codex transcript was off by the number of
+		// dropped lines before it. Stripping in place keeps the two line numberings
+		// identical, which is what the offset's five consumers assume.
+		//
+		// Nested compaction items inside a "compacted" line's replacement_history
+		// are still removed outright (see sanitizeHistoryItems): those are array
+		// elements within a single line, so removing them cannot shift line numbers.
 		delete(payload, "encrypted_content")
-	case "compaction", "compaction_summary":
-		return nil, false
 	default:
 		return lineData, true
 	}

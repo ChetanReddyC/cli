@@ -2,6 +2,7 @@ package codex
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -330,8 +331,47 @@ func TestSanitizeRestoredTranscript_StripsEncryptedItems(t *testing.T) {
 	got := string(SanitizePortableTranscript(input))
 	require.Contains(t, got, `"type":"reasoning"`)
 	require.NotContains(t, got, `"encrypted_content":"REDACTED"`)
-	require.NotContains(t, got, `"type":"compaction"`)
 	require.Contains(t, got, `"type":"message"`)
+
+	// Top-level compaction items are stripped in place, NOT dropped: the item
+	// survives without its payload so the stored transcript keeps the same line
+	// numbering as the agent's rollout (CheckpointTranscriptStart is counted on the
+	// rollout but applied to the stored copy).
+	require.Contains(t, got, `"type":"compaction"`)
+	require.Len(t,
+		splitJSONL([]byte(got)), len(splitJSONL(input)),
+		"sanitization must preserve the line count")
+}
+
+func TestSanitizePortableTranscript_PreservesLineNumbering(t *testing.T) {
+	t.Parallel()
+
+	// Every transform the sanitizer performs must leave line numbering intact, so an
+	// offset counted on the raw rollout still indexes the stored copy correctly.
+	input := []byte(`{"type":"session_meta","payload":{"id":"abc"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"one"}]}}
+{"type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"Y2lwaGVy"}}
+{"type":"response_item","payload":{"type":"compaction","encrypted_content":"Y2lwaGVy"}}
+{"type":"response_item","payload":{"type":"compaction_summary","encrypted_content":"Y2lwaGVy"}}
+{"type":"compacted","payload":{"message":"","replacement_history":[{"type":"compaction","encrypted_content":"Y2lwaGVy"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"two"}]}}
+`)
+
+	rawLines := splitJSONL(input)
+	got := SanitizePortableTranscript(input)
+	gotLines := splitJSONL(got)
+
+	require.Len(t, gotLines, len(rawLines),
+		"line count changed: offsets into the stored transcript would drift")
+	require.NotContains(t, string(got), "Y2lwaGVy", "ciphertext survived")
+
+	// Line-for-line, each stored line must still correspond to the same rollout line.
+	for i := range rawLines {
+		var rawLine, gotLine rolloutLine
+		require.NoError(t, json.Unmarshal(rawLines[i], &rawLine))
+		require.NoError(t, json.Unmarshal(gotLines[i], &gotLine))
+		require.Equal(t, rawLine.Type, gotLine.Type, "line %d changed type", i)
+	}
 }
 
 func TestSanitizeRestoredTranscript_StripsEncryptedItemsFromCompactedHistory(t *testing.T) {

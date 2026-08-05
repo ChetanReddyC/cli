@@ -23,17 +23,30 @@ import (
 // to be unmistakable in a stored blob, and shaped like the real base64.
 var codexCiphertext = strings.Repeat("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVph", 40)
 
-// codexRolloutWithEncryptedReasoning builds a Codex rollout whose reasoning items
-// carry encrypted_content, plus a compaction item. Both are non-portable state that
-// Entire must strip from its own stored copy (see codex.SanitizePortableTranscript).
+// codexRolloutWithEncryptedReasoning builds a Codex rollout whose reasoning and
+// compaction items carry encrypted_content — the non-portable state Entire strips
+// from its stored copy (see codex.SanitizePortableTranscript). Both real shapes use
+// the `encrypted_content` key; that is the only key the sanitizer strips.
 func codexRolloutWithEncryptedReasoning(sessionID, repoDir, ciphertext string) string {
 	return strings.Join([]string{
 		`{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"` + repoDir + `"}}`,
 		`{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"add feature.txt"}]}}`,
 		`{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"` + ciphertext + `"}}`,
-		`{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"compaction","payload":{"blob":"` + ciphertext + `"}}}`,
+		`{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"compaction","encrypted_content":"` + ciphertext + `"}}`,
 		`{"timestamp":"2026-01-01T00:00:04Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"added feature.txt"}]}}`,
 	}, "\n") + "\n"
+}
+
+// countJSONLLines counts non-empty lines, matching how transcript offsets are
+// counted (countTranscriptItems for JSONL agents).
+func countJSONLLines(s string) int {
+	n := 0
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // findShadowSessionTranscript locates the session transcript blob inside a shadow
@@ -176,8 +189,16 @@ func TestCodexShadowBranch_SanitizesTranscript(t *testing.T) {
 	if strings.Contains(stored, `"encrypted_content"`) {
 		t.Error("shadow-branch transcript still has an encrypted_content key")
 	}
-	if strings.Contains(stored, `"compaction"`) {
-		t.Error("shadow-branch transcript still has a compaction item")
+
+	// The compaction item is stripped in place, not dropped: its line survives so
+	// the stored transcript stays line-aligned with the agent's rollout. Offsets
+	// like CheckpointTranscriptStart are counted on the rollout and applied here,
+	// so a differing line count silently mis-scopes every later read.
+	if !strings.Contains(stored, `"type":"compaction"`) {
+		t.Error("compaction item was dropped; stored transcript is no longer line-aligned with the rollout")
+	}
+	if got, want := countJSONLLines(stored), countJSONLLines(rollout); got != want {
+		t.Errorf("stored transcript has %d lines, rollout has %d — offsets into the stored copy will drift", got, want)
 	}
 
 	// Sanitization must not eat the actual conversation.
@@ -275,8 +296,15 @@ func TestCodexCondense_NoAssetsFromSanitizedAwayContent(t *testing.T) {
 	}
 
 	// Two distinct images, both padded past the externalization length threshold.
-	// keptImg lives in a normal user message; droppedImg lives inside a compaction
-	// item, which codex.SanitizePortableTranscript removes outright.
+	// keptImg lives in a normal user message. droppedImg lives in a compaction item
+	// nested inside a "compacted" line's replacement_history, which
+	// sanitizeHistoryItems removes outright — the one place sanitization still
+	// discards content.
+	//
+	// The shape is synthetic: real Codex compaction items carry only
+	// encrypted_content, no readable content. It is here to pin the ordering
+	// invariant (never externalize out of content we are about to discard), not to
+	// reproduce an observed Codex rollout.
 	keptImg := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("kept-image-payload-", 8))
 	droppedImg := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("dropped-image-payload-", 8))
 	keptB64 := base64.StdEncoding.EncodeToString(keptImg)
@@ -295,10 +323,10 @@ func TestCodexCondense_NoAssetsFromSanitizedAwayContent(t *testing.T) {
 			`{"type":"input_text","text":"add feature.txt and look at this screenshot"},` +
 			`{"type":"input_image","image_url":"data:image/png;base64,` + keptB64 + `"}` +
 			`]}}`,
-		// Sanitization drops this whole line, so nothing in it should ever be
-		// extracted into an asset.
-		`{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"compaction","content":[` +
-			`{"type":"input_image","image_url":"data:image/png;base64,` + droppedB64 + `"}` +
+		// The nested compaction item is discarded by sanitization, so nothing in it
+		// should ever be extracted into an asset.
+		`{"timestamp":"2026-01-01T00:00:02Z","type":"compacted","payload":{"message":"","replacement_history":[` +
+			`{"type":"compaction","content":[{"type":"input_image","image_url":"data:image/png;base64,` + droppedB64 + `"}]}` +
 			`]}}`,
 		`{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"added feature.txt"}]}}`,
 	}, "\n") + "\n"

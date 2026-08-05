@@ -1461,10 +1461,17 @@ func TestWriteCommitted_CodexSanitizesPortableTranscript(t *testing.T) {
 
 	got := string(content.Transcript)
 	require.NotContains(t, got, `"encrypted_content":"REDACTED"`)
-	require.NotContains(t, got, `"type":"compaction"`)
-	require.NotContains(t, got, `"type":"compaction_summary"`)
 	require.Contains(t, got, `"summary":[{"text":"brief"}]`)
 	require.Contains(t, got, `"summary":[{"text":"nested"}]`)
+
+	// The top-level compaction item keeps its line (payload stripped) so the stored
+	// transcript stays line-aligned with the agent's rollout. Items nested inside a
+	// compacted line's replacement_history are still removed outright — they are
+	// array elements, so removing them cannot shift line numbers.
+	require.Contains(t, got, `"type":"compaction"`)
+	require.NotContains(t, got, `"type":"compaction_summary"`)
+	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 3,
+		"stored transcript must keep one line per rollout line")
 }
 
 // TestReadSessionContent_InvalidIndex verifies that ReadSessionContent returns

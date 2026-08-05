@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -51,6 +52,10 @@ func TestCodexResumeRestoredSessionWithSanitizedCompactedHistory(t *testing.T) {
 		out, err := entire.ResumeWithEnv(s.Dir, "feature", []string{"CODEX_HOME=" + codexSession.Home()})
 		require.NoError(t, err, "entire resume failed: %s", out)
 		require.Contains(t, out, "codex resume "+sessionID)
+
+		// Prove the restored rollout actually contains the shape under test before
+		// asserting Codex tolerates it — otherwise a green run says nothing.
+		assertRestoredCompactionStripped(t, findRestoredCodexRollout(t, codexSession.Home(), rolloutPath))
 
 		codexAgent, ok := s.Agent.(*agents.Codex)
 		require.True(t, ok, "expected *agents.Codex agent, got %T", s.Agent)
@@ -107,42 +112,149 @@ func readCodexSessionID(t *testing.T, rolloutPath string) string {
 	return ""
 }
 
+// appendCompactedEncryptedHistory appends the two encrypted-payload shapes Entire
+// has to make replayable, so a resume of the restored transcript exercises both:
+//
+//   - a top-level `response_item` whose payload type is `compaction`. Sanitization
+//     strips its encrypted_content but KEEPS the line, so the stored transcript
+//     stays line-aligned with the rollout (offsets are counted on the rollout and
+//     applied to the stored copy). This is the shape that decides whether Codex
+//     tolerates a compaction item with no payload.
+//   - a `compacted` line whose replacement_history carries reasoning and compaction
+//     items. Those nested items are removed outright — they are array elements, so
+//     removing them cannot shift line numbers.
 func appendCompactedEncryptedHistory(t *testing.T, rolloutPath string) {
 	t.Helper()
 
-	line := map[string]any{
-		"timestamp": "2026-04-08T12:00:00.000Z",
-		"type":      "compacted",
-		"payload": map[string]any{
-			"message": "",
-			"replacement_history": []map[string]any{
-				{
-					"type": "message",
-					"role": "user",
-					"content": []map[string]any{
-						{"type": "input_text", "text": "hello"},
+	lines := []map[string]any{
+		{
+			"timestamp": "2026-04-08T12:00:00.000Z",
+			"type":      "response_item",
+			"payload": map[string]any{
+				"type":              "compaction",
+				"encrypted_content": "REDACTED",
+			},
+		},
+		{
+			"timestamp": "2026-04-08T12:00:01.000Z",
+			"type":      "compacted",
+			"payload": map[string]any{
+				"message": "",
+				"replacement_history": []map[string]any{
+					{
+						"type": "message",
+						"role": "user",
+						"content": []map[string]any{
+							{"type": "input_text", "text": "hello"},
+						},
 					},
-				},
-				{
-					"type":              "reasoning",
-					"summary":           []map[string]any{{"text": "brief"}},
-					"encrypted_content": "REDACTED",
-				},
-				{
-					"type":              "compaction",
-					"encrypted_content": "REDACTED",
+					{
+						"type":              "reasoning",
+						"summary":           []map[string]any{{"text": "brief"}},
+						"encrypted_content": "REDACTED",
+					},
+					{
+						"type":              "compaction",
+						"encrypted_content": "REDACTED",
+					},
 				},
 			},
 		},
 	}
 
-	encoded, err := json.Marshal(line)
-	require.NoError(t, err)
-
 	f, err := os.OpenFile(rolloutPath, os.O_APPEND|os.O_WRONLY, 0)
 	require.NoError(t, err)
 	defer f.Close()
 
-	_, err = f.Write(append(encoded, '\n'))
+	for _, line := range lines {
+		encoded, err := json.Marshal(line)
+		require.NoError(t, err)
+		_, err = f.Write(append(encoded, '\n'))
+		require.NoError(t, err)
+	}
+}
+
+// findRestoredCodexRollout returns the rollout `entire resume` wrote. Restore does
+// not overwrite the agent's original file — it writes a fresh rollout for the same
+// session id under a new timestamped name — so the home holds both afterwards and
+// findCodexRollout's exactly-one expectation no longer applies.
+func findRestoredCodexRollout(t *testing.T, codexHome, originalPath string) string {
+	t.Helper()
+
+	matches, err := filepath.Glob(filepath.Join(codexHome, "sessions", "*", "*", "*", "rollout-*.jsonl"))
 	require.NoError(t, err)
+	require.NotEmpty(t, matches, "no Codex rollout found after resume")
+
+	var restored []string
+	for _, m := range matches {
+		if m != originalPath {
+			restored = append(restored, m)
+		}
+	}
+	require.Len(t, restored, 1,
+		"expected exactly one restored rollout alongside the original\noriginal: %s\nall: %v",
+		originalPath, matches)
+
+	t.Logf("original rollout: %s", originalPath)
+	t.Logf("restored rollout: %s", restored[0])
+	return restored[0]
+}
+
+// assertRestoredCompactionStripped verifies the restored rollout carries a
+// top-level compaction item whose encrypted payload was stripped while its LINE
+// survived. That is the shape the subsequent `codex resume` has to tolerate, and
+// asserting it here stops the test from passing vacuously if the fixture, the
+// sanitizer, or the restore path ever stops producing it.
+func assertRestoredCompactionStripped(t *testing.T, rolloutPath string) {
+	t.Helper()
+
+	data, err := os.ReadFile(rolloutPath)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "encrypted_content",
+		"restored rollout still carries encrypted payloads")
+
+	var sawStrippedCompaction bool
+	var sawCompactedLine bool
+	for _, raw := range bytes.Split(data, []byte("\n")) {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+		var line struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if json.Unmarshal(raw, &line) != nil || line.Type != "response_item" {
+			continue
+		}
+		var payload map[string]any
+		if json.Unmarshal(line.Payload, &payload) != nil {
+			continue
+		}
+		if payload["type"] == "compaction" {
+			sawStrippedCompaction = true
+			t.Logf("restored top-level compaction item, payload keys: %v", payloadKeys(payload))
+			require.NotContains(t, payload, "encrypted_content",
+				"compaction item kept its encrypted payload")
+		}
+	}
+
+	for _, raw := range bytes.Split(data, []byte("\n")) {
+		if bytes.Contains(raw, []byte(`"type":"compacted"`)) {
+			sawCompactedLine = true
+		}
+	}
+	require.True(t, sawCompactedLine, "restored rollout lost the compacted line")
+
+	require.True(t, sawStrippedCompaction,
+		"restored rollout has no top-level compaction item — the test did not exercise "+
+			"the payload-less compaction shape, so its result is meaningless")
+}
+
+func payloadKeys(payload map[string]any) []string {
+	keys := make([]string, 0, len(payload))
+	for k := range payload {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
