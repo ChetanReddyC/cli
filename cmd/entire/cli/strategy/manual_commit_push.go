@@ -278,10 +278,7 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 
-	dest := resolveRefsPushDestination(ctx, ps)
-	dest.warnIgnoredPushURLs(ctx, os.Stderr)
-
-	if _, err := flushCheckpointRefsQueue(ctx, repo, dest); err != nil {
+	if _, err := flushCheckpointRefsQueue(ctx, repo, ps); err != nil {
 		// Fail-soft: a checkpoint-ref push failure must never block the user's
 		// git push. The refs stay queued for the next pre-push.
 		logging.Warn(ctx, "git-refs pre-push: checkpoint ref push failed; refs left queued",
@@ -309,9 +306,7 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	if !checkpointPolicyAllowsGitHook(ctx, repo) {
 		return 0, false, errors.New("checkpoint policy does not allow pushing checkpoint refs; refs stay queued")
 	}
-	dest := resolveRefsPushDestination(ctx, ps)
-	dest.warnIgnoredPushURLs(ctx, os.Stderr)
-	pushed, err = flushCheckpointRefsQueue(ctx, repo, dest)
+	pushed, err = flushCheckpointRefsQueue(ctx, repo, ps)
 	// Clean up even on a partial/failed flush: a diverged batch can push some
 	// refs and still return an error, and the shadow branches for the refs that
 	// *did* land must still be cleaned up — parity with the pre-push path, which
@@ -328,8 +323,7 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 // never block the user's push) and the migration command's opt-in push (which
 // surfaces it). Stale entries — refs no longer present locally — are pruned so
 // they don't block the queue forever.
-func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, dest refsPushDestination) (int, error) {
-	pushTarget := dest.target
+func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps pushSettings) (int, error) {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
 		return 0, fmt.Errorf("resolve push queue: %w", err)
@@ -356,16 +350,22 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, dest re
 		return 0, nil
 	}
 
+	// Resolved here, not by the caller: it spawns `git remote get-url` and its
+	// result is unused unless refs are actually pushed, so an ordinary push with
+	// an empty queue must not pay for it — nor print the multi-URL warning.
+	dest := resolveRefsPushDestination(pushCtx, ps)
+	dest.warnIgnoredPushURLs(pushCtx)
+
 	// Progress: pushing many refs over the network can take tens of seconds, so
 	// surface it (matching the v1 path's "[entire] Pushing ..." line) instead of
 	// leaving the user's git push apparently hung. Written to stderr, which git
 	// shows during the pre-push hook.
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %d checkpoint ref(s) to %s...", len(existing), dest.display)
+	fmt.Fprintf(os.Stderr, "[entire] Pushing %d checkpoint ref(s) to %s...", len(existing), dest.display())
 	stop := startProgressDots(os.Stderr)
 
 	// Fast path: push all refs in one round-trip (fast-forward-only). If every
 	// ref was up to date or fast-forwarded, we're done.
-	batchErr := batchPushRefs(pushCtx, pushTarget, existing)
+	batchErr := batchPushRefs(pushCtx, dest.target, existing)
 	if batchErr == nil {
 		stop(" done")
 		if removeErr := queue.Remove(existing); removeErr != nil {
@@ -383,7 +383,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, dest re
 		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't push checkpoint refs: %v\n", batchErr)
 		printNonInteractiveSSHAuthHint()
 		if dest.checkpointRemote {
-			printCheckpointRemoteHint(pushTarget)
+			printCheckpointRemoteHint(dest.target)
 		}
 		return 0, batchErr
 	}
@@ -401,7 +401,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, dest re
 	pushed := make([]plumbing.ReferenceName, 0, len(existing))
 	var firstErr error
 	for _, ref := range existing {
-		if err := pushCheckpointRefWithRecovery(pushCtx, pushTarget, ref); err != nil {
+		if err := pushCheckpointRefWithRecovery(pushCtx, dest.target, ref); err != nil {
 			logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 				slog.String("ref", ref.String()), slog.String("error", err.Error()))
 			if nonInteractiveSSHAuthFailure(pushCtx, err) {

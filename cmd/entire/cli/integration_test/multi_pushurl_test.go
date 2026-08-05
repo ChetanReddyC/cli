@@ -22,10 +22,11 @@ import (
 //     $1, so the CLI sees N identical invocations and hands `git push <name>` the
 //     name — letting git fan out a second time.
 //
-// The CLI therefore has no per-URL control at all: it can only decide whether to
-// push checkpoints for a given hook invocation, not where they land. These tests
-// pin down what that means for each backend, including the places where today's
-// behavior is wrong.
+// The two backends diverge from there, deliberately. git-branch pushes to the
+// remote NAME and inherits git's fan-out, so it has no per-URL control — it can
+// only decide *whether* to push for a given hook invocation, not where. git-refs
+// resolves the first push URL itself and targets that one destination, because
+// its push queue records a ref with no per-destination state.
 //
 // The backends are covered by separate tests rather than ForEachBackend because
 // the interesting failure modes differ: the git-branch v1 branch is a single
@@ -377,51 +378,48 @@ func TestMultiPushURL_Refs_UnreachableSecondPushURL_IsIgnored(t *testing.T) {
 func TestMultiPushURL_DestinationNoteSurfaces(t *testing.T) {
 	t.Parallel()
 
-	t.Run("silent with one remote and one push URL", func(t *testing.T) {
-		t.Parallel()
-		env := NewFeatureBranchEnv(t)
-		env.CheckpointStore = StoreGitRefs
-		env.SetupBareRemote()
+	tests := []struct {
+		name   string
+		setup  func(env *TestEnv)
+		want   []string
+		absent []string
+	}{
+		{
+			name:   "one remote, one push URL",
+			setup:  func(*TestEnv) {},
+			absent: []string{"Checkpoint destination"},
+		},
+		{
+			name:  "remote with several push URLs",
+			setup: func(env *TestEnv) { env.AddSecondPushURL("origin") },
+			want:  []string{"Checkpoint destination", "pushes to 2 URLs", "first URL only", "checkpoint_remote"},
+		},
+		{
+			name:  "several remotes",
+			setup: func(env *TestEnv) { env.SetupNamedBareRemote("backup") },
+			want:  []string{"2 remotes", "always looks at origin"},
+		},
+	}
 
-		out := env.RunCLI("doctor")
-		if strings.Contains(out, "Checkpoint destination") {
-			t.Errorf("doctor should not mention the checkpoint destination for an unambiguous repo:\n%s", out)
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := NewFeatureBranchEnv(t)
+			env.CheckpointStore = StoreGitRefs
+			env.SetupBareRemote()
+			tt.setup(env)
 
-	t.Run("doctor reports a multi-push-URL remote", func(t *testing.T) {
-		t.Parallel()
-		env := NewFeatureBranchEnv(t)
-		env.CheckpointStore = StoreGitRefs
-		env.SetupBareRemote()
-		env.AddSecondPushURL("origin")
-
-		out := env.RunCLI("doctor")
-		for _, want := range []string{
-			"Checkpoint destination",
-			"pushes to 2 URLs",
-			"first URL only",
-			"checkpoint_remote",
-		} {
-			if !strings.Contains(out, want) {
-				t.Errorf("doctor output should mention %q:\n%s", want, out)
+			out := env.RunCLI("doctor")
+			for _, want := range tt.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("doctor output should mention %q:\n%s", want, out)
+				}
 			}
-		}
-	})
-
-	t.Run("doctor reports several remotes", func(t *testing.T) {
-		t.Parallel()
-		env := NewFeatureBranchEnv(t)
-		env.CheckpointStore = StoreGitRefs
-		env.SetupBareRemote()
-		env.SetupNamedBareRemote("backup")
-
-		out := env.RunCLI("doctor")
-		if !strings.Contains(out, "2 remotes") {
-			t.Errorf("doctor output should mention the extra remote:\n%s", out)
-		}
-		if !strings.Contains(out, "always looks at origin") {
-			t.Errorf("doctor output should explain that reads resolve via origin:\n%s", out)
-		}
-	})
+			for _, absent := range tt.absent {
+				if strings.Contains(out, absent) {
+					t.Errorf("doctor output should not mention %q for this repo:\n%s", absent, out)
+				}
+			}
+		})
+	}
 }

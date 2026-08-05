@@ -3,25 +3,23 @@ package strategy
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
-// refsPushDestination is where checkpoint refs are pushed, plus how to name that
-// place in user-facing output.
+// refsPushDestination is the single place checkpoint refs are pushed to.
 type refsPushDestination struct {
-	// target is passed to git push / the recovery fetch: a remote name, or a URL.
+	// target is passed to git push and to the recovery fetch: a remote name, or a URL.
 	target string
-	// display names the destination in progress and warning output.
-	display string
-	// checkpointRemote is true when target came from a configured
-	// checkpoint_remote, which gates the "a checkpoint remote is configured"
-	// hint — that hint must not fire for a URL we picked ourselves.
+	// checkpointRemote records that target came from a configured
+	// checkpoint_remote. It cannot be recovered from target's shape — a
+	// resolved push URL is URL-shaped too — and it decides both how the
+	// destination is named and whether the "a checkpoint remote is configured"
+	// hint applies.
 	checkpointRemote bool
-	// ignoredPushURLs counts push URLs of a multi-URL remote that will NOT
+	// ignoredPushURLs counts the push URLs of a multi-URL remote that will NOT
 	// receive checkpoint refs. Zero in every single-destination topology.
 	ignoredPushURLs int
 }
@@ -61,18 +59,16 @@ type refsPushDestination struct {
 // to a URL, so the overwhelmingly common topology behaves exactly as before —
 // remote-tracking refs still update, output still says "origin", and no
 // URL-keyed promisor config appears.
+//
+// Call this only once there is something to push: it spawns `git remote get-url`
+// and its result is unused on an empty queue.
 func resolveRefsPushDestination(ctx context.Context, ps pushSettings) refsPushDestination {
 	target := ps.pushTarget()
 
-	// A configured checkpoint_remote is already a single explicit destination.
-	if ps.hasCheckpointURL() {
-		return refsPushDestination{target: target, display: displayPushTarget(target), checkpointRemote: true}
-	}
-
-	// Pushing straight to a URL (git passes a bare URL through to the hook) is
-	// likewise already single-destination.
-	if remote.IsURL(target) {
-		return refsPushDestination{target: target, display: displayPushTarget(target)}
+	// A configured checkpoint_remote, or a push straight to a URL (git hands the
+	// hook a bare URL verbatim), is already a single explicit destination.
+	if ps.hasCheckpointURL() || remote.IsURL(target) {
+		return refsPushDestination{target: target, checkpointRemote: ps.hasCheckpointURL()}
 	}
 
 	urls, err := remote.GetPushURLs(ctx, target)
@@ -83,42 +79,43 @@ func resolveRefsPushDestination(ctx context.Context, ps pushSettings) refsPushDe
 			slog.String("target", target),
 			slog.String("error", err.Error()),
 		)
-		return refsPushDestination{target: target, display: target}
 	}
 	if len(urls) < 2 {
-		return refsPushDestination{target: target, display: target}
+		return refsPushDestination{target: target}
 	}
+	return refsPushDestination{target: urls[0], ignoredPushURLs: len(urls) - 1}
+}
 
-	return refsPushDestination{
-		target:          urls[0],
-		display:         fmt.Sprintf("%s (first of %d push URLs)", displayURL(urls[0]), len(urls)),
-		ignoredPushURLs: len(urls) - 1,
+// display names the destination for progress and warning output.
+//
+// Deliberately not displayPushTarget: that maps ANY URL to the literal words
+// "checkpoint remote", which was only ever true because a URL target implied a
+// configured checkpoint_remote. A push URL we resolved ourselves is URL-shaped
+// but is not a checkpoint remote, so it is named by its (redacted) URL.
+func (d refsPushDestination) display() string {
+	switch {
+	case d.checkpointRemote:
+		return "checkpoint remote"
+	case d.ignoredPushURLs > 0:
+		return fmt.Sprintf("%s (first of %d push URLs)", remote.RedactURLOrPath(d.target), d.ignoredPushURLs+1)
+	default:
+		return remote.RedactURLOrPath(d.target)
 	}
 }
 
-// displayURL renders a push destination for humans with any credentials removed.
-// RedactURL is only safe for URL-shaped values: given a plain filesystem path it
-// parses to an empty scheme and host and renders as ":///path/to/repo". Paths
-// carry no credentials, so pass them through unchanged.
-func displayURL(u string) string {
-	if remote.IsURL(u) {
-		return remote.RedactURL(u)
-	}
-	return u
-}
-
-// warnIgnoredPushURLs tells the user, once per push, that checkpoint refs are
-// going to one URL of a multi-URL remote — otherwise the choice is invisible and
-// looks like the other mirrors silently lost their checkpoints.
-func (d refsPushDestination) warnIgnoredPushURLs(ctx context.Context, errOut io.Writer) {
+// warnIgnoredPushURLs tells the user that checkpoint refs are going to one URL of
+// a multi-URL remote — otherwise the choice is invisible and looks like the other
+// mirrors silently lost their checkpoints. Call it only when there are refs to
+// push, so a no-op push stays quiet.
+func (d refsPushDestination) warnIgnoredPushURLs(ctx context.Context) {
 	if d.ignoredPushURLs == 0 {
 		return
 	}
-	fmt.Fprintf(errOut, "[entire] Checkpoints go to one repository: %s. %d other push URL(s) of this remote will not receive them.\n",
-		d.display, d.ignoredPushURLs)
-	fmt.Fprintln(errOut, "[entire] To store checkpoints in a specific repository instead, set checkpoint_remote in .entire/settings.json.")
+	fmt.Fprintf(stderrWriter, "[entire] Checkpoints go to one repository: %s. %d other push URL(s) of this remote will not receive them.\n",
+		d.display(), d.ignoredPushURLs)
+	fmt.Fprintln(stderrWriter, "[entire] To store checkpoints in a specific repository instead, set checkpoint_remote in .entire/settings.json.")
 	logging.Info(ctx, "git-refs push: multi-URL remote, pushing checkpoint refs to the first push URL only",
-		slog.String("target", displayURL(d.target)),
+		slog.String("target", remote.RedactURLOrPath(d.target)),
 		slog.Int("ignored_push_urls", d.ignoredPushURLs),
 	)
 }

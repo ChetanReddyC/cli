@@ -109,7 +109,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	checkClaudeCodeHookDrift(cmd)
 
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
-	checkCheckpointDestination(cmd)
+	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
 
 	// Stuck sessions
 	// Load all session states
@@ -435,35 +435,6 @@ func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, err
 	return confirmed, nil
 }
 
-// checkCodexHookTrust warns about two kinds of drift in the Codex hook
-// setup:
-//
-//  1. .codex/hooks.json is stale relative to what the CLI installs
-//     today (e.g. a release added PostToolUse after the user enabled
-//     Codex). Fix: re-run `entire enable`.
-//
-//  2. A declared hook lacks a `trusted_hash` entry in the user's Codex
-//     config — either a fresh clone or a newer hook on the file the
-//     user hasn't approved yet. Fix: open /hooks in Codex.
-//
-// Both checks are structural (file/key presence). Stays silent when
-// this repo doesn't have codex hooks installed or when we can't
-// resolve the worktree root. Warn-only.
-// checkCheckpointDestination reports where checkpoints will be pushed when the
-// repo's remote layout makes that ambiguous — several remotes, or one remote
-// fanning out to several push URLs. Silent on the ordinary single-destination
-// repo and whenever checkpoint_remote already pins one explicitly.
-func checkCheckpointDestination(cmd *cobra.Command) {
-	w := cmd.OutOrStdout()
-	topology := inspectRemoteTopology(cmd.Context())
-	if !topology.hasAmbiguousDestination() {
-		return
-	}
-	fmt.Fprintln(w, "Checkpoint destination: REVIEW")
-	topology.describeCheckpointDestination(w, "  ")
-	fmt.Fprintln(w)
-}
-
 // checkClaudeCodeHookDrift warns when Entire's Claude Code hooks are installed
 // but out of date — e.g. an older release wrote tool matchers that no longer
 // fire on current Claude Code. Read-only; the fix is `entire enable --force`.
@@ -482,6 +453,20 @@ func checkClaudeCodeHookDrift(cmd *cobra.Command) {
 	}
 }
 
+// checkCodexHookTrust warns about two kinds of drift in the Codex hook
+// setup:
+//
+//  1. .codex/hooks.json is stale relative to what the CLI installs
+//     today (e.g. a release added PostToolUse after the user enabled
+//     Codex). Fix: re-run `entire enable`.
+//
+//  2. A declared hook lacks a `trusted_hash` entry in the user's Codex
+//     config — either a fresh clone or a newer hook on the file the
+//     user hasn't approved yet. Fix: open /hooks in Codex.
+//
+// Both checks are structural (file/key presence). Stays silent when
+// this repo doesn't have codex hooks installed or when we can't
+// resolve the worktree root. Warn-only.
 func checkCodexHookTrust(cmd *cobra.Command) {
 	repoRoot, err := paths.WorktreeRoot(cmd.Context())
 	if err != nil {

@@ -210,6 +210,22 @@ func RedactURL(rawURL string) string {
 	return u.Scheme + "://" + u.Host + u.Path
 }
 
+// RedactURLOrPath renders a remote for display with any credentials removed,
+// accepting values that are not URLs at all.
+//
+// RedactURL cannot be applied blanket-fashion: it round-trips through url.Parse
+// and rebuilds "scheme://host/path", so a bare filesystem path like
+// /srv/repo.git comes back as ":///srv/repo.git" and a bare word like "origin"
+// as "://origin". Those inputs carry no credentials, so they pass through
+// unchanged. Use this wherever the value may be a remote name, a local path, or
+// a URL — i.e. anywhere a push/fetch target is shown to a user.
+func RedactURLOrPath(remote string) string {
+	if strings.Contains(remote, "://") || strings.Contains(remote, "@") {
+		return RedactURL(remote)
+	}
+	return remote
+}
+
 // ResolveRemoteRepo returns the forge identifier, owner, and repo name for the
 // given git remote. The forge is the short id used by the trails API ("gh",
 // "et", ...); it is derived from the hostname for direct git URLs or from the

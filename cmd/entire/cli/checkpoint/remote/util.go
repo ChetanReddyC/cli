@@ -492,6 +492,12 @@ func RedactURL(rawURL string) string {
 	return gitremote.RedactURL(rawURL)
 }
 
+// RedactURLOrPath is RedactURL for values that may be a remote name or a local
+// path rather than a URL. See gitremote.RedactURLOrPath.
+func RedactURLOrPath(target string) string {
+	return gitremote.RedactURLOrPath(target)
+}
+
 func logFallback(ctx context.Context, operation, fallbackURL, reason string, err error, attrs ...any) {
 	logAttrs := []any{
 		slog.String("operation", operation),
