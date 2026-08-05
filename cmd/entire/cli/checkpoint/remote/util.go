@@ -288,6 +288,17 @@ func GetRemoteURL(ctx context.Context, remoteName string) (string, error) {
 	return url, nil
 }
 
+// GetPushURLs returns every URL a push to remoteName delivers to, in the order
+// git will use them. See gitremote.GetPushURLs for why this differs from
+// GetRemoteURL.
+func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
+	urls, err := gitremote.GetPushURLs(ctx, remoteName)
+	if err != nil {
+		return nil, fmt.Errorf("get push URLs: %w", err)
+	}
+	return urls, nil
+}
+
 // GetRemoteURLInDir returns the URL configured for the named git remote in dir.
 func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, error) {
 	url, err := gitremote.GetRemoteURLInDir(ctx, dir, remoteName)

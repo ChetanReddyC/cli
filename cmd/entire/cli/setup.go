@@ -1341,6 +1341,8 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		}
 	}
 
+	printCheckpointDestinationNote(ctx, w)
+
 	return nil
 }
 
@@ -1350,6 +1352,7 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 		fmt.Fprintf(w, "Agents: %s\n", strings.Join(displayNames, ", "))
 	}
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
+	printCheckpointDestinationNote(ctx, w)
 }
 
 // resolveFirstRunCheckpointBackend decides the checkpoint storage backend

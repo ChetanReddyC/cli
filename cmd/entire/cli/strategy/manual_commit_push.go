@@ -278,7 +278,10 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 
-	if _, err := flushCheckpointRefsQueue(ctx, repo, ps.pushTarget()); err != nil {
+	dest := resolveRefsPushDestination(ctx, ps)
+	dest.warnIgnoredPushURLs(ctx, os.Stderr)
+
+	if _, err := flushCheckpointRefsQueue(ctx, repo, dest); err != nil {
 		// Fail-soft: a checkpoint-ref push failure must never block the user's
 		// git push. The refs stay queued for the next pre-push.
 		logging.Warn(ctx, "git-refs pre-push: checkpoint ref push failed; refs left queued",
@@ -306,7 +309,9 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	if !checkpointPolicyAllowsGitHook(ctx, repo) {
 		return 0, false, errors.New("checkpoint policy does not allow pushing checkpoint refs; refs stay queued")
 	}
-	pushed, err = flushCheckpointRefsQueue(ctx, repo, ps.pushTarget())
+	dest := resolveRefsPushDestination(ctx, ps)
+	dest.warnIgnoredPushURLs(ctx, os.Stderr)
+	pushed, err = flushCheckpointRefsQueue(ctx, repo, dest)
 	// Clean up even on a partial/failed flush: a diverged batch can push some
 	// refs and still return an error, and the shadow branches for the refs that
 	// *did* land must still be cleaned up — parity with the pre-push path, which
@@ -323,7 +328,8 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 // never block the user's push) and the migration command's opt-in push (which
 // surfaces it). Stale entries — refs no longer present locally — are pruned so
 // they don't block the queue forever.
-func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTarget string) (int, error) {
+func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, dest refsPushDestination) (int, error) {
+	pushTarget := dest.target
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
 		return 0, fmt.Errorf("resolve push queue: %w", err)
@@ -354,8 +360,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 	// surface it (matching the v1 path's "[entire] Pushing ..." line) instead of
 	// leaving the user's git push apparently hung. Written to stderr, which git
 	// shows during the pre-push hook.
-	displayTarget := displayPushTarget(pushTarget)
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %d checkpoint ref(s) to %s...", len(existing), displayTarget)
+	fmt.Fprintf(os.Stderr, "[entire] Pushing %d checkpoint ref(s) to %s...", len(existing), dest.display)
 	stop := startProgressDots(os.Stderr)
 
 	// Fast path: push all refs in one round-trip (fast-forward-only). If every
@@ -377,7 +382,9 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 	if nonInteractiveSSHAuthFailure(pushCtx, batchErr) {
 		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't push checkpoint refs: %v\n", batchErr)
 		printNonInteractiveSSHAuthHint()
-		printCheckpointRemoteHint(pushTarget)
+		if dest.checkpointRemote {
+			printCheckpointRemoteHint(pushTarget)
+		}
 		return 0, batchErr
 	}
 
@@ -386,7 +393,10 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, pushTar
 	// fetch+replay recovery, and remove from the queue only the refs that land
 	// (a genuine cherry-pick conflict leaves that ref queued for a later push,
 	// never force-overwriting the remote).
-	fmt.Fprintf(os.Stderr, "[entire] Some checkpoint refs diverged; syncing %d ref(s) individually...", len(existing))
+	// Deliberately does not claim divergence: a rejected batch is just as often
+	// an unreachable or unauthorized destination, and telling a user with a dead
+	// remote that their refs "diverged" sends them after the wrong problem.
+	fmt.Fprintf(os.Stderr, "[entire] Checkpoint ref push was rejected; retrying %d ref(s) individually...", len(existing))
 	stop = startProgressDots(os.Stderr)
 	pushed := make([]plumbing.ReferenceName, 0, len(existing))
 	var firstErr error

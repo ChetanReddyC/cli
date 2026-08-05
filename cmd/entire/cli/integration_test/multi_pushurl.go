@@ -126,6 +126,32 @@ func (env *TestEnv) GitPushWithHooksAllowError(remote, refSpec string) error {
 	return err //nolint:wrapcheck // test helper: the caller asserts on presence/absence, not identity
 }
 
+// AddUnreachableFirstPushURL configures remoteName to push to a nonexistent path
+// FIRST and its original URL second. git iterates push URLs in order and a
+// transport failure is fatal (it die()s rather than returning), so nothing after
+// the bad URL is attempted — unlike a ref rejection, which lets git carry on.
+// Returns the unreachable path.
+func (env *TestEnv) AddUnreachableFirstPushURL(remoteName string) string {
+	env.T.Helper()
+
+	ctx := env.T.Context()
+	missing := filepath.Join(env.T.TempDir(), "does-not-exist.git")
+	originalURL := env.RemoteURL(remoteName)
+
+	for _, url := range []string{missing, originalURL} {
+		cmd := exec.CommandContext(ctx, "git", "remote", "set-url", "--add", "--push", remoteName, url)
+		cmd.Dir = env.RepoDir
+		cmd.Env = testutil.GitIsolatedEnv()
+		if output, err := cmd.CombinedOutput(); err != nil {
+			env.T.Fatalf("failed to add push URL %s to remote %s: %v\n%s", url, remoteName, err, output)
+		}
+	}
+
+	env.setGitConfigBaseline()
+
+	return missing
+}
+
 // RemoteURL returns the fetch URL configured for remoteName.
 func (env *TestEnv) RemoteURL(remoteName string) string {
 	env.T.Helper()

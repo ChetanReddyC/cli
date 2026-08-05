@@ -107,6 +107,34 @@ func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, err
 	return strings.TrimSpace(string(output)), nil
 }
 
+// GetPushURLs returns every URL a push to remoteName delivers to, in the order
+// git will use them.
+//
+// A remote's push destinations are remote.<name>.pushurl when any is set and its
+// remote.<name>.url otherwise (git's push_url_of_remote), and BOTH may repeat —
+// git pushes to all of them, in config order. So this, not GetRemoteURL,
+// describes where a push actually goes; GetRemoteURL reports the FETCH URL,
+// which can name a different repository entirely.
+//
+// Returns at least one entry on success.
+func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", "--push", "--all", remoteName)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("remote %q not found", remoteName)
+	}
+	var urls []string
+	for _, line := range strings.Split(string(output), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			urls = append(urls, trimmed)
+		}
+	}
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("remote %q has no push URL", remoteName)
+	}
+	return urls, nil
+}
+
 // ParseURL parses a git remote URL (SSH SCP-style or HTTPS) into its components.
 func ParseURL(rawURL string) (*Info, error) {
 	rawURL = strings.TrimSpace(rawURL)

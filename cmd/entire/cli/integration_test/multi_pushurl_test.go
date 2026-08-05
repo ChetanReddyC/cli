@@ -4,6 +4,7 @@ package integration
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -246,17 +247,22 @@ func TestMultiPushURL_Branch_DoesNotPublishV1ToEmptySecondPushURL(t *testing.T) 
 	}
 }
 
-// TestMultiPushURL_Refs_FanOutToBothPushURLs is the git-refs baseline, and it
-// pins down a property the backend gets for free but does not enforce: the queue
-// is drained by the FIRST hook invocation and its refs removed after that push
-// succeeds, so the remaining invocations are no-ops. Both URLs still receive the
-// refs — again only because the CLI pushes to the remote name and git fans out.
+// TestMultiPushURL_Refs_GoesToFirstPushURLOnly pins the git-refs destination
+// rule: with several push URLs on one remote, checkpoint refs go to the FIRST
+// push URL and the rest are deliberately skipped.
 //
-// This is worth locking down because it is exactly what would break if
-// checkpoint pushes were ever retargeted at a single resolved URL (as a
-// configured checkpoint_remote already does): the queue would be emptied by the
-// first invocation and the second URL would silently never receive anything.
-func TestMultiPushURL_Refs_FanOutToBothPushURLs(t *testing.T) {
+// The push-discovery queue records only a ref, with no per-destination state, so
+// "this ref is pushed" has to mean one place. git's fan-out cannot provide that:
+// one failing URL fails the whole invocation so nothing unqueues even when other
+// URLs took the refs, and an unreachable FIRST URL makes git die() before
+// reaching any later URL (see ..._Refs_UnreachableFirstPushURL_ReachesNothing).
+//
+// The trade — checkpoints live in exactly one repository, and cloning a different
+// mirror of the same code will not find them — is why the user is warned on
+// stderr, and why checkpoint_remote remains the way to name the repository
+// explicitly. Note the git-branch backend deliberately still fans out; see
+// ..._Branch_RepeatedPushesKeepBothURLsInSync.
+func TestMultiPushURL_Refs_GoesToFirstPushURLOnly(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -278,29 +284,65 @@ func TestMultiPushURL_Refs_FanOutToBothPushURLs(t *testing.T) {
 	if !env.CheckpointExistsOnRemote(bareA, checkpointID) {
 		t.Errorf("checkpoint ref for %s should be on the first push URL", checkpointID)
 	}
-	if !env.CheckpointExistsOnRemote(bareB, checkpointID) {
-		t.Errorf("checkpoint ref for %s should be on the second push URL (git fans out to every push URL)", checkpointID)
+	if env.CheckpointExistsOnRemote(bareB, checkpointID) {
+		t.Errorf("checkpoint ref for %s should NOT be on the second push URL: refs target the first push URL only", checkpointID)
 	}
+	// The destination took them, so they unqueue — the property the whole rule
+	// exists to make possible.
 	if queued := env.QueuedCheckpointRefs(); len(queued) != 0 {
 		t.Errorf("queue should be empty after a confirmed push, still holds %v", queued)
 	}
 }
 
-// TestMultiPushURL_Refs_UnreachableSecondPushURL_RefsStayQueued covers the
-// git-refs failure mode. Per-checkpoint refs normally only fast-forward (each
-// write parents on the prior tip) and a checkpoint ID is minted once, so the
-// same-ref divergence that plagues the shared v1 branch is not reachable here
-// without a backfill or migration rewriting an existing checkpoint. The
-// realistic partial failure is instead a mirror that cannot be reached at all.
+// TestMultiPushURL_Refs_UnreachableFirstPushURL_ReachesNothing covers the case
+// that motivated targeting one URL explicitly rather than leaning on git's
+// fan-out.
 //
-// The refs still land on the reachable URL, and — the property that matters —
-// they stay queued, so every later push retries them. That is the backend
-// degrading toward "will retry" rather than toward silent loss, and it is the
-// concrete behavioral difference from the git-branch path above, which drops the
-// failure on the floor. The flip side is that the retry can never succeed while
-// the second URL is unreachable, so the queue never drains: a persistent
-// partial failure is invisible outside stderr.
-func TestMultiPushURL_Refs_UnreachableSecondPushURL_RefsStayQueued(t *testing.T) {
+// git iterates a remote's push URLs in order, and a transport failure (missing
+// repo, auth, bad host) is fatal — it die()s rather than returning, so URLs after
+// the failing one are never attempted at all. A rejection (non-fast-forward) by
+// contrast returns, and git carries on to the later URLs. So under fan-out a dead
+// mirror in FIRST position blocks checkpoint sync completely, while the same
+// mirror in last position does not: order silently decided the outcome.
+//
+// Targeting the first push URL makes that explicit instead of emergent, and the
+// refs stay queued either way, so nothing is lost.
+func TestMultiPushURL_Refs_UnreachableFirstPushURL_ReachesNothing(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	env.CheckpointStore = StoreGitRefs
+
+	bareA := env.SetupBareRemote()
+	env.AddUnreachableFirstPushURL("origin")
+
+	checkpointID := createCheckpointedCommit(t, env, "Add auth module", "auth.go", "package auth", "Add auth module")
+	if len(env.QueuedCheckpointRefs()) == 0 {
+		t.Fatal("setup: the checkpoint write should have enqueued a ref for push")
+	}
+
+	if err := env.GitPushWithHooksAllowError("origin", "HEAD"); err == nil {
+		t.Fatal("setup: git push should fail when the first push URL is unreachable")
+	}
+
+	if env.CheckpointsPresentOnRemote(bareA) {
+		t.Errorf("no checkpoint should reach the reachable URL: the unreachable first push URL is the target")
+	}
+	wantRef := checkpointRefName(checkpointID)
+	if queued := env.QueuedCheckpointRefs(); !slices.Contains(queued, wantRef) {
+		t.Errorf("ref %s should stay queued when the destination is unreachable; queue holds %v", wantRef, queued)
+	}
+}
+
+// TestMultiPushURL_Refs_UnreachableSecondPushURL_IsIgnored is the counterpart:
+// a broken mirror in a LATER position is now simply irrelevant to checkpoint
+// refs, because they target the first push URL only.
+//
+// Under git's fan-out this same topology failed the whole push and wedged the
+// queue indefinitely — the refs had reached the healthy URL but nothing could
+// unqueue them, so every later push retried and failed again. Targeting one URL
+// removes that failure mode entirely.
+func TestMultiPushURL_Refs_UnreachableSecondPushURL_IsIgnored(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -310,23 +352,76 @@ func TestMultiPushURL_Refs_UnreachableSecondPushURL_RefsStayQueued(t *testing.T)
 	env.AddUnreachableSecondPushURL("origin")
 
 	checkpointID := createCheckpointedCommit(t, env, "Add auth module", "auth.go", "package auth", "Add auth module")
-	queuedBefore := env.QueuedCheckpointRefs()
-	if len(queuedBefore) == 0 {
+	if len(env.QueuedCheckpointRefs()) == 0 {
 		t.Fatal("setup: the checkpoint write should have enqueued a ref for push")
 	}
 
-	// git exits non-zero because one push URL is unreachable; the user's push
-	// fails as a whole, which is git's behavior and not something the CLI can
-	// or should mask.
+	// The user's own branch push still fails — that is git's fan-out over a dead
+	// URL and not something the CLI can or should mask.
 	if err := env.GitPushWithHooksAllowError("origin", "HEAD"); err == nil {
 		t.Fatal("setup: git push should fail when one of the push URLs is unreachable")
 	}
 
 	if !env.CheckpointExistsOnRemote(bareA, checkpointID) {
-		t.Errorf("checkpoint ref for %s should still reach the reachable push URL", checkpointID)
+		t.Errorf("checkpoint ref for %s should reach the first push URL", checkpointID)
 	}
-	wantRef := checkpointRefName(checkpointID)
-	if queued := env.QueuedCheckpointRefs(); !slices.Contains(queued, wantRef) {
-		t.Errorf("ref %s should stay queued after a partially failed push so the next push retries it; queue holds %v", wantRef, queued)
+	if queued := env.QueuedCheckpointRefs(); len(queued) != 0 {
+		t.Errorf("refs should unqueue once the destination took them, even though a later push URL is dead; queue holds %v", queued)
 	}
+}
+
+// TestMultiPushURL_DestinationNoteSurfaces checks that the ambiguity is
+// announced rather than left for a reader of the source: `entire doctor` reports
+// it, and it stays silent on an ordinary single-destination repo so the common
+// output is unchanged.
+func TestMultiPushURL_DestinationNoteSurfaces(t *testing.T) {
+	t.Parallel()
+
+	t.Run("silent with one remote and one push URL", func(t *testing.T) {
+		t.Parallel()
+		env := NewFeatureBranchEnv(t)
+		env.CheckpointStore = StoreGitRefs
+		env.SetupBareRemote()
+
+		out := env.RunCLI("doctor")
+		if strings.Contains(out, "Checkpoint destination") {
+			t.Errorf("doctor should not mention the checkpoint destination for an unambiguous repo:\n%s", out)
+		}
+	})
+
+	t.Run("doctor reports a multi-push-URL remote", func(t *testing.T) {
+		t.Parallel()
+		env := NewFeatureBranchEnv(t)
+		env.CheckpointStore = StoreGitRefs
+		env.SetupBareRemote()
+		env.AddSecondPushURL("origin")
+
+		out := env.RunCLI("doctor")
+		for _, want := range []string{
+			"Checkpoint destination",
+			"pushes to 2 URLs",
+			"first URL only",
+			"checkpoint_remote",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("doctor output should mention %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("doctor reports several remotes", func(t *testing.T) {
+		t.Parallel()
+		env := NewFeatureBranchEnv(t)
+		env.CheckpointStore = StoreGitRefs
+		env.SetupBareRemote()
+		env.SetupNamedBareRemote("backup")
+
+		out := env.RunCLI("doctor")
+		if !strings.Contains(out, "2 remotes") {
+			t.Errorf("doctor output should mention the extra remote:\n%s", out)
+		}
+		if !strings.Contains(out, "always looks at origin") {
+			t.Errorf("doctor output should explain that reads resolve via origin:\n%s", out)
+		}
+	})
 }

@@ -108,6 +108,9 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Agent-specific: Claude Code hook config drift.
 	checkClaudeCodeHookDrift(cmd)
 
+	// Where checkpoints land, when the repo's remotes make that ambiguous.
+	checkCheckpointDestination(cmd)
+
 	// Stuck sessions
 	// Load all session states
 	states, err := strategy.ListSessionStates(ctx)
@@ -446,6 +449,21 @@ func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, err
 // Both checks are structural (file/key presence). Stays silent when
 // this repo doesn't have codex hooks installed or when we can't
 // resolve the worktree root. Warn-only.
+// checkCheckpointDestination reports where checkpoints will be pushed when the
+// repo's remote layout makes that ambiguous — several remotes, or one remote
+// fanning out to several push URLs. Silent on the ordinary single-destination
+// repo and whenever checkpoint_remote already pins one explicitly.
+func checkCheckpointDestination(cmd *cobra.Command) {
+	w := cmd.OutOrStdout()
+	topology := inspectRemoteTopology(cmd.Context())
+	if !topology.hasAmbiguousDestination() {
+		return
+	}
+	fmt.Fprintln(w, "Checkpoint destination: REVIEW")
+	topology.describeCheckpointDestination(w, "  ")
+	fmt.Fprintln(w)
+}
+
 // checkClaudeCodeHookDrift warns when Entire's Claude Code hooks are installed
 // but out of date — e.g. an older release wrote tool matchers that no longer
 // fire on current Claude Code. Read-only; the fix is `entire enable --force`.
