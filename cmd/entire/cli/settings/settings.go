@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -181,9 +182,64 @@ type PluginSettings struct {
 	IndexTTLHours int `json:"index_ttl_hours,omitempty"`
 }
 
+// gitURLSchemes are the transports a plugin or index repository URL may use.
+//
+// http:// and git:// are deliberately absent. Both are unauthenticated and
+// unencrypted, and the catalog fetched over them decides which repositories
+// install *without a confirmation prompt* — so a network attacker who can
+// rewrite the transport chooses the binary. That is strictly worse than the
+// plaintext-asset case the download path already refuses.
+var gitURLSchemes = []string{"https://", "ssh://", "file://"}
+
+// scpLikeGitURL matches git's scp-like syntax (user@host:path) — the form
+// `git@github.com:owner/repo.git` uses. Requires a user@, a host without a
+// slash, and a colon before the path, so it cannot match a bare option or a
+// local path.
+var scpLikeGitURL = regexp.MustCompile(`^[A-Za-z0-9._~-]+@[A-Za-z0-9._-]+:[^\s]`)
+
+// maxIndexTTLHours bounds plugins.index_ttl_hours. Beyond roughly 2.5 million
+// hours the nanosecond conversion in IndexTTL overflows int64 and wraps
+// negative, which reads as "always stale" — the exact opposite of the very
+// large value the user asked for. Ten years is past any real intent.
+const maxIndexTTLHours = 24 * 365 * 10
+
+// ValidateGitURL rejects anything that is not recognizably a git repository
+// URL. It is the single definition shared by settings validation and the
+// cli package's pre-flight check, so the two can no longer disagree about
+// what is acceptable — they previously differed on http://, git://, and bare
+// absolute paths, which meant `--index /srv/idx` worked while the equivalent
+// index_url setting was a hard load failure.
+//
+// This is a security boundary, not a nicety. These URLs reach the git CLI as
+// positional arguments and arrive from attacker-influenced places (index.json
+// entries, another plugin's entire-plugin.yml requires[], a stored manifest).
+// git parses an option-shaped positional as an option, and --upload-pack's
+// value is shell-interpreted, so an option-shaped URL is remote code
+// execution. Bare absolute paths are rejected too: file:// expresses the same
+// thing unambiguously, and narrowing a security boundary beats the
+// convenience.
+func ValidateGitURL(rawURL string) error {
+	u := strings.TrimSpace(rawURL)
+	if u == "" {
+		return errors.New("repository URL is empty")
+	}
+	if strings.HasPrefix(u, "-") {
+		return fmt.Errorf("repository URL %q must not start with '-'", rawURL)
+	}
+	for _, scheme := range gitURLSchemes {
+		if strings.HasPrefix(u, scheme) && len(u) > len(scheme) {
+			return nil
+		}
+	}
+	if scpLikeGitURL.MatchString(u) {
+		return nil
+	}
+	return fmt.Errorf("repository URL %q must use one of %s or git's user@host:path form",
+		rawURL, strings.Join(gitURLSchemes, ", "))
+}
+
 // Validate returns an error for semantically invalid plugin settings.
-// IndexURL must look like a git-cloneable URL: https://, ssh://, file://,
-// or scp-like git@host:path. The load path calls this after merging.
+// The load path calls this after merging.
 func (p *PluginSettings) Validate() error {
 	if p == nil {
 		return nil
@@ -191,15 +247,16 @@ func (p *PluginSettings) Validate() error {
 	if p.IndexTTLHours < 0 {
 		return fmt.Errorf("plugins.index_ttl_hours must be >= 0, got %d", p.IndexTTLHours)
 	}
+	if p.IndexTTLHours > maxIndexTTLHours {
+		return fmt.Errorf("plugins.index_ttl_hours must be <= %d, got %d", maxIndexTTLHours, p.IndexTTLHours)
+	}
 	if p.IndexURL == "" {
 		return nil
 	}
-	for _, prefix := range []string{"https://", "ssh://", "file://", "git@"} {
-		if strings.HasPrefix(p.IndexURL, prefix) {
-			return nil
-		}
+	if err := ValidateGitURL(p.IndexURL); err != nil {
+		return fmt.Errorf("plugins.index_url: %w", err)
 	}
-	return fmt.Errorf("plugins.index_url %q must start with https://, ssh://, file://, or git@", p.IndexURL)
+	return nil
 }
 
 // IndexTTL returns the configured index freshness window. Zero or negative
@@ -207,6 +264,12 @@ func (p *PluginSettings) Validate() error {
 func (p *PluginSettings) IndexTTL() time.Duration {
 	if p == nil || p.IndexTTLHours < 1 {
 		return 24 * time.Hour
+	}
+	// Saturate rather than overflow. Validate rejects out-of-range values on
+	// the load path, but IndexTTL is also reachable from a hand-built struct,
+	// and a wrapped negative duration reads as "always stale".
+	if p.IndexTTLHours > maxIndexTTLHours {
+		return maxIndexTTLHours * time.Hour
 	}
 	return time.Duration(p.IndexTTLHours) * time.Hour
 }

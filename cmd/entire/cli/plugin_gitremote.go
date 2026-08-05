@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"golang.org/x/mod/semver"
 )
 
@@ -21,77 +24,90 @@ import (
 // credential helpers and proxy config, the same reason hooks.go shells out
 // for network-touching operations.
 
-// gitQuiet returns an exec.Cmd for git with terminal prompts disabled, so
-// an auth-requiring remote fails fast instead of hanging a non-interactive
-// run on a username prompt.
-func gitQuiet(ctx context.Context, args ...string) *exec.Cmd {
+// pluginGitTimeout bounds any single git subprocess this package spawns.
+// Without it these calls are unbounded: the root context is WithCancel, not
+// WithTimeout, so a black-holed host hangs the command with no output. That
+// matters most during dependency planning, which issues one ls-remote plus up
+// to two shallow clones per dependency against author-controlled URLs, before
+// the user has confirmed anything. The asset download already caps at 5
+// minutes; this is the git half of the same bound.
+const pluginGitTimeout = 2 * time.Minute
+
+// runGitQuiet runs git and returns stdout, with a bounded deadline and an
+// environment that cannot block on a prompt.
+//
+// Output() (not Run()) so stderr lands in the ExitError for error messages.
+// LC_ALL=C keeps git's messages in English: fetchPluginMetadataAtTag decides
+// the benign "no metadata file" case by substring-matching git's stderr, and
+// git builds with NLS translate those strings — on a localized host every
+// plugin repo without an entire-plugin.yml (the documented default) would
+// otherwise fail to install. BatchMode stops ssh prompting for a key
+// passphrase on /dev/tty, which GIT_TERMINAL_PROMPT does not cover.
+func runGitQuiet(ctx context.Context, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, pluginGitTimeout)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	return cmd
+	cmd.Env = append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"LC_ALL=C",
+		"GIT_SSH_COMMAND=ssh -oBatchMode=yes",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		// Wrapped by callers with the operation and (redacted) URL; the bare
+		// verb here keeps the deadline case legible.
+		return out, fmt.Errorf("git %s: %w", args[0], err)
+	}
+	return out, nil
 }
 
-// pluginRepoURLSchemes are the transports a plugin (or index) repository URL
-// may use. Mirrors settings.PluginSettings.Validate's allowlist, plus the
-// git:// and http:// transports the release-asset path already accepts.
-var pluginRepoURLSchemes = []string{"https://", "http://", "ssh://", "git://", "file://"}
+// redactURL strips any userinfo from a URL so credentials embedded in a remote
+// (https://user:token@host/repo) never reach stderr, .entire/logs/ — which
+// lives in the user's working tree and is collected wholesale by
+// `entire doctor bundle` — or a persisted manifest.yml at mode 0644.
+// Non-URL inputs are returned unchanged; there is nothing to strip.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	u.User = nil
+	return u.String()
+}
 
-// scpLikeGitURL matches git's scp-like syntax (user@host:path) — the form
-// `git@github.com:owner/repo.git` uses. Requires a user@, a host without a
-// slash, and a colon before the path, so it can't match a bare option or a
-// local path.
-var scpLikeGitURL = regexp.MustCompile(`^[A-Za-z0-9._~-]+@[A-Za-z0-9._-]+:[^\s]`)
+// redactCredentials removes userinfo from any URL appearing in free text, for
+// git's stderr where we do not know which URL was echoed.
+var credentialInURL = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]*@`)
 
-// validatePluginRepoURL rejects anything that isn't recognizably a git
+func redactCredentials(text string) string {
+	return credentialInURL.ReplaceAllString(text, "${1}")
+}
+
+// validatePluginRepoURL rejects anything that is not recognizably a git
 // repository URL before it reaches the git CLI as a positional argument.
 //
-// This is a security boundary, not a nicety. Repo URLs arrive from
-// attacker-influenced places — index.json entries, another plugin's
-// entire-plugin.yml `requires`, a stored manifest — and git parses an
-// option-shaped positional as an option. `--upload-pack=<cmd>` is
-// shell-interpreted and runs against the *ambient* repo when no positional
-// remains, so an entry like "--upload-pack=curl … | sh; git-upload-pack"
-// would execute arbitrary commands during an index-resolved install, which
-// never prompts. validatePluginName already refuses a leading '-' on names
-// for the same reason; URLs need the same treatment.
+// The rule itself lives in the settings package as settings.ValidateGitURL so
+// there is exactly one definition: this check and the plugins.index_url
+// settings check previously disagreed about http://, git:// and bare absolute
+// paths, which meant `--index /srv/idx` was accepted here while the equivalent
+// setting was a hard load failure.
 //
-// Callers additionally pass "--" before positionals (defense in depth), so
-// an option-shaped value would be rejected by git even if it got this far.
+// Why it is a security boundary: these URLs arrive from attacker-influenced
+// places — index.json entries, another plugin's entire-plugin.yml requires[],
+// a stored manifest — and git parses an option-shaped positional as an option.
+// `--upload-pack=<cmd>` is shell-interpreted and runs against the *ambient*
+// repo when no positional remains, so an entry like
+// "--upload-pack=curl … | sh; git-upload-pack" would execute arbitrary
+// commands during an index-resolved install, which never prompts.
+// validatePluginName already refuses a leading '-' on names for the same
+// reason. Callers additionally pass "--" before positionals, so an
+// option-shaped value would be refused by git even if it got this far.
 func validatePluginRepoURL(rawURL string) error {
-	u := strings.TrimSpace(rawURL)
-	if u == "" {
-		return errors.New("repository URL is empty")
-	}
-	if strings.HasPrefix(u, "-") {
-		return fmt.Errorf("repository URL %q must not start with '-'", rawURL)
-	}
-	for _, scheme := range pluginRepoURLSchemes {
-		if strings.HasPrefix(u, scheme) && len(u) > len(scheme) {
-			return nil
-		}
-	}
-	if scpLikeGitURL.MatchString(u) {
-		return nil
-	}
-	// An absolute local path is a valid git remote and can't be read as an
-	// option, so it stays accepted — `--index /srv/plugin-index` and
-	// bare-path test fixtures keep working. Relative paths and bare names
-	// are still rejected: they'd be ambiguous with plugin names.
-	if isAbsoluteGitPath(u) {
-		return nil
-	}
-	return fmt.Errorf("repository URL %q must be an absolute path or use one of %s or git's user@host:path form",
-		rawURL, strings.Join(pluginRepoURLSchemes, ", "))
-}
-
-// isAbsoluteGitPath reports whether u is an absolute filesystem path: a
-// leading separator, or a Windows drive prefix like C:\ or C:/.
-func isAbsoluteGitPath(u string) bool {
-	if strings.HasPrefix(u, "/") || strings.HasPrefix(u, `\\`) {
-		return true
-	}
-	return len(u) >= 3 && u[1] == ':' &&
-		(u[2] == '/' || u[2] == '\\') &&
-		((u[0] >= 'A' && u[0] <= 'Z') || (u[0] >= 'a' && u[0] <= 'z'))
+	// Returned unwrapped: ValidateGitURL lives in this module and its message
+	// already names the offending URL and the accepted forms, so wrapping only
+	// duplicates the "repository URL" prefix. Callers add the role (index vs
+	// plugin vs dependency), which is the part that carries information.
+	return settings.ValidateGitURL(rawURL) //nolint:wrapcheck // see above
 }
 
 // listRemoteSemverTags returns the repo's semver tags ("v"-prefixed or
@@ -103,9 +119,9 @@ func listRemoteSemverTags(ctx context.Context, repoURL string) ([]string, error)
 	}
 	// --refs suppresses peeled ^{} entries for annotated tags. "--" keeps an
 	// option-shaped URL from being parsed as a git option.
-	out, err := gitQuiet(ctx, "ls-remote", "--tags", "--refs", "--", repoURL).Output()
+	out, err := runGitQuiet(ctx, "ls-remote", "--tags", "--refs", "--", repoURL)
 	if err != nil {
-		return nil, fmt.Errorf("list tags of %s: %w%s", repoURL, err, stderrSuffix(err))
+		return nil, fmt.Errorf("list tags of %s: %w%s", redactURL(repoURL), err, stderrSuffix(err))
 	}
 	var tags []string
 	for _, line := range strings.Split(string(out), "\n") {
@@ -114,11 +130,22 @@ func listRemoteSemverTags(ctx context.Context, repoURL string) ([]string, error)
 			continue
 		}
 		tag := strings.TrimPrefix(fields[1], "refs/tags/")
-		if semver.IsValid(canonicalSemver(tag)) {
-			tags = append(tags, tag)
+		canon := canonicalSemver(tag)
+		if !semver.IsValid(canon) {
+			continue
 		}
+		// Prereleases are excluded: semver ranks v2.0.0-rc1 above stable
+		// v1.9.0, so an author pushing a release candidate would migrate every
+		// user onto it on the next `plugin upgrade --all`. --pin installs an
+		// exact tag and bypasses this listing, which is the opt-in.
+		if semver.Prerelease(canon) != "" {
+			continue
+		}
+		tags = append(tags, tag)
 	}
-	sort.Slice(tags, func(i, j int) bool {
+	// Stable, so tags that compare equal (v1.0.0 vs 1.0.0, or +build metadata,
+	// which semver ignores) resolve in a deterministic order.
+	sort.SliceStable(tags, func(i, j int) bool {
 		return semver.Compare(canonicalSemver(tags[i]), canonicalSemver(tags[j])) > 0
 	})
 	return tags, nil
@@ -138,7 +165,7 @@ func canonicalSemver(tag string) string {
 func stderrSuffix(err error) string {
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-		return ": " + strings.TrimSpace(string(exitErr.Stderr))
+		return ": " + redactCredentials(strings.TrimSpace(string(exitErr.Stderr)))
 	}
 	return ""
 }
@@ -169,18 +196,18 @@ func fetchPluginMetadataAtTag(ctx context.Context, repoURL, tag string) (*Plugin
 	}
 	// Output() (not Run()) so stderr is captured into the ExitError for
 	// error messages; clone --quiet writes nothing to stdout.
-	if _, err := gitQuiet(ctx, cloneArgs(true)...).Output(); err != nil {
+	if _, err := runGitQuiet(ctx, cloneArgs(true)...); err != nil {
 		// Retry without the filter; the clone dir may be half-created.
 		if rmErr := os.RemoveAll(tmp); rmErr != nil {
 			return nil, fmt.Errorf("clean temp clone dir: %w", rmErr)
 		}
-		if _, err := gitQuiet(ctx, cloneArgs(false)...).Output(); err != nil {
-			return nil, fmt.Errorf("clone %s at %s: %w%s", repoURL, tag, err, stderrSuffix(err))
+		if _, err := runGitQuiet(ctx, cloneArgs(false)...); err != nil {
+			return nil, fmt.Errorf("clone %s at %s: %w%s", redactURL(repoURL), tag, err, stderrSuffix(err))
 		}
 	}
 	// `git show <rev>:<path>` peels annotated tags and, in a blobless
 	// clone, lazily fetches just this one blob from the promisor remote.
-	out, err := gitQuiet(ctx, "-C", tmp, "show", tag+":"+pluginMetadataFileName).Output()
+	out, err := runGitQuiet(ctx, "-C", tmp, "show", tag+":"+pluginMetadataFileName)
 	if err != nil {
 		// Missing file and missing tag both surface as exit 128; only the
 		// missing-file case is benign. Disambiguate via stderr.

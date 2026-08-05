@@ -104,3 +104,59 @@ func TestEntireSettings_PluginAccessors(t *testing.T) {
 		t.Errorf("PluginIndexTTL = %v, want 1h", got)
 	}
 }
+
+// One definition of an acceptable git URL, shared with the cli package's
+// pre-flight check. The two used to disagree on http://, git:// and bare
+// absolute paths, so `--index /srv/idx` was accepted while the equivalent
+// index_url setting was a hard load failure.
+func TestValidateGitURL(t *testing.T) {
+	t.Parallel()
+	for _, ok := range []string{
+		"https://github.com/entireio/plugin-index",
+		"ssh://git@github.com/entireio/plugin-index.git",
+		"file:///srv/plugin-index",
+		"git@github.com:entireio/plugin-index.git",
+	} {
+		if err := ValidateGitURL(ok); err != nil {
+			t.Errorf("ValidateGitURL(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"", "   ", "-x",
+		"--upload-pack=touch /tmp/pwned; git-upload-pack",
+		"ext::sh -c whoami",
+		// Unauthenticated transports: the catalog fetched over them decides
+		// what installs with no prompt.
+		"http://forge.internal/plugin-index",
+		"git://forge.internal/plugin-index",
+		// Bare paths: file:// says the same thing unambiguously.
+		"/srv/plugin-index",
+		"./rel",
+		"plugin-index",
+		"https://",
+	} {
+		if err := ValidateGitURL(bad); err == nil {
+			t.Errorf("ValidateGitURL(%q) = nil, want error", bad)
+		}
+	}
+}
+
+// index_ttl_hours beyond ~2.5M overflows the nanosecond conversion and wraps
+// negative, which reads as "always stale" — the opposite of the very large
+// value the user asked for.
+func TestPluginSettings_IndexTTLBounds(t *testing.T) {
+	t.Parallel()
+	if err := (&PluginSettings{IndexTTLHours: maxIndexTTLHours}).Validate(); err != nil {
+		t.Errorf("ten years should validate: %v", err)
+	}
+	for _, h := range []int{maxIndexTTLHours + 1, 2562048, 10000000} {
+		p := &PluginSettings{IndexTTLHours: h}
+		if err := p.Validate(); err == nil {
+			t.Errorf("Validate accepted index_ttl_hours=%d", h)
+		}
+		// Even reached directly, the window must stay positive.
+		if got := p.IndexTTL(); got <= 0 {
+			t.Errorf("IndexTTL() for %d = %v, want a positive duration", h, got)
+		}
+	}
+}

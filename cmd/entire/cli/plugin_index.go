@@ -199,7 +199,13 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 	fresh := false
 	if cloned && !force {
 		if info, err := os.Stat(marker); err == nil {
-			fresh = time.Since(info.ModTime()) < pluginIndexTTL(ctx)
+			// A negative age means the marker is dated in the future (clock
+			// rollback, restored backup, bad container clock). Treating that as
+			// fresh would freeze the catalog until someone ran `index update`
+			// by hand, so only a non-negative age inside the window counts.
+			if age := time.Since(info.ModTime()); age >= 0 && age < pluginIndexTTL(ctx) {
+				fresh = true
+			}
 		}
 	}
 
@@ -212,14 +218,14 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 		if err := os.RemoveAll(dir); err != nil {
 			return nil, fmt.Errorf("clear stale index cache: %w", err)
 		}
-		if _, err := gitQuiet(ctx, "clone", "--depth", "1", "--quiet", "--", indexURL, dir).Output(); err != nil {
-			return nil, fmt.Errorf("clone plugin index %s: %w%s", indexURL, err, stderrSuffix(err))
+		if _, err := runGitQuiet(ctx, "clone", "--depth", "1", "--quiet", "--", indexURL, dir); err != nil {
+			return nil, fmt.Errorf("clone plugin index %s: %w%s", redactURL(indexURL), err, stderrSuffix(err))
 		}
 		touchFile(marker)
 	case !fresh:
 		if err := refreshPluginIndexClone(ctx, dir); err != nil {
 			logging.Warn(ctx, "plugin index refresh failed; using cached copy",
-				slog.String("index", indexURL), slog.String("error", err.Error()))
+				slog.String("index", redactURL(indexURL)), slog.String("error", err.Error()))
 		} else {
 			touchFile(marker)
 		}
@@ -231,10 +237,10 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 // refreshPluginIndexClone updates an existing shallow clone to the remote
 // tip regardless of the remote's default branch name.
 func refreshPluginIndexClone(ctx context.Context, dir string) error {
-	if _, err := gitQuiet(ctx, "-C", dir, "fetch", "--depth", "1", "--quiet", "origin", "HEAD").Output(); err != nil {
+	if _, err := runGitQuiet(ctx, "-C", dir, "fetch", "--depth", "1", "--quiet", "origin", "HEAD"); err != nil {
 		return fmt.Errorf("fetch: %w%s", err, stderrSuffix(err))
 	}
-	if _, err := gitQuiet(ctx, "-C", dir, "reset", "--hard", "--quiet", "FETCH_HEAD").Output(); err != nil {
+	if _, err := runGitQuiet(ctx, "-C", dir, "reset", "--hard", "--quiet", "FETCH_HEAD"); err != nil {
 		return fmt.Errorf("reset: %w%s", err, stderrSuffix(err))
 	}
 	return nil
@@ -253,11 +259,11 @@ func touchFile(path string) {
 func loadPluginIndexFromDir(ctx context.Context, dir, indexURL string) (*PluginIndex, error) {
 	data, err := os.ReadFile(filepath.Join(dir, pluginIndexFileName)) //nolint:gosec // file inside our cache dir
 	if err != nil {
-		return nil, fmt.Errorf("plugin index %s has no readable %s: %w", indexURL, pluginIndexFileName, err)
+		return nil, fmt.Errorf("plugin index %s has no readable %s: %w", redactURL(indexURL), pluginIndexFileName, err)
 	}
 	var idx PluginIndex
 	if err := json.Unmarshal(data, &idx); err != nil {
-		return nil, fmt.Errorf("parse %s from %s: %w", pluginIndexFileName, indexURL, err)
+		return nil, fmt.Errorf("parse %s from %s: %w", pluginIndexFileName, redactURL(indexURL), err)
 	}
 	// version is recorded, not enforced. Refusing an unrecognized value would
 	// protect against a migration that can never happen: the index is one
@@ -275,7 +281,7 @@ func loadPluginIndexFromDir(ctx context.Context, dir, indexURL string) (*PluginI
 	// below. Degrading per entry beats refusing the catalog.
 	if idx.Version > pluginIndexSchemaVersion {
 		logging.Warn(ctx, "plugin index declares a newer schema version; reading what this CLI understands",
-			slog.String("index", indexURL),
+			slog.String("index", redactURL(indexURL)),
 			slog.Int("declared_version", idx.Version),
 			slog.Int("understood_version", pluginIndexSchemaVersion))
 	}

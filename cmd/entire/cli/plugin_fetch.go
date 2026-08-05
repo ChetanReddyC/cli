@@ -79,9 +79,27 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
+// maxAssetRedirects bounds the redirect chain for an asset fetch. Release
+// hosts routinely redirect to a CDN, so some hops are expected.
+const maxAssetRedirects = 10
+
 // pluginHTTPClient bounds the total time for a single asset download.
 // Plugins can be tens of MB; 5 minutes is generous even on slow links.
-var pluginHTTPClient = &http.Client{Timeout: 5 * time.Minute}
+//
+// CheckRedirect re-runs the transport check on every hop. Without it the
+// https-only rule is trivially bypassed: Go's default policy follows up to 10
+// redirects *across schemes* and only the initial URL was ever validated, so an
+// https:// entry point could deliver both the asset and its checksums.txt over
+// plaintext — exactly the outcome requireSecureAssetURL exists to prevent.
+var pluginHTTPClient = &http.Client{
+	Timeout: 5 * time.Minute,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxAssetRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxAssetRedirects)
+		}
+		return requireSecureAssetURL(req.URL.String())
+	},
+}
 
 // maxPluginAssetSize caps a downloaded asset. Real plugin binaries are tens
 // of MB; the cap exists so a misconfigured URL serving an endless stream
@@ -136,12 +154,25 @@ func archAliases(goarch string) []string {
 }
 
 // osAliases maps a GOOS to asset-name spellings, most specific first.
-// "all" covers macOS universal binaries.
 func osAliases(goos string) []string {
 	if goos == darwinGOOS {
-		return []string{"darwin", "macos", "all"}
+		return []string{"darwin", "macos"}
 	}
 	return []string{goos}
+}
+
+// platformArchAliases returns the arch spellings to try for goos. On darwin it
+// appends "all", which is where goreleaser puts the universal-binary marker:
+// the name is entire-<x>_<ver>_darwin_all, so "all" belongs in the arch slot.
+// It used to sit in the OS slot, generating _all_arm64 — a spelling no forge
+// produces — so the darwin_all fallback the docs promise never actually
+// matched and universal-only releases could not be installed at all.
+func platformArchAliases(goos, goarch string) []string {
+	aliases := archAliases(goarch)
+	if goos == darwinGOOS {
+		aliases = append(aliases, "all")
+	}
+	return aliases
 }
 
 // assetCandidates returns release asset filenames to try for this platform,
@@ -152,7 +183,7 @@ func assetCandidates(name, tag string) []string {
 	version := strings.TrimPrefix(tag, "v")
 	stems := make([]string, 0, 16)
 	for _, osName := range osAliases(runtime.GOOS) {
-		for _, arch := range archAliases(runtime.GOARCH) {
+		for _, arch := range platformArchAliases(runtime.GOOS, runtime.GOARCH) {
 			stems = append(stems,
 				fmt.Sprintf("%s_%s_%s_%s", binName, version, osName, arch),
 				fmt.Sprintf("%s_%s_%s", binName, osName, arch),
@@ -545,23 +576,42 @@ func writeExecutable(r io.Reader, destPath string) error {
 // so `plugin doctor` would confirm the corrupt binary as intact. Reading one
 // byte past the cap makes the overflow detectable, mirroring fetchAndVerify.
 func writeExecutableLimited(r io.Reader, destPath string, limit int64) error {
-	out, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755) //nolint:gosec // dest is inside the managed pkg tree; the binary must be executable
+	// Write to a sibling temp file and rename into place. Two reasons, both
+	// load-bearing:
+	//
+	//  - O_CREATE without O_EXCL follows a symlink at destPath, so a symlink
+	//    planted at pkg/<name>/entire-<name> by an earlier malicious plugin
+	//    would redirect this write anywhere the user can write (~/.zshrc, a git
+	//    hook). Creating a fresh temp name and renaming cannot follow anything.
+	//  - Opening destPath with O_TRUNC destroys the working binary before the
+	//    new bytes are known-good, so an interrupted or failed copy left the
+	//    plugin broken. This path is the *normal* one whenever staging and the
+	//    managed dir are on different filesystems (a tmpfs /tmp), not an edge
+	//    case.
+	tmp, err := os.CreateTemp(filepath.Dir(destPath), ".tmp-"+filepath.Base(destPath)+"-*")
 	if err != nil {
-		return fmt.Errorf("create binary: %w", err)
+		return fmt.Errorf("create staging binary: %w", err)
 	}
-	n, err := io.Copy(out, io.LimitReader(r, limit+1))
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // no-op once the rename succeeds
+
+	n, err := io.Copy(tmp, io.LimitReader(r, limit+1))
 	if err != nil {
-		_ = out.Close()
-		_ = os.Remove(destPath)
+		_ = tmp.Close()
 		return fmt.Errorf("write binary: %w", err)
 	}
-	if err := out.Close(); err != nil {
-		_ = os.Remove(destPath)
+	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close binary: %w", err)
 	}
 	if n > limit {
-		_ = os.Remove(destPath)
 		return fmt.Errorf("plugin binary exceeds the %d byte limit", limit)
+	}
+	// CreateTemp makes 0600; the dispatcher needs it executable.
+	if err := os.Chmod(tmpName, 0o755); err != nil { //nolint:gosec // a plugin binary must be executable
+		return fmt.Errorf("set executable bit: %w", err)
+	}
+	if err := os.Rename(tmpName, destPath); err != nil {
+		return fmt.Errorf("place binary: %w", err)
 	}
 	return nil
 }

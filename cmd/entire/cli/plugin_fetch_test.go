@@ -574,9 +574,55 @@ func TestWriteExecutableLimited_RejectsOversize(t *testing.T) {
 	if !strings.Contains(err.Error(), "exceeds") {
 		t.Errorf("err = %v, want a size-limit error", err)
 	}
-	// The truncated file must not be left behind to be installed.
-	if _, statErr := os.Stat(dest); statErr == nil {
-		t.Error("oversize write left a partial binary on disk")
+	// A failed write must leave the previously-installed binary intact — the
+	// write goes to a sibling temp file and only renames on success, so an
+	// interrupted upgrade can no longer strand a broken plugin.
+	after, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("failed write destroyed the existing binary: %v", err)
+	}
+	if len(after) != limit {
+		t.Errorf("existing binary changed: %d bytes, want %d", len(after), limit)
+	}
+	// And it must not leave staging debris behind.
+	entries, dirErr := os.ReadDir(filepath.Dir(dest))
+	if dirErr != nil {
+		t.Fatal(dirErr)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			t.Errorf("leftover staging file %q", e.Name())
+		}
+	}
+}
+
+// A symlink planted at the destination must not be followed: an earlier
+// malicious plugin could otherwise redirect a later install's write to any
+// path the user can write.
+func TestWriteExecutableLimited_DoesNotFollowSymlink(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim.txt")
+	if err := os.WriteFile(victim, []byte("ORIGINAL"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(dir, "bin")
+	if err := os.Symlink(victim, dest); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := writeExecutableLimited(bytes.NewReader([]byte("PAYLOAD")), dest, 1<<20); err != nil {
+		t.Fatalf("writeExecutableLimited: %v", err)
+	}
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "ORIGINAL" {
+		t.Errorf("symlink was followed: victim content = %q", got)
+	}
+	written, err := os.ReadFile(dest)
+	if err != nil || string(written) != "PAYLOAD" {
+		t.Errorf("dest content = %q, %v; want PAYLOAD written in place of the link", written, err)
 	}
 }
 
@@ -602,5 +648,83 @@ func TestExtractPluginBinary_OversizeEntryIsRejected(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dest); statErr == nil {
 		t.Error("oversize extraction left a truncated binary on disk")
+	}
+}
+
+// Go's default redirect policy follows hops across schemes and only the initial
+// URL was ever transport-checked, so an https:// entry point could deliver the
+// asset — and its checksums.txt — over plaintext. CheckRedirect closes that.
+func TestPluginHTTPClient_RevalidatesRedirects(t *testing.T) {
+	t.Parallel()
+	// A loopback origin that bounces to a non-loopback plaintext URL.
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Redirect(w, &http.Request{}, "http://plaintext.example.com/asset.tar.gz", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	_, err := fetchAndVerify(context.Background(), origin.URL+"/a.tar.gz", "a.tar.gz", "", t.TempDir())
+	if err == nil {
+		t.Fatal("redirect to plaintext was followed")
+	}
+	if !strings.Contains(err.Error(), "plaintext HTTP") {
+		t.Errorf("err = %v, want the transport refusal to surface", err)
+	}
+
+	// A redirect that stays on an allowed transport must still work, so CDN
+	// hops aren't broken.
+	payload := []byte("binary")
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(payload) //nolint:errcheck // test server write
+	}))
+	defer final.Close()
+	hop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL+"/a.tar.gz", http.StatusFound)
+	}))
+	defer hop.Close()
+	if _, err := fetchAndVerify(context.Background(), hop.URL+"/a.tar.gz", "a.tar.gz", "", t.TempDir()); err != nil {
+		t.Errorf("loopback-to-loopback redirect should still work: %v", err)
+	}
+}
+
+// goreleaser names universal macOS builds entire-<x>_<ver>_darwin_all, so "all"
+// belongs in the arch slot. It used to sit in the OS slot, generating
+// _all_<arch> — a spelling no forge produces — so the darwin_all fallback the
+// docs promise never matched.
+func TestAssetCandidates_DarwinUniversal(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != darwinGOOS {
+		t.Skip("darwin-only naming")
+	}
+	var hasDarwinAll bool
+	for _, c := range assetCandidates("demo", "v0.1.0") {
+		if strings.Contains(c, "darwin_all") {
+			hasDarwinAll = true
+		}
+		if strings.Contains(c, "_all_") {
+			t.Errorf("candidate %q puts 'all' in the OS slot; no forge produces that", c)
+		}
+	}
+	if !hasDarwinAll {
+		t.Error("no darwin_all candidate; universal-only releases cannot install")
+	}
+}
+
+func TestRedactURL(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ in, want string }{
+		{"https://user:s3cr3t@git.example.com/o/r", "https://git.example.com/o/r"},
+		{"https://token@git.example.com/o/r", "https://git.example.com/o/r"},
+		{"https://git.example.com/o/r", "https://git.example.com/o/r"},
+		{"git@github.com:o/r.git", "git@github.com:o/r.git"},
+	}
+	for _, tt := range tests {
+		if got := redactURL(tt.in); got != tt.want {
+			t.Errorf("redactURL(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+	// Free-text scrubbing for git's stderr, where we don't know the URL.
+	got := redactCredentials("fatal: could not read from https://bob:hunter2@git.example.com/x")
+	if strings.Contains(got, "hunter2") || strings.Contains(got, "bob") {
+		t.Errorf("redactCredentials leaked userinfo: %q", got)
 	}
 }

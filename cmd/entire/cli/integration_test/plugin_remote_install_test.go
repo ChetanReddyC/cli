@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -118,24 +117,39 @@ func newIndexRepo(t *testing.T, indexJSON string) string {
 	return "file://" + filepath.ToSlash(dir)
 }
 
-// pluginTestEnv builds the child env: isolated plugin dir + cache + index URL.
-func pluginTestEnv(t *testing.T, indexURL string) []string {
+// pluginTestEnv builds the child env and the directory to run it from:
+// isolated plugin dir + cache + index URL.
+//
+// The base MUST be testutil.GitIsolatedEnv(), not os.Environ(). The
+// process-wide ENTIRE_TEST_GIT_HERMETIC=1 set by TestMain is inert on its own —
+// it bites through the per-host http.<url>.proxy entries GitIsolatedEnv writes
+// into an isolated GIT_CONFIG_GLOBAL, which point github.com/gitlab.com at a
+// dead loopback address so a stray network dial fails fast instead of
+// succeeding quietly. Building from os.Environ() sets the flag with no config
+// backing it: tripwire absent, and the developer's real global git config
+// inherited. That would let these tests pass by cloning the real
+// entireio/plugin-index if index-URL resolution ever regressed to the built-in
+// default — precisely the regression they exist to catch.
+func pluginTestEnv(t *testing.T, indexURL string) (env []string, workDir string) {
 	t.Helper()
-	env := os.Environ()
-	env = append(env,
+	env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_PLUGIN_DIR="+t.TempDir(),
 		"XDG_CACHE_HOME="+t.TempDir(),
 	)
 	if indexURL != "" {
 		env = append(env, "ENTIRE_PLUGIN_INDEX_URL="+indexURL)
 	}
-	return env
+	// A dedicated CWD, because settings resolve from the working directory: an
+	// unset cmd.Dir leaves the child standing in the real repo and reading its
+	// committed .entire/settings.json.
+	return env, t.TempDir()
 }
 
-func runEntire(t *testing.T, env []string, args ...string) (stdout, stderr string, err error) {
+func runEntire(t *testing.T, env []string, workDir string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	cmd := execx.NonInteractive(context.Background(), getTestBinary(), args...)
 	cmd.Env = env
+	cmd.Dir = workDir
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
@@ -151,11 +165,11 @@ func TestPluginRemoteInstall_FromIndexAndDispatch(t *testing.T) {
 	srv := startReleaseServer(t, map[string][]string{"demo": {"0.1.0"}})
 	repoURL := newPluginRepo(t, fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL), "v0.1.0")
 	indexURL := newIndexRepo(t, fmt.Sprintf(`{"version":1,"plugins":[{"name":"demo","repo_url":"%s","description":"Demo plugin","official":true}]}`, repoURL))
-	env := pluginTestEnv(t, indexURL)
+	env, workDir := pluginTestEnv(t, indexURL)
 
 	// Bare-name install resolves through the index; index-listed repos
 	// need no --yes.
-	stdout, stderr, err := runEntire(t, env, "plugin", "install", "demo")
+	stdout, stderr, err := runEntire(t, env, workDir, "plugin", "install", "demo")
 	if err != nil {
 		t.Fatalf("plugin install demo: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
 	}
@@ -164,7 +178,7 @@ func TestPluginRemoteInstall_FromIndexAndDispatch(t *testing.T) {
 	}
 
 	// The dispatcher must now run it as `entire demo`.
-	stdout, stderr, err = runEntire(t, env, "demo")
+	stdout, stderr, err = runEntire(t, env, workDir, "demo")
 	if err != nil {
 		t.Fatalf("entire demo: %v\nstderr: %s", err, stderr)
 	}
@@ -173,7 +187,7 @@ func TestPluginRemoteInstall_FromIndexAndDispatch(t *testing.T) {
 	}
 
 	// list shows the tag from the manifest.
-	stdout, _, err = runEntire(t, env, "plugin", "list")
+	stdout, _, err = runEntire(t, env, workDir, "plugin", "list")
 	if err != nil {
 		t.Fatalf("plugin list: %v", err)
 	}
@@ -191,10 +205,10 @@ func TestPluginRemoteInstall_URLNeedsYesWhenUnlisted(t *testing.T) {
 	repoURL := newPluginRepo(t, fmt.Sprintf("name: solo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL), "v0.1.0")
 	// Empty index: the URL is unlisted → untrusted.
 	indexURL := newIndexRepo(t, `{"version":1,"plugins":[]}`)
-	env := pluginTestEnv(t, indexURL)
+	env, workDir := pluginTestEnv(t, indexURL)
 
 	// Non-interactive without --yes refuses.
-	_, stderr, err := runEntire(t, env, "plugin", "install", repoURL)
+	_, stderr, err := runEntire(t, env, workDir, "plugin", "install", repoURL)
 	if err == nil {
 		t.Fatal("unlisted URL install without --yes succeeded in non-interactive mode")
 	}
@@ -203,7 +217,7 @@ func TestPluginRemoteInstall_URLNeedsYesWhenUnlisted(t *testing.T) {
 	}
 
 	// With --yes it proceeds.
-	stdout, stderr, err := runEntire(t, env, "plugin", "install", repoURL, "--yes")
+	stdout, stderr, err := runEntire(t, env, workDir, "plugin", "install", repoURL, "--yes")
 	if err != nil {
 		t.Fatalf("install --yes: %v\nstderr: %s", err, stderr)
 	}
@@ -223,9 +237,9 @@ func TestPluginRemoteInstall_DependenciesAndRemoveGuard(t *testing.T) {
 		"name: brainy\ndownload_url: \"%s/dl/{tag}/{asset}\"\nrequires:\n  - name: semy\n    repo_url: %s\n", srv.URL, semRepo), "v0.1.0")
 	indexURL := newIndexRepo(t, fmt.Sprintf(
 		`{"version":1,"plugins":[{"name":"brainy","repo_url":"%s"},{"name":"semy","repo_url":"%s"}]}`, brainRepo, semRepo))
-	env := pluginTestEnv(t, indexURL)
+	env, workDir := pluginTestEnv(t, indexURL)
 
-	stdout, stderr, err := runEntire(t, env, "plugin", "install", "brainy", "--yes")
+	stdout, stderr, err := runEntire(t, env, workDir, "plugin", "install", "brainy", "--yes")
 	if err != nil {
 		t.Fatalf("install brainy: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
 	}
@@ -235,26 +249,26 @@ func TestPluginRemoteInstall_DependenciesAndRemoveGuard(t *testing.T) {
 
 	// Both dispatchable.
 	for _, name := range []string{"brainy", "semy"} {
-		out, _, err := runEntire(t, env, name)
+		out, _, err := runEntire(t, env, workDir, name)
 		if err != nil || !strings.Contains(out, name+"-ran-v0.1.0") {
 			t.Errorf("entire %s = %q, %v", name, out, err)
 		}
 	}
 
 	// Remove guard: semy is required by brainy.
-	_, stderr, err = runEntire(t, env, "plugin", "remove", "semy")
+	_, stderr, err = runEntire(t, env, workDir, "plugin", "remove", "semy")
 	if err == nil {
 		t.Fatal("remove of depended-on plugin succeeded without --force")
 	}
 	if !strings.Contains(stderr, "brainy") {
 		t.Errorf("remove stderr = %q, want dependent named", stderr)
 	}
-	if _, _, err := runEntire(t, env, "plugin", "remove", "semy", "--force"); err != nil {
+	if _, _, err := runEntire(t, env, workDir, "plugin", "remove", "semy", "--force"); err != nil {
 		t.Errorf("remove --force failed: %v", err)
 	}
 
 	// Doctor now reports the missing dependency, exit code 1.
-	stdout, _, err = runEntire(t, env, "plugin", "doctor")
+	stdout, _, err = runEntire(t, env, workDir, "plugin", "doctor")
 	if err == nil {
 		t.Error("doctor exit code = 0 with missing dependency, want failure")
 	}
@@ -271,9 +285,9 @@ func TestPluginSearchAndInfo(t *testing.T) {
 	indexURL := newIndexRepo(t, `{"version":1,"plugins":[
 		{"name":"alpha","repo_url":"https://example.com/entire-alpha","description":"First letter","official":true},
 		{"name":"beta","repo_url":"https://example.com/entire-beta","description":"Second letter"}]}`)
-	env := pluginTestEnv(t, indexURL)
+	env, workDir := pluginTestEnv(t, indexURL)
 
-	stdout, stderr, err := runEntire(t, env, "plugin", "search", "letter")
+	stdout, stderr, err := runEntire(t, env, workDir, "plugin", "search", "letter")
 	if err != nil {
 		t.Fatalf("plugin search: %v\nstderr: %s", err, stderr)
 	}
@@ -281,7 +295,7 @@ func TestPluginSearchAndInfo(t *testing.T) {
 		t.Errorf("search output = %q", stdout)
 	}
 
-	stdout, _, err = runEntire(t, env, "plugin", "info", "alpha")
+	stdout, _, err = runEntire(t, env, workDir, "plugin", "info", "alpha")
 	if err != nil {
 		t.Fatalf("plugin info: %v", err)
 	}

@@ -67,7 +67,7 @@ func InstallPluginFromRepo(ctx context.Context, opts RemoteInstallOptions) (*Rem
 			return nil, err
 		}
 		if len(tags) == 0 {
-			return nil, fmt.Errorf("%s has no semver tags; pass --pin <tag> to install a non-semver tag", repoURL)
+			return nil, fmt.Errorf("%s has no stable semver tags; prereleases are skipped, so pass --pin <tag> to install one (or a non-semver tag)", redactURL(repoURL))
 		}
 		if len(tags) > maxTagFallbacks {
 			tags = tags[:maxTagFallbacks]
@@ -198,7 +198,7 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 		return nil, err
 	}
 	if len(tags) == 0 {
-		return nil, fmt.Errorf("%s has no semver tags", m.RepoURL)
+		return nil, fmt.Errorf("%s has no stable semver tags; prereleases are skipped, so pass --pin <tag> to move to one", redactURL(m.RepoURL))
 	}
 	// Semver comparison, not string equality: "v0.2.0" and "0.2.0" are the
 	// same version, and a remote that re-tagged with the other spelling

@@ -120,3 +120,59 @@ requires:
 		}
 	}
 }
+
+// entire-plugin.yml is documented as optional and a missing file is handled, so
+// a committed placeholder must not be fatal at every tag. An empty stream
+// decodes to io.EOF, which used to abort the whole install.
+func TestParsePluginMetadata_EmptyIsNotAnError(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ label, body string }{
+		{"empty", ""},
+		{"comment only", "# nothing yet\n"},
+		{"whitespace", "\n\n  \n"},
+		{"explicit empty document", "---\n"},
+	} {
+		meta, err := ParsePluginMetadata([]byte(tc.body))
+		if err != nil {
+			t.Errorf("%s: ParsePluginMetadata = %v, want no error", tc.label, err)
+			continue
+		}
+		if meta == nil {
+			t.Errorf("%s: meta is nil, want an empty metadata value", tc.label)
+			continue
+		}
+		if meta.Name != "" || len(meta.Requires) != 0 {
+			t.Errorf("%s: meta = %+v, want zero value", tc.label, meta)
+		}
+	}
+	// Genuine syntax errors must still fail.
+	if _, err := ParsePluginMetadata([]byte("name: [unclosed\n")); err == nil {
+		t.Error("ParsePluginMetadata accepted malformed YAML")
+	}
+}
+
+// Credentials embedded in a remote must not be persisted: manifest.yml is mode
+// 0644 and upgrades re-resolve auth through git's credential helpers.
+func TestSavePluginManifest_StripsCredentials(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	if err := SavePluginManifest(&PluginManifest{
+		Name:    "demo",
+		RepoURL: "https://bob:hunter2@git.example.com/o/entire-demo",
+		Tag:     "v1.0.0",
+		Requires: []PluginRequirement{
+			{Name: "dep", RepoURL: "https://tok@git.example.com/o/entire-dep"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadPluginManifest("demo")
+	if err != nil || m == nil {
+		t.Fatalf("LoadPluginManifest = %v, %v", m, err)
+	}
+	if strings.Contains(m.RepoURL, "hunter2") || strings.Contains(m.RepoURL, "bob") {
+		t.Errorf("repo_url kept credentials: %q", m.RepoURL)
+	}
+	if len(m.Requires) != 1 || strings.Contains(m.Requires[0].RepoURL, "tok@") {
+		t.Errorf("requirement repo_url kept credentials: %+v", m.Requires)
+	}
+}

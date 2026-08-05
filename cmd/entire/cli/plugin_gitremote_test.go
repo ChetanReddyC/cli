@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -88,14 +89,10 @@ func TestValidatePluginRepoURL(t *testing.T) {
 	t.Parallel()
 	valid := []string{
 		"https://github.com/entireio/entire-run",
-		"http://forge.internal/team/entire-run.git",
 		"ssh://git@github.com/entireio/entire-run.git",
-		"git://example.com/entire-run.git",
 		"file:///tmp/entire-run",
 		"git@github.com:entireio/entire-run.git",
 		"forge-user@git.example.com:team/entire-run",
-		"/srv/plugin-index",
-		`C:\\repos\\entire-run`,
 	}
 	for _, u := range valid {
 		if err := validatePluginRepoURL(u); err != nil {
@@ -106,6 +103,16 @@ func TestValidatePluginRepoURL(t *testing.T) {
 		"",
 		"   ",
 		"-x",
+		// Unauthenticated, unencrypted transports: the catalog fetched over
+		// them decides what installs without a prompt, so a network attacker
+		// who can rewrite the transport chooses the binary.
+		"http://forge.internal/team/entire-run.git",
+		"git://example.com/entire-run.git",
+		// Bare paths are rejected in favor of file://, which says the same
+		// thing unambiguously — and keeps this validator identical to the
+		// settings one.
+		"/srv/plugin-index",
+		`C:\\repos\\entire-run`,
 		// The injection payloads: git reads an option-shaped positional as an
 		// option, and --upload-pack's value is shell-interpreted.
 		"--upload-pack=touch /tmp/pwned; git-upload-pack",
@@ -198,5 +205,40 @@ func TestPluginNameFromRepoURL(t *testing.T) {
 		if err != nil || got != tt.want {
 			t.Errorf("pluginNameFromRepoURL(%q) = %q, %v; want %q", tt.url, got, err, tt.want)
 		}
+	}
+}
+
+// semver ranks v2.0.0-rc1 above stable v1.9.0, so listing prereleases would
+// migrate every user onto a release candidate on the next `plugin upgrade
+// --all` the moment an author pushed one. --pin installs an exact tag and
+// bypasses this listing, which is the deliberate opt-in.
+func TestListRemoteSemverTags_SkipsPrereleases(t *testing.T) {
+	t.Parallel()
+	url := newTaggedPluginRepo(t, "", "v1.0.0", "v1.9.0", "v2.0.0-rc1", "v2.0.0-alpha", "v2.0.0+build7")
+	tags, err := listRemoteSemverTags(context.Background(), url)
+	if err != nil {
+		t.Fatalf("listRemoteSemverTags: %v", err)
+	}
+	for _, tg := range tags {
+		if strings.Contains(tg, "-rc") || strings.Contains(tg, "-alpha") {
+			t.Errorf("prerelease %q was listed", tg)
+		}
+	}
+	// Build metadata is not a prerelease and must survive.
+	if len(tags) == 0 || tags[0] != "v2.0.0+build7" {
+		t.Errorf("tags = %v, want v2.0.0+build7 newest", tags)
+	}
+}
+
+// A repo with only prereleases must say so, not merely "no semver tags".
+func TestListRemoteSemverTags_PrereleaseOnlyRepoIsEmpty(t *testing.T) {
+	t.Parallel()
+	url := newTaggedPluginRepo(t, "", "v1.0.0-rc1")
+	tags, err := listRemoteSemverTags(context.Background(), url)
+	if err != nil {
+		t.Fatalf("listRemoteSemverTags: %v", err)
+	}
+	if len(tags) != 0 {
+		t.Errorf("tags = %v, want none", tags)
 	}
 }

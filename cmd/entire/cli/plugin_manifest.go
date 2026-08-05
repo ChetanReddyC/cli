@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -118,7 +119,14 @@ func ParsePluginMetadata(data []byte) (*PluginMetadata, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&meta); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", pluginMetadataFileName, err)
+		// An empty or comment-only stream decodes to io.EOF. The file is
+		// documented as optional and a *missing* one is fine, so a committed
+		// placeholder must not be fatal at every tag. An explicit "---" already
+		// behaved this way; align the empty cases with it.
+		if !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("parsing %s: %w", pluginMetadataFileName, err)
+		}
+		meta = PluginMetadata{}
 	}
 	if meta.Name != "" {
 		if err := validatePluginName(meta.Name); err != nil {
@@ -189,6 +197,13 @@ func LoadPluginManifest(name string) (*PluginManifest, error) {
 
 // SavePluginManifest writes the manifest into the plugin's pkg dir.
 func SavePluginManifest(m *PluginManifest) error {
+	// Strip any credentials before persisting: manifest.yml is mode 0644 and a
+	// token in a remote URL has no business on disk. Upgrades re-resolve the
+	// remote through git's credential helpers, which is where auth belongs.
+	m.RepoURL = redactURL(m.RepoURL)
+	for i := range m.Requires {
+		m.Requires[i].RepoURL = redactURL(m.Requires[i].RepoURL)
+	}
 	dir, err := EnsurePluginPkgDir(m.Name)
 	if err != nil {
 		return err
