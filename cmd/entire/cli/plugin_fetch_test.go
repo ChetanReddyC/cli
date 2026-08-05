@@ -728,3 +728,56 @@ func TestRedactURL(t *testing.T) {
 		t.Errorf("redactCredentials leaked userinfo: %q", got)
 	}
 }
+
+// releaseAssetBaseURL derives the asset URL from the repo URL, and url.String()
+// re-serializes embedded userinfo — so a private-forge remote like
+// https://user:token@host/o/r produces a credentialed download URL. The request
+// must keep it (that is how it authenticates), but no message may carry it:
+// main.go prints command errors to stderr, and a download failure is an
+// ordinary event, so an unscrubbed message leaks the token to a terminal or CI
+// log. This is the HTTP counterpart of the git-path redaction.
+func TestDownloadErrors_NeverLeakCredentials(t *testing.T) {
+	t.Parallel()
+	const secret = "hunter2-should-never-appear"
+
+	// The asset URL inherits userinfo from the repo URL.
+	base, err := releaseAssetBaseURL("https://bob:"+secret+"@git.example.com/o/entire-run", "v1.0.0")
+	if err != nil {
+		t.Fatalf("releaseAssetBaseURL: %v", err)
+	}
+	if !strings.Contains(base, secret) {
+		t.Fatalf("precondition changed: asset base no longer carries userinfo (%s)", base)
+	}
+
+	// Every reachable failure mode on that URL.
+	staging := t.TempDir()
+	var errs []error
+	_, e := fetchAndVerify(context.Background(), base+"a.tar.gz", "a.tar.gz", "", staging)
+	errs = append(errs, e) // unreachable host
+	_, e = httpGetSmall(context.Background(), base+checksumsFileName)
+	errs = append(errs, e) // checksum manifest fetch
+	_, e = downloadPluginAsset(context.Background(), nil,
+		"https://bob:"+secret+"@git.example.com/o/entire-run", "run", "v1.0.0", staging, true)
+	errs = append(errs, e) // full orchestration
+	e = requireSecureAssetURL("http://bob:" + secret + "@git.example.com/a.tar.gz")
+	errs = append(errs, e) // transport refusal
+
+	// A checksum mismatch, which quotes the URL on a *successful* request.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("bytes")) //nolint:errcheck // test server write
+	}))
+	defer srv.Close()
+	credURL := strings.Replace(srv.URL, "http://", "http://bob:"+secret+"@", 1)
+	_, e = fetchAndVerify(context.Background(), credURL+"/a.tar.gz", "a.tar.gz", "deadbeef", staging)
+	errs = append(errs, e)
+
+	for i, err := range errs {
+		if err == nil {
+			t.Errorf("case %d: expected an error to inspect", i)
+			continue
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("case %d leaked the credential: %v", i, err)
+		}
+	}
+}

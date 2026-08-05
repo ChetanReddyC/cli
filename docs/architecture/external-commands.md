@@ -76,7 +76,9 @@ An empty or comment-only file is also accepted — the file is documented as opt
 
 #### Credentials never reach logs, output, or disk
 
-A remote may embed credentials (`https://user:token@host/repo`). Every path that prints, logs, or persists a repository or index URL strips the userinfo first, and git's captured stderr is scrubbed for the same pattern. This matters more than usual here: `.entire/logs/` lives inside the user's working tree and is collected wholesale by `entire doctor bundle`, and `manifest.yml` is written mode 0644. Upgrades re-resolve auth through git's credential helpers, which is where it belongs.
+A remote may embed credentials (`https://user:token@host/repo`). Every path that prints, logs, or persists a repository, index, or **asset download** URL strips the userinfo first, and git's captured stderr is scrubbed for the same pattern.
+
+The download path needs saying explicitly: `releaseAssetBaseURL` derives the asset URL from the repo URL, and `url.String()` re-serializes embedded userinfo, so a private-forge remote produces a credentialed download URL. The request keeps it — that is how it authenticates — but every message goes through `redactURL`, because a download failure is an ordinary event (network hiccup, 5xx, checksum mismatch) and `main.go` prints command errors straight to stderr. This matters more than usual here: `.entire/logs/` lives inside the user's working tree and is collected wholesale by `entire doctor bundle`, and `manifest.yml` is written mode 0644. Upgrades re-resolve auth through git's credential helpers, which is where it belongs.
 
 #### Downloads must be authenticated, over a transport that can't be rewritten
 

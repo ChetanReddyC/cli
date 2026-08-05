@@ -52,7 +52,7 @@ var errUnverifiedAsset = errors.New("release asset cannot be verified")
 func requireSecureAssetURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("parse download URL %q: %w", rawURL, err)
+		return fmt.Errorf("parse download URL %q: %w", redactURL(rawURL), err)
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "https":
@@ -62,9 +62,9 @@ func requireSecureAssetURL(rawURL string) error {
 			return nil
 		}
 		return fmt.Errorf("refusing to download %s over plaintext HTTP: the asset and its %s would share an origin, so a network attacker could replace both and checksum verification would prove nothing; serve the release over HTTPS or declare an https download_url in %s",
-			rawURL, checksumsFileName, pluginMetadataFileName)
+			redactURL(rawURL), checksumsFileName, pluginMetadataFileName)
 	default:
-		return fmt.Errorf("plugin downloads must use https; %q has scheme %q", rawURL, u.Scheme)
+		return fmt.Errorf("plugin downloads must use https; %q has scheme %q", redactURL(rawURL), u.Scheme)
 	}
 }
 
@@ -117,7 +117,7 @@ func releaseAssetBaseURL(repoURL, tag string) (string, error) {
 		return "", fmt.Errorf("parse repo URL: %w", err)
 	}
 	if u.Scheme != "https" && u.Scheme != "http" {
-		return "", fmt.Errorf("release downloads need an http(s) repo URL, got %q (declare download_url in %s for non-HTTP remotes)", repoURL, pluginMetadataFileName)
+		return "", fmt.Errorf("release downloads need an http(s) repo URL, got %q (declare download_url in %s for non-HTTP remotes)", redactURL(repoURL), pluginMetadataFileName)
 	}
 	base := strings.TrimSuffix(u.String(), "/")
 	host := strings.ToLower(u.Hostname())
@@ -346,7 +346,7 @@ func downloadPluginAsset(ctx context.Context, meta *PluginMetadata, repoURL, nam
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("%w for %s/%s at %s %s", errAssetNotFound, runtime.GOOS, runtime.GOARCH, repoURL, tag)
+	return nil, fmt.Errorf("%w for %s/%s at %s %s", errAssetNotFound, runtime.GOOS, runtime.GOARCH, redactURL(repoURL), tag)
 }
 
 // assetNameFromURL derives the staging filename for a fully-specified
@@ -373,19 +373,19 @@ func httpGetSmall(ctx context.Context, rawURL string) ([]byte, error) {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request for %s: %w", rawURL, err)
+		return nil, fmt.Errorf("build request for %s: %w", redactURL(rawURL), err)
 	}
 	resp, err := pluginHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", rawURL, err)
+		return nil, fmt.Errorf("GET %s: %w", redactURL(rawURL), err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: %s", rawURL, resp.Status)
+		return nil, fmt.Errorf("GET %s: %s", redactURL(rawURL), resp.Status)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", rawURL, err)
+		return nil, fmt.Errorf("read %s: %w", redactURL(rawURL), err)
 	}
 	return data, nil
 }
@@ -395,6 +395,12 @@ func httpGetSmall(ctx context.Context, rawURL string) ([]byte, error) {
 // computed digest. 404/410 map to errAssetNotFound. Partial files are
 // removed on verification failure so a hostile or truncated download never
 // lingers in staging.
+// Note on credentials: rawURL may carry userinfo, because releaseAssetBaseURL
+// derives the asset URL from the repo URL and url.String() re-serializes it.
+// The request keeps it — that is how the download authenticates to a private
+// forge — but every message below goes through redactURL, since main.go prints
+// command errors to stderr and a download failure is an ordinary event
+// (network hiccup, 5xx, checksum mismatch), not an exceptional one.
 func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir string) (*fetchedAsset, error) {
 	// The asset name is normally one of our own candidates, but the
 	// single-URL download_url template path derives it from the URL and a
@@ -411,19 +417,19 @@ func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir s
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request for %s: %w", rawURL, err)
+		return nil, fmt.Errorf("build request for %s: %w", redactURL(rawURL), err)
 	}
 	resp, err := pluginHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("download %s: %w", rawURL, err)
+		return nil, fmt.Errorf("download %s: %w", redactURL(rawURL), err)
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotFound, http.StatusGone:
-		return nil, fmt.Errorf("%w: GET %s: %s", errAssetNotFound, rawURL, resp.Status)
+		return nil, fmt.Errorf("%w: GET %s: %s", errAssetNotFound, redactURL(rawURL), resp.Status)
 	default:
-		return nil, fmt.Errorf("download %s: %s", rawURL, resp.Status)
+		return nil, fmt.Errorf("download %s: %s", redactURL(rawURL), resp.Status)
 	}
 
 	dest := filepath.Join(stagingDir, asset)
@@ -436,7 +442,7 @@ func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir s
 	closeErr := out.Close()
 	if err != nil {
 		_ = os.Remove(dest)
-		return nil, fmt.Errorf("download %s: %w", rawURL, err)
+		return nil, fmt.Errorf("download %s: %w", redactURL(rawURL), err)
 	}
 	if closeErr != nil {
 		_ = os.Remove(dest)
@@ -444,7 +450,7 @@ func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir s
 	}
 	if n > maxPluginAssetSize {
 		_ = os.Remove(dest)
-		return nil, fmt.Errorf("download %s: exceeds %d byte limit", rawURL, int64(maxPluginAssetSize))
+		return nil, fmt.Errorf("download %s: exceeds %d byte limit", redactURL(rawURL), int64(maxPluginAssetSize))
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if wantDigest != "" && !strings.EqualFold(got, wantDigest) {
