@@ -157,6 +157,7 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 
 	repoURL := arg
 	var trusted bool
+	var expectedName string
 	var idx *PluginIndex
 
 	if classifyInstallArg(arg) == installFromIndex {
@@ -180,6 +181,10 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 				arg, strings.Join(entry.Platforms, "/"), runtime.GOOS)
 		}
 		repoURL = entry.RepoURL
+		// The user asked for this catalog name; the repo must not install
+		// under a different one. Index installs never prompt, so this is the
+		// only thing tying the request to what lands on PATH.
+		expectedName = entry.Name
 		trusted = true
 	} else {
 		// URL install: the index is only consulted for the trust check.
@@ -213,6 +218,7 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 
 	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{
 		RepoURL: repoURL, Pin: flags.pin, Force: flags.force, AllowUnverified: flags.allowUnverified,
+		ExpectedName: expectedName,
 	})
 	if err != nil {
 		return fmt.Errorf("install plugin: %w", err)
@@ -265,9 +271,9 @@ func installPlannedDeps(ctx context.Context, cmd *cobra.Command, reqs []PluginRe
 		switch {
 		case a.Upgrade:
 			fmt.Fprintf(out, "  %s  (installed %s, needs >= %s — will upgrade from %s)%s\n",
-				a.Name, a.CurrentTag, a.MinVersion, a.RepoURL, note)
+				a.Name, a.CurrentTag, a.MinVersion, redactURL(a.RepoURL), note)
 		default:
-			fmt.Fprintf(out, "  %s  (%s)%s\n", a.Name, a.RepoURL, note)
+			fmt.Fprintf(out, "  %s  (%s)%s\n", a.Name, redactURL(a.RepoURL), note)
 		}
 	}
 	if unlisted > 0 {
@@ -586,7 +592,7 @@ func newPluginInfoCmd() *cobra.Command {
 			fmt.Fprintf(out, "Name:        %s\n", name)
 			if entry != nil {
 				fmt.Fprintf(out, "Description: %s\n", entry.Description)
-				fmt.Fprintf(out, "Repository:  %s\n", entry.RepoURL)
+				fmt.Fprintf(out, "Repository:  %s\n", redactURL(entry.RepoURL))
 				fmt.Fprintf(out, "Official:    %t\n", entry.Official)
 				if len(entry.Platforms) > 0 {
 					fmt.Fprintf(out, "Platforms:   %s\n", strings.Join(entry.Platforms, ", "))
@@ -594,7 +600,7 @@ func newPluginInfoCmd() *cobra.Command {
 			}
 			switch {
 			case m != nil:
-				fmt.Fprintf(out, "Installed:   %s (from %s", m.Tag, m.RepoURL)
+				fmt.Fprintf(out, "Installed:   %s (from %s", m.Tag, redactURL(m.RepoURL))
 				if m.Pinned {
 					fmt.Fprint(out, ", pinned")
 				}

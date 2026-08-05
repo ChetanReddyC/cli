@@ -74,6 +74,14 @@ This gives up catching author typos, which strict decoding did. The trade is asy
 
 An empty or comment-only file is also accepted — the file is documented as optional, and a committed placeholder should not be fatal at every tag.
 
+#### The installed name must match what was requested
+
+The installed plugin name comes from the *remote* — `entire-plugin.yml`'s `name:`, else the repository basename. Whenever the caller has already committed to a name, that name is passed down as `ExpectedName` and a mismatch is fatal. Three paths set it: an index-resolved install (the catalog entry the user typed), a dependency install (the requirement being satisfied), and an upgrade (the plugin being upgraded). A bare `install <url>` sets nothing, because there the repository legitimately names itself.
+
+Unchecked, the remote chose the name unilaterally and three things broke: an index entry named `safe` could install `entire-hijack` with no prompt (index installs never prompt); `--force` escalated across plugins, because the already-installed check tested the remote-declared name, so reinstalling A let A's repo declare `name: B` and replace an unrelated installed B; and a dependency installed under another name never satisfied its requirement, so `doctor` reported it missing forever and every future parent install re-attempted it.
+
+It fails rather than warns: every caller that sets an expectation has already made a trust decision about *that* name, and silently honoring a different one voids it. A genuine rename is a catalog entry or a requirement to fix.
+
 #### Credentials never reach logs, output, or disk
 
 A remote may embed credentials (`https://user:token@host/repo`). Every path that prints, logs, or persists a repository, index, or **asset download** URL strips the userinfo first, and git's captured stderr is scrubbed for the same pattern.

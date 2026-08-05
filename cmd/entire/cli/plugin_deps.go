@@ -186,7 +186,7 @@ func planDeps(ctx context.Context, reqs []PluginRequirement, idx *PluginIndex, p
 			tag = tags[0]
 		}
 		if tag == "" {
-			addDepWarning(plan, fmt.Sprintf("could not list tags for %q (%s); its own dependencies were not inspected — 'entire plugin doctor' will report any gaps", req.Name, action.RepoURL))
+			addDepWarning(plan, fmt.Sprintf("could not list tags for %q (%s); its own dependencies were not inspected — 'entire plugin doctor' will report any gaps", req.Name, redactURL(action.RepoURL)))
 			continue
 		}
 		meta, err := fetchPluginMetadataAtTag(ctx, action.RepoURL, tag)
@@ -250,6 +250,10 @@ func ExecuteDepPlan(ctx context.Context, plan *DepPlan, allowUnverified bool) er
 	for _, a := range plan.Actions {
 		if _, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{
 			RepoURL: a.RepoURL, Force: a.Upgrade, AllowUnverified: allowUnverified,
+			// The plan named this dependency and the user confirmed that name;
+			// an install landing under a different one would never satisfy the
+			// requirement, leaving doctor to report it missing forever.
+			ExpectedName: a.Name,
 		}); err != nil {
 			return fmt.Errorf("install dependency %q: %w", a.Name, err)
 		}
@@ -324,7 +328,7 @@ func RunPluginDoctor(ctx context.Context) ([]PluginDoctorIssue, error) {
 			issues = append(issues, PluginDoctorIssue{
 				Plugin:  m.Name,
 				Problem: "has an install manifest but no entry in the managed bin dir",
-				Fix:     fmt.Sprintf("reinstall: entire plugin install %s --force", m.RepoURL),
+				Fix:     fmt.Sprintf("reinstall: entire plugin install %s --force", redactURL(m.RepoURL)),
 			})
 		}
 		issues = append(issues, checkManagedBinaryIntegrity(m)...)
@@ -394,7 +398,7 @@ func checkManagedBinaryIntegrity(m *PluginManifest) []PluginDoctorIssue {
 		issues = append(issues, PluginDoctorIssue{
 			Plugin:  m.Name,
 			Problem: "managed binary is missing or unreadable: " + err.Error(),
-			Fix:     fmt.Sprintf("reinstall: entire plugin install %s --force", m.RepoURL),
+			Fix:     fmt.Sprintf("reinstall: entire plugin install %s --force", redactURL(m.RepoURL)),
 		})
 		return issues
 	}
@@ -402,7 +406,7 @@ func checkManagedBinaryIntegrity(m *PluginManifest) []PluginDoctorIssue {
 		issues = append(issues, PluginDoctorIssue{
 			Plugin:  m.Name,
 			Problem: "managed binary no longer matches the digest recorded at install; it was modified or replaced outside entire",
-			Fix:     fmt.Sprintf("reinstall from the recorded source: entire plugin install %s --force", m.RepoURL),
+			Fix:     fmt.Sprintf("reinstall from the recorded source: entire plugin install %s --force", redactURL(m.RepoURL)),
 		})
 	}
 	return issues

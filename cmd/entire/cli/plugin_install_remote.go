@@ -39,6 +39,12 @@ type RemoteInstallOptions struct {
 	// executing an unauthenticated binary is the supply-chain risk the
 	// checksum path exists to remove, so it takes an explicit opt-in.
 	AllowUnverified bool
+	// ExpectedName is the plugin name the caller has already committed to —
+	// the index entry the user asked for, the requirement being satisfied, or
+	// the plugin being upgraded. Empty only when the caller genuinely has no
+	// expectation, i.e. a bare `install <url>` where the repository names
+	// itself. See installRepoAtTag for why a mismatch is fatal.
+	ExpectedName string
 }
 
 // RemoteInstallResult is what a successful remote install produced.
@@ -94,11 +100,36 @@ func installRepoAtTag(ctx context.Context, repoURL, tag string, opts RemoteInsta
 	if err != nil {
 		return nil, err
 	}
+	// The installed name comes from the *remote* — entire-plugin.yml's name:,
+	// else the repo basename.
 	var name string
 	if meta != nil && meta.Name != "" {
 		name = meta.Name
 	} else if name, err = pluginNameFromRepoURL(repoURL); err != nil {
 		return nil, err
+	}
+
+	// Reconcile it with what the caller asked for. Unchecked, the remote chose
+	// the name unilaterally, which broke three things:
+	//
+	//  - `install <index-name>` could install something else entirely: the
+	//    index entry says "safe", the repo declares "hijack", and the user gets
+	//    entire-hijack on PATH with no prompt (index installs never prompt).
+	//  - --force escalated across plugins: the already-installed check below
+	//    tests the *remote-declared* name, so reinstalling A let A's repo
+	//    declare name: B and replace an unrelated installed B.
+	//  - A dependency installed under a different name never satisfied the
+	//    requirement, so dependencySatisfied/doctor reported it missing forever
+	//    and every future parent install re-attempted it.
+	//
+	// Fatal rather than a warning: every caller that sets ExpectedName has
+	// already made a trust decision about *that* name, and silently honoring a
+	// different one voids it. A legitimate rename is a catalog or requirement
+	// to fix, and the message says so.
+	if opts.ExpectedName != "" && name != opts.ExpectedName {
+		return nil, fmt.Errorf(
+			"%s declares plugin name %q but %q was requested; refusing to install under a name that was not asked for (update the plugin index entry or the requirement if the plugin was renamed)",
+			redactURL(repoURL), name, opts.ExpectedName)
 	}
 
 	if existing, err := FindInstalledPlugin(name); err != nil {
@@ -211,6 +242,7 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 	// installed verified must not silently downgrade to unverified.
 	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{
 		RepoURL: m.RepoURL, Force: true, AllowUnverified: m.Unverified,
+		ExpectedName: name,
 	})
 	if err != nil {
 		return nil, err

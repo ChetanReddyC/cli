@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // Tags used across the remote-install lifecycle tests.
@@ -67,8 +69,11 @@ func gitTag(t *testing.T, repoURL, tag string) {
 	}
 }
 
-func installedPayload(t *testing.T, name string) string {
+// installedPayload reads back the payload of the "demo" fixture plugin, which
+// is the only plugin these lifecycle tests install.
+func installedPayload(t *testing.T) string {
 	t.Helper()
+	const name = "demo"
 	p, err := FindInstalledPlugin(name)
 	if err != nil || p == nil {
 		t.Fatalf("FindInstalledPlugin(%s) = %v, %v", name, p, err)
@@ -100,7 +105,7 @@ func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest //
 	if res.Manifest.SHA256 == "" || res.Manifest.Asset == "" {
 		t.Errorf("manifest missing provenance: %+v", res.Manifest)
 	}
-	if got := installedPayload(t, "demo"); got != "payload-0.2.0" {
+	if got := installedPayload(t); got != "payload-0.2.0" {
 		t.Errorf("installed payload = %q, want payload-0.2.0", got)
 	}
 
@@ -127,7 +132,7 @@ func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest //
 	if o.FromTag != remoteTestTagMid || o.ToTag != "v0.3.0" {
 		t.Errorf("upgrade outcome = %+v, want v0.2.0 → v0.3.0", o)
 	}
-	if got := installedPayload(t, "demo"); got != "payload-0.3.0" {
+	if got := installedPayload(t); got != "payload-0.3.0" {
 		t.Errorf("post-upgrade payload = %q, want payload-0.3.0", got)
 	}
 }
@@ -166,7 +171,7 @@ func TestInstallPluginFromRepo_PinnedSkipsUpgrade(t *testing.T) { //nolint:paral
 	if res.Manifest.Tag != remoteTestTagOld || !res.Manifest.Pinned {
 		t.Errorf("manifest = %+v, want pinned v0.1.0", res.Manifest)
 	}
-	if got := installedPayload(t, "demo"); got != "payload-0.1.0" {
+	if got := installedPayload(t); got != "payload-0.1.0" {
 		t.Errorf("payload = %q, want payload-0.1.0", got)
 	}
 	o, err := UpgradeInstalledPlugin(ctx, "demo")
@@ -271,5 +276,122 @@ func TestUpgradeInstalledPlugin_AssetlessNewestTagReportsUpToDate(t *testing.T) 
 	}
 	if !o.UpToDate {
 		t.Errorf("outcome = %+v, want UpToDate when fallback lands on the installed tag", o)
+	}
+}
+
+// The installed name comes from the remote (entire-plugin.yml's name:, else the
+// repo basename). When the caller already committed to a name — an index entry
+// the user typed, a requirement being satisfied, a plugin being upgraded — the
+// remote must not substitute a different one. Unchecked this let an index entry
+// named "safe" install entire-hijack with no prompt, and let --force on plugin A
+// replace an unrelated installed plugin B.
+func TestInstallPluginFromRepo_RejectsNameMismatch(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	withIsolatedPath(t)
+	srv := pluginReleaseServer(t, "0.1.0")
+	defer srv.Close()
+	meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
+	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+
+	_, err := InstallPluginFromRepo(context.Background(), RemoteInstallOptions{
+		RepoURL: repoURL, ExpectedName: "safe",
+	})
+	if err == nil {
+		t.Fatal("install proceeded under a name the caller did not request")
+	}
+	for _, want := range []string{`"demo"`, `"safe"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to name %s", err, want)
+		}
+	}
+	// Nothing may land on PATH under either name.
+	for _, name := range []string{"demo", "safe"} {
+		p, findErr := FindInstalledPlugin(name)
+		if findErr != nil {
+			t.Fatalf("FindInstalledPlugin(%s): %v", name, findErr)
+		}
+		if p != nil {
+			t.Errorf("plugin %q was installed despite the mismatch", name)
+		}
+	}
+
+	// The same repo installs fine when the expectation matches, and when the
+	// caller has no expectation at all (a bare `install <url>`, where the
+	// repository legitimately names itself).
+	if _, err := InstallPluginFromRepo(context.Background(), RemoteInstallOptions{
+		RepoURL: repoURL, ExpectedName: "demo",
+	}); err != nil {
+		t.Fatalf("matching expectation should install: %v", err)
+	}
+	if _, err := InstallPluginFromRepo(context.Background(), RemoteInstallOptions{
+		RepoURL: repoURL, Force: true,
+	}); err != nil {
+		t.Errorf("no expectation should install: %v", err)
+	}
+}
+
+// A dependency installed under a different name would never satisfy the
+// requirement, so dependencySatisfied and doctor would report it missing
+// forever and every future parent install would re-attempt it.
+func TestExecuteDepPlan_RejectsNameMismatch(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	withIsolatedPath(t)
+	srv := pluginReleaseServer(t, "0.1.0")
+	defer srv.Close()
+	meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
+	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+
+	// The plan says "sem"; the repo declares "demo".
+	plan := &DepPlan{Actions: []DepAction{{Name: "sem", RepoURL: repoURL}}}
+	err := ExecuteDepPlan(context.Background(), plan, false)
+	if err == nil {
+		t.Fatal("ExecuteDepPlan installed a dependency under the wrong name")
+	}
+	if !strings.Contains(err.Error(), "sem") {
+		t.Errorf("err = %v, want it to name the unsatisfied requirement", err)
+	}
+	p, findErr := FindInstalledPlugin("demo")
+	if findErr != nil {
+		t.Fatalf("FindInstalledPlugin: %v", findErr)
+	}
+	if p != nil {
+		t.Error("the mis-named dependency was installed anyway")
+	}
+}
+
+// Upgrade knows the name of the plugin it is upgrading, so a repo that renamed
+// itself must fail loudly rather than quietly installing a second plugin and
+// leaving the original behind.
+func TestUpgradeInstalledPlugin_RejectsRename(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	withIsolatedPath(t)
+	srv := pluginReleaseServer(t, "0.1.0", "0.2.0")
+	defer srv.Close()
+	meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
+	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+	if _, err := InstallPluginFromRepo(context.Background(), RemoteInstallOptions{RepoURL: repoURL}); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+
+	// The upstream renames itself and tags a newer release.
+	dir := strings.TrimPrefix(repoURL, "file://")
+	testutil.WriteFile(t, dir, pluginMetadataFileName,
+		fmt.Sprintf("name: renamed\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL))
+	testutil.GitAdd(t, dir, pluginMetadataFileName)
+	testutil.GitCommit(t, dir, "rename")
+	gitTag(t, repoURL, remoteTestTagMid)
+
+	if _, err := UpgradeInstalledPlugin(context.Background(), "demo"); err == nil {
+		t.Error("upgrade accepted a renamed plugin")
+	}
+	p, findErr := FindInstalledPlugin("renamed")
+	if findErr != nil {
+		t.Fatalf("FindInstalledPlugin: %v", findErr)
+	}
+	if p != nil {
+		t.Error("upgrade installed the plugin under its new name")
+	}
+	if installedPayload(t) != "payload-0.1.0" {
+		t.Error("the original install was disturbed by the failed upgrade")
 	}
 }
