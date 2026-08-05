@@ -141,7 +141,7 @@ are listed and installed after a single confirmation (or with --yes);
 	cmd.Flags().BoolVar(&yes, "yes", false, "Skip confirmation prompts (non-index sources, dependency installs)")
 	cmd.Flags().BoolVar(&noDeps, "no-deps", false, "Do not install declared dependencies")
 	cmd.Flags().StringVar(&pin, "pin", "", "Install exactly this tag and skip it during 'plugin upgrade'")
-	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides settings and "+pluginIndexEnvVar+")")
+	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides "+pluginIndexEnvVar+" and the built-in default)")
 	cmd.Flags().BoolVar(&allowUnverified, "allow-unverified", false,
 		"Install even when the release publishes no "+checksumsFileName+" to authenticate the download")
 	return cmd
@@ -161,7 +161,7 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 
 	if classifyInstallArg(arg) == installFromIndex {
 		var err error
-		idx, err = SyncPluginIndex(ctx, resolvePluginIndexURL(ctx, flags.index), false)
+		idx, err = SyncPluginIndex(ctx, resolvePluginIndexURL(flags.index), false)
 		if err != nil {
 			return fmt.Errorf("resolve %q via plugin index: %w", arg, err)
 		}
@@ -186,7 +186,7 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 		// An unreachable index degrades to "not listed" rather than
 		// blocking the install.
 		var idxErr error
-		idx, idxErr = SyncPluginIndex(ctx, resolvePluginIndexURL(ctx, flags.index), false)
+		idx, idxErr = SyncPluginIndex(ctx, resolvePluginIndexURL(flags.index), false)
 		trusted = idxErr == nil && idx.HasRepoURL(repoURL)
 	}
 
@@ -518,7 +518,7 @@ func newPluginSearchCmd() *cobra.Command {
 			if len(args) == 1 {
 				term = args[0]
 			}
-			idx, err := SyncPluginIndex(ctx, resolvePluginIndexURL(ctx, indexFlag), false)
+			idx, err := SyncPluginIndex(ctx, resolvePluginIndexURL(indexFlag), false)
 			if err != nil {
 				return silencePluginCancel(ctx, err)
 			}
@@ -531,7 +531,7 @@ func newPluginSearchCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides settings and "+pluginIndexEnvVar+")")
+	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides "+pluginIndexEnvVar+" and the built-in default)")
 	return cmd
 }
 
@@ -568,7 +568,7 @@ func newPluginInfoCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 
 			entry := (*PluginIndexEntry)(nil)
-			if idx, err := SyncPluginIndex(ctx, resolvePluginIndexURL(ctx, indexFlag), false); err == nil {
+			if idx, err := SyncPluginIndex(ctx, resolvePluginIndexURL(indexFlag), false); err == nil {
 				entry = idx.Find(name)
 			}
 			m, err := LoadPluginManifest(name)
@@ -614,7 +614,7 @@ func newPluginInfoCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides settings and "+pluginIndexEnvVar+")")
+	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides "+pluginIndexEnvVar+" and the built-in default)")
 	return cmd
 }
 
@@ -628,7 +628,7 @@ func newPluginBrowseCmd() *cobra.Command {
 			if !interactive.CanPromptInteractively() {
 				return errors.New("browse needs a terminal; use 'entire plugin search' instead")
 			}
-			idx, err := SyncPluginIndex(ctx, resolvePluginIndexURL(ctx, indexFlag), false)
+			idx, err := SyncPluginIndex(ctx, resolvePluginIndexURL(indexFlag), false)
 			if err != nil {
 				return silencePluginCancel(ctx, err)
 			}
@@ -658,7 +658,7 @@ func newPluginBrowseCmd() *cobra.Command {
 			return silencePluginCancel(ctx, runRemoteInstall(ctx, cmd, choice, remoteInstallFlags{index: indexFlag}))
 		},
 	}
-	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides settings and "+pluginIndexEnvVar+")")
+	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides "+pluginIndexEnvVar+" and the built-in default)")
 	return cmd
 }
 
@@ -699,7 +699,7 @@ func newPluginIndexCmd() *cobra.Command {
 		Short: "Force a refresh of the plugin index",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			url := resolvePluginIndexURL(ctx, indexFlag)
+			url := resolvePluginIndexURL(indexFlag)
 			idx, err := SyncPluginIndex(ctx, url, true)
 			if err != nil {
 				return silencePluginCancel(ctx, err)
@@ -708,7 +708,7 @@ func newPluginIndexCmd() *cobra.Command {
 			return nil
 		},
 	}
-	update.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides settings and "+pluginIndexEnvVar+")")
+	update.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides "+pluginIndexEnvVar+" and the built-in default)")
 	cmd.AddCommand(update)
 	return cmd
 }

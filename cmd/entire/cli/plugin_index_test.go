@@ -115,8 +115,9 @@ func TestSyncPluginIndex_OfflineUsesStaleCopy(t *testing.T) { //nolint:parallelt
 // version is advisory, not a gate. Enforcing it would guard a migration that
 // can never happen — the index is one shared resource read by every shipped
 // CLI, so a bump breaks discovery fleet-wide — while punishing the case that
-// does happen: an index (often hand-written, which plugins.index_url exists
-// for) that omits the field, or one that grows a field this CLI ignores.
+// does happen: an index (often hand-written, as an internal catalog set via
+// ENTIRE_PLUGIN_INDEX_URL is) that omits the field, or one that grows a field
+// this CLI ignores.
 func TestSyncPluginIndex_VersionIsAdvisory(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	entry := `{"name":"run","repo_url":"https://x.example/entire-run"}`
@@ -170,18 +171,44 @@ func TestSyncPluginIndex_RejectsUnusableIndexURL(t *testing.T) { //nolint:parall
 	}
 }
 
+// Precedence is --index > ENTIRE_PLUGIN_INDEX_URL > built-in default, and
+// repo-level settings are deliberately not a source: .entire/settings.json is
+// committed and resolved from the working directory, so honoring it let a
+// cloned repository redirect the catalog — and an index-listed repo installs
+// with no confirmation prompt.
 func TestResolvePluginIndexURL_Precedence(t *testing.T) { //nolint:paralleltest // mutates env
-	ctx := context.Background()
 	t.Setenv(pluginIndexEnvVar, "")
-	if got := resolvePluginIndexURL(ctx, "https://flag.example/idx"); got != "https://flag.example/idx" {
+	if got := resolvePluginIndexURL("https://flag.example/idx"); got != "https://flag.example/idx" {
 		t.Errorf("flag should win: %q", got)
 	}
-	t.Setenv(pluginIndexEnvVar, "https://env.example/idx")
-	if got := resolvePluginIndexURL(ctx, ""); got != "https://env.example/idx" {
-		t.Errorf("env should win over settings/default: %q", got)
+	if got := resolvePluginIndexURL(""); got != defaultPluginIndexURL {
+		t.Errorf("bare call should fall back to the built-in default: %q", got)
 	}
-	if got := resolvePluginIndexURL(ctx, "https://flag.example/idx"); got != "https://flag.example/idx" {
+	t.Setenv(pluginIndexEnvVar, "https://env.example/idx")
+	if got := resolvePluginIndexURL(""); got != "https://env.example/idx" {
+		t.Errorf("env should win over the default: %q", got)
+	}
+	if got := resolvePluginIndexURL("https://flag.example/idx"); got != "https://flag.example/idx" {
 		t.Errorf("flag should win over env: %q", got)
+	}
+}
+
+// A committed .entire/settings.json must not be able to steer the catalog. The
+// settings schema no longer has the key at all, so the strict loader rejects it
+// outright rather than honoring it — this pins that the door stays shut.
+func TestPluginIndexURL_NotConfigurableViaRepoSettings(t *testing.T) { //nolint:paralleltest // mutates env
+	t.Setenv(pluginIndexEnvVar, "")
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".entire"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".entire", "settings.json"),
+		[]byte(`{"plugins":{"index_url":"https://evil.example/idx"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if got := resolvePluginIndexURL(""); got != defaultPluginIndexURL {
+		t.Errorf("repo settings steered the index to %q", got)
 	}
 }
 

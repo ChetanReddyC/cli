@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -145,12 +144,6 @@ type EntireSettings struct {
 	// nil/true = sign (default), false = skip signing.
 	SignCheckpointCommits *bool `json:"sign_checkpoint_commits,omitempty"`
 
-	// Plugins configures the external-command plugin layer (index discovery
-	// and remote install). Plugin state (what's installed, pins, manifests)
-	// lives in the managed plugin directory, never in settings. Nil means
-	// all defaults.
-	Plugins *PluginSettings `json:"plugins,omitempty"`
-
 	// Checkpoints selects checkpoint storage backends (a primary plus optional
 	// write-only mirrors). checkpoint.Open consumes it via the lenient
 	// LoadCheckpointsConfig loader; the field also lives here so the strict
@@ -160,134 +153,15 @@ type EntireSettings struct {
 	// Deprecated: no longer used. Exists to tolerate old settings files
 	// that still contain "strategy": "auto-commit" or similar.
 	Strategy string `json:"strategy,omitempty"`
-}
 
-// PluginSettings configures plugin discovery and remote install behavior.
-//
-// Settings are repo-level by design: a repository can commit plugins.index_url
-// to point contributors at an internal plugin catalog. The managed plugin
-// store itself is per-user; these settings only steer discovery. Precedence
-// for the effective index URL (resolved in the cli package, not here):
-// --index flag > ENTIRE_PLUGIN_INDEX_URL > settings.local.json >
-// settings.json > built-in default.
-type PluginSettings struct {
-	// IndexURL is the git URL of the plugin index repository. Empty means
-	// the built-in default index.
-	IndexURL string `json:"index_url,omitempty"`
-
-	// IndexTTLHours is how long a synced index copy is considered fresh
-	// before plugin search/install trigger a re-sync. Zero means "unset"
-	// — the caller applies the default (24). `entire plugin index update`
-	// always forces a refresh regardless of TTL.
-	IndexTTLHours int `json:"index_ttl_hours,omitempty"`
-}
-
-// gitURLSchemes are the transports a plugin or index repository URL may use.
-//
-// http:// and git:// are deliberately absent. Both are unauthenticated and
-// unencrypted, and the catalog fetched over them decides which repositories
-// install *without a confirmation prompt* — so a network attacker who can
-// rewrite the transport chooses the binary. That is strictly worse than the
-// plaintext-asset case the download path already refuses.
-var gitURLSchemes = []string{"https://", "ssh://", "file://"}
-
-// scpLikeGitURL matches git's scp-like syntax (user@host:path) — the form
-// `git@github.com:owner/repo.git` uses. Requires a user@, a host without a
-// slash, and a colon before the path, so it cannot match a bare option or a
-// local path.
-var scpLikeGitURL = regexp.MustCompile(`^[A-Za-z0-9._~-]+@[A-Za-z0-9._-]+:[^\s]`)
-
-// maxIndexTTLHours bounds plugins.index_ttl_hours. Beyond roughly 2.5 million
-// hours the nanosecond conversion in IndexTTL overflows int64 and wraps
-// negative, which reads as "always stale" — the exact opposite of the very
-// large value the user asked for. Ten years is past any real intent.
-const maxIndexTTLHours = 24 * 365 * 10
-
-// ValidateGitURL rejects anything that is not recognizably a git repository
-// URL. It is the single definition shared by settings validation and the
-// cli package's pre-flight check, so the two can no longer disagree about
-// what is acceptable — they previously differed on http://, git://, and bare
-// absolute paths, which meant `--index /srv/idx` worked while the equivalent
-// index_url setting was a hard load failure.
-//
-// This is a security boundary, not a nicety. These URLs reach the git CLI as
-// positional arguments and arrive from attacker-influenced places (index.json
-// entries, another plugin's entire-plugin.yml requires[], a stored manifest).
-// git parses an option-shaped positional as an option, and --upload-pack's
-// value is shell-interpreted, so an option-shaped URL is remote code
-// execution. Bare absolute paths are rejected too: file:// expresses the same
-// thing unambiguously, and narrowing a security boundary beats the
-// convenience.
-func ValidateGitURL(rawURL string) error {
-	u := strings.TrimSpace(rawURL)
-	if u == "" {
-		return errors.New("repository URL is empty")
-	}
-	if strings.HasPrefix(u, "-") {
-		return fmt.Errorf("repository URL %q must not start with '-'", rawURL)
-	}
-	for _, scheme := range gitURLSchemes {
-		if strings.HasPrefix(u, scheme) && len(u) > len(scheme) {
-			return nil
-		}
-	}
-	if scpLikeGitURL.MatchString(u) {
-		return nil
-	}
-	return fmt.Errorf("repository URL %q must use one of %s or git's user@host:path form",
-		rawURL, strings.Join(gitURLSchemes, ", "))
-}
-
-// Validate returns an error for semantically invalid plugin settings.
-// The load path calls this after merging.
-func (p *PluginSettings) Validate() error {
-	if p == nil {
-		return nil
-	}
-	if p.IndexTTLHours < 0 {
-		return fmt.Errorf("plugins.index_ttl_hours must be >= 0, got %d", p.IndexTTLHours)
-	}
-	if p.IndexTTLHours > maxIndexTTLHours {
-		return fmt.Errorf("plugins.index_ttl_hours must be <= %d, got %d", maxIndexTTLHours, p.IndexTTLHours)
-	}
-	if p.IndexURL == "" {
-		return nil
-	}
-	if err := ValidateGitURL(p.IndexURL); err != nil {
-		return fmt.Errorf("plugins.index_url: %w", err)
-	}
-	return nil
-}
-
-// IndexTTL returns the configured index freshness window. Zero or negative
-// IndexTTLHours (or a nil receiver) yields the 24h default.
-func (p *PluginSettings) IndexTTL() time.Duration {
-	if p == nil || p.IndexTTLHours < 1 {
-		return 24 * time.Hour
-	}
-	// Saturate rather than overflow. Validate rejects out-of-range values on
-	// the load path, but IndexTTL is also reachable from a hand-built struct,
-	// and a wrapped negative duration reads as "always stale".
-	if p.IndexTTLHours > maxIndexTTLHours {
-		return maxIndexTTLHours * time.Hour
-	}
-	return time.Duration(p.IndexTTLHours) * time.Hour
-}
-
-// PluginIndexURL returns the configured index URL, or "" when unset.
-func (s *EntireSettings) PluginIndexURL() string {
-	if s == nil || s.Plugins == nil {
-		return ""
-	}
-	return s.Plugins.IndexURL
-}
-
-// PluginIndexTTL returns the effective index freshness window (default 24h).
-func (s *EntireSettings) PluginIndexTTL() time.Duration {
-	if s == nil {
-		return 24 * time.Hour
-	}
-	return s.Plugins.IndexTTL()
+	// Deprecated: plugin discovery reads no settings at all. Retained, and
+	// ignored, purely so a file left over from when plugins.index_url and
+	// plugins.index_ttl_hours existed does not fail the strict loader — which
+	// would break every command that loads settings, not just the plugin ones,
+	// with an opaque "unknown field" error. map[string]any so any shape under
+	// the key is tolerated. See resolvePluginIndexURL for why the index URL is
+	// deliberately not settings-driven.
+	Plugins map[string]any `json:"plugins,omitempty"`
 }
 
 // ClonePreferences stores clone-local, uncommitted preferences that should be
@@ -685,9 +559,6 @@ func loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAb
 	if err := settings.SummaryGeneration.Validate(); err != nil {
 		return nil, fmt.Errorf("merged settings invalid: %w", err)
 	}
-	if err := settings.Plugins.Validate(); err != nil {
-		return nil, fmt.Errorf("merged settings invalid: %w", err)
-	}
 
 	return settings, nil
 }
@@ -1070,26 +941,6 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		return err
 	}
 
-	if err := mergePlugins(settings, raw); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// mergePlugins replaces the plugin config from the override (whole-object
-// replacement, parallel to mergeInvestigate — the schema is small and
-// per-field merge semantics aren't worth the machinery).
-func mergePlugins(settings *EntireSettings, raw map[string]json.RawMessage) error {
-	pluginsRaw, ok := raw["plugins"]
-	if !ok {
-		return nil
-	}
-	var cfg PluginSettings
-	if err := unmarshalField("plugins", pluginsRaw, &cfg); err != nil {
-		return err
-	}
-	settings.Plugins = &cfg
 	return nil
 }
 

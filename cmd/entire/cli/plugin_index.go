@@ -21,8 +21,9 @@ import (
 // Plugin discovery rides on a git-synced index, krew-style: the index is
 // itself a git repository containing index.json, shallow-cloned into the
 // user cache and re-pulled on a TTL. No hosted service, no forge REST API —
-// any git server can host an index, and a repo can point contributors at an
-// internal catalog via plugins.index_url in .entire/settings.json.
+// any git server can host an index. An organization points the CLI at an
+// internal catalog with ENTIRE_PLUGIN_INDEX_URL or --index; see
+// resolvePluginIndexURL for why a committed settings file cannot.
 const (
 	// defaultPluginIndexURL is the built-in curated index.
 	defaultPluginIndexURL = "https://github.com/entireio/plugin-index"
@@ -38,6 +39,11 @@ const (
 	// pluginIndexSyncMarker records the last successful sync time as the
 	// marker file's mtime. Untracked, so fetch/reset never touches it.
 	pluginIndexSyncMarker = ".entire-last-sync"
+	// pluginIndexTTL is how long a synced copy is considered fresh. Fixed
+	// rather than configurable: `plugin index update` already forces a refresh
+	// and stale-on-offline already covers a failed one, so a knob here tuned a
+	// problem solved twice over while costing a settings load per sync.
+	pluginIndexTTL = 24 * time.Hour
 )
 
 // PluginIndex is the parsed catalog. Decoding is deliberately lenient
@@ -114,34 +120,30 @@ func normalizeRepoURL(u string) string {
 }
 
 // resolvePluginIndexURL applies the documented precedence: --index flag >
-// ENTIRE_PLUGIN_INDEX_URL > settings (local over project) > built-in
-// default. Settings load failures fall through to the default rather than
-// blocking discovery; the failure is logged at debug.
-func resolvePluginIndexURL(ctx context.Context, flagValue string) string {
+// ENTIRE_PLUGIN_INDEX_URL > built-in default.
+//
+// Repo-level settings are deliberately NOT a source. .entire/settings.json is a
+// committed file resolved from the working directory, and an index-listed repo
+// installs with no confirmation prompt — so honoring it there meant a cloned
+// repository could redirect the catalog and get an attacker-chosen binary
+// downloaded, chmod 0755, and linked onto the user's PATH without a prompt.
+// The value of that setting was precisely that contributors got a different
+// catalog *without knowing*, which is the vulnerability stated as a feature; it
+// cannot be kept and made safe, only removed or made visible.
+//
+// Organizations wanting an internal catalog set ENTIRE_PLUGIN_INDEX_URL, which
+// applies across repos rather than per-repo, and cannot be chosen by content
+// the user merely checked out. This matches Go, where no repo-committed file
+// can redirect GOPROXY; npm's per-project registry override is the
+// cautionary counter-example.
+func resolvePluginIndexURL(flagValue string) string {
 	if flagValue != "" {
 		return flagValue
 	}
 	if v := os.Getenv(pluginIndexEnvVar); v != "" {
 		return v
 	}
-	s, err := LoadEntireSettings(ctx)
-	if err != nil {
-		logging.Debug(ctx, "plugin index: settings load failed, using default index", slog.String("error", err.Error()))
-		return defaultPluginIndexURL
-	}
-	if u := s.PluginIndexURL(); u != "" {
-		return u
-	}
 	return defaultPluginIndexURL
-}
-
-// pluginIndexTTL returns the freshness window from settings (default 24h).
-func pluginIndexTTL(ctx context.Context) time.Duration {
-	s, err := LoadEntireSettings(ctx)
-	if err != nil {
-		return 24 * time.Hour
-	}
-	return s.PluginIndexTTL()
 }
 
 // pluginIndexCacheDir is the per-URL local copy. Keyed by a hash of the
@@ -203,7 +205,7 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 			// rollback, restored backup, bad container clock). Treating that as
 			// fresh would freeze the catalog until someone ran `index update`
 			// by hand, so only a non-negative age inside the window counts.
-			if age := time.Since(info.ModTime()); age >= 0 && age < pluginIndexTTL(ctx) {
+			if age := time.Since(info.ModTime()); age >= 0 && age < pluginIndexTTL {
 				fresh = true
 			}
 		}
@@ -274,7 +276,7 @@ func loadPluginIndexFromDir(ctx context.Context, dir, indexURL string) (*PluginI
 	// Enforcing it only ever fired by accident — most painfully on an index
 	// that simply omits the field (version 0), which told the author to
 	// upgrade the CLI when the fix was in their own file. Hand-written
-	// internal catalogs are exactly what plugins.index_url exists for.
+	// internal catalogs are a first-class case (ENTIRE_PLUGIN_INDEX_URL).
 	//
 	// Additive changes, the ones that actually happen, are already absorbed:
 	// decoding ignores unknown fields and unreadable entries are dropped

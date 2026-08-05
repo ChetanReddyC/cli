@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"golang.org/x/mod/semver"
 )
 
@@ -83,31 +82,56 @@ func redactCredentials(text string) string {
 	return credentialInURL.ReplaceAllString(text, "${1}")
 }
 
+// gitURLSchemes are the transports a plugin or index repository URL may use.
+//
+// http:// and git:// are deliberately absent. Both are unauthenticated and
+// unencrypted, and the catalog fetched over them decides which repositories
+// install without a confirmation prompt — so an attacker who can rewrite the
+// transport chooses the binary. That is strictly worse than the plaintext-asset
+// case the download path already refuses.
+var gitURLSchemes = []string{"https://", "ssh://", "file://"}
+
+// scpLikeGitURL matches git's scp-like syntax (user@host:path) — the form
+// `git@github.com:owner/repo.git` uses. Requires a user@, a host without a
+// slash, and a colon before the path, so it cannot match a bare option or a
+// local path.
+var scpLikeGitURL = regexp.MustCompile(`^[A-Za-z0-9._~-]+@[A-Za-z0-9._-]+:[^\s]`)
+
 // validatePluginRepoURL rejects anything that is not recognizably a git
 // repository URL before it reaches the git CLI as a positional argument.
 //
-// The rule itself lives in the settings package as settings.ValidateGitURL so
-// there is exactly one definition: this check and the plugins.index_url
-// settings check previously disagreed about http://, git:// and bare absolute
-// paths, which meant `--index /srv/idx` was accepted here while the equivalent
-// setting was a hard load failure.
+// This is a security boundary, not a nicety. These URLs arrive from
+// attacker-influenced places — index.json entries, another plugin's
+// entire-plugin.yml requires[], a stored manifest, --index — and git parses an
+// option-shaped positional as an option. `--upload-pack=<cmd>` is
+// shell-interpreted and runs against the *ambient* repo when no positional
+// remains, so an entry like "--upload-pack=curl … | sh; git-upload-pack" would
+// execute arbitrary commands during an index-resolved install, which never
+// prompts. validatePluginName already refuses a leading '-' on names for the
+// same reason.
 //
-// Why it is a security boundary: these URLs arrive from attacker-influenced
-// places — index.json entries, another plugin's entire-plugin.yml requires[],
-// a stored manifest — and git parses an option-shaped positional as an option.
-// `--upload-pack=<cmd>` is shell-interpreted and runs against the *ambient*
-// repo when no positional remains, so an entry like
-// "--upload-pack=curl … | sh; git-upload-pack" would execute arbitrary
-// commands during an index-resolved install, which never prompts.
-// validatePluginName already refuses a leading '-' on names for the same
-// reason. Callers additionally pass "--" before positionals, so an
-// option-shaped value would be refused by git even if it got this far.
+// Bare absolute paths are rejected: file:// expresses the same thing
+// unambiguously, and narrowing a security boundary beats the convenience.
+// Callers additionally pass "--" before positionals, so an option-shaped value
+// would be refused by git even if it got this far.
 func validatePluginRepoURL(rawURL string) error {
-	// Returned unwrapped: ValidateGitURL lives in this module and its message
-	// already names the offending URL and the accepted forms, so wrapping only
-	// duplicates the "repository URL" prefix. Callers add the role (index vs
-	// plugin vs dependency), which is the part that carries information.
-	return settings.ValidateGitURL(rawURL) //nolint:wrapcheck // see above
+	u := strings.TrimSpace(rawURL)
+	if u == "" {
+		return errors.New("repository URL is empty")
+	}
+	if strings.HasPrefix(u, "-") {
+		return fmt.Errorf("repository URL %q must not start with '-'", rawURL)
+	}
+	for _, scheme := range gitURLSchemes {
+		if strings.HasPrefix(u, scheme) && len(u) > len(scheme) {
+			return nil
+		}
+	}
+	if scpLikeGitURL.MatchString(u) {
+		return nil
+	}
+	return fmt.Errorf("repository URL %q must use one of %s or git's user@host:path form",
+		rawURL, strings.Join(gitURLSchemes, ", "))
 }
 
 // listRemoteSemverTags returns the repo's semver tags ("v"-prefixed or
