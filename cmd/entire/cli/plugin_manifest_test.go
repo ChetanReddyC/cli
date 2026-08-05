@@ -93,12 +93,16 @@ requires:
 		t.Errorf("parsed %+v", meta)
 	}
 
-	// Unknown keys are author typos; strict decoding surfaces them. The
-	// key must NOT be a near-miss spelling of a real field: a spell-fixing
-	// formatter pass once rewrote such a key into the correctly-spelled
-	// field name, which made the input valid and the test vacuous.
-	if _, err := ParsePluginMetadata([]byte("name: x\nnot_a_real_field:\n  - name: y\n")); err == nil {
-		t.Error("ParsePluginMetadata accepted unknown key")
+	// Unknown keys are ignored, not rejected. entire-plugin.yml is read by
+	// every shipped CLI version and has no version field, so refusing a file
+	// that carries a field this binary predates would break installs
+	// permanently for everyone on that version. The known fields must still
+	// decode alongside the unknown one.
+	fwd, err := ParsePluginMetadata([]byte("name: x\nmin_cli_version: v9.9.9\ndescription: still parsed\n"))
+	if err != nil {
+		t.Errorf("ParsePluginMetadata rejected a forward-compatible file: %v", err)
+	} else if fwd.Name != "x" || fwd.Description != "still parsed" {
+		t.Errorf("known fields lost alongside an unknown one: %+v", fwd)
 	}
 	// Reserved names rejected.
 	if _, err := ParsePluginMetadata([]byte("name: agent-evil\n")); err == nil || !strings.Contains(err.Error(), "reserved") {

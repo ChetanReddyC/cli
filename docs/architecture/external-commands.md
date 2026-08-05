@@ -62,9 +62,17 @@ Accepted forms are `https://`, `ssh://`, `file://`, and git's `user@host:path` s
 
 `http://` and `git://` are deliberately absent. Both are unauthenticated and unencrypted, and the catalog fetched over them decides which repositories install *without a confirmation prompt*, so an attacker who can rewrite the transport chooses the binary — strictly worse than the plaintext-asset case below. Bare absolute paths are rejected because `file://` expresses the same thing unambiguously; narrowing a security boundary beats the convenience.
 
-The rule has exactly one definition, `settings.ValidateGitURL`, shared by this check and `plugins.index_url` validation. They previously disagreed about `http://`, `git://`, and absolute paths, so `--index /srv/idx` was accepted while the equivalent committed setting was a hard load failure. Invalid index entries are dropped like invalid names (one bad row can't take out the catalog); an invalid `requires[].repo_url` fails metadata parsing, surfacing the author's mistake at install time.
+The rule has exactly one definition, `validatePluginRepoURL`, applied to plugin repositories and to the index URL alike. Two validators previously disagreed about `http://`, `git://`, and absolute paths, so `--index /srv/idx` was accepted while the equivalent settings value was a hard load failure; the settings key is gone (see below) and one definition remains. Invalid index entries are dropped like invalid names (one bad row can't take out the catalog); an invalid `requires[].repo_url` fails metadata parsing, surfacing the author's mistake at install time.
 
 This mirrors `validatePluginName`, which refuses a leading `-` on names for the same reason. Regression coverage asserts the payload never executes, not merely that the call errors.
+
+#### `entire-plugin.yml` decodes leniently
+
+Unknown keys are ignored, the same choice made for `index.json` and for the same reason: both are artifacts read by every CLI version ever shipped, and refusing one an older binary doesn't fully understand breaks it permanently for everyone on that version, with no way for the plugin author to fix it for them. `entire-plugin.yml` has no `version` field to gate on either, so the first author to adopt any future field would break installs on every older CLI.
+
+This gives up catching author typos, which strict decoding did. The trade is asymmetric: a misspelled key costs the author one confused test run against their own plugin; a forward-compatibility break is unfixable and fleet-wide. Author-side validation belongs in a lint command, not in the path every user's install runs through.
+
+An empty or comment-only file is also accepted — the file is documented as optional, and a committed placeholder should not be fatal at every tag.
 
 #### Credentials never reach logs, output, or disk
 
@@ -88,7 +96,15 @@ An install that used the opt-in is recorded as `unverified: true` in the manifes
 
 Discovery rides on a git-synced index, krew-style: the index is itself a git repository containing `index.json`, shallow-cloned into the user cache (keyed by a hash of the URL) and refreshed on a TTL. `entire plugin search [term]`, `info <name>`, and `browse` read it; `entire plugin index update` forces a refresh. When a refresh fails but a cached copy exists, the stale copy is used — discovery doesn't hard-fail offline.
 
-The effective index URL resolves as: `--index` flag > `ENTIRE_PLUGIN_INDEX_URL` > `plugins.index_url` in `.entire/settings.local.json`/`.entire/settings.json` > the built-in default (`https://github.com/entireio/plugin-index`). The repo-level setting is deliberate: a company can commit `plugins.index_url` to point contributors at an internal catalog. `plugins.index_ttl_hours` tunes freshness (default 24).
+The effective index URL resolves as: `--index` flag > `ENTIRE_PLUGIN_INDEX_URL` > the built-in default (`https://github.com/entireio/plugin-index`). Freshness is a fixed 24 hours.
+
+**Repo-level settings are deliberately not a source, and there is no TTL knob.** Both were removed rather than hardened:
+
+`plugins.index_url` was read from `.entire/settings.json` — a committed file resolved from the working directory — while an index-listed repository installs with *no confirmation prompt*. Composed, that meant a cloned repository could redirect the catalog and have an attacker-chosen binary downloaded, `chmod 0755`, and linked onto the user's `PATH` without a prompt. The value of the setting was precisely that contributors got a different catalog *without knowing*, which is the vulnerability stated as a feature: it cannot be kept and made safe, only removed or made visible. Removing it also makes the failure mode safe — a missing override now falls back to the curated default rather than to someone else's catalog.
+
+An organization wanting an internal catalog sets `ENTIRE_PLUGIN_INDEX_URL`, which applies across repositories rather than per-repository and cannot be chosen by content the user merely checked out. Go takes the same position — no repo-committed file can redirect `GOPROXY` — while npm's per-project `registry` override is the cautionary counter-example.
+
+`plugins.index_ttl_hours` went with it: `entire plugin index update` already forces a refresh and stale-on-offline already covers a failed one, so the knob tuned a problem solved twice while costing a settings load per sync. Between them, the whole `PluginSettings` struct, its validator, its merge path, and its tests are gone — the plugin layer now reads no settings at all.
 
 `index.json` schema (version 1): `{"version": 1, "plugins": [{"name", "repo_url", "description", "official", "platforms"}]}`. Entries with invalid names (e.g. the reserved `agent-` prefix) or unusable repo URLs are filtered on load, not fatal.
 

@@ -111,13 +111,24 @@ type PluginMetadata struct {
 // file at the root of a plugin repository.
 const pluginMetadataFileName = "entire-plugin.yml"
 
-// ParsePluginMetadata decodes entire-plugin.yml content. Strict decoding:
-// unknown keys are an error, surfacing author typos at install time rather
-// than silently ignoring a misspelled "requires".
+// ParsePluginMetadata decodes entire-plugin.yml content.
+//
+// Decoding is lenient: unknown keys are ignored, matching the choice made for
+// index.json. Both are artifacts read by every CLI version ever shipped, and
+// refusing one an older binary doesn't fully understand breaks it permanently
+// for everyone on that version — the plugin author cannot fix it for them.
+// entire-plugin.yml has no version field to gate on either, so the first author
+// to adopt any future field (min_cli_version, bin_name, …) would break installs
+// on every older CLI.
+//
+// This deliberately gives up catching author typos here, which strict decoding
+// did. The trade is asymmetric: a misspelled key costs the author one confused
+// test run against their own plugin, while a forward-compatibility break is
+// unfixable and fleet-wide. Author-side validation belongs in a lint command,
+// not in the hot path every user's install runs through.
 func ParsePluginMetadata(data []byte) (*PluginMetadata, error) {
 	var meta PluginMetadata
 	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
 	if err := dec.Decode(&meta); err != nil {
 		// An empty or comment-only stream decodes to io.EOF. The file is
 		// documented as optional and a *missing* one is fine, so a committed
