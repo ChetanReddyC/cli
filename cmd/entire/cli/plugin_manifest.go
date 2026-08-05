@@ -78,12 +78,24 @@ type PluginManifest struct {
 // PluginRequirement declares a dependency on another plugin. Shared between
 // the author-side metadata file (entire-plugin.yml) and the install-side
 // manifest so the two can never drift.
+//
+// There is deliberately no repo_url. A missing dependency resolves by name
+// through the plugin index, so the URL a dependency install fetches from always
+// comes from the curated catalog rather than from the requiring plugin's author.
+// With an author-supplied URL, installing one plugin meant fetching and
+// executing a binary from a URL its author chose — and dependency planning
+// contacted that URL *before* the confirmation prompt. The capability is not
+// gone, the authority moved: a user can still install an out-of-catalog
+// dependency by URL themselves, with the usual untrusted-source prompt, after
+// which the requirement is satisfied. Consent belongs to the user, not the
+// author.
+//
+// A dependency must therefore be indexed before a dependent can ship, the same
+// constraint krew, Homebrew and apt impose.
 type PluginRequirement struct {
-	// Name is the bare plugin name of the dependency.
+	// Name is the bare plugin name of the dependency, resolved through the
+	// plugin index.
 	Name string `yaml:"name"`
-	// RepoURL is where to install the dependency from when it's missing.
-	// Optional when the dependency is resolvable through the index.
-	RepoURL string `yaml:"repo_url,omitempty"`
 	// MinVersion is the minimum acceptable tag (e.g. "v0.2.0"). Minimum
 	// only — there is deliberately no range syntax.
 	MinVersion string `yaml:"min_version,omitempty"`
@@ -148,14 +160,6 @@ func ParsePluginMetadata(data []byte) (*PluginMetadata, error) {
 		if err := validatePluginName(req.Name); err != nil {
 			return nil, fmt.Errorf("%s declares invalid requirement: %w", pluginMetadataFileName, err)
 		}
-		// A requirement's repo_url is author-controlled and reaches the git
-		// CLI during dependency planning — which runs before the install
-		// confirmation prompt. Reject non-URLs at the parse boundary.
-		if req.RepoURL != "" {
-			if err := validatePluginRepoURL(req.RepoURL); err != nil {
-				return nil, fmt.Errorf("%s declares invalid repo_url for requirement %q: %w", pluginMetadataFileName, req.Name, err)
-			}
-		}
 	}
 	return &meta, nil
 }
@@ -212,9 +216,6 @@ func SavePluginManifest(m *PluginManifest) error {
 	// token in a remote URL has no business on disk. Upgrades re-resolve the
 	// remote through git's credential helpers, which is where auth belongs.
 	m.RepoURL = redactURL(m.RepoURL)
-	for i := range m.Requires {
-		m.Requires[i].RepoURL = redactURL(m.Requires[i].RepoURL)
-	}
 	dir, err := EnsurePluginPkgDir(m.Name)
 	if err != nil {
 		return err

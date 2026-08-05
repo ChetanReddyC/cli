@@ -16,7 +16,7 @@ func TestPluginManifest_Roundtrip(t *testing.T) { //nolint:paralleltest // mutat
 		SHA256:      "abc",
 		Pinned:      true,
 		InstalledAt: time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC),
-		Requires:    []PluginRequirement{{Name: "sem", RepoURL: "https://github.com/entireio/entire-sem", MinVersion: "v0.2.0"}},
+		Requires:    []PluginRequirement{{Name: "sem", MinVersion: "v0.2.0"}},
 	}
 	if err := SavePluginManifest(in); err != nil {
 		t.Fatalf("SavePluginManifest: %v", err)
@@ -111,17 +111,15 @@ requires:
 	if _, err := ParsePluginMetadata([]byte("name: ok\nrequires:\n  - name: agent-evil\n")); err == nil {
 		t.Error("ParsePluginMetadata accepted reserved requirement name")
 	}
-	// A requirement's repo_url is author-controlled and reaches the git CLI
-	// during dependency planning — which runs before the confirmation prompt.
-	for _, bad := range []string{
-		"--upload-pack=touch /tmp/pwned; git-upload-pack",
-		"ext::sh -c whoami",
-		"not-a-url",
-	} {
-		yml := "name: ok\nrequires:\n  - name: dep\n    repo_url: \"" + bad + "\"\n"
-		if _, err := ParsePluginMetadata([]byte(yml)); err == nil {
-			t.Errorf("ParsePluginMetadata accepted requirement repo_url %q", bad)
-		}
+	// requires[] carries only a name and an optional minimum. A repo_url left
+	// over from the old schema is ignored rather than honored, so a published
+	// file cannot steer a dependency install at a URL its author chose.
+	legacy, err := ParsePluginMetadata([]byte("name: ok\nrequires:\n  - name: dep\n    repo_url: https://evil.example/entire-dep\n"))
+	if err != nil {
+		t.Fatalf("a legacy repo_url should be ignored, not rejected: %v", err)
+	}
+	if len(legacy.Requires) != 1 || legacy.Requires[0].Name != "dep" {
+		t.Errorf("requirement lost: %+v", legacy.Requires)
 	}
 }
 
@@ -160,12 +158,10 @@ func TestParsePluginMetadata_EmptyIsNotAnError(t *testing.T) {
 func TestSavePluginManifest_StripsCredentials(t *testing.T) { //nolint:paralleltest // mutates env
 	withPluginDir(t)
 	if err := SavePluginManifest(&PluginManifest{
-		Name:    "demo",
-		RepoURL: "https://bob:hunter2@git.example.com/o/entire-demo",
-		Tag:     "v1.0.0",
-		Requires: []PluginRequirement{
-			{Name: "dep", RepoURL: "https://tok@git.example.com/o/entire-dep"},
-		},
+		Name:     "demo",
+		RepoURL:  "https://bob:hunter2@git.example.com/o/entire-demo",
+		Tag:      "v1.0.0",
+		Requires: []PluginRequirement{{Name: "dep"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +172,7 @@ func TestSavePluginManifest_StripsCredentials(t *testing.T) { //nolint:parallelt
 	if strings.Contains(m.RepoURL, "hunter2") || strings.Contains(m.RepoURL, "bob") {
 		t.Errorf("repo_url kept credentials: %q", m.RepoURL)
 	}
-	if len(m.Requires) != 1 || strings.Contains(m.Requires[0].RepoURL, "tok@") {
-		t.Errorf("requirement repo_url kept credentials: %+v", m.Requires)
+	if len(m.Requires) != 1 || m.Requires[0].Name != "dep" {
+		t.Errorf("requirements not round-tripped: %+v", m.Requires)
 	}
 }

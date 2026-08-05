@@ -54,15 +54,15 @@ Installing from a URL not listed in the index prints the source and asks for con
 
 #### Repository URLs are a security boundary
 
-Every repo URL is validated by `validatePluginRepoURL` before it reaches the git CLI, and every git invocation passes `--` before its positionals. Both layers exist because repo URLs are attacker-influenced: they arrive from `index.json` entries, from another plugin's `requires[].repo_url`, and from `--index`/`ENTIRE_PLUGIN_INDEX_URL`.
+Every repo URL is validated by `validatePluginRepoURL` before it reaches the git CLI, and every git invocation passes `--` before its positionals. Both layers exist because repo URLs are attacker-influenced: they arrive from `index.json` entries and from `--index`/`ENTIRE_PLUGIN_INDEX_URL`.
 
-git parses an option-shaped positional as an option, and `--upload-pack=<cmd>` is shell-interpreted — with no positional repository left, it runs against the *ambient* repo's `origin`. So a catalog entry like `--upload-pack=curl … | sh; git-upload-pack` would execute arbitrary commands during an index-resolved install, which by design never prompts. Dependency planning is the tightest path: it inspects `requires[].repo_url` *before* the install confirmation.
+git parses an option-shaped positional as an option, and `--upload-pack=<cmd>` is shell-interpreted — with no positional repository left, it runs against the *ambient* repo's `origin`. So a catalog entry like `--upload-pack=curl … | sh; git-upload-pack` would execute arbitrary commands during an index-resolved install, which by design never prompts. Dependency planning is the tightest path: it contacts a dependency's repository — now always an index-listed one — *before* the install confirmation.
 
 Accepted forms are `https://`, `ssh://`, `file://`, and git's `user@host:path` scp-like syntax. Anything else — a leading `-`, a bare name, a relative or bare absolute path, git's command-executing `ext::` transport — is rejected.
 
 `http://` and `git://` are deliberately absent. Both are unauthenticated and unencrypted, and the catalog fetched over them decides which repositories install *without a confirmation prompt*, so an attacker who can rewrite the transport chooses the binary — strictly worse than the plaintext-asset case below. Bare absolute paths are rejected because `file://` expresses the same thing unambiguously; narrowing a security boundary beats the convenience.
 
-The rule has exactly one definition, `validatePluginRepoURL`, applied to plugin repositories and to the index URL alike. Two validators previously disagreed about `http://`, `git://`, and absolute paths, so `--index /srv/idx` was accepted while the equivalent settings value was a hard load failure; the settings key is gone (see below) and one definition remains. Invalid index entries are dropped like invalid names (one bad row can't take out the catalog); an invalid `requires[].repo_url` fails metadata parsing, surfacing the author's mistake at install time.
+The rule has exactly one definition, `validatePluginRepoURL`, applied to plugin repositories and to the index URL alike. Two validators previously disagreed about `http://`, `git://`, and absolute paths, so `--index /srv/idx` was accepted while the equivalent settings value was a hard load failure; the settings key is gone (see below) and one definition remains. Invalid index entries are dropped like invalid names, so one bad row cannot take out the catalog.
 
 This mirrors `validatePluginName`, which refuses a leading `-` on names for the same reason. Regression coverage asserts the payload never executes, not merely that the call errors.
 
@@ -127,12 +127,17 @@ A plugin declares dependencies in `entire-plugin.yml`:
 ```yaml
 name: brain
 requires:
-  - name: sem
-    repo_url: https://github.com/entireio/entire-sem  # where to get it if missing
-    min_version: v0.2.0                                # minimum only; no ranges
+  - name: graph          # resolved by name through the plugin index
+    min_version: v0.2.0  # minimum only; no ranges
 ```
 
-Resolution is **install-time only** — dispatch stays zero-cost. After installing the main plugin, missing dependencies are resolved transitively (metadata-only, nothing downloaded during planning; a per-name record of the strictest `min_version` seen, plus a depth bound, make metadata cycles an error rather than a hang), listed apt-style, and installed after one confirmation (`--yes` skips, `--no-deps` opts out). Dependencies whose resolved repo URL is not listed in the index are marked `← not in the plugin index` in that listing, with a warning naming the count: a `requires[].repo_url` is declared by the requiring plugin's author, so it gets the same visibility as a URL the user typed at the direct-install prompt. One confirmation still covers the whole set — the point is that it is an informed one. A declined plan is a warning, not a failure. Dependencies already satisfied from raw `$PATH` or a local-dev install count as satisfied, with a warning when `min_version` can't be verified.
+**A requirement carries no URL.** A missing dependency resolves by name through the index and nowhere else, so the URL a dependency install fetches from always comes from the curated catalog rather than from the requiring plugin's author. With an author-supplied `repo_url`, installing one plugin meant fetching and executing a binary from a URL its author chose — and planning contacted that URL *before* the confirmation prompt.
+
+The capability is not gone, the authority moved: a user can still install an out-of-catalog dependency by URL themselves, with the usual untrusted-source prompt, after which the requirement is satisfied and planning schedules nothing. Consent belongs to the user, not the plugin author.
+
+The consequence is a publishing order — a dependency must be indexed before a dependent can ship — which is the same constraint krew, Homebrew and apt impose. A `repo_url` left over from the old schema is ignored rather than honored, since `entire-plugin.yml` decodes leniently, so previously-published files keep parsing and simply lose the URL.
+
+Resolution is **install-time only** — dispatch stays zero-cost. After installing the main plugin, missing dependencies are resolved transitively (metadata-only, nothing downloaded during planning; a per-name record of the strictest `min_version` seen, plus a depth bound, make metadata cycles an error rather than a hang), listed apt-style, and installed after one confirmation (`--yes` skips, `--no-deps` opts out). The listing carries no per-entry trust annotation, because there is no longer a path by which an author-chosen URL can appear in it: a missing dependency comes from the index, and an upgrade reinstalls from the source that plugin's own install already accepted. A declined plan is a warning, not a failure. Dependencies already satisfied from raw `$PATH` or a local-dev install count as satisfied, with a warning when `min_version` can't be verified.
 
 Planning tracks the strictest `min_version` seen per plugin rather than a plain visited set. In a diamond where two requirers demand different minimums of the same plugin (A needs `sem >= v1.0.0`, B needs `sem >= v2.0.0`), a name-only set would mark `sem` handled on A's satisfied requirement and skip B's stricter one entirely — no action, no warning — completing the install with B running against a too-old `sem`. `doctor` caught that afterwards, since it walks each manifest's requirements independently, but the install plans the upgrade instead of deferring the discovery. One action per plugin name either way. The requirement list is copied into the install manifest so reverse-dependency checks work offline:
 

@@ -103,8 +103,8 @@ func TestPlanDependencyInstalls(t *testing.T) { //nolint:paralleltest // mutates
 	if a := bySemName["sem"]; !a.Upgrade || a.CurrentTag != depTestOldTag || a.RepoURL != "https://x.example/entire-sem" {
 		t.Errorf("sem action = %+v, want upgrade from its recorded repo", a)
 	}
-	if a := bySemName["run"]; a.Upgrade || !a.FromIndex {
-		t.Errorf("run action = %+v, want fresh install from index", a)
+	if a := bySemName["run"]; a.Upgrade || a.RepoURL == "" {
+		t.Errorf("run action = %+v, want a fresh install resolved from the index", a)
 	}
 }
 
@@ -305,13 +305,14 @@ func TestPlanDependencyInstalls_StricterConstraintOnVisitedDep(t *testing.T) { /
 	}); err != nil {
 		t.Fatal(err)
 	}
+	idx := &PluginIndex{Version: 1, Plugins: []PluginIndexEntry{{Name: dep}}}
 
 	// Ordered weakest-first: the weak requirement is satisfied and would have
 	// closed the name off to the stricter one that follows.
 	plan, err := PlanDependencyInstalls(context.Background(), []PluginRequirement{
-		{Name: dep, RepoURL: depRepo, MinVersion: "v1.0.0"},
-		{Name: dep, RepoURL: depRepo, MinVersion: "v2.0.0"},
-	}, &PluginIndex{})
+		{Name: dep, MinVersion: "v1.0.0"},
+		{Name: dep, MinVersion: "v2.0.0"},
+	}, idx)
 	if err != nil {
 		t.Fatalf("PlanDependencyInstalls: %v", err)
 	}
@@ -326,9 +327,9 @@ func TestPlanDependencyInstalls_StricterConstraintOnVisitedDep(t *testing.T) { /
 	// The reverse order must not double-plan: the stricter requirement is
 	// handled first and the weaker one adds nothing.
 	plan, err = PlanDependencyInstalls(context.Background(), []PluginRequirement{
-		{Name: dep, RepoURL: depRepo, MinVersion: "v2.0.0"},
-		{Name: dep, RepoURL: depRepo, MinVersion: "v1.0.0"},
-	}, &PluginIndex{})
+		{Name: dep, MinVersion: "v2.0.0"},
+		{Name: dep, MinVersion: "v1.0.0"},
+	}, idx)
 	if err != nil {
 		t.Fatalf("PlanDependencyInstalls (reversed): %v", err)
 	}
@@ -338,8 +339,8 @@ func TestPlanDependencyInstalls_StricterConstraintOnVisitedDep(t *testing.T) { /
 
 	// A dep with no minimum at all stays satisfied and unplanned.
 	plan, err = PlanDependencyInstalls(context.Background(), []PluginRequirement{
-		{Name: dep, RepoURL: depRepo},
-	}, &PluginIndex{})
+		{Name: dep},
+	}, idx)
 	if err != nil {
 		t.Fatalf("PlanDependencyInstalls (no minimum): %v", err)
 	}
@@ -348,58 +349,51 @@ func TestPlanDependencyInstalls_StricterConstraintOnVisitedDep(t *testing.T) { /
 	}
 }
 
-// FromIndex is the trust signal the command layer uses to flag dependencies
-// whose repo URL was declared by the requiring plugin's author rather than
-// listed in the catalog. It was previously set only on the two branches that
-// consulted the index, so an upgrade action was always reported as unlisted
-// regardless of its source. It must now mean one thing everywhere: "this
-// resolved URL appears in the index".
-func TestPlanDependencyInstalls_FromIndexTracksResolvedURL(t *testing.T) { //nolint:paralleltest // mutates env
+// A missing dependency resolves by name through the index and nowhere else.
+// entire-plugin.yml has no repo_url field, so a plugin author cannot point a
+// dependency install at a URL of their choosing — planning used to contact that
+// URL before the confirmation prompt. The capability moved to the user, who can
+// install an out-of-catalog dependency themselves and thereby satisfy it.
+func TestPlanDependencyInstalls_MissingDepMustBeIndexed(t *testing.T) { //nolint:paralleltest // mutates env
 	withPluginDir(t)
 	withIsolatedPath(t)
 	ctx := context.Background()
 
-	listedRepo := newTaggedPluginRepo(t, "", "v1.0.0")
-	unlistedRepo := newTaggedPluginRepo(t, "", "v1.0.0")
-	// "old" is installed below its minimum, from a repo the index does list —
-	// the upgrade branch, which never set the flag before.
-	if err := SavePluginManifest(&PluginManifest{
-		Name: "old", RepoURL: listedRepo, Tag: depTestOldTag,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	idx := &PluginIndex{Version: 1, Plugins: []PluginIndexEntry{
-		{Name: "listed", RepoURL: listedRepo},
-		{Name: "old", RepoURL: listedRepo},
-	}}
+	listed := newTaggedPluginRepo(t, "", "v1.0.0")
+	idx := &PluginIndex{Version: 1, Plugins: []PluginIndexEntry{{Name: "listed", RepoURL: listed}}}
 
-	plan, err := PlanDependencyInstalls(ctx, []PluginRequirement{
-		{Name: "listed"},                          // resolved via index
-		{Name: "byurl", RepoURL: listedRepo},      // author URL that is listed
-		{Name: "unlisted", RepoURL: unlistedRepo}, // author URL that is not
-		{Name: "old", MinVersion: "v9.0.0"},       // upgrade from a listed repo
-	}, idx)
+	// In the index: planned, from the catalog's URL.
+	plan, err := PlanDependencyInstalls(ctx, []PluginRequirement{{Name: "listed"}}, idx)
 	if err != nil {
 		t.Fatalf("PlanDependencyInstalls: %v", err)
 	}
-	byName := map[string]DepAction{}
-	for _, a := range plan.Actions {
-		byName[a.Name] = a
+	if len(plan.Actions) != 1 || plan.Actions[0].RepoURL != listed {
+		t.Fatalf("actions = %+v, want one action using the index URL", plan.Actions)
 	}
-	for _, name := range []string{"listed", "byurl", "old"} {
-		a, ok := byName[name]
-		if !ok {
-			t.Errorf("no action planned for %q", name)
-			continue
+
+	// Not in the index: refused, with the two ways forward named.
+	_, err = PlanDependencyInstalls(ctx, []PluginRequirement{{Name: "absent"}}, idx)
+	if err == nil {
+		t.Fatal("planning accepted a dependency that is not in the index")
+	}
+	for _, want := range []string{"not in the plugin index", "plugin search", "install it yourself"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to mention %q", err, want)
 		}
-		if !a.FromIndex {
-			t.Errorf("%s action = %+v, want FromIndex (repo is listed)", name, a)
-		}
 	}
-	if a := byName["old"]; !a.Upgrade {
-		t.Errorf("old action = %+v, want an upgrade", a)
+
+	// A user who installs the dependency themselves satisfies the requirement,
+	// which is the escape hatch — held by the user, not the plugin author.
+	if err := SavePluginManifest(&PluginManifest{
+		Name: "absent", RepoURL: "https://x.example/entire-absent", Tag: "v1.0.0",
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if a, ok := byName["unlisted"]; !ok || a.FromIndex {
-		t.Errorf("unlisted action = %+v, want planned with FromIndex false", a)
+	plan, err = PlanDependencyInstalls(ctx, []PluginRequirement{{Name: "absent"}}, idx)
+	if err != nil {
+		t.Fatalf("a self-installed dependency should satisfy the requirement: %v", err)
+	}
+	if len(plan.Actions) != 0 {
+		t.Errorf("actions = %+v, want none", plan.Actions)
 	}
 }

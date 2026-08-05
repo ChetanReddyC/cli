@@ -33,9 +33,6 @@ type DepAction struct {
 	Upgrade bool
 	// CurrentTag is the installed tag for upgrades.
 	CurrentTag string
-	// FromIndex is true when the repo URL came from the index (trusted)
-	// rather than from another plugin's metadata.
-	FromIndex bool
 }
 
 // DepPlan is the result of resolving a plugin's transitive requirements.
@@ -155,24 +152,15 @@ func planDeps(ctx context.Context, reqs []PluginRequirement, idx *PluginIndex, p
 			action.CurrentTag = m.Tag
 			action.RepoURL = m.RepoURL
 		} else {
-			action.RepoURL = req.RepoURL
-			if action.RepoURL == "" {
-				if e := idx.Find(req.Name); e != nil {
-					action.RepoURL = e.RepoURL
-				}
+			// Missing: resolve by name through the index, which is the only
+			// source. See PluginRequirement for why an author-supplied URL is
+			// not accepted here.
+			e := idx.Find(req.Name)
+			if e == nil {
+				return fmt.Errorf("dependency %q is not installed and is not in the plugin index; ask the plugin author to get it listed (try 'entire plugin search %s'), or install it yourself from its repository URL first", req.Name, req.Name)
 			}
-			if action.RepoURL == "" {
-				return fmt.Errorf("dependency %q is not installed and has no repo URL (not in the plugin index either); add repo_url to the requirement or install it manually", req.Name)
-			}
+			action.RepoURL = e.RepoURL
 		}
-		// Set uniformly from the resolved URL rather than only on the branches
-		// that consulted the index, so the flag means one thing everywhere:
-		// "this URL is listed in the catalog". The command layer surfaces the
-		// ones that aren't before asking for confirmation — a dependency's
-		// repo_url is author-controlled, so it deserves the same visibility as
-		// a URL the user typed. A nil index (offline during a URL install)
-		// makes everything unlisted, which is the conservative answer.
-		action.FromIndex = idx.HasRepoURL(action.RepoURL)
 		upsertDepAction(plan, action)
 
 		// Recurse into what the dependency itself requires, using metadata
