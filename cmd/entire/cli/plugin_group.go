@@ -250,13 +250,29 @@ func installPlannedDeps(ctx context.Context, cmd *cobra.Command, reqs []PluginRe
 	}
 
 	fmt.Fprintf(out, "\nThis plugin requires %d additional plugin(s):\n", len(plan.Actions))
+	unlisted := 0
 	for _, a := range plan.Actions {
+		// A dependency's repo_url is declared by the requiring plugin's author,
+		// so it gets the same visibility as a URL the user typed: the direct
+		// install path prompts per untrusted URL, and the apt-style single
+		// confirmation here would otherwise hide the distinction entirely even
+		// though planning already tracks it.
+		note := ""
+		if !a.FromIndex {
+			note = "  ← not in the plugin index"
+			unlisted++
+		}
 		switch {
 		case a.Upgrade:
-			fmt.Fprintf(out, "  %s  (installed %s, needs >= %s — will upgrade)\n", a.Name, a.CurrentTag, a.MinVersion)
+			fmt.Fprintf(out, "  %s  (installed %s, needs >= %s — will upgrade from %s)%s\n",
+				a.Name, a.CurrentTag, a.MinVersion, a.RepoURL, note)
 		default:
-			fmt.Fprintf(out, "  %s  (%s)\n", a.Name, a.RepoURL)
+			fmt.Fprintf(out, "  %s  (%s)%s\n", a.Name, a.RepoURL, note)
 		}
+	}
+	if unlisted > 0 {
+		fmt.Fprintf(errOut, "Warning: %d of these resolve to repository URLs that are not listed in the plugin index; they come from the requiring plugin's %s.\n",
+			unlisted, pluginMetadataFileName)
 	}
 	ok, err := confirmPluginAction(ctx, "Install them now?", flags.yes)
 	switch {

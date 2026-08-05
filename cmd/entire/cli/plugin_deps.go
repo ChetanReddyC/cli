@@ -159,15 +159,20 @@ func planDeps(ctx context.Context, reqs []PluginRequirement, idx *PluginIndex, p
 			if action.RepoURL == "" {
 				if e := idx.Find(req.Name); e != nil {
 					action.RepoURL = e.RepoURL
-					action.FromIndex = true
 				}
-			} else if idx.HasRepoURL(action.RepoURL) {
-				action.FromIndex = true
 			}
 			if action.RepoURL == "" {
 				return fmt.Errorf("dependency %q is not installed and has no repo URL (not in the plugin index either); add repo_url to the requirement or install it manually", req.Name)
 			}
 		}
+		// Set uniformly from the resolved URL rather than only on the branches
+		// that consulted the index, so the flag means one thing everywhere:
+		// "this URL is listed in the catalog". The command layer surfaces the
+		// ones that aren't before asking for confirmation — a dependency's
+		// repo_url is author-controlled, so it deserves the same visibility as
+		// a URL the user typed. A nil index (offline during a URL install)
+		// makes everything unlisted, which is the conservative answer.
+		action.FromIndex = idx.HasRepoURL(action.RepoURL)
 		upsertDepAction(plan, action)
 
 		// Recurse into what the dependency itself requires, using metadata

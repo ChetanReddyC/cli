@@ -347,3 +347,59 @@ func TestPlanDependencyInstalls_StricterConstraintOnVisitedDep(t *testing.T) { /
 		t.Errorf("no-minimum actions = %+v, want none", plan.Actions)
 	}
 }
+
+// FromIndex is the trust signal the command layer uses to flag dependencies
+// whose repo URL was declared by the requiring plugin's author rather than
+// listed in the catalog. It was previously set only on the two branches that
+// consulted the index, so an upgrade action was always reported as unlisted
+// regardless of its source. It must now mean one thing everywhere: "this
+// resolved URL appears in the index".
+func TestPlanDependencyInstalls_FromIndexTracksResolvedURL(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	withIsolatedPath(t)
+	ctx := context.Background()
+
+	listedRepo := newTaggedPluginRepo(t, "", "v1.0.0")
+	unlistedRepo := newTaggedPluginRepo(t, "", "v1.0.0")
+	// "old" is installed below its minimum, from a repo the index does list —
+	// the upgrade branch, which never set the flag before.
+	if err := SavePluginManifest(&PluginManifest{
+		Name: "old", RepoURL: listedRepo, Tag: depTestOldTag,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	idx := &PluginIndex{Version: 1, Plugins: []PluginIndexEntry{
+		{Name: "listed", RepoURL: listedRepo},
+		{Name: "old", RepoURL: listedRepo},
+	}}
+
+	plan, err := PlanDependencyInstalls(ctx, []PluginRequirement{
+		{Name: "listed"},                          // resolved via index
+		{Name: "byurl", RepoURL: listedRepo},      // author URL that is listed
+		{Name: "unlisted", RepoURL: unlistedRepo}, // author URL that is not
+		{Name: "old", MinVersion: "v9.0.0"},       // upgrade from a listed repo
+	}, idx)
+	if err != nil {
+		t.Fatalf("PlanDependencyInstalls: %v", err)
+	}
+	byName := map[string]DepAction{}
+	for _, a := range plan.Actions {
+		byName[a.Name] = a
+	}
+	for _, name := range []string{"listed", "byurl", "old"} {
+		a, ok := byName[name]
+		if !ok {
+			t.Errorf("no action planned for %q", name)
+			continue
+		}
+		if !a.FromIndex {
+			t.Errorf("%s action = %+v, want FromIndex (repo is listed)", name, a)
+		}
+	}
+	if a := byName["old"]; !a.Upgrade {
+		t.Errorf("old action = %+v, want an upgrade", a)
+	}
+	if a, ok := byName["unlisted"]; !ok || a.FromIndex {
+		t.Errorf("unlisted action = %+v, want planned with FromIndex false", a)
+	}
+}
