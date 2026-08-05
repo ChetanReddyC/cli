@@ -299,7 +299,12 @@ Tests that spawn the real `entire` or `git` binary need the child to be non-inte
 2. `testing.Testing()` → false. In-process `go test` runs are non-interactive by default; no per-test `t.Setenv("ENTIRE_TEST_TTY", "0")` is needed.
 3. Agent sentinels (`GEMINI_CLI`, `COPILOT_CLI`, `PI_CODING_AGENT`, `GIT_TERMINAL_PROMPT=0`) → false.
 4. `CI=<non-empty-non-false>` → false.
-5. `/dev/tty` probe.
+5. `/dev/tty` probe, plus its terminal mode → a terminal held in raw mode
+   (canonical input off) belongs to a full-screen TUI that spawned us, not to a
+   shell we can prompt: TUI git clients (lazygit, gitui, tig) run `git commit`
+   as a child while owning the screen, so the hook inherits a `/dev/tty` it
+   must not prompt on. Fails open when the mode can't be read. See
+   `interactive/rawmode_unix.go` for the rationale.
 
 For subprocesses spawning the real `entire` binary (e2e, integration tests, `entire` calling itself from a hook), prefer `execx.NonInteractive` over env-var plumbing:
 
