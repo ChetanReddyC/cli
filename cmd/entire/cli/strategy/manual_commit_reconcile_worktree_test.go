@@ -2,8 +2,10 @@ package strategy
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -52,6 +54,45 @@ func TestReconcileWorktreePathForResumedTurn_LeavesValidSiblingUntouched(t *test
 
 	require.Equal(t, sibling, state.WorktreePath,
 		"a recorded path that still resolves to this repo must be left untouched")
+}
+
+// TestReconcileWorktreePathForResumedTurn_PreservesWorktreeIDAcrossRelocation
+// covers the reachable data-loss path: a session started in a linked worktree
+// whose path is later gone (whole-repo relocation), resumed from the main
+// worktree. Reconcile must repoint WorktreePath without changing WorktreeID —
+// the shadow branch is keyed on WorktreeID, so rewriting it (main worktree ID is
+// "") would orphan the session's prior checkpoints and lose rewind history.
+func TestReconcileWorktreePathForResumedTurn_PreservesWorktreeIDAcrossRelocation(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+
+	mainDir := setupSessionMatchRepo(t)
+	linkedDir := filepath.Join(mainDir, ".worktrees", "feature")
+	createSessionMatchWorktree(t, mainDir, linkedDir, "feature")
+
+	linkedID, err := paths.GetWorktreeID(linkedDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, linkedID, "linked worktree must have a non-empty WorktreeID")
+
+	state := &SessionState{
+		SessionID:    "relocated-linked-session",
+		WorktreePath: linkedDir,
+		WorktreeID:   linkedID,
+	}
+
+	// Remove the linked worktree so its recorded path no longer resolves to this
+	// repo's git common dir — the trigger condition for reconciliation.
+	removeSessionMatchWorktree(mainDir, linkedDir)
+
+	t.Chdir(mainDir)
+	clearSessionMatchCaches()
+
+	reconcileWorktreePathForResumedTurn(ctx, state)
+
+	require.Equal(t, mainDir, state.WorktreePath,
+		"a stale recorded path should be repointed at the current worktree")
+	require.Equal(t, linkedID, state.WorktreeID,
+		"WorktreeID must be preserved so the session's existing shadow branch stays reachable")
 }
 
 // TestReconcileWorktreePathForResumedTurn_NoopWhenPathUnchanged covers the common

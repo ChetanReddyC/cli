@@ -314,9 +314,13 @@ func reconcileWorktreePathForResumedTurn(ctx context.Context, state *SessionStat
 
 	old := state.WorktreePath
 	state.WorktreePath = current
-	if worktreeID, idErr := paths.GetWorktreeID(current); idErr == nil {
-		state.WorktreeID = worktreeID
-	}
+	// Deliberately do NOT rewrite state.WorktreeID here. The session's shadow
+	// branch is keyed on WorktreeID (entire/<base>-hash(worktreeID)); repointing
+	// it to the current worktree's identity (e.g. "" when resuming a linked
+	// worktree's session from the main worktree after a repo move) would orphan
+	// every prior checkpoint and lose rewind history. Reconcile only fires once
+	// the recorded path is gone, so retaining the original ID cannot collide with
+	// a live sibling worktree.
 	logging.Info(logging.WithComponent(ctx, "hooks"), "reconciled session worktree path after relocation",
 		slog.String("session_id", state.SessionID),
 		slog.String("from", old),
