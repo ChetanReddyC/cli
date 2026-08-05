@@ -197,12 +197,26 @@ in `lifecycle.go`, before `.entire/metadata/<session>/full.jsonl` is written). C
 implements it to strip encrypted reasoning payloads and compaction blobs, which are
 bound to the originating session and cannot be replayed out of a checkpoint.
 
-Ordering matters in both directions: sanitizing first keeps non-replayable payloads
-out of storage, and it spares the redaction layers from scanning ciphertext they
-would only discard afterwards — base64 is the pathological input for the entropy
-layer, so a large Codex rollout otherwise costs tens of seconds per Stop. The
-transform is idempotent, so later write paths can call it without knowing whether an
-upstream path already did.
+Every path that builds a stored transcript runs the same three steps in the same
+order — **sanitize → externalize images → redact**:
+
+| Path | Where |
+|---|---|
+| Stop (shadow branch) | `lifecycle.go`, before `full.jsonl` is written |
+| Post-commit condensation | `prepareTranscriptForStorage` in `manual_commit_condensation.go` |
+| Stop finalize (full-session rewrite) | `manual_commit_hooks.go`, before `extractSessionImages` |
+
+Each step must precede the next. Sanitizing first avoids externalizing images out of
+items that are about to be discarded — that would store an asset whose referencing
+transcript line disappears moments later — and avoids redacting megabytes of
+ciphertext only to throw it away; base64 is the pathological input for the entropy
+layer, so a large Codex rollout otherwise costs tens of seconds per Stop *and* per
+commit. Externalizing before redaction is required because base64 is high-entropy
+and redaction would otherwise flag and destroy it.
+
+The sanitize transform is idempotent, so a downstream write path can call it without
+knowing whether an upstream path already did (`checkpoint.sanitizeForAgentType` is
+the store's own belt-and-braces call).
 
 One coupling to respect when changing this: `SessionState.CheckpointTranscriptSize`
 is a growth baseline compared against the shadow transcript blob's size in

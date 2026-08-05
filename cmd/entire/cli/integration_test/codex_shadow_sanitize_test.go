@@ -3,9 +3,13 @@
 package integration
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -251,5 +255,104 @@ func TestCodexShadowBranch_GrowthStillDetectedAfterCommit(t *testing.T) {
 	if secondCheckpoint == firstCheckpoint {
 		t.Fatalf("second commit did not condense a new checkpoint (growth went undetected); "+
 			"both commits report checkpoint %s", firstCheckpoint)
+	}
+}
+
+// TestCodexCondense_NoAssetsFromSanitizedAwayContent proves that image
+// externalization runs on the sanitized transcript, not the raw one.
+//
+// Condensation's pipeline order is sanitize -> externalize -> redact. If
+// externalization runs before sanitization, images embedded in items that
+// sanitization discards (Codex compaction payloads) get extracted into asset blobs
+// and a manifest entry, while the transcript line that referenced them is dropped
+// moments later — leaving an orphaned asset stored and pushed forever.
+func TestCodexCondense_NoAssetsFromSanitizedAwayContent(t *testing.T) {
+	env := NewFeatureBranchEnv(t)
+
+	localSettings := filepath.Join(env.RepoDir, ".entire", "settings.local.json")
+	if err := os.WriteFile(localSettings, []byte(`{"redaction":{"externalize_images":true}}`), 0o644); err != nil {
+		t.Fatalf("write settings.local.json: %v", err)
+	}
+
+	// Two distinct images, both padded past the externalization length threshold.
+	// keptImg lives in a normal user message; droppedImg lives inside a compaction
+	// item, which codex.SanitizePortableTranscript removes outright.
+	keptImg := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("kept-image-payload-", 8))
+	droppedImg := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("dropped-image-payload-", 8))
+	keptB64 := base64.StdEncoding.EncodeToString(keptImg)
+	droppedB64 := base64.StdEncoding.EncodeToString(droppedImg)
+
+	keptSum := sha256.Sum256(keptImg)
+	keptHex := hex.EncodeToString(keptSum[:])
+	droppedSum := sha256.Sum256(droppedImg)
+	droppedHex := hex.EncodeToString(droppedSum[:])
+
+	sessionID := "codex-sanitize-before-extract"
+	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", "codex-rollout.jsonl")
+	rollout := strings.Join([]string{
+		`{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"` + env.RepoDir + `"}}`,
+		`{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[` +
+			`{"type":"input_text","text":"add feature.txt and look at this screenshot"},` +
+			`{"type":"input_image","image_url":"data:image/png;base64,` + keptB64 + `"}` +
+			`]}}`,
+		// Sanitization drops this whole line, so nothing in it should ever be
+		// extracted into an asset.
+		`{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"compaction","content":[` +
+			`{"type":"input_image","image_url":"data:image/png;base64,` + droppedB64 + `"}` +
+			`]}}`,
+		`{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"added feature.txt"}]}}`,
+	}, "\n") + "\n"
+
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte(rollout), 0o644); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+
+	hook := codexHooker(t, env.RepoDir, sessionID, transcriptPath)
+	hook("user-prompt-submit", map[string]any{
+		"prompt": "add feature.txt and look at this screenshot", "hook_event_name": "UserPromptSubmit",
+	})
+	env.WriteFile("feature.txt", "hi\n")
+	applyPatchHook(hook, "call_1", "*** Begin Patch\n*** Add File: feature.txt\n+hi\n*** End Patch\n")
+	env.GitCommitWithShadowHooks("add feature.txt", "feature.txt")
+	hook("stop", map[string]any{"hook_event_name": "Stop"})
+
+	cpID := env.GetLatestCheckpointIDFromHistory()
+	if cpID == "" {
+		t.Fatal("no checkpoint id in history")
+	}
+	sessionPath := ShardedCheckpointPath(cpID) + "/0/"
+
+	raw, ok := env.ReadFileFromBranch(paths.MetadataBranchName, sessionPath+paths.AssetsManifestFile)
+	if !ok {
+		t.Fatalf("assets/manifest.json missing at %s", sessionPath)
+	}
+
+	var manifest struct {
+		Assets []struct {
+			Name   string `json:"name"`
+			SHA256 string `json:"sha256"`
+		} `json:"assets"`
+	}
+	if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
+		t.Fatalf("parse manifest: %v\n%s", err, raw)
+	}
+
+	var sums []string
+	for _, a := range manifest.Assets {
+		sums = append(sums, a.SHA256)
+	}
+
+	if !slices.Contains(sums, keptHex) {
+		t.Errorf("the kept image was not externalized; manifest sha256s = %v", sums)
+	}
+	if slices.Contains(sums, droppedHex) {
+		t.Error("an image inside a sanitized-away compaction item was externalized into an orphaned asset " +
+			"(externalization ran before sanitization)")
+	}
+	if len(manifest.Assets) != 1 {
+		t.Errorf("expected exactly 1 externalized asset, got %d: %s", len(manifest.Assets), raw)
 	}
 }

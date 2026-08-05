@@ -2843,6 +2843,12 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; ExtractSkillEvents handles nil
 	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(agent.ExtractSkillEvents(ctx, ag, fullTranscript, 0), state.TurnID))
 
+	// Sanitize before externalizing and redacting, matching CondenseSession's
+	// sanitize -> externalize -> redact order. Skill events above are extracted from
+	// the pre-sanitization bytes because they are session telemetry rather than
+	// stored transcript content.
+	fullTranscript = agent.SanitizeTranscriptForStorage(ag, fullTranscript)
+
 	// Redact secrets before writing. Checkpoint store methods require
 	// pre-redacted in-memory transcript content from callers. The live
 	// transcript on disk is still treated as raw/untrusted input, so redact it
