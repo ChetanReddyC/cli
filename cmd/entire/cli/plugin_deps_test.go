@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -217,5 +218,74 @@ func TestPlanDependencyInstalls_WarnsOnUninspectableDep(t *testing.T) { //nolint
 	}
 	if !found {
 		t.Errorf("warnings = %v, want uninspectable-dep warning naming leaf", plan.Warnings)
+	}
+}
+
+// The manifest's SHA256 covers the downloaded asset — usually an archive that
+// is discarded with the staging dir — so it can never detect tampering of the
+// thing actually executed. BinarySHA256 covers the installed binary, which is
+// what doctor re-hashes.
+func TestRunPluginDoctor_DetectsTamperedBinary(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	withIsolatedPath(t)
+
+	dir, err := EnsurePluginPkgDir("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binPath := filepath.Join(dir, pluginBinaryName("demo"))
+	if err := os.WriteFile(binPath, []byte("original"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := fileSHA256(binPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	save := func(m *PluginManifest) {
+		t.Helper()
+		if err := SavePluginManifest(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := &PluginManifest{Name: "demo", RepoURL: "https://x.example/entire-demo", Tag: "v1.0.0", BinarySHA256: digest}
+	save(base)
+
+	doctorProblems := func() string {
+		t.Helper()
+		issues, err := RunPluginDoctor(context.Background())
+		if err != nil {
+			t.Fatalf("RunPluginDoctor: %v", err)
+		}
+		var problems []string
+		for _, i := range issues {
+			problems = append(problems, i.Problem)
+		}
+		return strings.Join(problems, " | ")
+	}
+
+	// Intact binary: no integrity complaint.
+	if got := doctorProblems(); strings.Contains(got, "no longer matches") {
+		t.Errorf("doctor flagged an intact binary: %s", got)
+	}
+
+	// Swapped out under the managed dir — the case the digest exists for.
+	if err := os.WriteFile(binPath, []byte("malicious"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := doctorProblems(); !strings.Contains(got, "no longer matches the digest recorded at install") {
+		t.Errorf("doctor missed a tampered binary: %s", got)
+	}
+
+	// A manifest predating integrity recording has nothing to compare, so
+	// staying quiet is correct rather than nagging about a likely-fine plugin.
+	save(&PluginManifest{Name: "demo", RepoURL: base.RepoURL, Tag: base.Tag})
+	if got := doctorProblems(); strings.Contains(got, "no longer matches") {
+		t.Errorf("doctor flagged a manifest without BinarySHA256: %s", got)
+	}
+
+	// An unverified install is a standing fact worth surfacing.
+	save(&PluginManifest{Name: "demo", RepoURL: base.RepoURL, Tag: base.Tag, Unverified: true})
+	if got := doctorProblems(); !strings.Contains(got, "without checksum verification") {
+		t.Errorf("doctor did not surface the unverified install: %s", got)
 	}
 }

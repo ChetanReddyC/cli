@@ -82,6 +82,102 @@ func TestAssetNameFromURL(t *testing.T) {
 	}
 }
 
+// Plaintext HTTP would let a network attacker rewrite the asset *and* the
+// checksums.txt meant to authenticate it, since both come from one origin.
+// Loopback is exempt so httptest fixtures and local forges still work.
+func TestRequireSecureAssetURL(t *testing.T) {
+	t.Parallel()
+	ok := []string{
+		"https://github.com/e/entire-run/releases/download/v1/a.tar.gz",
+		"http://127.0.0.1:8080/dl/a.tar.gz",
+		"http://[::1]:9000/dl/a.tar.gz",
+		"http://localhost:1234/dl/a.tar.gz",
+	}
+	for _, u := range ok {
+		if err := requireSecureAssetURL(u); err != nil {
+			t.Errorf("requireSecureAssetURL(%q) = %v, want nil", u, err)
+		}
+	}
+	bad := []string{
+		"http://example.com/dl/a.tar.gz",
+		"http://192.168.1.10/dl/a.tar.gz",
+		"ftp://example.com/a.tar.gz",
+		"file:///etc/passwd",
+	}
+	for _, u := range bad {
+		if err := requireSecureAssetURL(u); err == nil {
+			t.Errorf("requireSecureAssetURL(%q) = nil, want error", u)
+		}
+	}
+}
+
+// A plaintext non-loopback download must be refused at the fetch boundary,
+// not merely discouraged, so the refusal covers the author-declared
+// download_url escape hatch as well as the derived forge URLs.
+func TestDownloadPluginAsset_RefusesPlaintextHTTP(t *testing.T) {
+	t.Parallel()
+	meta := &PluginMetadata{DownloadURL: "http://plugins.example.com/dl/{asset}"}
+	_, err := downloadPluginAsset(context.Background(), meta,
+		"https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir(), false)
+	if err == nil || !strings.Contains(err.Error(), "plaintext HTTP") {
+		t.Errorf("err = %v, want a plaintext-HTTP refusal", err)
+	}
+}
+
+// A release that publishes an asset but no checksums.txt is refused by
+// default: nothing authenticates those bytes, and we are about to make them
+// executable. --allow-unverified is the explicit opt-in.
+func TestDownloadPluginAsset_UnverifiedRequiresOptIn(t *testing.T) {
+	t.Parallel()
+	asset := fmt.Sprintf("entire-run_1.0.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	payload := makeTarGz(t, map[string][]byte{"entire-run": []byte("payload")})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, asset) {
+			_, _ = w.Write(payload) //nolint:errcheck // test server write
+			return
+		}
+		http.NotFound(w, r) // no checksums.txt published
+	}))
+	defer srv.Close()
+	meta := &PluginMetadata{DownloadURL: srv.URL + "/dl/{asset}"}
+
+	staging := t.TempDir()
+	_, err := downloadPluginAsset(context.Background(), meta,
+		"https://example.invalid/entire-run", "run", "v1.0.0", staging, false)
+	if !errors.Is(err, errUnverifiedAsset) {
+		t.Fatalf("err = %v, want errUnverifiedAsset", err)
+	}
+	// The refused download must not be left behind in staging.
+	entries, dirErr := os.ReadDir(staging)
+	if dirErr != nil {
+		t.Fatal(dirErr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("refused download left %d file(s) in staging", len(entries))
+	}
+
+	fa, err := downloadPluginAsset(context.Background(), meta,
+		"https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir(), true)
+	if err != nil {
+		t.Fatalf("downloadPluginAsset with opt-in: %v", err)
+	}
+	if fa.Verified {
+		t.Error("Verified = true for a download with no checksum manifest")
+	}
+}
+
+// A fixed download_url (no {asset}) can't locate a checksum manifest at all,
+// so it is unverifiable by construction and needs the same opt-in.
+func TestDownloadPluginAsset_FixedURLRequiresOptIn(t *testing.T) {
+	t.Parallel()
+	meta := &PluginMetadata{DownloadURL: "https://dl.example.com/entire-run.tar.gz"}
+	_, err := downloadPluginAsset(context.Background(), meta,
+		"https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir(), false)
+	if !errors.Is(err, errUnverifiedAsset) {
+		t.Errorf("err = %v, want errUnverifiedAsset", err)
+	}
+}
+
 func TestAssetCandidates_CoverConventions(t *testing.T) {
 	t.Parallel()
 	cands := assetCandidates("run", "v1.2.3")
@@ -346,7 +442,7 @@ func TestDownloadPluginAsset_ViaChecksumManifest(t *testing.T) {
 	defer srv.Close()
 
 	meta := &PluginMetadata{DownloadURL: srv.URL + "/dl/{tag}/{asset}"}
-	fa, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir())
+	fa, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir(), false)
 	if err != nil {
 		t.Fatalf("downloadPluginAsset: %v", err)
 	}
@@ -369,7 +465,7 @@ func TestDownloadPluginAsset_ProbeFallbackWithoutChecksums(t *testing.T) {
 	defer srv.Close()
 
 	meta := &PluginMetadata{DownloadURL: srv.URL + "/dl/{asset}"}
-	fa, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir())
+	fa, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir(), true)
 	if err != nil {
 		t.Fatalf("downloadPluginAsset: %v", err)
 	}
@@ -378,12 +474,16 @@ func TestDownloadPluginAsset_ProbeFallbackWithoutChecksums(t *testing.T) {
 	}
 }
 
+// allowUnverified stays false here on purpose: with verification required,
+// "this tag has no release yet" must still surface as errAssetNotFound so the
+// next-highest-tag walk keeps working. Only a *found but unauthenticated*
+// asset becomes errUnverifiedAsset.
 func TestDownloadPluginAsset_NoAssetForPlatform(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()
 	meta := &PluginMetadata{DownloadURL: srv.URL + "/dl/{asset}"}
-	_, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir())
+	_, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir(), false)
 	if !errors.Is(err, errAssetNotFound) {
 		t.Errorf("err = %v, want errAssetNotFound", err)
 	}
@@ -436,7 +536,7 @@ func TestDownloadPluginAsset_StaleManifestFallsThroughToProbe(t *testing.T) {
 	}))
 	defer srv.Close()
 	meta := &PluginMetadata{DownloadURL: srv.URL + "/dl/{asset}"}
-	fa, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir())
+	fa, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir(), true)
 	if err != nil {
 		t.Fatalf("downloadPluginAsset with stale manifest: %v", err)
 	}

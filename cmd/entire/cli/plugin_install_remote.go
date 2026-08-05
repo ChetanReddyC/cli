@@ -34,6 +34,11 @@ type RemoteInstallOptions struct {
 	Pin string
 	// Force replaces an existing managed entry with the same name.
 	Force bool
+	// AllowUnverified permits installing a release that publishes no
+	// checksums.txt covering this platform. Off by default: downloading and
+	// executing an unauthenticated binary is the supply-chain risk the
+	// checksum path exists to remove, so it takes an explicit opt-in.
+	AllowUnverified bool
 }
 
 // RemoteInstallResult is what a successful remote install produced.
@@ -108,15 +113,12 @@ func installRepoAtTag(ctx context.Context, repoURL, tag string, opts RemoteInsta
 	}
 	defer os.RemoveAll(staging)
 
-	asset, err := downloadPluginAsset(ctx, meta, repoURL, name, tag, staging)
+	asset, err := downloadPluginAsset(ctx, meta, repoURL, name, tag, staging, opts.AllowUnverified)
 	if err != nil {
 		return nil, err
 	}
 
-	binBase := pluginBinaryPrefix + name
-	if runtime.GOOS == windowsGOOS {
-		binBase += ".exe"
-	}
+	binBase := pluginBinaryName(name)
 	stagedBin := filepath.Join(staging, "extracted-"+binBase)
 	if err := extractPluginBinary(asset.Path, name, stagedBin); err != nil {
 		return nil, err
@@ -132,19 +134,30 @@ func installRepoAtTag(ctx context.Context, repoURL, tag string, opts RemoteInsta
 		return nil, fmt.Errorf("place plugin binary: %w", err)
 	}
 
+	// Digest the binary we actually placed, not just the archive it came from.
+	// asset.SHA256 covers the downloaded asset, which is discarded with the
+	// staging dir — so it records provenance but can never detect later
+	// tampering. binDigest is what `plugin doctor` re-checks.
+	binDigest, err := fileSHA256(pkgBin)
+	if err != nil {
+		return nil, fmt.Errorf("hash installed plugin binary: %w", err)
+	}
+
 	installed, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: pkgBin, Force: true})
 	if err != nil {
 		return nil, err
 	}
 
 	manifest := &PluginManifest{
-		Name:        name,
-		RepoURL:     repoURL,
-		Tag:         tag,
-		Asset:       asset.Asset,
-		SHA256:      asset.SHA256,
-		Pinned:      opts.Pin != "",
-		InstalledAt: time.Now().UTC(),
+		Name:         name,
+		RepoURL:      repoURL,
+		Tag:          tag,
+		Asset:        asset.Asset,
+		SHA256:       asset.SHA256,
+		BinarySHA256: binDigest,
+		Unverified:   !asset.Verified,
+		Pinned:       opts.Pin != "",
+		InstalledAt:  time.Now().UTC(),
 	}
 	if meta != nil {
 		manifest.Requires = meta.Requires
@@ -193,7 +206,12 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 	if semver.Compare(canonicalSemver(tags[0]), canonicalSemver(m.Tag)) <= 0 {
 		return &UpgradeOutcome{Name: name, UpToDate: true}, nil
 	}
-	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: m.RepoURL, Force: true})
+	// Inherit the install-time trust decision: a plugin the user knowingly
+	// installed unverified shouldn't start failing on upgrade, and one
+	// installed verified must not silently downgrade to unverified.
+	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{
+		RepoURL: m.RepoURL, Force: true, AllowUnverified: m.Unverified,
+	})
 	if err != nil {
 		return nil, err
 	}

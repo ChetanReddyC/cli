@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,18 +20,37 @@ const (
 )
 
 // pluginReleaseServer serves goreleaser-shaped release assets for the "demo"
-// plugin at the given versions. Assets are tar.gz archives whose entire-<name> entry content is
+// plugin at the given versions, alongside the per-tag checksums.txt goreleaser
+// publishes. Assets are tar.gz archives whose entire-<name> entry content is
 // "payload-<version>", letting tests assert which version got installed.
+//
+// Serving checksums matters: installs require an authenticated download by
+// default, so a server without them would exercise only the refusal path.
 func pluginReleaseServer(t *testing.T, versions ...string) *httptest.Server {
 	t.Helper()
 	binName := pluginBinaryPrefix + "demo"
 	assets := map[string][]byte{}
+	// checksums.txt is per-tag, and the URL template routes by tag, so index
+	// the manifests by the version segment of the request path.
+	sumsByVersion := map[string][]byte{}
 	for _, v := range versions {
 		archive := makeTarGz(t, map[string][]byte{binName: []byte("payload-" + v)})
-		assets[fmt.Sprintf("%s_%s_%s_%s.tar.gz", binName, v, runtime.GOOS, runtime.GOARCH)] = archive
+		asset := fmt.Sprintf("%s_%s_%s_%s.tar.gz", binName, v, runtime.GOOS, runtime.GOARCH)
+		assets[asset] = archive
+		sumsByVersion[v] = []byte(fmt.Sprintf("%x  %s\n", sha256.Sum256(archive), asset))
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		base := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		if base == checksumsFileName {
+			for v, sums := range sumsByVersion {
+				if strings.Contains(r.URL.Path, "/v"+v+"/") || strings.Contains(r.URL.Path, "/"+v+"/") {
+					_, _ = w.Write(sums) //nolint:errcheck // test server write; failure surfaces as a client error
+					return
+				}
+			}
+			http.NotFound(w, r)
+			return
+		}
 		if data, ok := assets[base]; ok {
 			_, _ = w.Write(data) //nolint:errcheck // test server write; failure surfaces as a client error
 			return

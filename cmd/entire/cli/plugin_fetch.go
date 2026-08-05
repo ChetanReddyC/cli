@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -30,6 +31,53 @@ import (
 // trying the next-highest tag — a pushed tag whose release isn't published
 // yet) from transport errors (not worth retrying on another tag).
 var errAssetNotFound = errors.New("no matching release asset")
+
+// errUnverifiedAsset means an asset was reachable but nothing authenticated
+// it — no checksums.txt covering this platform. Distinct from
+// errAssetNotFound so it never triggers the next-highest-tag walk: falling
+// back to an older tag wouldn't make the download any more trustworthy.
+var errUnverifiedAsset = errors.New("release asset cannot be verified")
+
+// requireSecureAssetURL gates every plugin HTTP fetch on a transport that a
+// network attacker can't rewrite.
+//
+// Plaintext HTTP is not merely "less good" here: the asset and the
+// checksums.txt that authenticates it come from the same origin, so an
+// attacker who can rewrite one can rewrite both, and checksum verification
+// becomes theatre. HTTPS is therefore required for anything off-machine.
+//
+// Loopback is exempt so httptest-backed tests and local forge experiments
+// keep working — traffic that never leaves the machine has no network
+// attacker to defend against.
+func requireSecureAssetURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("parse download URL %q: %w", rawURL, err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("refusing to download %s over plaintext HTTP: the asset and its %s would share an origin, so a network attacker could replace both and checksum verification would prove nothing; serve the release over HTTPS or declare an https download_url in %s",
+			rawURL, checksumsFileName, pluginMetadataFileName)
+	default:
+		return fmt.Errorf("plugin downloads must use https; %q has scheme %q", rawURL, u.Scheme)
+	}
+}
+
+// isLoopbackHost reports whether host addresses this machine.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
 
 // pluginHTTPClient bounds the total time for a single asset download.
 // Plugins can be tens of MB; 5 minutes is generous even on slow links.
@@ -113,7 +161,7 @@ func assetCandidates(name, tag string) []string {
 	}
 	exts := []string{".tar.gz", ".zip", ""}
 	if runtime.GOOS == windowsGOOS {
-		exts = []string{".zip", ".tar.gz", ".exe"}
+		exts = []string{".zip", ".tar.gz", windowsExeExt}
 	}
 	var out []string
 	for _, ext := range exts {
@@ -124,12 +172,16 @@ func assetCandidates(name, tag string) []string {
 	return out
 }
 
+// checksumsFileName is the conventional name of a release's checksum
+// manifest (goreleaser's default).
+const checksumsFileName = "checksums.txt"
+
 // checksumCandidates returns filenames the checksum manifest may go by.
 func checksumCandidates(name, tag string) []string {
 	binName := pluginBinaryPrefix + name
 	version := strings.TrimPrefix(tag, "v")
 	return []string{
-		"checksums.txt",
+		checksumsFileName,
 		fmt.Sprintf("%s_%s_checksums.txt", binName, version),
 		binName + "_checksums.txt",
 	}
@@ -171,13 +223,18 @@ type fetchedAsset struct {
 	Asset string
 	// SHA256 is the hex digest of the downloaded bytes.
 	SHA256 string
+	// Verified is true when SHA256 was checked against a digest published in
+	// the release's checksum manifest, rather than merely computed from
+	// whatever arrived. Recorded in the install manifest so `plugin doctor`
+	// can surface unverified installs.
+	Verified bool
 }
 
 // downloadPluginAsset locates and downloads the release asset for name@tag
 // into stagingDir, verifying against the release's checksum manifest when
 // one is published. Returns errAssetNotFound (possibly wrapped) when the
 // tag has no asset for this platform.
-func downloadPluginAsset(ctx context.Context, meta *PluginMetadata, repoURL, name, tag, stagingDir string) (*fetchedAsset, error) {
+func downloadPluginAsset(ctx context.Context, meta *PluginMetadata, repoURL, name, tag, stagingDir string, allowUnverified bool) (*fetchedAsset, error) {
 	assetURL := func(asset string) (string, error) {
 		if meta != nil && meta.DownloadURL != "" {
 			return expandDownloadTemplate(meta.DownloadURL, name, tag, asset), nil
@@ -190,8 +247,13 @@ func downloadPluginAsset(ctx context.Context, meta *PluginMetadata, repoURL, nam
 	}
 
 	// A download_url template without {asset} is a single fully-specified
-	// URL; there is nothing to select.
+	// URL; there is nothing to select — and no way to locate a checksum
+	// manifest, since every candidate name would expand to the same URL.
 	if meta != nil && meta.DownloadURL != "" && !strings.Contains(meta.DownloadURL, "{asset}") {
+		if !allowUnverified {
+			return nil, fmt.Errorf("%w: %s declares a fixed download_url with no {asset} placeholder, so no %s can be located; add {asset} to the template or install with --allow-unverified",
+				errUnverifiedAsset, pluginMetadataFileName, checksumsFileName)
+		}
 		u := expandDownloadTemplate(meta.DownloadURL, name, tag, "")
 		return fetchAndVerify(ctx, u, assetNameFromURL(u), "", stagingDir)
 	}
@@ -225,9 +287,16 @@ func downloadPluginAsset(ctx context.Context, meta *PluginMetadata, repoURL, nam
 		return fetchAndVerify(ctx, au, asset, digest, stagingDir)
 	}
 
-	// Fallback: probe candidates directly (release without a checksum
-	// manifest). No digest to verify against; the manifest records the
-	// digest we computed so upgrades can at least detect drift.
+	// Fallback: probe candidates directly (a release published without a
+	// checksum manifest). Nothing authenticates these bytes, so by default an
+	// asset found this way is refused rather than installed.
+	//
+	// The probe still runs when verification is required: it distinguishes
+	// "this tag has no release yet" (errAssetNotFound, worth walking down to
+	// the next tag) from "the release exists but publishes no checksums"
+	// (errUnverifiedAsset, which an older tag wouldn't fix). Getting that
+	// wrong would report a missing release for a plugin that simply doesn't
+	// ship checksums.
 	for _, asset := range assetCandidates(name, tag) {
 		u, err := assetURL(asset)
 		if err != nil {
@@ -235,6 +304,11 @@ func downloadPluginAsset(ctx context.Context, meta *PluginMetadata, repoURL, nam
 		}
 		fa, err := fetchAndVerify(ctx, u, asset, "", stagingDir)
 		if err == nil {
+			if !allowUnverified {
+				_ = os.Remove(fa.Path)
+				return nil, fmt.Errorf("%w: %s %s publishes %s but no %s to authenticate it; ask the author to publish checksums, or install with --allow-unverified",
+					errUnverifiedAsset, name, tag, asset, checksumsFileName)
+			}
 			return fa, nil
 		}
 		if !errors.Is(err, errAssetNotFound) {
@@ -263,6 +337,9 @@ func assetNameFromURL(rawURL string) string {
 
 // httpGetSmall fetches a small text resource (checksum manifests).
 func httpGetSmall(ctx context.Context, rawURL string) ([]byte, error) {
+	if err := requireSecureAssetURL(rawURL); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request for %s: %w", rawURL, err)
@@ -297,6 +374,9 @@ func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir s
 	if asset == "" || asset == "." || asset == ".." ||
 		strings.ContainsAny(asset, `/\`) || asset != filepath.Base(asset) {
 		return nil, fmt.Errorf("unsafe release asset name %q", asset)
+	}
+	if err := requireSecureAssetURL(rawURL); err != nil {
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -340,7 +420,7 @@ func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir s
 		_ = os.Remove(dest)
 		return nil, fmt.Errorf("checksum mismatch for %s: got %s, want %s", asset, got, wantDigest)
 	}
-	return &fetchedAsset{Path: dest, Asset: asset, SHA256: got}, nil
+	return &fetchedAsset{Path: dest, Asset: asset, SHA256: got, Verified: wantDigest != ""}, nil
 }
 
 // extractPluginBinary locates the plugin executable inside the downloaded
@@ -372,7 +452,7 @@ func matchesPluginBinary(entryName, binName string) bool {
 	if base == binName {
 		return true
 	}
-	return runtime.GOOS == windowsGOOS && strings.EqualFold(base, binName+".exe")
+	return runtime.GOOS == windowsGOOS && strings.EqualFold(base, binName+windowsExeExt)
 }
 
 // safeArchiveEntry rejects entry names that could escape an extraction
@@ -429,6 +509,21 @@ func extractFromZip(archivePath, binName, destPath string) error {
 		return writeExecutable(io.LimitReader(rc, maxPluginAssetSize), destPath)
 	}
 	return fmt.Errorf("archive %s contains no %s entry", filepath.Base(archivePath), binName)
+}
+
+// fileSHA256 returns the hex SHA-256 of the file at path. Used to record the
+// installed binary's digest and to re-check it in `plugin doctor`.
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path) //nolint:gosec // path is inside the managed plugin tree
+	if err != nil {
+		return "", fmt.Errorf("open %s: %w", filepath.Base(path), err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("read %s: %w", filepath.Base(path), err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // writeExecutable writes r to destPath with the executable bit set.

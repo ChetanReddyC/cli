@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -50,18 +51,36 @@ func makeScriptTarGz(t *testing.T, name, marker string) []byte {
 	return buf.Bytes()
 }
 
-// startReleaseServer serves tar.gz assets for the named plugins/versions.
+// startReleaseServer serves tar.gz assets for the named plugins/versions,
+// plus the per-tag checksums.txt goreleaser publishes alongside them. Installs
+// require an authenticated download by default, so serving checksums is what
+// keeps these tests on the production code path rather than the refusal path.
 func startReleaseServer(t *testing.T, plugins map[string][]string) *httptest.Server {
 	t.Helper()
 	assets := map[string][]byte{}
+	// Keyed by version: checksums.txt is per-tag and the URL template routes
+	// by tag, so the handler picks the manifest from the request path.
+	sumsByVersion := map[string][]byte{}
 	for name, versions := range plugins {
 		for _, v := range versions {
 			asset := fmt.Sprintf("entire-%s_%s_%s_%s.tar.gz", name, v, runtime.GOOS, runtime.GOARCH)
-			assets[asset] = makeScriptTarGz(t, name, name+"-ran-v"+v)
+			data := makeScriptTarGz(t, name, name+"-ran-v"+v)
+			assets[asset] = data
+			sumsByVersion[v] = append(sumsByVersion[v], []byte(fmt.Sprintf("%x  %s\n", sha256.Sum256(data), asset))...)
 		}
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		base := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		if base == "checksums.txt" {
+			for v, sums := range sumsByVersion {
+				if strings.Contains(r.URL.Path, "/v"+v+"/") || strings.Contains(r.URL.Path, "/"+v+"/") {
+					_, _ = w.Write(sums) //nolint:errcheck // test server write; failure surfaces as a client error
+					return
+				}
+			}
+			http.NotFound(w, r)
+			return
+		}
 		if data, ok := assets[base]; ok {
 			_, _ = w.Write(data) //nolint:errcheck // test server write; failure surfaces as a client error
 			return

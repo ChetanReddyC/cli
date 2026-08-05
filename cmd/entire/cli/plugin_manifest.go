@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"time"
 
@@ -27,7 +28,18 @@ import (
 const (
 	pluginManagedPkgSubdir = "pkg"
 	pluginManifestFileName = "manifest.yml"
+	// windowsExeExt is the extension Windows executables need.
+	windowsExeExt = ".exe"
 )
+
+// pluginBinaryName returns the on-disk executable name for a bare plugin
+// name: entire-<name>, plus the Windows extension where the host needs it.
+func pluginBinaryName(name string) string {
+	if runtime.GOOS == windowsGOOS {
+		return pluginBinaryPrefix + name + windowsExeExt
+	}
+	return pluginBinaryPrefix + name
+}
 
 // PluginManifest records how a managed plugin was installed. Settings
 // configure behavior; manifests record facts. The dependency list is
@@ -45,6 +57,14 @@ type PluginManifest struct {
 	Asset string `yaml:"asset,omitempty"`
 	// SHA256 is the hex digest of the downloaded asset.
 	SHA256 string `yaml:"sha256,omitempty"`
+	// BinarySHA256 is the hex digest of the installed binary under
+	// pkg/<name>/. Distinct from SHA256, which covers the downloaded asset —
+	// usually an archive, and discarded with the staging dir. Recording the
+	// binary is what lets `plugin doctor` detect post-install tampering.
+	BinarySHA256 string `yaml:"binary_sha256,omitempty"`
+	// Unverified records that no checksum manifest authenticated the
+	// download (installed with --allow-unverified). Surfaced by doctor.
+	Unverified bool `yaml:"unverified,omitempty"`
 	// Pinned marks installs done with --pin; upgrade skips them.
 	Pinned bool `yaml:"pinned,omitempty"`
 	// InstalledAt is when the install (or last upgrade) completed.

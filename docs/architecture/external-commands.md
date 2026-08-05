@@ -43,8 +43,10 @@ Remote installs are deliberately forge-agnostic:
 1. **Version resolution** uses `git ls-remote --tags` — identical on GitHub, GitLab, Gitea/Forgejo, and self-hosted servers; inherits the user's git auth and proxy config. The highest semver tag wins; `--pin <tag>` installs exactly that tag and marks the manifest pinned (skipped by `upgrade`).
 2. **Metadata** is read from `entire-plugin.yml` at the repo root via a blobless shallow clone (with a plain shallow-clone fallback for servers that don't allow partial-clone filters). The file is optional; without it the plugin name derives from the repo basename (`entire-run` → `run`).
 3. **Asset download** is the one forge-specific step, contained in a small URL-convention table: GitHub/Gitea-style `<repo>/releases/download/<tag>/<asset>`, GitLab-style `<repo>/-/releases/<tag>/downloads/<asset>`, unknown hosts default to GitHub-style. Authors on other hosts declare a `download_url` template in `entire-plugin.yml` (placeholders: `{name}` `{tag}` `{version}` `{os}` `{arch}` `{asset}`).
-4. **Asset selection** prefers the release's `checksums.txt`: the manifest lists what was actually published, and the download is verified against it. Without one, goreleaser-conventional candidate names are probed (`entire-<name>_<version>_<os>_<arch>.tar.gz` and friends, with `x86_64`/`aarch64` aliases and a `darwin_all` universal-binary fallback). A pushed tag with no published assets falls back to the next-highest tag with a warning.
-5. The binary lands in `pkg/<name>/` next to a `manifest.yml` recording provenance (repo URL, tag, asset, SHA-256, pin state, dependency list), and is linked into `bin/` through the same symlink→hardlink→copy fallback as local installs. The dispatcher never changes.
+4. **Asset selection** goes through the release's `checksums.txt`: the manifest lists what was actually published, and the download is verified against it. Candidate names follow goreleaser conventions (`entire-<name>_<version>_<os>_<arch>.tar.gz` and friends, with `x86_64`/`aarch64` aliases and a `darwin_all` universal-binary fallback). A pushed tag with no published assets falls back to the next-highest tag with a warning.
+5. The binary lands in `pkg/<name>/` next to a `manifest.yml` recording provenance (repo URL, tag, asset, asset SHA-256, **binary SHA-256**, verification state, pin state, dependency list), and is linked into `bin/` through the same symlink→hardlink→copy fallback as local installs. The dispatcher never changes.
+
+The two digests are not redundant. `sha256` covers the downloaded asset, which is usually an archive and is discarded with the staging directory — provenance only, nothing left to compare against. `binary_sha256` covers the executable under `pkg/<name>/`, which is what `entire plugin doctor` re-hashes to detect a binary swapped out after install.
 
 Installing from a URL not listed in the index prints the source and asks for confirmation (`--yes` to skip; required in non-interactive runs). Index-listed repos install without prompting.
 
@@ -57,6 +59,18 @@ git parses an option-shaped positional as an option, and `--upload-pack=<cmd>` i
 Accepted forms are `https://`, `http://`, `ssh://`, `git://`, `file://`, git's `user@host:path` scp-like syntax, and absolute local paths. Anything else — a leading `-`, a bare name, a relative path, git's command-executing `ext::` transport — is rejected. Invalid index entries are dropped like invalid names (one bad row can't take out the catalog); an invalid `requires[].repo_url` fails metadata parsing, surfacing the author's mistake at install time.
 
 This mirrors `validatePluginName`, which refuses a leading `-` on names for the same reason. Regression coverage asserts the payload never executes, not merely that the call errors.
+
+#### Downloads must be authenticated, over a transport that can't be rewritten
+
+Two requirements apply to every asset fetch, both enforced at the HTTP boundary so the author-declared `download_url` escape hatch is covered as well as the derived forge URLs:
+
+**HTTPS.** Plaintext HTTP is refused for anything off-machine. This isn't stylistic: the asset and the `checksums.txt` that authenticates it come from the same origin, so an attacker who can rewrite one can rewrite both and checksum verification proves nothing. Loopback (`127.0.0.1`, `::1`, `localhost`) is exempt so `httptest` fixtures and local forge experiments keep working — traffic that never leaves the machine has no network attacker to defend against.
+
+**A checksum manifest.** A release that publishes an asset but no `checksums.txt` covering the platform is refused by default; installing means making those bytes executable, so it takes an explicit `--allow-unverified`. Two shapes are unverifiable and hit the same gate: a release with no manifest at all, and a `download_url` with no `{asset}` placeholder (every candidate name expands to one fixed URL, so no manifest can be located — add `{asset}` to fix it properly).
+
+The candidate probe still runs when verification is required, because it separates two failures that need different handling: *no release published for this tag yet* (`errAssetNotFound` — worth walking down to the next-highest tag) from *release exists but publishes no checksums* (`errUnverifiedAsset` — an older tag wouldn't be any more trustworthy, so the walk stops). Conflating them would report a missing release for a plugin that simply doesn't ship checksums.
+
+An install that used the opt-in is recorded as `unverified: true` in the manifest, reported by `entire plugin doctor` until the author publishes checksums, and inherited by `plugin upgrade` — so a knowingly-unverified plugin doesn't start failing on upgrade, and a verified one can't silently become unverified.
 
 ### Plugin index (discovery)
 
@@ -83,7 +97,7 @@ requires:
 Resolution is **install-time only** — dispatch stays zero-cost. After installing the main plugin, missing dependencies are resolved transitively (metadata-only, nothing downloaded during planning; a visited set plus depth bound make metadata cycles an error, not a hang), listed apt-style, and installed after one confirmation (`--yes` skips, `--no-deps` opts out). A declined plan is a warning, not a failure. Dependencies already satisfied from raw `$PATH` or a local-dev install count as satisfied, with a warning when `min_version` can't be verified. The requirement list is copied into the install manifest so reverse-dependency checks work offline:
 
 - `entire plugin remove sem` refuses when another manifest requires it (`--force` overrides).
-- `entire plugin doctor` reports missing/outdated dependencies, manifest/bin-dir drift, dangling local-dev symlinks, and (macOS) a `com.apple.quarantine` attribute that would block execution. Exit code 1 when issues are found.
+- `entire plugin doctor` reports missing/outdated dependencies, manifest/bin-dir drift, binaries that no longer match the `binary_sha256` recorded at install, installs that were never checksum-verified, dangling local-dev symlinks, and (macOS) a `com.apple.quarantine` attribute that would block execution. Exit code 1 when issues are found. The integrity check covers the `pkg/` binary the manifest describes; where `bin/` holds a copy rather than a link (Windows without Developer Mode), the dangling/non-executable link check is what guards that surface.
 
 > **Compatibility note:** the `entire plugin` command group is itself a built-in. Per the "built-ins win" rule above, it shadows any external command named `entire-plugin` that may have existed on `$PATH` previously. The collision is intentional — managing plugins is a built-in concern — but worth flagging for anyone who shipped an `entire-plugin` external command before this layer landed.
 

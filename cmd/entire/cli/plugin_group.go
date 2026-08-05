@@ -87,7 +87,7 @@ func classifyInstallArg(arg string) installArgKind {
 }
 
 func newPluginInstallCmd() *cobra.Command {
-	var force, yes, noDeps bool
+	var force, yes, noDeps, allowUnverified bool
 	var pin, indexFlag string
 	cmd := &cobra.Command{
 		Use:   "install <name|url|path>",
@@ -100,8 +100,9 @@ Three source forms:
              entire plugin install run
   url    Full git repository URLs install from any git host. The newest
          semver tag is resolved with 'git ls-remote'; the platform's release
-         asset is downloaded and verified against the release's
-         checksums.txt when one is published:
+         asset is downloaded over HTTPS and verified against the release's
+         checksums.txt. A release that publishes no checksums is refused
+         unless --allow-unverified is passed:
              entire plugin install https://github.com/entireio/entire-run
   path   Local executables are linked into the managed directory (symlink
          first, so rebuilds are picked up immediately). Paths must be
@@ -131,7 +132,8 @@ are listed and installed after a single confirmation (or with --yes);
 				return nil
 			}
 			return silencePluginCancel(ctx, runRemoteInstall(ctx, cmd, arg, remoteInstallFlags{
-				force: force, yes: yes, noDeps: noDeps, pin: pin, index: indexFlag,
+				force: force, yes: yes, noDeps: noDeps, allowUnverified: allowUnverified,
+				pin: pin, index: indexFlag,
 			}))
 		},
 	}
@@ -140,12 +142,14 @@ are listed and installed after a single confirmation (or with --yes);
 	cmd.Flags().BoolVar(&noDeps, "no-deps", false, "Do not install declared dependencies")
 	cmd.Flags().StringVar(&pin, "pin", "", "Install exactly this tag and skip it during 'plugin upgrade'")
 	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides settings and "+pluginIndexEnvVar+")")
+	cmd.Flags().BoolVar(&allowUnverified, "allow-unverified", false,
+		"Install even when the release publishes no "+checksumsFileName+" to authenticate the download")
 	return cmd
 }
 
 type remoteInstallFlags struct {
-	force, yes, noDeps bool
-	pin, index         string
+	force, yes, noDeps, allowUnverified bool
+	pin, index                          string
 }
 
 func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags remoteInstallFlags) error {
@@ -207,7 +211,9 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 		}
 	}
 
-	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: repoURL, Pin: flags.pin, Force: flags.force})
+	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{
+		RepoURL: repoURL, Pin: flags.pin, Force: flags.force, AllowUnverified: flags.allowUnverified,
+	})
 	if err != nil {
 		return fmt.Errorf("install plugin: %w", err)
 	}
@@ -215,19 +221,22 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 		fmt.Fprintf(errOut, "Warning: tag %s has no release asset for this platform; fell back to %s.\n", t, res.Manifest.Tag)
 	}
 	fmt.Fprintf(out, "Installed plugin %q %s from %s\n", res.Manifest.Name, res.Manifest.Tag, repoURL)
+	if res.Manifest.Unverified {
+		fmt.Fprintf(errOut, "Warning: %s published no %s; the download was not authenticated.\n", res.Manifest.Tag, checksumsFileName)
+	}
 	warnIfShadowsBuiltin(cmd, res.Manifest.Name)
 
 	if flags.noDeps || res.Metadata == nil || len(res.Metadata.Requires) == 0 {
 		return nil
 	}
-	return installPlannedDeps(ctx, cmd, res.Metadata.Requires, idx, flags.yes)
+	return installPlannedDeps(ctx, cmd, res.Metadata.Requires, idx, flags)
 }
 
 // installPlannedDeps plans, confirms once (apt-style), and executes
 // dependency installs. The main plugin is already installed at this point,
 // so a declined or non-confirmable plan degrades to a warning, not an
 // error — doctor reports the gap afterwards.
-func installPlannedDeps(ctx context.Context, cmd *cobra.Command, reqs []PluginRequirement, idx *PluginIndex, yes bool) error {
+func installPlannedDeps(ctx context.Context, cmd *cobra.Command, reqs []PluginRequirement, idx *PluginIndex, flags remoteInstallFlags) error {
 	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
 	plan, err := PlanDependencyInstalls(ctx, reqs, idx)
 	if err != nil {
@@ -249,7 +258,7 @@ func installPlannedDeps(ctx context.Context, cmd *cobra.Command, reqs []PluginRe
 			fmt.Fprintf(out, "  %s  (%s)\n", a.Name, a.RepoURL)
 		}
 	}
-	ok, err := confirmPluginAction(ctx, "Install them now?", yes)
+	ok, err := confirmPluginAction(ctx, "Install them now?", flags.yes)
 	switch {
 	case errors.Is(err, errConfirmNeedsTerminal):
 		// Non-interactive without --yes: the main install already
@@ -270,7 +279,7 @@ func installPlannedDeps(ctx context.Context, cmd *cobra.Command, reqs []PluginRe
 		fmt.Fprintln(errOut, "Skipping dependency installs; 'entire plugin doctor' will report what's missing.")
 		return nil
 	}
-	if err := ExecuteDepPlan(ctx, plan); err != nil {
+	if err := ExecuteDepPlan(ctx, plan, flags.allowUnverified); err != nil {
 		return err
 	}
 	for _, a := range plan.Actions {

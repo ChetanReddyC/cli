@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -188,9 +189,15 @@ func unverifiableVersionWarning(req PluginRequirement, source string) string {
 }
 
 // ExecuteDepPlan runs the planned installs. Upgrades pass Force.
-func ExecuteDepPlan(ctx context.Context, plan *DepPlan) error {
+// allowUnverified is inherited from the root install so a single
+// --allow-unverified covers the whole transitive set the user confirmed,
+// rather than failing partway through on the first dependency without
+// published checksums.
+func ExecuteDepPlan(ctx context.Context, plan *DepPlan, allowUnverified bool) error {
 	for _, a := range plan.Actions {
-		if _, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: a.RepoURL, Force: a.Upgrade}); err != nil {
+		if _, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{
+			RepoURL: a.RepoURL, Force: a.Upgrade, AllowUnverified: allowUnverified,
+		}); err != nil {
 			return fmt.Errorf("install dependency %q: %w", a.Name, err)
 		}
 	}
@@ -267,6 +274,7 @@ func RunPluginDoctor(ctx context.Context) ([]PluginDoctorIssue, error) {
 				Fix:     fmt.Sprintf("reinstall: entire plugin install %s --force", m.RepoURL),
 			})
 		}
+		issues = append(issues, checkManagedBinaryIntegrity(m)...)
 		for _, req := range m.Requires {
 			satisfied, warning, err := dependencySatisfied(req)
 			if err != nil {
@@ -297,6 +305,54 @@ func RunPluginDoctor(ctx context.Context) ([]PluginDoctorIssue, error) {
 		}
 	}
 	return issues, nil
+}
+
+// checkManagedBinaryIntegrity re-hashes a managed plugin's binary and
+// compares it to the digest recorded at install time, catching a binary
+// swapped out under the managed directory after install.
+//
+// This checks the pkg/ binary, which is the copy the manifest describes and
+// the target bin/ links to. Where the bin/ entry is a copy rather than a link
+// (Windows without Developer Mode), a tampered copy is not covered — the
+// dangling/non-executable link check above is what guards that surface.
+//
+// A manifest without BinarySHA256 predates integrity recording, so there is
+// nothing to compare and silence is correct; nagging about it would only tell
+// the user to reinstall a plugin that is probably fine.
+func checkManagedBinaryIntegrity(m *PluginManifest) []PluginDoctorIssue {
+	var issues []PluginDoctorIssue
+	if m.Unverified {
+		issues = append(issues, PluginDoctorIssue{
+			Plugin:  m.Name,
+			Problem: fmt.Sprintf("installed from %s without checksum verification (the release published no %s)", m.Tag, checksumsFileName),
+			Fix:     "if the author has since published checksums, re-run: entire plugin upgrade " + m.Name,
+		})
+	}
+	if m.BinarySHA256 == "" {
+		return issues
+	}
+	dir, err := PluginPkgDir(m.Name)
+	if err != nil {
+		return issues
+	}
+	binPath := filepath.Join(dir, pluginBinaryName(m.Name))
+	got, err := fileSHA256(binPath)
+	if err != nil {
+		issues = append(issues, PluginDoctorIssue{
+			Plugin:  m.Name,
+			Problem: "managed binary is missing or unreadable: " + err.Error(),
+			Fix:     fmt.Sprintf("reinstall: entire plugin install %s --force", m.RepoURL),
+		})
+		return issues
+	}
+	if !strings.EqualFold(got, m.BinarySHA256) {
+		issues = append(issues, PluginDoctorIssue{
+			Plugin:  m.Name,
+			Problem: "managed binary no longer matches the digest recorded at install; it was modified or replaced outside entire",
+			Fix:     fmt.Sprintf("reinstall from the recorded source: entire plugin install %s --force", m.RepoURL),
+		})
+	}
+	return issues
 }
 
 // quarantinedPath returns the path to flag when the file (or its symlink
