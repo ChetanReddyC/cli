@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
@@ -170,6 +171,27 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 	if err != nil {
 		return nil, err
 	}
+
+	// The cache dir is shared by every concurrent `entire plugin` invocation
+	// and syncing it is destructive: RemoveAll + clone on the cold path,
+	// fetch + `reset --hard FETCH_HEAD` on the warm one. Serialize the whole
+	// sync-and-read under an advisory lock, the same way discovery/cache.go
+	// guards its shared cache files. Without it, one process cloning while
+	// another reads index.json surfaces a spurious "no readable index.json",
+	// and two cold syncs racing can leave exactly the half-created directory
+	// the sweep below exists to recover from.
+	//
+	// The lock file is a *sibling* of the cache dir, not inside it: RemoveAll
+	// on the dir would otherwise delete the lock file while we hold it.
+	if err := os.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
+		return nil, fmt.Errorf("create index cache dir: %w", err)
+	}
+	release, err := flock.AcquireContext(ctx, dir+".lock")
+	if err != nil {
+		return nil, fmt.Errorf("lock plugin index cache: %w", err)
+	}
+	defer release()
+
 	marker := filepath.Join(dir, pluginIndexSyncMarker)
 	_, statErr := os.Stat(filepath.Join(dir, ".git"))
 	cloned := statErr == nil
@@ -189,9 +211,6 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 		// cleared the cache by hand.
 		if err := os.RemoveAll(dir); err != nil {
 			return nil, fmt.Errorf("clear stale index cache: %w", err)
-		}
-		if err := os.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
-			return nil, fmt.Errorf("create index cache dir: %w", err)
 		}
 		if _, err := gitQuiet(ctx, "clone", "--depth", "1", "--quiet", "--", indexURL, dir).Output(); err != nil {
 			return nil, fmt.Errorf("clone plugin index %s: %w%s", indexURL, err, stderrSuffix(err))

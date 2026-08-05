@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -228,5 +230,40 @@ func TestSyncPluginIndex_RecoversFromPartialClone(t *testing.T) { //nolint:paral
 	}
 	if len(idx.Plugins) != 1 {
 		t.Errorf("plugins = %d, want 1", len(idx.Plugins))
+	}
+}
+
+// The per-URL cache dir is shared by every concurrent `entire plugin`
+// invocation, and syncing it is destructive (RemoveAll + clone, or
+// fetch + reset --hard). Concurrent syncs of the same index must all return a
+// usable catalog rather than racing on partial state — including the cold-start
+// case, where every caller wants to create the same clone at once.
+func TestSyncPluginIndex_ConcurrentSyncsAreSerialized(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	url, _ := newIndexRepo(t, `{"version":1,"plugins":[{"name":"run","repo_url":"https://x.example/entire-run"}]}`)
+
+	const workers = 6
+	errs := make(chan error, workers)
+	var start sync.WaitGroup
+	start.Add(1)
+	for range workers {
+		go func() {
+			start.Wait() // maximize overlap on the cold clone
+			idx, err := SyncPluginIndex(context.Background(), url, true)
+			switch {
+			case err != nil:
+				errs <- err
+			case idx.Find("run") == nil:
+				errs <- errors.New("catalog loaded without the expected entry")
+			default:
+				errs <- nil
+			}
+		}()
+	}
+	start.Done()
+	for range workers {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent SyncPluginIndex: %v", err)
+		}
 	}
 }

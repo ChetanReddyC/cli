@@ -486,7 +486,7 @@ func extractFromTarGz(archivePath, binName, destPath string) error {
 		if hdr.Typeflag != tar.TypeReg || !safeArchiveEntry(hdr.Name) || !matchesPluginBinary(hdr.Name, binName) {
 			continue
 		}
-		return writeExecutable(io.LimitReader(tr, maxPluginAssetSize), destPath)
+		return writeExecutable(tr, destPath)
 	}
 	return fmt.Errorf("archive %s contains no %s entry", filepath.Base(archivePath), binName)
 }
@@ -506,7 +506,7 @@ func extractFromZip(archivePath, binName, destPath string) error {
 			return fmt.Errorf("open zip entry: %w", err)
 		}
 		defer rc.Close()
-		return writeExecutable(io.LimitReader(rc, maxPluginAssetSize), destPath)
+		return writeExecutable(rc, destPath)
 	}
 	return fmt.Errorf("archive %s contains no %s entry", filepath.Base(archivePath), binName)
 }
@@ -526,16 +526,31 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// writeExecutable writes r to destPath with the executable bit set.
-// Explicit chmod (not inherited archive mode) because zip-built and
-// raw-binary releases routinely lose the bit — the #1 "downloaded plugin
-// doesn't run" failure.
+// writeExecutable writes r to destPath with the executable bit set, bounded by
+// maxPluginAssetSize. Explicit chmod (not inherited archive mode) because
+// zip-built and raw-binary releases routinely lose the bit — the #1
+// "downloaded plugin doesn't run" failure.
 func writeExecutable(r io.Reader, destPath string) error {
+	return writeExecutableLimited(r, destPath, maxPluginAssetSize)
+}
+
+// writeExecutableLimited is writeExecutable with an explicit cap, so the
+// oversize path is testable without materializing 512 MiB.
+//
+// The cap lives here rather than in each caller's io.LimitReader because a
+// bare LimitReader makes truncation invisible: io.Copy returns a nil error at
+// the limit, so an archive entry larger than the cap was silently truncated
+// and installed as the plugin binary with the install reporting success. Worse
+// since binary_sha256 landed — the digest is computed from the truncated bytes,
+// so `plugin doctor` would confirm the corrupt binary as intact. Reading one
+// byte past the cap makes the overflow detectable, mirroring fetchAndVerify.
+func writeExecutableLimited(r io.Reader, destPath string, limit int64) error {
 	out, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755) //nolint:gosec // dest is inside the managed pkg tree; the binary must be executable
 	if err != nil {
 		return fmt.Errorf("create binary: %w", err)
 	}
-	if _, err := io.Copy(out, r); err != nil {
+	n, err := io.Copy(out, io.LimitReader(r, limit+1))
+	if err != nil {
 		_ = out.Close()
 		_ = os.Remove(destPath)
 		return fmt.Errorf("write binary: %w", err)
@@ -543,6 +558,10 @@ func writeExecutable(r io.Reader, destPath string) error {
 	if err := out.Close(); err != nil {
 		_ = os.Remove(destPath)
 		return fmt.Errorf("close binary: %w", err)
+	}
+	if n > limit {
+		_ = os.Remove(destPath)
+		return fmt.Errorf("plugin binary exceeds the %d byte limit", limit)
 	}
 	return nil
 }

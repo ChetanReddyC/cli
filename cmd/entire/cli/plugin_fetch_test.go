@@ -544,3 +544,63 @@ func TestDownloadPluginAsset_StaleManifestFallsThroughToProbe(t *testing.T) {
 		t.Errorf("Asset = %q, want %q via probe fallback", fa.Asset, asset)
 	}
 }
+
+// A bare io.LimitReader makes truncation invisible: io.Copy returns a nil
+// error at the cap, so an oversize archive entry was written out as the plugin
+// binary and the install reported success. Since binary_sha256 is computed from
+// the bytes on disk, doctor would then confirm the truncated binary as intact.
+func TestWriteExecutableLimited_RejectsOversize(t *testing.T) {
+	t.Parallel()
+	const limit = 32
+	dest := filepath.Join(t.TempDir(), "bin")
+
+	// Exactly at the limit is a complete file, not an overflow.
+	if err := writeExecutableLimited(bytes.NewReader(bytes.Repeat([]byte("a"), limit)), dest, limit); err != nil {
+		t.Fatalf("writeExecutableLimited at the limit: %v", err)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != limit {
+		t.Errorf("wrote %d bytes, want %d", len(got), limit)
+	}
+
+	// One byte over must fail loudly rather than truncate.
+	err = writeExecutableLimited(bytes.NewReader(bytes.Repeat([]byte("a"), limit+1)), dest, limit)
+	if err == nil {
+		t.Fatal("writeExecutableLimited accepted an oversize source")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("err = %v, want a size-limit error", err)
+	}
+	// The truncated file must not be left behind to be installed.
+	if _, statErr := os.Stat(dest); statErr == nil {
+		t.Error("oversize write left a partial binary on disk")
+	}
+}
+
+// extractPluginBinary must inherit the cap: a highly-compressible archive
+// entry can expand well past the download cap that bounded the archive itself.
+func TestExtractPluginBinary_OversizeEntryIsRejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "a.tar.gz")
+	// maxPluginAssetSize+1 zero bytes compress to a few KB, so this stays a
+	// cheap test while exercising the real cap.
+	big := make([]byte, maxPluginAssetSize+1)
+	if err := os.WriteFile(archive, makeTarGz(t, map[string][]byte{"entire-run": big}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(dir, "out")
+	err := extractPluginBinary(archive, "run", dest)
+	if err == nil {
+		t.Fatal("extractPluginBinary accepted an oversize archive entry")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("err = %v, want a size-limit error", err)
+	}
+	if _, statErr := os.Stat(dest); statErr == nil {
+		t.Error("oversize extraction left a truncated binary on disk")
+	}
+}
