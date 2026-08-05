@@ -153,15 +153,6 @@ type EntireSettings struct {
 	// Deprecated: no longer used. Exists to tolerate old settings files
 	// that still contain "strategy": "auto-commit" or similar.
 	Strategy string `json:"strategy,omitempty"`
-
-	// Deprecated: plugin discovery reads no settings at all. Retained, and
-	// ignored, purely so a file left over from when plugins.index_url and
-	// plugins.index_ttl_hours existed does not fail the strict loader — which
-	// would break every command that loads settings, not just the plugin ones,
-	// with an opaque "unknown field" error. map[string]any so any shape under
-	// the key is tolerated. See resolvePluginIndexURL for why the index URL is
-	// deliberately not settings-driven.
-	Plugins map[string]any `json:"plugins,omitempty"`
 }
 
 // ClonePreferences stores clone-local, uncommitted preferences that should be

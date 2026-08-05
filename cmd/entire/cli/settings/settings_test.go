@@ -1397,33 +1397,3 @@ func TestIsSetUpAndEnabled_LocalSettingsOnly(t *testing.T) {
 		t.Fatal("IsSetUpAndEnabled should be true when only settings.local.json exists and is enabled")
 	}
 }
-
-// plugins.index_url and plugins.index_ttl_hours were removed: the index URL is
-// no longer settings-driven, because .entire/settings.json is committed and an
-// index-listed plugin installs without a prompt. A file left over from when the
-// key existed must not fail the strict loader — that would break every command
-// that loads settings, not just plugin ones.
-func TestLoadSettings_ToleratesRemovedPluginsKey(t *testing.T) { //nolint:paralleltest // mutates env
-	dir := t.TempDir()
-	entireDir := filepath.Join(dir, ".entire")
-	if err := os.MkdirAll(entireDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled":true,"plugins":{"index_url":"https://x.example/idx","index_ttl_hours":48}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// Also in the local override, which goes through the strict merge path.
-	if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"),
-		[]byte(`{"plugins":{"index_url":"https://y.example/idx"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(dir)
-	s, err := Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load() rejected a leftover plugins key: %v", err)
-	}
-	if !s.Enabled {
-		t.Error("sibling settings were lost")
-	}
-}
