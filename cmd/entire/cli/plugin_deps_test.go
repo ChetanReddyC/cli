@@ -289,3 +289,61 @@ func TestRunPluginDoctor_DetectsTamperedBinary(t *testing.T) { //nolint:parallel
 		t.Errorf("doctor did not surface the unverified install: %s", got)
 	}
 }
+
+// Diamond dependency with differing minimums: A needs sem >= v1.0.0, B needs
+// sem >= v2.0.0, and sem is installed at v1.5.0. A name-only visited set
+// marked sem handled on the first (satisfied) requirement and skipped the
+// second entirely — no action, no warning — so the install completed leaving B
+// against a too-old sem. Doctor caught it after the fact, but the install
+// should plan the upgrade rather than defer the discovery.
+func TestPlanDependencyInstalls_StricterConstraintOnVisitedDep(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	withIsolatedPath(t)
+	const dep, depRepo = "sem", "https://x.example/entire-sem"
+	if err := SavePluginManifest(&PluginManifest{
+		Name: dep, RepoURL: depRepo, Tag: "v1.5.0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ordered weakest-first: the weak requirement is satisfied and would have
+	// closed the name off to the stricter one that follows.
+	plan, err := PlanDependencyInstalls(context.Background(), []PluginRequirement{
+		{Name: dep, RepoURL: depRepo, MinVersion: "v1.0.0"},
+		{Name: dep, RepoURL: depRepo, MinVersion: "v2.0.0"},
+	}, &PluginIndex{})
+	if err != nil {
+		t.Fatalf("PlanDependencyInstalls: %v", err)
+	}
+	if len(plan.Actions) != 1 {
+		t.Fatalf("actions = %+v, want exactly one upgrade for sem", plan.Actions)
+	}
+	a := plan.Actions[0]
+	if a.Name != dep || !a.Upgrade || a.CurrentTag != "v1.5.0" || a.MinVersion != "v2.0.0" {
+		t.Errorf("action = %+v, want sem upgrade from v1.5.0 for min v2.0.0", a)
+	}
+
+	// The reverse order must not double-plan: the stricter requirement is
+	// handled first and the weaker one adds nothing.
+	plan, err = PlanDependencyInstalls(context.Background(), []PluginRequirement{
+		{Name: dep, RepoURL: depRepo, MinVersion: "v2.0.0"},
+		{Name: dep, RepoURL: depRepo, MinVersion: "v1.0.0"},
+	}, &PluginIndex{})
+	if err != nil {
+		t.Fatalf("PlanDependencyInstalls (reversed): %v", err)
+	}
+	if len(plan.Actions) != 1 {
+		t.Errorf("reversed actions = %+v, want exactly one", plan.Actions)
+	}
+
+	// A dep with no minimum at all stays satisfied and unplanned.
+	plan, err = PlanDependencyInstalls(context.Background(), []PluginRequirement{
+		{Name: dep, RepoURL: depRepo},
+	}, &PluginIndex{})
+	if err != nil {
+		t.Fatalf("PlanDependencyInstalls (no minimum): %v", err)
+	}
+	if len(plan.Actions) != 0 {
+		t.Errorf("no-minimum actions = %+v, want none", plan.Actions)
+	}
+}

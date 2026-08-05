@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"golang.org/x/mod/semver"
@@ -51,30 +52,77 @@ type DepPlan struct {
 // visited set plus a depth bound make cycles an error path, not a hang.
 func PlanDependencyInstalls(ctx context.Context, rootReqs []PluginRequirement, idx *PluginIndex) (*DepPlan, error) {
 	plan := &DepPlan{}
-	visited := map[string]bool{}
-	if err := planDeps(ctx, rootReqs, idx, plan, visited, 0); err != nil {
+	// name -> strictest min_version considered so far, not a plain seen-set:
+	// see planDeps.
+	considered := map[string]string{}
+	if err := planDeps(ctx, rootReqs, idx, plan, considered, 0); err != nil {
 		return nil, err
 	}
 	return plan, nil
 }
 
-func planDeps(ctx context.Context, reqs []PluginRequirement, idx *PluginIndex, plan *DepPlan, visited map[string]bool, depth int) error {
+// stricterMinVersion reports whether a demands a higher minimum than b.
+// An empty string means "no minimum": nothing is stricter than it, and any
+// concrete minimum is stricter than it.
+func stricterMinVersion(a, b string) bool {
+	switch {
+	case a == "":
+		return false
+	case b == "":
+		return true
+	default:
+		return semver.Compare(canonicalSemver(a), canonicalSemver(b)) > 0
+	}
+}
+
+// upsertDepAction keeps one action per plugin name, replacing an earlier
+// entry when a stricter requirement supersedes it.
+func upsertDepAction(plan *DepPlan, action DepAction) {
+	for i := range plan.Actions {
+		if plan.Actions[i].Name == action.Name {
+			plan.Actions[i] = action
+			return
+		}
+	}
+	plan.Actions = append(plan.Actions, action)
+}
+
+// addDepWarning appends a warning unless it is already present. Re-visiting a
+// name under a stricter constraint can re-derive the same observation, and
+// printing it twice would just look like a bug.
+func addDepWarning(plan *DepPlan, warning string) {
+	if warning == "" || slices.Contains(plan.Warnings, warning) {
+		return
+	}
+	plan.Warnings = append(plan.Warnings, warning)
+}
+
+func planDeps(ctx context.Context, reqs []PluginRequirement, idx *PluginIndex, plan *DepPlan, considered map[string]string, depth int) error {
 	if depth > maxDepDepth {
 		return fmt.Errorf("dependency chain deeper than %d; cycle in plugin metadata?", maxDepDepth)
 	}
 	for _, req := range reqs {
-		if visited[req.Name] {
+		// Keyed by name *and* gated on the strictest min_version seen so far,
+		// not a plain seen-set. In a diamond where two requirers demand
+		// different minimums of the same plugin (A needs C >= v1, B needs
+		// C >= v2), a name-only set skipped B's stricter constraint entirely:
+		// an installed C satisfying v1 produced no action and no warning, so
+		// the install completed leaving B running against a too-old C. Doctor
+		// caught it afterwards — it walks each manifest's requirements
+		// independently — but the install should plan the upgrade, not defer
+		// the discovery.
+		if prev, seen := considered[req.Name]; seen && !stricterMinVersion(req.MinVersion, prev) {
 			continue
 		}
-		visited[req.Name] = true
+		// Past the guard this name is either new or strictly stricter than
+		// what was recorded, so this requirement's minimum is the one to keep.
+		considered[req.Name] = req.MinVersion
 
 		satisfied, warning, err := dependencySatisfied(req)
 		if err != nil {
 			return err
 		}
-		if warning != "" {
-			plan.Warnings = append(plan.Warnings, warning)
-		}
+		addDepWarning(plan, warning)
 		if satisfied {
 			// An already-satisfied managed dependency can itself have
 			// gaps (e.g. its own dep was removed with --force since
@@ -88,7 +136,7 @@ func planDeps(ctx context.Context, reqs []PluginRequirement, idx *PluginIndex, p
 				return err
 			}
 			if m != nil {
-				if err := planDeps(ctx, m.Requires, idx, plan, visited, depth+1); err != nil {
+				if err := planDeps(ctx, m.Requires, idx, plan, considered, depth+1); err != nil {
 					return err
 				}
 			}
@@ -120,7 +168,7 @@ func planDeps(ctx context.Context, reqs []PluginRequirement, idx *PluginIndex, p
 				return fmt.Errorf("dependency %q is not installed and has no repo URL (not in the plugin index either); add repo_url to the requirement or install it manually", req.Name)
 			}
 		}
-		plan.Actions = append(plan.Actions, action)
+		upsertDepAction(plan, action)
 
 		// Recurse into what the dependency itself requires, using metadata
 		// only — nothing is downloaded during planning. Inspection
@@ -133,18 +181,18 @@ func planDeps(ctx context.Context, reqs []PluginRequirement, idx *PluginIndex, p
 			tag = tags[0]
 		}
 		if tag == "" {
-			plan.Warnings = append(plan.Warnings, fmt.Sprintf("could not list tags for %q (%s); its own dependencies were not inspected — 'entire plugin doctor' will report any gaps", req.Name, action.RepoURL))
+			addDepWarning(plan, fmt.Sprintf("could not list tags for %q (%s); its own dependencies were not inspected — 'entire plugin doctor' will report any gaps", req.Name, action.RepoURL))
 			continue
 		}
 		meta, err := fetchPluginMetadataAtTag(ctx, action.RepoURL, tag)
 		if err != nil {
-			plan.Warnings = append(plan.Warnings, fmt.Sprintf("could not read %s for %q at %s; its own dependencies were not inspected — 'entire plugin doctor' will report any gaps", pluginMetadataFileName, req.Name, tag))
+			addDepWarning(plan, fmt.Sprintf("could not read %s for %q at %s; its own dependencies were not inspected — 'entire plugin doctor' will report any gaps", pluginMetadataFileName, req.Name, tag))
 			continue
 		}
 		if meta == nil {
 			continue // no metadata file: no declared dependencies
 		}
-		if err := planDeps(ctx, meta.Requires, idx, plan, visited, depth+1); err != nil {
+		if err := planDeps(ctx, meta.Requires, idx, plan, considered, depth+1); err != nil {
 			return err
 		}
 	}
