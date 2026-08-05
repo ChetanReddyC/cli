@@ -393,10 +393,11 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	// fetch+replay recovery, and remove from the queue only the refs that land
 	// (a genuine cherry-pick conflict leaves that ref queued for a later push,
 	// never force-overwriting the remote).
-	// Deliberately does not claim divergence: a rejected batch is just as often
-	// an unreachable or unauthorized destination, and telling a user with a dead
-	// remote that their refs "diverged" sends them after the wrong problem.
-	fmt.Fprintf(os.Stderr, "[entire] Checkpoint ref push was rejected; retrying %d ref(s) individually...", len(existing))
+	// Deliberately names no cause: the batch fails on divergence, but just as
+	// often on an unreachable or unauthorized destination. Telling a user with a
+	// dead remote that their refs "diverged" — or were "rejected", which equally
+	// implies the remote answered — sends them after the wrong problem.
+	fmt.Fprintf(os.Stderr, "[entire] Checkpoint ref push failed; retrying %d ref(s) individually...", len(existing))
 	stop = startProgressDots(os.Stderr)
 	pushed := make([]plumbing.ReferenceName, 0, len(existing))
 	var firstErr error
