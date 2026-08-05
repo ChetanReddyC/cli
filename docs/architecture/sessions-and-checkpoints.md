@@ -197,22 +197,28 @@ in `lifecycle.go`, before `.entire/metadata/<session>/full.jsonl` is written). C
 implements it to strip encrypted reasoning payloads and compaction blobs, which are
 bound to the originating session and cannot be replayed out of a checkpoint.
 
-Every path that builds a stored transcript runs the same three steps in the same
-order — **sanitize → externalize images → redact**:
+Sanitization always runs before redaction, but the paths differ in whether image
+externalization happens at all:
 
-| Path | Where |
-|---|---|
-| Stop (shadow branch) | `lifecycle.go`, before `full.jsonl` is written |
-| Post-commit condensation | `prepareTranscriptForStorage` in `manual_commit_condensation.go` |
-| Stop finalize (full-session rewrite) | `manual_commit_hooks.go`, before `extractSessionImages` |
+| Path | Pipeline | Where |
+|---|---|---|
+| Stop (shadow branch) | sanitize → redact | `lifecycle.go` sanitizes before `full.jsonl` is written; the metadata-dir walker (`createRedactedBlobFromFile`) redacts it into the shadow tree |
+| Post-commit condensation | sanitize → externalize → redact | `prepareTranscriptForStorage` in `manual_commit_condensation.go` |
+| Stop finalize (full-session rewrite) | sanitize → externalize → redact | `manual_commit_hooks.go`, before `extractSessionImages` |
 
-Each step must precede the next. Sanitizing first avoids externalizing images out of
-items that are about to be discarded — that would store an asset whose referencing
-transcript line disappears moments later — and avoids redacting megabytes of
-ciphertext only to throw it away; base64 is the pathological input for the entropy
-layer, so a large Codex rollout otherwise costs tens of seconds per Stop *and* per
-commit. Externalizing before redaction is required because base64 is high-entropy
-and redaction would otherwise flag and destroy it.
+**Image externalization runs only on the committed paths** (condensation and
+finalize). The shadow-branch copy is never externalized, so inline images there are
+subject to redaction like any other high-entropy content — do not assume a shadow
+transcript preserves them. Assets and the `assets/manifest.json` index exist only
+under committed checkpoints.
+
+Where all three steps run, each must precede the next. Sanitizing first avoids
+externalizing images out of items that are about to be discarded — that would store
+an asset whose referencing transcript line disappears moments later — and avoids
+redacting megabytes of ciphertext only to throw it away; base64 is the pathological
+input for the entropy layer, so a large Codex rollout otherwise costs tens of seconds
+per Stop *and* per commit. Externalizing before redaction is required because base64
+is high-entropy and redaction would otherwise flag and destroy it.
 
 The sanitize transform is idempotent, so a downstream write path can call it without
 knowing whether an upstream path already did (`checkpoint.sanitizeForAgentType` is

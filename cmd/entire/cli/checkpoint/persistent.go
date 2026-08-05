@@ -1058,7 +1058,10 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 			rawData = nil
 		}
 		if len(rawData) > 0 {
-			redacted, redactErr := redact.JSONLBytes(rawData)
+			// Sanitize BEFORE redacting, matching the pipeline order everywhere else:
+			// redaction must not scan ciphertext that sanitization is about to
+			// discard. This is the one path that reaches the store with raw bytes.
+			redacted, redactErr := redact.JSONLBytes(sanitizeForAgentType(opts.Agent, rawData))
 			if redactErr != nil {
 				return false, nil, fmt.Errorf("failed to redact transcript from file: %w", redactErr)
 			}
@@ -1069,9 +1072,10 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 		return false, nil, nil
 	}
 
-	// Sanitize non-portable agent state out of the stored copy. Idempotent, so this
-	// is a no-op when the Stop path already sanitized (see lifecycle.go) and still
-	// covers transcripts that reach us raw (the TranscriptPath fallback above).
+	// Safety net for in-memory callers that reached the store without sanitizing
+	// (notably `entire import`, which writes raw third-party rollouts). Idempotent,
+	// so it is a no-op for the paths that already did it — including the fallback
+	// above.
 	transcriptBytes = sanitizeForAgentType(opts.Agent, transcriptBytes)
 
 	// Chunk the transcript if it's too large
