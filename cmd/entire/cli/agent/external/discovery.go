@@ -98,16 +98,18 @@ func discoverAndRegisterNamed(ctx context.Context, name types.AgentName, timeout
 		return nil
 	}
 
-	callerCtx := ctx
-	ctx, cancel := context.WithTimeout(callerCtx, timeout)
+	// `ctx` deliberately stays the CALLER's context; the derived timeout gets its own
+	// name. Shadowing `ctx` with the derived context is what caused the bug this
+	// function is guarding against, and it left the trap in place for the next edit.
+	discoveryCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if err := discoveryCtxErr(callerCtx, ctx, fmt.Sprintf("discovering external agent %q", name)); err != nil {
+	if err := discoveryCtxErr(ctx, discoveryCtx, fmt.Sprintf("discovering external agent %q", name)); err != nil {
 		return err
 	}
 
 	binName := binaryPrefix + string(name)
 	binPath, err := lookPathExternalAgent(binName)
-	if ctxErr := discoveryCtxErr(callerCtx, ctx, fmt.Sprintf("looking up external agent %q binary %q", name, binName)); ctxErr != nil {
+	if ctxErr := discoveryCtxErr(ctx, discoveryCtx, fmt.Sprintf("looking up external agent %q binary %q", name, binName)); ctxErr != nil {
 		return ctxErr
 	}
 	if err != nil {
@@ -116,7 +118,7 @@ func discoverAndRegisterNamed(ctx context.Context, name types.AgentName, timeout
 		}
 		return fmt.Errorf("looking up external agent %q binary %q: %w", name, binName, err)
 	}
-	registered, err := registerExternalAgent(ctx, binPath, name)
+	registered, err := registerExternalAgent(discoveryCtx, binPath, name)
 	if err != nil {
 		return err
 	}
@@ -128,8 +130,8 @@ func discoverAndRegisterNamed(ctx context.Context, name types.AgentName, timeout
 
 // discoverAndRegister contains the shared scanning logic for external agent discovery.
 func discoverAndRegister(ctx context.Context) {
-	callerCtx := ctx
-	ctx, cancel := context.WithTimeout(callerCtx, discoveryTimeout)
+	// As above: `ctx` remains the caller's, the derived timeout is named.
+	discoveryCtx, cancel := context.WithTimeout(ctx, discoveryTimeout)
 	defer cancel()
 
 	pathEnv := os.Getenv("PATH")
@@ -145,7 +147,7 @@ func discoverAndRegister(ctx context.Context) {
 
 	seen := make(map[string]bool) // deduplicate binaries across PATH dirs
 	for _, dir := range filepath.SplitList(pathEnv) {
-		if discoveryCanceled(callerCtx, ctx) {
+		if discoveryCanceled(ctx, discoveryCtx) {
 			logging.Debug(ctx, "external agent discovery timed out")
 			return
 		}
@@ -155,7 +157,7 @@ func discoverAndRegister(ctx context.Context) {
 			continue // skip unreadable directories
 		}
 		for _, binPath := range matches {
-			if discoveryCanceled(callerCtx, ctx) {
+			if discoveryCanceled(ctx, discoveryCtx) {
 				logging.Debug(ctx, "external agent discovery timed out")
 				return
 			}
@@ -177,7 +179,7 @@ func discoverAndRegister(ctx context.Context) {
 				continue
 			}
 
-			registeredAgent, err := registerExternalAgent(ctx, binPath, agentName)
+			registeredAgent, err := registerExternalAgent(discoveryCtx, binPath, agentName)
 			if err != nil {
 				logging.Debug(ctx, "skipping external agent (registration failed)",
 					slog.String("binary", binPath),
