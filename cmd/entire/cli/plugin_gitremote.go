@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -12,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"golang.org/x/mod/semver"
 )
 
@@ -36,21 +36,28 @@ const pluginGitTimeout = 2 * time.Minute
 // environment that cannot block on a prompt.
 //
 // Output() (not Run()) so stderr lands in the ExitError for error messages.
-// LC_ALL=C keeps git's messages in English: fetchPluginMetadataAtTag decides
+// LC_ALL=C/LANG=C keep git's messages in English: fetchPluginMetadataAtTag decides
 // the benign "no metadata file" case by substring-matching git's stderr, and
 // git builds with NLS translate those strings — on a localized host every
 // plugin repo without an entire-plugin.yml (the documented default) would
 // otherwise fail to install. BatchMode stops ssh prompting for a key
-// passphrase on /dev/tty, which GIT_TERMINAL_PROMPT does not cover.
+// passphrase on /dev/tty, which GIT_TERMINAL_PROMPT does not cover — but only
+// when the user has not set GIT_SSH_COMMAND themselves.
 func runGitQuiet(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, pluginGitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = append(os.Environ(),
-		"GIT_TERMINAL_PROMPT=0",
-		"LC_ALL=C",
-		"GIT_SSH_COMMAND=ssh -oBatchMode=yes",
-	)
+	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
+	// Only supply a batch-mode ssh when the user has not configured one. A
+	// blanket GIT_SSH_COMMAND would override both the env var and
+	// core.sshCommand, discarding a custom ssh invocation (jump hosts, an
+	// explicit identity) and breaking clones that only work through it.
+	// Respecting an existing setting costs the passphrase-prompt guard in that
+	// one case, which is the right trade — the user chose that command.
+	if _, set := os.LookupEnv("GIT_SSH_COMMAND"); !set {
+		env = append(env, "GIT_SSH_COMMAND=ssh -oBatchMode=yes")
+	}
+	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
 		// Wrapped by callers with the operation and (redacted) URL; the bare
@@ -60,18 +67,16 @@ func runGitQuiet(ctx context.Context, args ...string) ([]byte, error) {
 	return out, nil
 }
 
-// redactURL strips any userinfo from a URL so credentials embedded in a remote
-// (https://user:token@host/repo) never reach stderr, .entire/logs/ — which
-// lives in the user's working tree and is collected wholesale by
-// `entire doctor bundle` — or a persisted manifest.yml at mode 0644.
-// Non-URL inputs are returned unchanged; there is nothing to strip.
+// redactURL strips credentials from a URL so they never reach stderr,
+// .entire/logs/ — which lives in the user's working tree and is collected
+// wholesale by `entire doctor bundle` — or a persisted manifest.yml.
+//
+// Delegates to the repo-wide helper rather than reimplementing it: that one also
+// drops the query string, which matters here because release hosts redirect to
+// signed CDN URLs carrying ?token=/X-Amz-Signature=. A local implementation that
+// only stripped userinfo would have leaked those.
 func redactURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.User == nil {
-		return raw
-	}
-	u.User = nil
-	return u.String()
+	return gitremote.RedactURL(raw)
 }
 
 // redactCredentials removes userinfo from any URL appearing in free text, for
@@ -120,7 +125,7 @@ func validatePluginRepoURL(rawURL string) error {
 		return errors.New("repository URL is empty")
 	}
 	if strings.HasPrefix(u, "-") {
-		return fmt.Errorf("repository URL %q must not start with '-'", rawURL)
+		return fmt.Errorf("repository URL %q must not start with '-'", redactURL(rawURL))
 	}
 	for _, scheme := range gitURLSchemes {
 		if strings.HasPrefix(u, scheme) && len(u) > len(scheme) {
@@ -131,7 +136,7 @@ func validatePluginRepoURL(rawURL string) error {
 		return nil
 	}
 	return fmt.Errorf("repository URL %q must use one of %s or git's user@host:path form",
-		rawURL, strings.Join(gitURLSchemes, ", "))
+		redactURL(rawURL), strings.Join(gitURLSchemes, ", "))
 }
 
 // listRemoteSemverTags returns the repo's semver tags ("v"-prefixed or

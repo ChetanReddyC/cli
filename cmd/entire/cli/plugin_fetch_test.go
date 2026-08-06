@@ -716,6 +716,11 @@ func TestRedactURL(t *testing.T) {
 		{"https://token@git.example.com/o/r", "https://git.example.com/o/r"},
 		{"https://git.example.com/o/r", "https://git.example.com/o/r"},
 		{"git@github.com:o/r.git", "git@github.com:o/r.git"},
+		// Signed CDN redirects carry the secret in the query, not the
+		// userinfo — release hosts redirect asset downloads to exactly this
+		// shape, so stripping only userinfo would still leak.
+		{"https://cdn.example.com/a.tar.gz?X-Amz-Signature=deadbeef", "https://cdn.example.com/a.tar.gz"},
+		{"https://cdn.example.com/a.tar.gz?token=s3cr3t", "https://cdn.example.com/a.tar.gz"},
 	}
 	for _, tt := range tests {
 		if got := redactURL(tt.in); got != tt.want {

@@ -141,10 +141,17 @@ are listed and installed after a single confirmation (or with --yes);
 	cmd.Flags().BoolVar(&yes, "yes", false, "Skip confirmation prompts (non-index sources, dependency installs)")
 	cmd.Flags().BoolVar(&noDeps, "no-deps", false, "Do not install declared dependencies")
 	cmd.Flags().StringVar(&pin, "pin", "", "Install exactly this tag and skip it during 'plugin upgrade'")
-	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides "+pluginIndexEnvVar+" and the built-in default)")
+	addIndexFlag(cmd, &indexFlag)
 	cmd.Flags().BoolVar(&allowUnverified, "allow-unverified", false,
 		"Install even when the release publishes no "+checksumsFileName+" to authenticate the download")
 	return cmd
+}
+
+// addIndexFlag registers --index on cmd. Five subcommands accept it; the help
+// text lived in five places before this.
+func addIndexFlag(cmd *cobra.Command, target *string) {
+	cmd.Flags().StringVar(target, "index", "",
+		"Plugin index URL (overrides "+pluginIndexEnvVar+" and the built-in default)")
 }
 
 type remoteInstallFlags struct {
@@ -158,13 +165,15 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 	repoURL := arg
 	var trusted bool
 	var expectedName string
-	var idx *PluginIndex
+
+	// Both paths need the catalog: one to resolve a name, the other for the
+	// trust check. Sync once. An unreachable index is fatal only for the
+	// name-resolution path; a URL install degrades to "not listed".
+	idx, idxErr := SyncPluginIndex(ctx, resolvePluginIndexURL(flags.index), false)
 
 	if classifyInstallArg(arg) == installFromIndex {
-		var err error
-		idx, err = SyncPluginIndex(ctx, resolvePluginIndexURL(flags.index), false)
-		if err != nil {
-			return fmt.Errorf("resolve %q via plugin index: %w", arg, err)
+		if idxErr != nil {
+			return fmt.Errorf("resolve %q via plugin index: %w", arg, idxErr)
 		}
 		entry := idx.Find(arg)
 		if entry == nil {
@@ -187,17 +196,12 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 		expectedName = entry.Name
 		trusted = true
 	} else {
-		// URL install: the index is only consulted for the trust check.
-		// An unreachable index degrades to "not listed" rather than
-		// blocking the install.
-		var idxErr error
-		idx, idxErr = SyncPluginIndex(ctx, resolvePluginIndexURL(flags.index), false)
 		trusted = idxErr == nil && idx.HasRepoURL(repoURL)
 	}
 
 	if !trusted {
 		ok, err := confirmPluginAction(ctx,
-			fmt.Sprintf("Install from %s? The repository is not listed in the plugin index.", repoURL),
+			fmt.Sprintf("Install from %s? The repository is not listed in the plugin index.", redactURL(repoURL)),
 			flags.yes)
 		switch {
 		case errors.Is(err, errConfirmNeedsTerminal):
@@ -226,7 +230,7 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 	for _, t := range res.SkippedTags {
 		fmt.Fprintf(errOut, "Warning: tag %s has no release asset for this platform; fell back to %s.\n", t, res.Manifest.Tag)
 	}
-	fmt.Fprintf(out, "Installed plugin %q %s from %s\n", res.Manifest.Name, res.Manifest.Tag, repoURL)
+	fmt.Fprintf(out, "Installed plugin %q %s from %s\n", res.Manifest.Name, res.Manifest.Tag, redactURL(repoURL))
 	if res.Manifest.Unverified {
 		fmt.Fprintf(errOut, "Warning: %s published no %s; the download was not authenticated.\n", res.Manifest.Tag, checksumsFileName)
 	}
@@ -328,7 +332,7 @@ func confirmPluginAction(ctx context.Context, prompt string, assumeYes bool) (bo
 }
 
 // silencePluginCancel maps Ctrl+C-induced failures to a SilentError per the
-// codebase convention (clean.go, activity_cmd.go) — printing "context
+// codebase convention (clean.go, session_tokens.go) — printing "context
 // canceled" at a user who just interrupted a clone or download is noise.
 // The ctx.Err() check matters because a killed git child surfaces as
 // "signal: killed", not context.Canceled, when the cancellation raced the
@@ -526,7 +530,7 @@ func newPluginSearchCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides "+pluginIndexEnvVar+" and the built-in default)")
+	addIndexFlag(cmd, &indexFlag)
 	return cmd
 }
 
@@ -609,7 +613,7 @@ func newPluginInfoCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides "+pluginIndexEnvVar+" and the built-in default)")
+	addIndexFlag(cmd, &indexFlag)
 	return cmd
 }
 
@@ -653,7 +657,7 @@ func newPluginBrowseCmd() *cobra.Command {
 			return silencePluginCancel(ctx, runRemoteInstall(ctx, cmd, choice, remoteInstallFlags{index: indexFlag}))
 		},
 	}
-	cmd.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides "+pluginIndexEnvVar+" and the built-in default)")
+	addIndexFlag(cmd, &indexFlag)
 	return cmd
 }
 
@@ -699,11 +703,11 @@ func newPluginIndexCmd() *cobra.Command {
 			if err != nil {
 				return silencePluginCancel(ctx, err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Index %s: %d plugin(s).\n", url, len(idx.Plugins))
+			fmt.Fprintf(cmd.OutOrStdout(), "Index %s: %d plugin(s).\n", redactURL(url), len(idx.Plugins))
 			return nil
 		},
 	}
-	update.Flags().StringVar(&indexFlag, "index", "", "Plugin index URL (overrides "+pluginIndexEnvVar+" and the built-in default)")
+	addIndexFlag(update, &indexFlag)
 	cmd.AddCommand(update)
 	return cmd
 }

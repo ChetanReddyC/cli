@@ -234,7 +234,10 @@ func TestPluginRemoteInstall_DependenciesAndRemoveGuard(t *testing.T) {
 	srv := startReleaseServer(t, map[string][]string{"brainy": {"0.1.0"}, "semy": {"0.1.0"}})
 	semRepo := newPluginRepo(t, fmt.Sprintf("name: semy\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL), "v0.1.0")
 	brainRepo := newPluginRepo(t, fmt.Sprintf(
-		"name: brainy\ndownload_url: \"%s/dl/{tag}/{asset}\"\nrequires:\n  - name: semy\n    repo_url: %s\n", srv.URL, semRepo), "v0.1.0")
+		// requires[] has no repo_url any more; a leftover one must be ignored and
+		// the dependency resolved from the index. Point it somewhere unreachable
+		// so honoring it would fail the test loudly.
+		"name: brainy\ndownload_url: \"%s/dl/{tag}/{asset}\"\nrequires:\n  - name: semy\n    repo_url: https://unreachable.invalid/entire-semy\n", srv.URL), "v0.1.0")
 	indexURL := newIndexRepo(t, fmt.Sprintf(
 		`{"version":1,"plugins":[{"name":"brainy","repo_url":"%s"},{"name":"semy","repo_url":"%s"}]}`, brainRepo, semRepo))
 	env, workDir := pluginTestEnv(t, indexURL)

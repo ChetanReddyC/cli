@@ -115,12 +115,12 @@ func planDeps(ctx context.Context, reqs []PluginRequirement, idx *PluginIndex, p
 		// what was recorded, so this requirement's minimum is the one to keep.
 		considered[req.Name] = req.MinVersion
 
-		satisfied, warning, err := dependencySatisfied(req)
+		status, err := dependencySatisfied(req)
 		if err != nil {
 			return err
 		}
-		addDepWarning(plan, warning)
-		if satisfied {
+		addDepWarning(plan, status.Warning)
+		if status.Satisfied {
 			// An already-satisfied managed dependency can itself have
 			// gaps (e.g. its own dep was removed with --force since
 			// install). Walk its recorded requirements — offline, from
@@ -128,24 +128,16 @@ func planDeps(ctx context.Context, reqs []PluginRequirement, idx *PluginIndex, p
 			// chain instead of stopping at the first satisfied node.
 			// PATH/local-dev installs have no manifest; doctor covers
 			// those.
-			m, err := LoadPluginManifest(req.Name)
-			if err != nil {
-				return err
-			}
-			if m != nil {
-				if err := planDeps(ctx, m.Requires, idx, plan, considered, depth+1); err != nil {
+			if status.Manifest != nil {
+				if err := planDeps(ctx, status.Manifest.Requires, idx, plan, considered, depth+1); err != nil {
 					return err
 				}
 			}
 			continue
 		}
 
-		m, err := LoadPluginManifest(req.Name)
-		if err != nil {
-			return err
-		}
 		action := DepAction{Name: req.Name, MinVersion: req.MinVersion}
-		if m != nil {
+		if m := status.Manifest; m != nil {
 			// Installed but below min_version: upgrade in place from its
 			// recorded repo.
 			action.Upgrade = true
@@ -198,28 +190,43 @@ func planDeps(ctx context.Context, reqs []PluginRequirement, idx *PluginIndex, p
 // unknown). Note `entire plugin <verb>` runs with the user's original PATH
 // (main.go restores it for built-ins), so LookPath here sees only
 // raw-PATH plugins — managed entries are checked explicitly first.
-func dependencySatisfied(req PluginRequirement) (satisfied bool, warning string, err error) {
+// depStatus is what dependencySatisfied concluded about one requirement.
+type depStatus struct {
+	// Satisfied is true when nothing needs installing.
+	Satisfied bool
+	// Manifest is the dependency's install manifest, or nil for a local-dev
+	// install or a raw-$PATH binary. Returned rather than re-loaded by callers:
+	// every one of them needed it, so the file was being read three times per
+	// requirement.
+	Manifest *PluginManifest
+	// Warning is a non-blocking observation, e.g. a min_version that cannot be
+	// verified because the dependency came from $PATH.
+	Warning string
+}
+
+func dependencySatisfied(req PluginRequirement) (depStatus, error) {
 	m, err := LoadPluginManifest(req.Name)
 	if err != nil {
-		return false, "", err
+		return depStatus{}, err
 	}
 	if m != nil {
-		if req.MinVersion == "" || semver.Compare(canonicalSemver(m.Tag), canonicalSemver(req.MinVersion)) >= 0 {
-			return true, "", nil
-		}
-		return false, "", nil // triggers the upgrade path in planDeps
+		satisfied := req.MinVersion == "" ||
+			semver.Compare(canonicalSemver(m.Tag), canonicalSemver(req.MinVersion)) >= 0
+		// Not satisfied here means installed-but-too-old, which is the upgrade
+		// path in planDeps.
+		return depStatus{Satisfied: satisfied, Manifest: m}, nil
 	}
 	installed, err := FindInstalledPlugin(req.Name)
 	if err != nil {
-		return false, "", err
+		return depStatus{}, err
 	}
 	if installed != nil {
-		return true, unverifiableVersionWarning(req, "a local-dev install"), nil
+		return depStatus{Satisfied: true, Warning: unverifiableVersionWarning(req, "a local-dev install")}, nil
 	}
 	if _, err := exec.LookPath(pluginBinaryPrefix + req.Name); err == nil {
-		return true, unverifiableVersionWarning(req, "$PATH"), nil
+		return depStatus{Satisfied: true, Warning: unverifiableVersionWarning(req, "$PATH")}, nil
 	}
-	return false, "", nil
+	return depStatus{}, nil
 }
 
 func unverifiableVersionWarning(req PluginRequirement, source string) string {
@@ -321,19 +328,15 @@ func RunPluginDoctor(ctx context.Context) ([]PluginDoctorIssue, error) {
 		}
 		issues = append(issues, checkManagedBinaryIntegrity(m)...)
 		for _, req := range m.Requires {
-			satisfied, warning, err := dependencySatisfied(req)
+			status, err := dependencySatisfied(req)
 			if err != nil {
 				return nil, err
 			}
 			switch {
-			case satisfied && warning != "":
-				issues = append(issues, PluginDoctorIssue{Plugin: m.Name, Problem: warning, Fix: ""})
-			case !satisfied:
-				dep, depErr := LoadPluginManifest(req.Name)
-				if depErr != nil {
-					return nil, depErr
-				}
-				if dep != nil {
+			case status.Satisfied && status.Warning != "":
+				issues = append(issues, PluginDoctorIssue{Plugin: m.Name, Problem: status.Warning, Fix: ""})
+			case !status.Satisfied:
+				if dep := status.Manifest; dep != nil {
 					issues = append(issues, PluginDoctorIssue{
 						Plugin:  m.Name,
 						Problem: fmt.Sprintf("requires %s >= %s but %s is installed", req.Name, req.MinVersion, dep.Tag),

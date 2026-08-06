@@ -58,17 +58,24 @@ func TestDependencySatisfied_ManagedManifest(t *testing.T) { //nolint:parallelte
 	if err := SavePluginManifest(&PluginManifest{Name: "sem", RepoURL: "https://x.example/entire-sem", Tag: "v0.3.0"}); err != nil {
 		t.Fatal(err)
 	}
-	ok, warn, err := dependencySatisfied(PluginRequirement{Name: "sem", MinVersion: "v0.2.0"})
-	if err != nil || !ok || warn != "" {
-		t.Errorf("satisfied above min: ok=%t warn=%q err=%v", ok, warn, err)
+	st, err := dependencySatisfied(PluginRequirement{Name: "sem", MinVersion: "v0.2.0"})
+	if err != nil || !st.Satisfied || st.Warning != "" {
+		t.Errorf("satisfied above min: %+v err=%v", st, err)
 	}
-	ok, _, err = dependencySatisfied(PluginRequirement{Name: "sem", MinVersion: "v0.4.0"})
-	if err != nil || ok {
-		t.Errorf("below min must be unsatisfied: ok=%t err=%v", ok, err)
+	// The manifest it loaded comes back, so callers don't re-read the file.
+	if st.Manifest == nil || st.Manifest.Tag != "v0.3.0" {
+		t.Errorf("manifest not returned: %+v", st.Manifest)
 	}
-	ok, _, err = dependencySatisfied(PluginRequirement{Name: "ghost"})
-	if err != nil || ok {
-		t.Errorf("missing dep must be unsatisfied: ok=%t err=%v", ok, err)
+	st, err = dependencySatisfied(PluginRequirement{Name: "sem", MinVersion: "v0.4.0"})
+	if err != nil || st.Satisfied {
+		t.Errorf("below min must be unsatisfied: %+v err=%v", st, err)
+	}
+	if st.Manifest == nil {
+		t.Error("the upgrade path needs the installed manifest")
+	}
+	st, err = dependencySatisfied(PluginRequirement{Name: "ghost"})
+	if err != nil || st.Satisfied || st.Manifest != nil {
+		t.Errorf("missing dep must be unsatisfied with no manifest: %+v err=%v", st, err)
 	}
 }
 

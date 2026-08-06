@@ -266,15 +266,21 @@ type fetchedAsset struct {
 // one is published. Returns errAssetNotFound (possibly wrapped) when the
 // tag has no asset for this platform.
 func downloadPluginAsset(ctx context.Context, meta *PluginMetadata, repoURL, name, tag, stagingDir string, allowUnverified bool) (*fetchedAsset, error) {
-	assetURL := func(asset string) (string, error) {
-		if meta != nil && meta.DownloadURL != "" {
-			return expandDownloadTemplate(meta.DownloadURL, name, tag, asset), nil
+	// Resolve the prefix once. It does not depend on the asset name, so
+	// deriving it per candidate meant re-parsing the repo URL ~36 times in the
+	// probe loop and carrying an error return through three call sites for a
+	// failure that can only happen here.
+	var assetURL func(asset string) string
+	if meta != nil && meta.DownloadURL != "" {
+		assetURL = func(asset string) string {
+			return expandDownloadTemplate(meta.DownloadURL, name, tag, asset)
 		}
+	} else {
 		base, err := releaseAssetBaseURL(repoURL, tag)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		return base + asset, nil
+		assetURL = func(asset string) string { return base + asset }
 	}
 
 	// A download_url template without {asset} is a single fully-specified
@@ -292,11 +298,7 @@ func downloadPluginAsset(ctx context.Context, meta *PluginMetadata, repoURL, nam
 	// Preferred path: fetch the checksum manifest and pick from what was
 	// actually published.
 	for _, cs := range checksumCandidates(name, tag) {
-		u, err := assetURL(cs)
-		if err != nil {
-			return nil, err
-		}
-		data, err := httpGetSmall(ctx, u)
+		data, err := httpGetSmall(ctx, assetURL(cs))
 		if err != nil {
 			continue
 		}
@@ -311,11 +313,7 @@ func downloadPluginAsset(ctx context.Context, meta *PluginMetadata, repoURL, nam
 			// directly.
 			continue
 		}
-		au, err := assetURL(asset)
-		if err != nil {
-			return nil, err
-		}
-		return fetchAndVerify(ctx, au, asset, digest, stagingDir)
+		return fetchAndVerify(ctx, assetURL(asset), asset, digest, stagingDir)
 	}
 
 	// Fallback: probe candidates directly (a release published without a
@@ -329,22 +327,18 @@ func downloadPluginAsset(ctx context.Context, meta *PluginMetadata, repoURL, nam
 	// wrong would report a missing release for a plugin that simply doesn't
 	// ship checksums.
 	for _, asset := range assetCandidates(name, tag) {
-		u, err := assetURL(asset)
-		if err != nil {
+		fa, err := fetchAndVerify(ctx, assetURL(asset), asset, "", stagingDir)
+		switch {
+		case errors.Is(err, errAssetNotFound):
+			continue
+		case err != nil:
 			return nil, err
-		}
-		fa, err := fetchAndVerify(ctx, u, asset, "", stagingDir)
-		if err == nil {
-			if !allowUnverified {
-				_ = os.Remove(fa.Path)
-				return nil, fmt.Errorf("%w: %s %s publishes %s but no %s to authenticate it; ask the author to publish checksums, or install with --allow-unverified",
-					errUnverifiedAsset, name, tag, asset, checksumsFileName)
-			}
+		case allowUnverified:
 			return fa, nil
 		}
-		if !errors.Is(err, errAssetNotFound) {
-			return nil, err
-		}
+		_ = os.Remove(fa.Path)
+		return nil, fmt.Errorf("%w: %s %s publishes %s but no %s to authenticate it; ask the author to publish checksums, or install with --allow-unverified",
+			errUnverifiedAsset, name, tag, asset, checksumsFileName)
 	}
 	return nil, fmt.Errorf("%w for %s/%s at %s %s", errAssetNotFound, runtime.GOOS, runtime.GOARCH, redactURL(repoURL), tag)
 }
