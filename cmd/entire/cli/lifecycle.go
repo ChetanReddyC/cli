@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
@@ -548,6 +549,13 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// Bound every session-state lock acquisition on the TurnStart path so a
 	// background lock holder can't stall the user's prompt (see the const doc).
 	ctx = strategy.WithSessionLockWait(ctx, turnStartSessionLockWait)
+
+	// Read the worktree status at most once for this hook. TurnStart fires
+	// before the agent runs and only writes under .entire/ and .git/, neither of
+	// which git reports, so the status cannot change while this hook executes.
+	// Without the cache both CapturePrePromptState and the strategy's prompt
+	// attribution pay for a full go-git worktree walk.
+	ctx = gitrepo.WithStatusCache(ctx)
 
 	// Fill model from hint file if the agent didn't provide it on this hook
 	if event.Model == "" {
