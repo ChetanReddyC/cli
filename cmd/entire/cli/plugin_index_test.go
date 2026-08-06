@@ -219,12 +219,21 @@ func TestClassifyInstallArg(t *testing.T) {
 	for arg, want := range map[string]installArgKind{
 		"https://github.com/entireio/entire-run": installFromURL,
 		"git@github.com:entireio/entire-run.git": installFromURL,
-		"file:///tmp/repo":                       installFromURL,
-		"./dist/entire-run":                      installFromPath,
-		"dist/entire-run":                        installFromPath,
-		"../entire-run":                          installFromPath,
-		"run":                                    installFromIndex,
-		"brain":                                  installFromIndex,
+		// Any SSH username, not just "git" — the classifier and
+		// validatePluginRepoURL share one definition of scp-like, and the
+		// validator has always accepted these. Note these contain a path
+		// separator, so the scp-like test has to run first.
+		"deploy@git.corp.io:group/entire-foo.git": installFromURL,
+		"ci-bot@git.corp.io:entire-foo":           installFromURL,
+		"file:///tmp/repo":                        installFromURL,
+		"./dist/entire-run":                       installFromPath,
+		"dist/entire-run":                         installFromPath,
+		"../entire-run":                           installFromPath,
+		// A relative path is not scp-like even though it has a dot and a colon
+		// nearby; the regex anchors the username at the start.
+		"./deploy@host:entire-run": installFromPath,
+		"run":                      installFromIndex,
+		"brain":                    installFromIndex,
 		// Bare names are index lookups even when a same-named file exists
 		// in the CWD — classification is pure string logic, never stat,
 		// so a stray local file can't shadow an index name. Local files

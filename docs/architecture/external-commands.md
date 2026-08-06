@@ -35,7 +35,7 @@ The CLI prepends this directory to `$PATH` at startup via `cli.PrependPluginBinD
 | Form | Example | Behavior |
 |---|---|---|
 | bare name | `entire plugin install run` | Resolved through the [plugin index](#plugin-index-discovery) |
-| repository URL | `entire plugin install https://github.com/entireio/entire-run` | Installs from any git host |
+| repository URL | `entire plugin install https://github.com/entireio/entire-run` | Installs from any git host. Also accepts git's scp-like form with any SSH username (`deploy@git.corp.io:group/entire-foo.git`) — the same set `validatePluginRepoURL` allows |
 | local path | `entire plugin install ./dist/entire-run` | Symlink/copy into the managed dir (unchanged) |
 
 Remote installs are deliberately forge-agnostic:

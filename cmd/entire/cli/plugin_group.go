@@ -69,15 +69,23 @@ const (
 )
 
 // classifyInstallArg distinguishes the three install sources. URLs are
-// anything with a scheme or scp-like git@ prefix; paths must be explicit —
-// a separator or a leading dot (./entire-foo) — and everything else is a
-// bare name for index lookup. Deliberately NOT stat-based: a stray file or
+// anything with a scheme or git's scp-like user@host:path form; paths must be
+// explicit — a separator or a leading dot (./entire-foo) — and everything else
+// is a bare name for index lookup. Deliberately NOT stat-based: a stray file or
 // directory in the CWD sharing a plugin's name must not shadow the index
 // (and could never install anyway — path installs require an entire-
 // basename). The spaces stay disjoint because validatePluginName rejects
 // separators in plugin names.
+//
+// The scp-like test shares scpLikeGitURL with validatePluginRepoURL rather than
+// matching a "git@" prefix. Two definitions had drifted apart: the validator
+// accepts any SSH username, so deploy@git.corp.io:group/entire-foo.git was a
+// URL it would have installed from, but the classifier sent it down the path
+// branch — where it failed with a confusing "stat: no such file" instead. The
+// scp-like check must precede the separator check, since these URLs contain a
+// path separator too.
 func classifyInstallArg(arg string) installArgKind {
-	if strings.Contains(arg, "://") || strings.HasPrefix(arg, "git@") {
+	if strings.Contains(arg, "://") || scpLikeGitURL.MatchString(arg) {
 		return installFromURL
 	}
 	if strings.ContainsAny(arg, `/\`) || strings.HasPrefix(arg, ".") {
