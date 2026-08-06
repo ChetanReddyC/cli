@@ -231,4 +231,10 @@ func assertStrictJSONSearchInstructions(t *testing.T, content string) {
 	if strings.Contains(content, "Your only history-search mechanism is the `entire search` command.") {
 		t.Fatal("scaffolded file should not present plain `entire search` as the required command")
 	}
+	if !strings.Contains(content, "entire search --json --compact") {
+		t.Fatal("scaffolded file should recommend `--json --compact` for scanning results")
+	}
+	if !strings.Contains(content, "entire checkpoint explain <id>") {
+		t.Fatal("scaffolded file should point drill-down at `entire checkpoint explain <id>`")
+	}
 }
