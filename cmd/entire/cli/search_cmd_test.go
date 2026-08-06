@@ -107,6 +107,90 @@ func TestWriteSearchJSON_ZeroLimitFallsBackToDefaultPageSize(t *testing.T) {
 	}
 }
 
+func TestWriteSearchCompactJSON_TrimsResults(t *testing.T) {
+	t.Parallel()
+
+	resp := &search.Response{
+		Results: testResults(),
+		Total:   2,
+		Page:    1,
+	}
+
+	var buf bytes.Buffer
+	if err := writeSearchCompactJSON(&buf, resp, 0, 1); err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+
+	output := buf.String()
+	// Identifiers, ranking, and files survive.
+	for _, want := range []string{
+		`"id": "a3b2c4d5e6f7"`,
+		`"type": "checkpoint"`,
+		`"repo": "entirehq/entire.io"`,
+		`"branch": "main"`,
+		`"author": "alicecodes"`,
+		`"date": "2026-03-24T10:30:00Z"`,
+		`"src/middleware/auth.go"`,
+		`"score": 0.042`,
+		`"title": "Implement auth middleware"`,
+		`"total_pages": 1`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("compact output missing %s:\n%s", want, output)
+		}
+	}
+	// The full prompt must NOT be embedded (that's the whole point).
+	if strings.Contains(output, "add auth middleware to protect API routes") {
+		t.Errorf("compact output must not contain the full prompt:\n%s", output)
+	}
+}
+
+func TestWriteSearchCompactJSON_TruncatesLongPromptTitle(t *testing.T) {
+	t.Parallel()
+
+	longPrompt := strings.Repeat("word ", 200) // ~1000 chars, no commit message fallback
+	resp := &search.Response{
+		Results: []search.Result{{
+			Type: search.TypeCheckpoint,
+			Checkpoint: &search.CheckpointResult{
+				ID:     "cp1",
+				Prompt: longPrompt,
+				Org:    "o",
+				Repo:   "r",
+			},
+		}},
+		Total: 1,
+	}
+
+	var buf bytes.Buffer
+	if err := writeSearchCompactJSON(&buf, resp, 0, 1); err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+
+	output := buf.String()
+	if strings.Contains(output, strings.TrimSpace(longPrompt)) {
+		t.Error("expected long prompt title to be truncated")
+	}
+	if !strings.Contains(output, "…") {
+		t.Errorf("expected truncated title to end with ellipsis:\n%s", output)
+	}
+}
+
+func TestSearchCmd_CompactWithCodeRejected(t *testing.T) {
+	t.Setenv("ENTIRE_CODE_SEARCH", "1")
+
+	root := NewRootCmd()
+	root.SetArgs([]string{"search", "--code", "--compact", "handleRequest"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected error when --compact used with --code")
+	}
+	if !strings.Contains(err.Error(), "--compact cannot be used with --code") {
+		t.Errorf("error = %q, want containing '--compact cannot be used with --code'", err.Error())
+	}
+}
+
 func TestCodeSearchEnabled_EnvGate(t *testing.T) {
 	// Modifies process-global env, no t.Parallel().
 	for _, tc := range []struct {

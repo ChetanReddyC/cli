@@ -27,6 +27,7 @@ import (
 func newSearchCmd() *cobra.Command { //nolint:maintidx // command wiring is inherently complex
 	var (
 		jsonOutput       bool
+		compactOutput    bool
 		codeFlag         bool
 		caseSensitive    bool
 		limitFlag        int
@@ -51,11 +52,15 @@ By default, results are scoped to the current repository. Use --all-repos to
 search across all accessible repos.
 
 Run without arguments to open an interactive search. Results are
-displayed in an interactive table. Use --json for machine-readable output.
+displayed in an interactive table. Use --json for machine-readable output,
+and add --compact for a trimmed per-result shape suited to agents (implies
+--json): id, type, repo, branch, author, date, files touched, score, and a
+truncated title instead of the full prompt. Fetch full detail for a single
+result with 'entire checkpoint explain <id>'.
 
 CLI queries also support inline filters like author:<name>, date:<week|month>,
 branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
-		Example: "  entire search \"retry backoff\" --json\n  entire search \"auth timeout author:alice date:week\"\n  entire search --code \"parseToken\"",
+		Example: "  entire search \"retry backoff\" --json\n  entire search \"retry backoff\" --json --compact\n  entire search \"auth timeout author:alice date:week\"\n  entire search --code \"parseToken\"",
 		Args:    cobra.ArbitraryArgs,
 		Hidden:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -64,6 +69,13 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			if caseSensitive && !codeFlag {
 				return errors.New("--case-sensitive can only be used with --code")
+			}
+
+			if compactOutput {
+				if codeFlag {
+					return errors.New("--compact cannot be used with --code")
+				}
+				jsonOutput = true // compact is a JSON shape
 			}
 
 			if codeFlag {
@@ -252,6 +264,9 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			// JSON output: explicit flag or piped/redirected stdout
 			if jsonOutput || !isTerminal {
+				if compactOutput {
+					return writeSearchCompactJSON(w, resp, requestedLimit, requestedPage)
+				}
 				return writeSearchJSON(w, resp, requestedLimit, requestedPage)
 			}
 
@@ -296,6 +311,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	}
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
+	cmd.Flags().BoolVar(&compactOutput, "compact", false, "Trimmed JSON output for agents: id, repo, files touched, score, and a truncated title instead of the full prompt (implies --json)")
 	cmd.Flags().BoolVar(&codeFlag, "code", false, "Search code content across repositories")
 	cmd.Flags().BoolVar(&caseSensitive, "case-sensitive", false, "Case-sensitive code search (only with --code)")
 	cmd.Flags().IntVar(&limitFlag, "limit", resultsPerPage, "Maximum number of results (per page for checkpoint search, total for --code)")
@@ -924,34 +940,38 @@ func isASCII(s string) bool {
 	return true
 }
 
-// writeSearchJSON writes client-side paginated search results as JSON.
-func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error {
+// paginateSearchResults slices results for the requested client-side page,
+// normalizing limit and page, and returns the page slice (never nil) plus the
+// normalized pagination values.
+func paginateSearchResults(results []search.Result, limit, page int) (pageResults []search.Result, total, totalPages, normLimit, normPage int) {
 	if limit <= 0 {
 		limit = resultsPerPage
 	}
-
-	total := len(resp.Results)
-	totalPages := (total + limit - 1) / limit
+	total = len(results)
+	totalPages = (total + limit - 1) / limit
 	if totalPages < 1 {
 		totalPages = 1
 	}
 	if page < 1 {
 		page = 1
 	}
-
-	// Slice results for the requested page.
 	start := (page - 1) * limit
 	end := start + limit
-	var pageResults []search.Result
 	if start < total {
 		if end > total {
 			end = total
 		}
-		pageResults = resp.Results[start:end]
+		pageResults = results[start:end]
 	}
 	if pageResults == nil {
 		pageResults = []search.Result{}
 	}
+	return pageResults, total, totalPages, limit, page
+}
+
+// writeSearchJSON writes client-side paginated search results as JSON.
+func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error {
+	pageResults, total, totalPages, limit, page := paginateSearchResults(resp.Results, limit, page)
 
 	out := struct {
 		Results    []search.Result    `json:"results"`
@@ -971,6 +991,77 @@ func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error 
 	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling results: %w", err)
+	}
+	fmt.Fprint(w, string(data))
+	return nil
+}
+
+// compactTitleMaxLen caps the title snippet length (in runes) in --compact
+// output so a hit never carries a full multi-KB prompt (ENT-1527).
+const compactTitleMaxLen = 200
+
+// compactSearchHit is the trimmed per-result shape emitted by --compact.
+// Field names follow the full JSON wire format's camelCase convention.
+type compactSearchHit struct {
+	ID           string   `json:"id"`
+	Type         string   `json:"type"`
+	Repo         string   `json:"repo,omitempty"`
+	Branch       string   `json:"branch,omitempty"`
+	Author       string   `json:"author,omitempty"`
+	Date         string   `json:"date,omitempty"`
+	Title        string   `json:"title"`
+	FilesTouched []string `json:"filesTouched,omitempty"`
+	Score        float64  `json:"score"`
+}
+
+// writeSearchCompactJSON writes client-side paginated search results as
+// compact JSON: per hit only identifiers, ranking, files touched, and a
+// truncated title snippet — never the full prompt. Agents fetch full detail
+// for a single hit via `entire checkpoint explain <id>`.
+func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int) error {
+	pageResults, total, totalPages, limit, page := paginateSearchResults(resp.Results, limit, page)
+
+	hits := make([]compactSearchHit, 0, len(pageResults))
+	for i := range pageResults {
+		r := &pageResults[i]
+		repo := r.ResultRepo()
+		if org := r.ResultOrg(); org != "" && repo != "" {
+			repo = org + "/" + repo
+		}
+		hit := compactSearchHit{
+			ID:     r.ResultID(),
+			Type:   r.Type,
+			Repo:   repo,
+			Branch: r.ResultBranch(),
+			Author: r.ResultAuthor(),
+			Date:   r.ResultCreatedAt(),
+			Title:  truncateOneLine(r.ResultTitle(), compactTitleMaxLen),
+			Score:  r.Meta.Score,
+		}
+		if r.Checkpoint != nil {
+			hit.FilesTouched = r.Checkpoint.FilesTouched
+		}
+		hits = append(hits, hit)
+	}
+
+	out := struct {
+		Results    []compactSearchHit `json:"results"`
+		Total      int                `json:"total"`
+		Page       int                `json:"page"`
+		TotalPages int                `json:"total_pages"`
+		Limit      int                `json:"limit"`
+		Counts     *search.TypeCounts `json:"counts,omitempty"`
+	}{
+		Results:    hits,
+		Total:      total,
+		Page:       page,
+		TotalPages: totalPages,
+		Limit:      limit,
+		Counts:     resp.Counts,
+	}
+	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling compact results: %w", err)
 	}
 	fmt.Fprint(w, string(data))
 	return nil
