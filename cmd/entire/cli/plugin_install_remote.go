@@ -179,11 +179,6 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 		return nil, fmt.Errorf("hash installed plugin binary: %w", err)
 	}
 
-	installed, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: pkgBin, Force: true})
-	if err != nil {
-		return nil, err
-	}
-
 	manifest := &PluginManifest{
 		Name:         name,
 		RepoURL:      repoURL,
@@ -198,7 +193,24 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	if meta != nil {
 		manifest.Requires = meta.Requires
 	}
+	// The manifest is written before the bin/ link, immediately after the
+	// binary swap. Ordering matters because replaceBinary has already mutated
+	// pkg/<name>/: until the manifest catches up, it records the *previous*
+	// tag and binary_sha256 while the new binary is on disk, and
+	// checkManagedBinaryIntegrity reads that as tampering — a permanent false
+	// alarm on a perfectly good install. Writing it here leaves only the local
+	// re-hash above in that window.
+	//
+	// If the bin/ link then fails, the manifest is still accurate and doctor
+	// reports the real problem ("has an install manifest but no entry in the
+	// managed bin dir") with a fix that works, instead of accusing the user of
+	// tampering.
 	if err := SavePluginManifest(manifest); err != nil {
+		return nil, err
+	}
+
+	installed, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: pkgBin, Force: true})
+	if err != nil {
 		return nil, err
 	}
 	return &RemoteInstallResult{Installed: installed, Manifest: manifest, Metadata: meta}, nil

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -224,8 +225,11 @@ func SavePluginManifest(m *PluginManifest) error {
 	if err != nil {
 		return fmt.Errorf("marshal plugin manifest: %w", err)
 	}
+	// Atomic via the shared helper: a torn manifest would read as either a
+	// missing install or a digest mismatch, and this write happens moments
+	// after the binary it describes was swapped in.
 	path := filepath.Join(dir, pluginManifestFileName)
-	if err := os.WriteFile(path, data, 0o644); err != nil { //nolint:gosec // manifest is non-secret provenance metadata
+	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
 		return fmt.Errorf("write plugin manifest: %w", err)
 	}
 	return nil

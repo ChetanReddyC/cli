@@ -246,10 +246,21 @@ func ExecuteDepPlan(ctx context.Context, plan *DepPlan, allowUnverified bool) er
 		// The plan named this dependency and the user confirmed that name; an
 		// install landing under a different one would never satisfy the
 		// requirement, leaving doctor to report it missing forever.
-		if _, err := InstallPluginFromRepo(ctx, a.RepoURL, a.Name, RemoteInstallOptions{
+		res, err := InstallPluginFromRepo(ctx, a.RepoURL, a.Name, RemoteInstallOptions{
 			Force: a.Upgrade, AllowUnverified: allowUnverified,
-		}); err != nil {
+		})
+		if err != nil {
 			return fmt.Errorf("install dependency %q: %w", a.Name, err)
+		}
+		// Verify the outcome, not just that an install happened. The install
+		// takes the newest published tag, which may still be below the minimum
+		// the plan computed — in which case reporting success would silently
+		// defeat the guarantee the plan was built on, and leave doctor
+		// complaining forever about a dependency we just "installed".
+		if a.MinVersion != "" &&
+			semver.Compare(canonicalSemver(res.Manifest.Tag), canonicalSemver(a.MinVersion)) < 0 {
+			return fmt.Errorf("dependency %q: newest release is %s but %s or later is required; ask the plugin author to publish a release that meets it",
+				a.Name, res.Manifest.Tag, a.MinVersion)
 		}
 	}
 	return nil

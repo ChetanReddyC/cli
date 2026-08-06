@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -349,5 +350,56 @@ func TestUpgradeInstalledPlugin_RejectsRename(t *testing.T) { //nolint:parallelt
 	}
 	if installedPayload(t) != "payload-0.1.0" {
 		t.Error("the original install was disturbed by the failed upgrade")
+	}
+}
+
+// replaceBinary mutates pkg/<name>/ before the manifest catches up. Until it
+// does, the manifest records the previous tag and binary_sha256 while the new
+// binary is on disk, and checkManagedBinaryIntegrity reads that as tampering.
+// The manifest must therefore be consistent with the binary once an upgrade
+// returns — and doctor must be quiet about a healthy install.
+func TestUpgrade_LeavesManifestConsistentWithBinary(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+	ctx := context.Background()
+	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0", "0.2.0")
+	if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{}); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+	// A new tag on the same commit is enough: the metadata already points at
+	// the server, which serves 0.2.0 too. Rewriting the identical metadata
+	// would be an empty commit.
+	gitTag(t, repoURL, remoteTestTagMid)
+
+	if _, err := UpgradeInstalledPlugin(ctx, "demo"); err != nil {
+		t.Fatalf("UpgradeInstalledPlugin: %v", err)
+	}
+
+	m, err := LoadPluginManifest("demo")
+	if err != nil || m == nil {
+		t.Fatalf("LoadPluginManifest = %v, %v", m, err)
+	}
+	if m.Tag != remoteTestTagMid {
+		t.Errorf("manifest tag = %s, want %s", m.Tag, remoteTestTagMid)
+	}
+	dir, err := PluginPkgDir("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := fileSHA256(filepath.Join(dir, pluginBinaryName("demo")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk != m.BinarySHA256 {
+		t.Errorf("binary_sha256 = %s but the binary hashes to %s", m.BinarySHA256, onDisk)
+	}
+	// The whole point: doctor must not cry tampering after a clean upgrade.
+	issues, err := RunPluginDoctor(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, i := range issues {
+		if strings.Contains(i.Problem, "no longer matches") {
+			t.Errorf("doctor reported false tampering after upgrade: %+v", i)
+		}
 	}
 }

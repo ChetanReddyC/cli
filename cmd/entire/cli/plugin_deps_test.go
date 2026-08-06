@@ -402,3 +402,39 @@ func TestPlanDependencyInstalls_MissingDepMustBeIndexed(t *testing.T) { //nolint
 		t.Errorf("actions = %+v, want none", plan.Actions)
 	}
 }
+
+// ExecuteDepPlan installs the newest published tag, which may still be below
+// the minimum the plan computed. Reporting success there would silently defeat
+// the guarantee the plan was built on and leave doctor complaining forever
+// about a dependency the command just claimed to install.
+func TestExecuteDepPlan_RejectsOutcomeBelowMinVersion(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0")
+
+	// Newest available is v0.1.0; the plan demands v9.0.0.
+	plan := &DepPlan{Actions: []DepAction{{Name: "demo", RepoURL: repoURL, MinVersion: "v9.0.0"}}}
+	err := ExecuteDepPlan(context.Background(), plan, false)
+	if err == nil {
+		t.Fatal("ExecuteDepPlan reported success for an unmet minimum")
+	}
+	for _, want := range []string{"demo", "v0.1.0", "v9.0.0"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to mention %q", err, want)
+		}
+	}
+	// The check runs after the install, so the dependency is on disk at the
+	// too-old version. That is deliberate and recoverable: doctor reports
+	// "requires demo >= v9.0.0 but v0.1.0 is installed", which is accurate and
+	// actionable, rather than leaving nothing behind to diagnose.
+	m, err := LoadPluginManifest("demo")
+	if err != nil || m == nil || m.Tag != remoteTestTagOld {
+		t.Errorf("expected demo installed at %s, got %+v (%v)", remoteTestTagOld, m, err)
+	}
+
+	// A minimum the newest tag does satisfy succeeds. Upgrade:true because the
+	// failed action above already installed it, so this needs Force.
+	plan = &DepPlan{Actions: []DepAction{{Name: "demo", RepoURL: repoURL, MinVersion: remoteTestTagOld, Upgrade: true}}}
+	if err := ExecuteDepPlan(context.Background(), plan, false); err != nil {
+		t.Errorf("satisfiable minimum should install: %v", err)
+	}
+}
