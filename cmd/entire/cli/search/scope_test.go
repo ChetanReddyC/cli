@@ -67,3 +67,47 @@ func TestResultID_RawDataFallback(t *testing.T) {
 		t.Errorf("checkpoint ResultID() = %q, want \"ck1\"", got)
 	}
 }
+
+// TestResultAccessors_RawDataFallback verifies repo/pr rows expose identifying
+// fields from the raw payload, so trimmed views (e.g. --compact) don't collapse
+// them to just {id, type, score}.
+func TestResultAccessors_RawDataFallback(t *testing.T) {
+	t.Parallel()
+
+	const repoName = "backend"
+
+	var repoRow Result
+	if err := json.Unmarshal([]byte(`{"type":"repo","data":{"id":"01JREPO","name":"backend","org":"acme","createdAt":"2026-01-02T00:00:00Z"},"searchMeta":{"score":1}}`), &repoRow); err != nil {
+		t.Fatal(err)
+	}
+	if got := repoRow.ResultTitle(); got != repoName {
+		t.Errorf("repo ResultTitle() = %q, want \"backend\"", got)
+	}
+	if got := repoRow.ResultRepo(); got != repoName {
+		t.Errorf("repo ResultRepo() = %q, want \"backend\"", got)
+	}
+	if got := repoRow.ResultOrg(); got != "acme" {
+		t.Errorf("repo ResultOrg() = %q, want \"acme\"", got)
+	}
+	if got := repoRow.ResultCreatedAt(); got != "2026-01-02T00:00:00Z" {
+		t.Errorf("repo ResultCreatedAt() = %q", got)
+	}
+
+	var prRow Result
+	if err := json.Unmarshal([]byte(`{"type":"pr","data":{"id":"pr-9","title":"Fix login retry","repo":"backend","author":"alice"},"searchMeta":{"score":1}}`), &prRow); err != nil {
+		t.Fatal(err)
+	}
+	if got := prRow.ResultTitle(); got != "Fix login retry" {
+		t.Errorf("pr ResultTitle() = %q, want \"Fix login retry\"", got)
+	}
+	if got := prRow.ResultRepo(); got != repoName {
+		t.Errorf("pr ResultRepo() = %q, want \"backend\"", got)
+	}
+	if got := prRow.ResultAuthor(); got != testAuthor {
+		t.Errorf("pr ResultAuthor() = %q, want \"alice\"", got)
+	}
+	// Fields absent from the payload stay empty.
+	if got := prRow.ResultBranch() + prRow.ResultCreatedAt() + prRow.ResultOrg(); got != "" {
+		t.Errorf("pr accessors for absent fields = %q, want all empty", got)
+	}
+}

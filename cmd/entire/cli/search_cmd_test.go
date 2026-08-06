@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -145,6 +146,41 @@ func TestWriteSearchCompactJSON_TrimsResults(t *testing.T) {
 	}
 }
 
+// Repo/pr rows (reachable via --all-repos) have no typed struct; compact hits
+// must still carry identifying info from the raw payload instead of collapsing
+// to just {id, type, score}.
+func TestWriteSearchCompactJSON_RepoAndPRRowsKeepIdentifyingFields(t *testing.T) {
+	t.Parallel()
+
+	wire := `{"results":[
+		{"type":"repo","data":{"id":"01JREPO","name":"backend","org":"acme"},"searchMeta":{"score":0.9}},
+		{"type":"pr","data":{"id":"pr-9","title":"Fix login retry","repo":"backend","author":"alice"},"searchMeta":{"score":0.5}}
+	],"total":2,"page":1}`
+	var resp search.Response
+	if err := json.Unmarshal([]byte(wire), &resp); err != nil {
+		t.Fatalf("unmarshaling wire response: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := writeSearchCompactJSON(&buf, &resp, 0, 1); err != nil {
+		t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+	}
+
+	output := buf.String()
+	for _, want := range []string{
+		`"id": "01JREPO"`,
+		`"repo": "acme/backend"`,
+		`"title": "backend"`,
+		`"id": "pr-9"`,
+		`"title": "Fix login retry"`,
+		`"author": "alice"`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("compact output missing %s:\n%s", want, output)
+		}
+	}
+}
+
 func TestWriteSearchCompactJSON_TruncatesLongPromptTitle(t *testing.T) {
 	t.Parallel()
 
@@ -177,7 +213,7 @@ func TestWriteSearchCompactJSON_TruncatesLongPromptTitle(t *testing.T) {
 }
 
 func TestSearchCmd_CompactWithCodeRejected(t *testing.T) {
-	t.Setenv("ENTIRE_CODE_SEARCH", "1")
+	t.Parallel()
 
 	root := NewRootCmd()
 	root.SetArgs([]string{"search", "--code", "--compact", "handleRequest"})

@@ -217,20 +217,47 @@ func resultField(r *Result, fromCheckpoint func(*CheckpointResult) string, fromC
 	return ""
 }
 
-// ResultOrg returns the org for any result type.
-func (r *Result) ResultOrg() string {
-	return resultField(r,
-		func(c *CheckpointResult) string { return c.Org },
-		func(c *CommitResult) string { return c.Org },
-		func(s *SessionResult) string { return s.Org })
+// rawString returns the first non-empty string value among the given keys in
+// the raw payload of a result without a typed struct (repo, pr). Returns ""
+// for typed results or when no key matches.
+func (r *Result) rawString(keys ...string) string {
+	if len(r.rawData) == 0 {
+		return ""
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(r.rawData, &m); err != nil {
+		return ""
+	}
+	for _, k := range keys {
+		var s string
+		if err := json.Unmarshal(m[k], &s); err == nil && s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
-// ResultRepo returns the repo for any result type.
+// ResultOrg returns the org for any result type.
+func (r *Result) ResultOrg() string {
+	if v := resultField(r,
+		func(c *CheckpointResult) string { return c.Org },
+		func(c *CommitResult) string { return c.Org },
+		func(s *SessionResult) string { return s.Org }); v != "" {
+		return v
+	}
+	return r.rawString("org")
+}
+
+// ResultRepo returns the repo for any result type. Repo/PR raw payloads carry
+// the repository under "repo", "fullName", or "name".
 func (r *Result) ResultRepo() string {
-	return resultField(r,
+	if v := resultField(r,
 		func(c *CheckpointResult) string { return c.Repo },
 		func(c *CommitResult) string { return c.Repo },
-		func(s *SessionResult) string { return s.Repo })
+		func(s *SessionResult) string { return s.Repo }); v != "" {
+		return v
+	}
+	return r.rawString("repo", "fullName", "name")
 }
 
 // ResultBranch returns the branch for any result type.
@@ -248,15 +275,18 @@ func (r *Result) ResultBranch() string {
 
 // ResultCreatedAt returns the createdAt for any result type.
 func (r *Result) ResultCreatedAt() string {
-	return resultField(r,
+	if v := resultField(r,
 		func(c *CheckpointResult) string { return c.CreatedAt },
 		func(c *CommitResult) string { return c.CreatedAt },
-		func(s *SessionResult) string { return s.CreatedAt })
+		func(s *SessionResult) string { return s.CreatedAt }); v != "" {
+		return v
+	}
+	return r.rawString("createdAt")
 }
 
 // ResultAuthor returns the display author for any result type.
 func (r *Result) ResultAuthor() string {
-	return resultField(r,
+	if v := resultField(r,
 		func(c *CheckpointResult) string {
 			if c.AuthorUsername != nil && *c.AuthorUsername != "" {
 				return *c.AuthorUsername
@@ -274,7 +304,10 @@ func (r *Result) ResultAuthor() string {
 				return *s.AuthorUsername
 			}
 			return ""
-		})
+		}); v != "" {
+		return v
+	}
+	return r.rawString("authorUsername", "author")
 }
 
 // ResultID returns the primary ID for any result type. Types without a typed
@@ -288,20 +321,13 @@ func (r *Result) ResultID() string {
 		func(s *SessionResult) string { return s.SessionID }); id != "" {
 		return id
 	}
-	if len(r.rawData) > 0 {
-		var d struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(r.rawData, &d); err == nil {
-			return d.ID
-		}
-	}
-	return ""
+	return r.rawString("id")
 }
 
-// ResultTitle returns the primary display text for any result type.
+// ResultTitle returns the primary display text for any result type. Repo/PR
+// raw payloads identify themselves via "title", "name", or "fullName".
 func (r *Result) ResultTitle() string {
-	return resultField(r,
+	if v := resultField(r,
 		func(c *CheckpointResult) string {
 			// Prefer the commit title over the prompt; fall back to the prompt
 			// for uncommitted checkpoints. The full prompt remains in the detail view.
@@ -319,7 +345,10 @@ func (r *Result) ResultTitle() string {
 			}
 			return c.CommitMessage
 		},
-		func(s *SessionResult) string { return s.DisplayName })
+		func(s *SessionResult) string { return s.DisplayName }); v != "" {
+		return v
+	}
+	return r.rawString("title", "name", "fullName")
 }
 
 // TypeCounts holds per-type result counts.
