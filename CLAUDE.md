@@ -510,10 +510,15 @@ target is a *direct child* of the `.gitignore` declaring it. A root-level
 `e2e/artifacts/` rule is one level too deep and never prunes, so every
 `Status()` descended ~15k artifact directories and cost 5.25s (against 0.013s
 for `git status --porcelain`), which timed out agent hooks. The rule therefore
-lives in `e2e/.gitignore` as `artifacts/`. When adding a new ignored directory,
+lives in `e2e/.gitignore` as `/artifacts/`. When adding a new ignored directory,
 declare it in a `.gitignore` in its parent directory rather than as a nested
 path from the root — reviewers should flag multi-component directory patterns
 added to the root `.gitignore`.
+
+Anchor the relocated pattern with a leading slash. Moving `a/b/` to a
+`.gitignore` in `a/` as bare `b/` also drops git's root anchoring, so it would
+newly match `b` at any depth below `a/`; `/b/` preserves the original scope and
+prunes identically.
 
 `gitrepo.WithStatusCache(ctx)` memoizes the walk for callers that read status
 more than once. Install it **only** across a window where the worktree cannot
