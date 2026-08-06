@@ -111,6 +111,30 @@ requires:
 	if _, err := ParsePluginMetadata([]byte("name: ok\nrequires:\n  - name: agent-evil\n")); err == nil {
 		t.Error("ParsePluginMetadata accepted reserved requirement name")
 	}
+	// A malformed min_version must fail rather than silently removing the floor:
+	// x/mod/semver ranks an invalid string below every valid one, so the
+	// comparison in dependencySatisfied would report any installed version as
+	// acceptable. Ranges are the likeliest author mistake, since the field is
+	// deliberately a minimum only.
+	for _, bad := range []string{"vtypo", "latest", ">=1.0", "1.x"} {
+		yml := "name: ok\nrequires:\n  - name: dep\n    min_version: \"" + bad + "\"\n"
+		_, err := ParsePluginMetadata([]byte(yml))
+		if err == nil {
+			t.Errorf("ParsePluginMetadata accepted min_version %q", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "min_version") {
+			t.Errorf("min_version %q: err = %v, want it to name the field", bad, err)
+		}
+	}
+	// Both spellings of a valid tag are accepted, and an absent minimum is fine.
+	for _, good := range []string{"v0.2.0", "0.2.0", "v1", ""} {
+		yml := "name: ok\nrequires:\n  - name: dep\n    min_version: \"" + good + "\"\n"
+		if _, err := ParsePluginMetadata([]byte(yml)); err != nil {
+			t.Errorf("ParsePluginMetadata rejected min_version %q: %v", good, err)
+		}
+	}
+
 	// requires[] carries only a name and an optional minimum. A repo_url left
 	// over from the old schema is ignored rather than honored, so a published
 	// file cannot steer a dependency install at a URL its author chose.

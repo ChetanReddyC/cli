@@ -130,8 +130,10 @@ A plugin declares dependencies in `entire-plugin.yml`:
 name: brain
 requires:
   - name: graph          # resolved by name through the plugin index
-    min_version: v0.2.0  # minimum only; no ranges
+    min_version: v0.2.0  # minimum only; no ranges, and validated at parse
 ```
+
+`min_version` is checked for well-formedness when the metadata is parsed. A malformed value would otherwise *remove* the floor rather than fail: `x/mod/semver` ranks an invalid string below every valid one, so the comparison in `dependencySatisfied` reports any installed version as acceptable — `vtypo`, `latest` and `>=1.0` all behave that way. Rejecting a malformed value of a known field is consistent with the lenient decoding above, which is about unknown *keys*: those are a newer CLI's fields and refusing them breaks older binaries permanently, whereas a bad version string is an author error no CLI version will ever accept.
 
 **A requirement carries no URL.** A missing dependency resolves by name through the index and nowhere else, so the URL a dependency install fetches from always comes from the curated catalog rather than from the requiring plugin's author. With an author-supplied `repo_url`, installing one plugin meant fetching and executing a binary from a URL its author chose — and planning contacted that URL *before* the confirmation prompt.
 

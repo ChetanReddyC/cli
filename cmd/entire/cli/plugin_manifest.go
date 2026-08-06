@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"golang.org/x/mod/semver"
 	"gopkg.in/yaml.v3"
 )
 
@@ -160,6 +161,22 @@ func ParsePluginMetadata(data []byte) (*PluginMetadata, error) {
 	for _, req := range meta.Requires {
 		if err := validatePluginName(req.Name); err != nil {
 			return nil, fmt.Errorf("%s declares invalid requirement: %w", pluginMetadataFileName, err)
+		}
+		// A malformed min_version silently removes the floor rather than
+		// failing: x/mod/semver ranks an invalid string below every valid one,
+		// so semver.Compare(installedTag, garbage) >= 0 is always true and
+		// dependencySatisfied reports any version as acceptable. "vtypo",
+		// "latest" and ">=1.0" all behave that way.
+		//
+		// Rejecting this is consistent with the lenient decoding above, not in
+		// tension with it. Unknown *keys* stay lenient because they are a newer
+		// CLI's fields and refusing them breaks older binaries permanently. A
+		// malformed *value of a known field* is an author error that no CLI
+		// version will ever accept — which is why req.Name is already validated
+		// right here.
+		if req.MinVersion != "" && !semver.IsValid(canonicalSemver(req.MinVersion)) {
+			return nil, fmt.Errorf("%s requirement %q declares invalid min_version %q: want a semver tag such as v0.2.0 (a minimum only — ranges are not supported)",
+				pluginMetadataFileName, req.Name, req.MinVersion)
 		}
 	}
 	return &meta, nil
