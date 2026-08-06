@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -41,7 +40,7 @@ func pluginReleaseServer(t *testing.T, versions ...string) *httptest.Server {
 		assets[asset] = archive
 		sumsByVersion[v] = []byte(fmt.Sprintf("%x  %s\n", sha256.Sum256(archive), asset))
 	}
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		base := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
 		if base == checksumsFileName {
 			for v, sums := range sumsByVersion {
@@ -59,14 +58,23 @@ func pluginReleaseServer(t *testing.T, versions ...string) *httptest.Server {
 		}
 		http.NotFound(w, r)
 	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// newDemoPluginRepo is the fixture every lifecycle test starts from: a release
+// server for the "demo" plugin at the given versions, and a tagged repo whose
+// metadata points at it. Eight tests opened with these same four lines.
+func newDemoPluginRepo(t *testing.T, tags []string, versions ...string) (repoURL string, srv *httptest.Server) {
+	t.Helper()
+	srv = pluginReleaseServer(t, versions...)
+	meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
+	return newTaggedPluginRepo(t, meta, tags...), srv
 }
 
 func gitTag(t *testing.T, repoURL, tag string) {
 	t.Helper()
-	dir := strings.TrimPrefix(repoURL, "file://")
-	if out, err := exec.CommandContext(t.Context(), "git", "-C", dir, "tag", tag).CombinedOutput(); err != nil {
-		t.Fatalf("git tag: %v: %s", err, out)
-	}
+	gitTagRepo(t, repoDirFromURL(repoURL), tag)
 }
 
 // installedPayload reads back the payload of the "demo" fixture plugin, which
@@ -86,14 +94,10 @@ func installedPayload(t *testing.T) string {
 }
 
 func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	ctx := context.Background()
 
-	srv := pluginReleaseServer(t, "0.1.0", "0.2.0")
-	defer srv.Close()
-	meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
-	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld, remoteTestTagMid)
+	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld, remoteTestTagMid}, "0.1.0", "0.2.0")
 
 	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: repoURL})
 	if err != nil {
@@ -122,7 +126,6 @@ func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest //
 
 	// New tag + new asset → upgrade replaces the binary.
 	srv2 := pluginReleaseServer(t, "0.1.0", "0.2.0", "0.3.0")
-	defer srv2.Close()
 	updateRepoMetadata(t, repoURL, fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv2.URL))
 	gitTag(t, repoURL, "v0.3.0")
 	o, err = UpgradeInstalledPlugin(ctx, "demo")
@@ -140,29 +143,17 @@ func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest //
 // updateRepoMetadata commits a new entire-plugin.yml to the test repo.
 func updateRepoMetadata(t *testing.T, repoURL, metadata string) {
 	t.Helper()
-	dir := strings.TrimPrefix(repoURL, "file://")
-	if err := os.WriteFile(dir+"/"+pluginMetadataFileName, []byte(metadata), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{
-		{"-C", dir, "add", pluginMetadataFileName},
-		{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--no-gpg-sign", "-m", "update metadata"},
-	} {
-		if out, err := exec.CommandContext(t.Context(), "git", args...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
+	dir := repoDirFromURL(repoURL)
+	testutil.WriteFile(t, dir, pluginMetadataFileName, metadata)
+	testutil.GitAdd(t, dir, pluginMetadataFileName)
+	testutil.GitCommit(t, dir, "update metadata")
 }
 
 func TestInstallPluginFromRepo_PinnedSkipsUpgrade(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	ctx := context.Background()
 
-	srv := pluginReleaseServer(t, "0.1.0", "0.2.0")
-	defer srv.Close()
-	meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
-	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld, remoteTestTagMid)
+	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld, remoteTestTagMid}, "0.1.0", "0.2.0")
 
 	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: repoURL, Pin: remoteTestTagOld})
 	if err != nil {
@@ -181,17 +172,13 @@ func TestInstallPluginFromRepo_PinnedSkipsUpgrade(t *testing.T) { //nolint:paral
 }
 
 func TestInstallPluginFromRepo_FallsBackPastAssetlessTag(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	ctx := context.Background()
 
 	// Assets exist for 0.1.0 only; v0.2.0 is a pushed tag with no
 	// published release. Install must fall back with the skipped tag
 	// reported.
-	srv := pluginReleaseServer(t, "0.1.0")
-	defer srv.Close()
-	meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
-	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld, remoteTestTagMid)
+	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld, remoteTestTagMid}, "0.1.0")
 
 	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: repoURL})
 	if err != nil {
@@ -206,22 +193,17 @@ func TestInstallPluginFromRepo_FallsBackPastAssetlessTag(t *testing.T) { //nolin
 }
 
 func TestUpgradeInstalledPlugin_NoManifest(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	if _, err := UpgradeInstalledPlugin(context.Background(), "localdev"); err == nil || !strings.Contains(err.Error(), "manifest") {
 		t.Errorf("err = %v, want no-manifest explanation", err)
 	}
 }
 
 func TestRemoveManagedPlugin_CleansBinAndPkg(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	ctx := context.Background()
 
-	srv := pluginReleaseServer(t, "0.1.0")
-	defer srv.Close()
-	meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
-	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0")
 	if _, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: repoURL}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -237,8 +219,7 @@ func TestRemoveManagedPlugin_CleansBinAndPkg(t *testing.T) { //nolint:parallelte
 }
 
 func TestUpgradeInstalledPlugin_EquivalentTagSpellingIsUpToDate(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	// Manifest recorded the bare spelling; the remote tag carries the v
 	// prefix. Equivalent semver must not trigger a reinstall — the repo
 	// has no release server at all, so any download attempt would fail.
@@ -256,16 +237,12 @@ func TestUpgradeInstalledPlugin_EquivalentTagSpellingIsUpToDate(t *testing.T) { 
 }
 
 func TestUpgradeInstalledPlugin_AssetlessNewestTagReportsUpToDate(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	ctx := context.Background()
 	// Assets exist only for 0.1.0; v0.2.0 is tagged but unpublished.
 	// Upgrade falls back to the installed version and must report
 	// up-to-date, not a misleading "v0.1.0 → v0.1.0" upgrade line.
-	srv := pluginReleaseServer(t, "0.1.0")
-	defer srv.Close()
-	meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
-	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0")
 	if _, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: repoURL}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -286,12 +263,8 @@ func TestUpgradeInstalledPlugin_AssetlessNewestTagReportsUpToDate(t *testing.T) 
 // named "safe" install entire-hijack with no prompt, and let --force on plugin A
 // replace an unrelated installed plugin B.
 func TestInstallPluginFromRepo_RejectsNameMismatch(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
-	srv := pluginReleaseServer(t, "0.1.0")
-	defer srv.Close()
-	meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
-	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+	withIsolatedPluginEnv(t)
+	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0")
 
 	_, err := InstallPluginFromRepo(context.Background(), RemoteInstallOptions{
 		RepoURL: repoURL, ExpectedName: "safe",
@@ -334,12 +307,8 @@ func TestInstallPluginFromRepo_RejectsNameMismatch(t *testing.T) { //nolint:para
 // requirement, so dependencySatisfied and doctor would report it missing
 // forever and every future parent install would re-attempt it.
 func TestExecuteDepPlan_RejectsNameMismatch(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
-	srv := pluginReleaseServer(t, "0.1.0")
-	defer srv.Close()
-	meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
-	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+	withIsolatedPluginEnv(t)
+	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0")
 
 	// The plan says "sem"; the repo declares "demo".
 	plan := &DepPlan{Actions: []DepAction{{Name: "sem", RepoURL: repoURL}}}
@@ -363,22 +332,15 @@ func TestExecuteDepPlan_RejectsNameMismatch(t *testing.T) { //nolint:paralleltes
 // itself must fail loudly rather than quietly installing a second plugin and
 // leaving the original behind.
 func TestUpgradeInstalledPlugin_RejectsRename(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
-	srv := pluginReleaseServer(t, "0.1.0", "0.2.0")
-	defer srv.Close()
-	meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
-	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+	withIsolatedPluginEnv(t)
+	repoURL, srv := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0", "0.2.0")
 	if _, err := InstallPluginFromRepo(context.Background(), RemoteInstallOptions{RepoURL: repoURL}); err != nil {
 		t.Fatalf("initial install: %v", err)
 	}
 
 	// The upstream renames itself and tags a newer release.
-	dir := strings.TrimPrefix(repoURL, "file://")
-	testutil.WriteFile(t, dir, pluginMetadataFileName,
+	updateRepoMetadata(t, repoURL,
 		fmt.Sprintf("name: renamed\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL))
-	testutil.GitAdd(t, dir, pluginMetadataFileName)
-	testutil.GitCommit(t, dir, "rename")
 	gitTag(t, repoURL, remoteTestTagMid)
 
 	if _, err := UpgradeInstalledPlugin(context.Background(), "demo"); err == nil {

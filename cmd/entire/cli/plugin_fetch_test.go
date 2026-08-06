@@ -19,6 +19,45 @@ import (
 	"testing"
 )
 
+// staticServer serves body for every request. Four tests hand-rolled this
+// three-line handler; the //nolint:errcheck for the test-server write now
+// appears once instead of eleven times.
+func staticServer(t *testing.T, body []byte) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body) //nolint:errcheck // test server write; failure surfaces as a client error
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// assetServer serves one release asset and, when checksums is non-empty, a
+// checksums.txt alongside it. Everything else 404s — which is how a release
+// that publishes no checksum manifest behaves.
+func assetServer(t *testing.T, asset string, payload []byte, checksums string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case checksums != "" && strings.HasSuffix(r.URL.Path, checksumsFileName):
+			_, _ = w.Write([]byte(checksums)) //nolint:errcheck // test server write
+		case strings.HasSuffix(r.URL.Path, asset):
+			_, _ = w.Write(payload) //nolint:errcheck // test server write
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// notFoundServer 404s everything: a tag with no published release.
+func notFoundServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 func TestReleaseAssetBaseURL(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -131,14 +170,7 @@ func TestDownloadPluginAsset_UnverifiedRequiresOptIn(t *testing.T) {
 	t.Parallel()
 	asset := fmt.Sprintf("entire-run_1.0.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
 	payload := makeTarGz(t, map[string][]byte{"entire-run": []byte("payload")})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, asset) {
-			_, _ = w.Write(payload) //nolint:errcheck // test server write
-			return
-		}
-		http.NotFound(w, r) // no checksums.txt published
-	}))
-	defer srv.Close()
+	srv := assetServer(t, asset, payload, "") // no checksums.txt published
 	meta := &PluginMetadata{DownloadURL: srv.URL + "/dl/{asset}"}
 
 	staging := t.TempDir()
@@ -390,10 +422,7 @@ func TestSafeArchiveEntry(t *testing.T) {
 func TestFetchAndVerify_ChecksumEnforced(t *testing.T) {
 	t.Parallel()
 	payload := []byte("plugin bytes")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write(payload) //nolint:errcheck // test server write; failure surfaces as a client error
-	}))
-	defer srv.Close()
+	srv := staticServer(t, payload)
 
 	dir := t.TempDir()
 	sum := sha256.Sum256(payload)
@@ -414,8 +443,7 @@ func TestFetchAndVerify_ChecksumEnforced(t *testing.T) {
 
 func TestFetchAndVerify_404IsAssetNotFound(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.NotFoundHandler())
-	defer srv.Close()
+	srv := notFoundServer(t)
 	_, err := fetchAndVerify(context.Background(), srv.URL+"/missing", "missing", "", t.TempDir())
 	if !errors.Is(err, errAssetNotFound) {
 		t.Errorf("404 error = %v, want errAssetNotFound", err)
@@ -429,17 +457,7 @@ func TestDownloadPluginAsset_ViaChecksumManifest(t *testing.T) {
 	sum := sha256.Sum256(payload)
 	checksums := hex.EncodeToString(sum[:]) + "  " + asset + "\n"
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "checksums.txt"):
-			_, _ = w.Write([]byte(checksums)) //nolint:errcheck // test server write; failure surfaces as a client error
-		case strings.HasSuffix(r.URL.Path, asset):
-			_, _ = w.Write(payload) //nolint:errcheck // test server write; failure surfaces as a client error
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer srv.Close()
+	srv := assetServer(t, asset, payload, checksums)
 
 	meta := &PluginMetadata{DownloadURL: srv.URL + "/dl/{tag}/{asset}"}
 	fa, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir(), false)
@@ -455,14 +473,7 @@ func TestDownloadPluginAsset_ProbeFallbackWithoutChecksums(t *testing.T) {
 	t.Parallel()
 	payload := makeTarGz(t, map[string][]byte{"entire-run": []byte("bin")})
 	asset := fmt.Sprintf("entire-run_1.0.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, asset) {
-			_, _ = w.Write(payload) //nolint:errcheck // test server write; failure surfaces as a client error
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer srv.Close()
+	srv := assetServer(t, asset, payload, "")
 
 	meta := &PluginMetadata{DownloadURL: srv.URL + "/dl/{asset}"}
 	fa, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir(), true)
@@ -480,8 +491,7 @@ func TestDownloadPluginAsset_ProbeFallbackWithoutChecksums(t *testing.T) {
 // asset becomes errUnverifiedAsset.
 func TestDownloadPluginAsset_NoAssetForPlatform(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.NotFoundHandler())
-	defer srv.Close()
+	srv := notFoundServer(t)
 	meta := &PluginMetadata{DownloadURL: srv.URL + "/dl/{asset}"}
 	_, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir(), false)
 	if !errors.Is(err, errAssetNotFound) {
@@ -491,10 +501,7 @@ func TestDownloadPluginAsset_NoAssetForPlatform(t *testing.T) {
 
 func TestFetchAndVerify_RejectsUnsafeAssetNames(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("x")) //nolint:errcheck // test server write; failure surfaces as a client error
-	}))
-	defer srv.Close()
+	srv := staticServer(t, []byte("x"))
 	for _, asset := range []string{"", ".", "..", "../escape", "a/b", `a\b`} {
 		if _, err := fetchAndVerify(context.Background(), srv.URL, asset, "", t.TempDir()); err == nil {
 			t.Errorf("fetchAndVerify accepted unsafe asset name %q", asset)
@@ -504,10 +511,7 @@ func TestFetchAndVerify_RejectsUnsafeAssetNames(t *testing.T) {
 
 func TestFetchAndVerify_RemovesPartialFileOnMismatch(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("payload")) //nolint:errcheck // test server write; failure surfaces as a client error
-	}))
-	defer srv.Close()
+	srv := staticServer(t, []byte("payload"))
 	dir := t.TempDir()
 	if _, err := fetchAndVerify(context.Background(), srv.URL+"/a", "a", strings.Repeat("0", 64), dir); err == nil {
 		t.Fatal("fetchAndVerify accepted a wrong digest")
@@ -524,17 +528,8 @@ func TestDownloadPluginAsset_StaleManifestFallsThroughToProbe(t *testing.T) {
 	// must not block the install: selection falls through to the probe.
 	payload := makeTarGz(t, map[string][]byte{"entire-run": []byte("bin")})
 	asset := fmt.Sprintf("entire-run_1.0.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "checksums.txt"):
-			_, _ = w.Write([]byte("abc  entire-run_1.0.0_plan9_mips.tar.gz\n")) //nolint:errcheck // test server write
-		case strings.HasSuffix(r.URL.Path, asset):
-			_, _ = w.Write(payload) //nolint:errcheck // test server write
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer srv.Close()
+	// A stale root manifest that lists only a foreign platform's asset.
+	srv := assetServer(t, asset, payload, "abc  entire-run_1.0.0_plan9_mips.tar.gz\n")
 	meta := &PluginMetadata{DownloadURL: srv.URL + "/dl/{asset}"}
 	fa, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir(), true)
 	if err != nil {
@@ -768,10 +763,7 @@ func TestDownloadErrors_NeverLeakCredentials(t *testing.T) {
 	errs = append(errs, e) // transport refusal
 
 	// A checksum mismatch, which quotes the URL on a *successful* request.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("bytes")) //nolint:errcheck // test server write
-	}))
-	defer srv.Close()
+	srv := staticServer(t, []byte("bytes"))
 	credURL := strings.Replace(srv.URL, "http://", "http://bob:"+secret+"@", 1)
 	_, e = fetchAndVerify(context.Background(), credURL+"/a.tar.gz", "a.tar.gz", "deadbeef", staging)
 	errs = append(errs, e)

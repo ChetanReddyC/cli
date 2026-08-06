@@ -11,6 +11,13 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
+// withIndexCache points the plugin-index cache at a scratch dir, so tests never
+// read or write the developer's real ~/.cache/entire. Sibling of withPluginDir.
+func withIndexCache(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+}
+
 // newIndexRepo creates a git repo holding index.json and returns its
 // file:// URL.
 func newIndexRepo(t *testing.T, indexJSON string) (url, dir string) {
@@ -34,7 +41,7 @@ const testIndexJSON = `{
 }`
 
 func TestSyncPluginIndex_CloneSearchFind(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	withIndexCache(t)
 	url, _ := newIndexRepo(t, testIndexJSON)
 	idx, err := SyncPluginIndex(context.Background(), url, false)
 	if err != nil {
@@ -59,7 +66,7 @@ func TestSyncPluginIndex_CloneSearchFind(t *testing.T) { //nolint:paralleltest /
 }
 
 func TestSyncPluginIndex_RefreshPicksUpNewEntries(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	withIndexCache(t)
 	url, dir := newIndexRepo(t, `{"version":1,"plugins":[{"name":"run","repo_url":"https://x.example/entire-run"}]}`)
 	ctx := context.Background()
 	idx, err := SyncPluginIndex(ctx, url, false)
@@ -93,7 +100,7 @@ func TestSyncPluginIndex_RefreshPicksUpNewEntries(t *testing.T) { //nolint:paral
 }
 
 func TestSyncPluginIndex_OfflineUsesStaleCopy(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	withIndexCache(t)
 	url, dir := newIndexRepo(t, `{"version":1,"plugins":[{"name":"run","repo_url":"https://x.example/entire-run"}]}`)
 	ctx := context.Background()
 	if _, err := SyncPluginIndex(ctx, url, false); err != nil {
@@ -119,7 +126,7 @@ func TestSyncPluginIndex_OfflineUsesStaleCopy(t *testing.T) { //nolint:parallelt
 // ENTIRE_PLUGIN_INDEX_URL is) that omits the field, or one that grows a field
 // this CLI ignores.
 func TestSyncPluginIndex_VersionIsAdvisory(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	withIndexCache(t)
 	entry := `{"name":"run","repo_url":"https://x.example/entire-run"}`
 	for _, tt := range []struct{ label, json string }{
 		{label: "omitted", json: `{"plugins":[` + entry + `]}`},
@@ -144,7 +151,7 @@ func TestSyncPluginIndex_VersionIsAdvisory(t *testing.T) { //nolint:paralleltest
 // Bad entries are dropped the same way an invalid name is, so one hostile
 // row can't take out the whole catalog.
 func TestSyncPluginIndex_DropsEntriesWithUnusableRepoURL(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	withIndexCache(t)
 	url, _ := newIndexRepo(t, `{"version":1,"plugins":[
 		{"name":"evil","repo_url":"--upload-pack=touch /tmp/pwned; git-upload-pack"},
 		{"name":"alsoevil","repo_url":"ext::sh -c whoami"},
@@ -165,7 +172,7 @@ func TestSyncPluginIndex_DropsEntriesWithUnusableRepoURL(t *testing.T) { //nolin
 // The index URL itself reaches `git clone` as a positional, and --index /
 // ENTIRE_PLUGIN_INDEX_URL bypass the settings validator entirely.
 func TestSyncPluginIndex_RejectsUnusableIndexURL(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	withIndexCache(t)
 	if _, err := SyncPluginIndex(context.Background(), "--upload-pack=touch /tmp/pwned; git-upload-pack", false); err == nil {
 		t.Error("SyncPluginIndex accepted an option-shaped index URL")
 	}
@@ -199,13 +206,8 @@ func TestResolvePluginIndexURL_Precedence(t *testing.T) { //nolint:paralleltest 
 func TestPluginIndexURL_NotConfigurableViaRepoSettings(t *testing.T) { //nolint:paralleltest // mutates env
 	t.Setenv(pluginIndexEnvVar, "")
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, ".entire"), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".entire", "settings.json"),
-		[]byte(`{"plugins":{"index_url":"https://evil.example/idx"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.WriteFile(t, dir, ".entire/settings.json",
+		`{"plugins":{"index_url":"https://evil.example/idx"}}`)
 	t.Chdir(dir)
 	if got := resolvePluginIndexURL(""); got != defaultPluginIndexURL {
 		t.Errorf("repo settings steered the index to %q", got)
@@ -236,7 +238,7 @@ func TestClassifyInstallArg(t *testing.T) {
 }
 
 func TestSyncPluginIndex_RecoversFromPartialClone(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	withIndexCache(t)
 	url, _ := newIndexRepo(t, `{"version":1,"plugins":[{"name":"run","repo_url":"https://x.example/entire-run"}]}`)
 	// Simulate an interrupted first clone: cache dir exists, is non-empty,
 	// but has no .git. git clone refuses non-empty targets, so sync must
@@ -266,7 +268,7 @@ func TestSyncPluginIndex_RecoversFromPartialClone(t *testing.T) { //nolint:paral
 // usable catalog rather than racing on partial state — including the cold-start
 // case, where every caller wants to create the same clone at once.
 func TestSyncPluginIndex_ConcurrentSyncsAreSerialized(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	withIndexCache(t)
 	url, _ := newIndexRepo(t, `{"version":1,"plugins":[{"name":"run","repo_url":"https://x.example/entire-run"}]}`)
 
 	const workers = 6

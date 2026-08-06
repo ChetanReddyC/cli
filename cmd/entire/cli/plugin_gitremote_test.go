@@ -11,6 +11,31 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
+// runGitIsolated runs a git command with the same config isolation
+// testutil.CreateBranch/GitReset use. Without it these shell-outs inherit the
+// developer's global git config — a `tag.gpgSign = true` there fails the tag
+// calls below on their machine but not in CI.
+func runGitIsolated(t *testing.T, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", args...)
+	cmd.Env = testutil.GitIsolatedEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// gitTagRepo tags a repo given its dir. Three separate copies of this
+// shell-out existed across the plugin tests, none of them isolated.
+func gitTagRepo(t *testing.T, dir, tag string) {
+	t.Helper()
+	runGitIsolated(t, "-C", dir, "tag", tag)
+}
+
+// repoDirFromURL maps a file:// fixture URL back to its directory.
+func repoDirFromURL(repoURL string) string {
+	return strings.TrimPrefix(repoURL, "file://")
+}
+
 // newTaggedPluginRepo creates a git repo with entire-plugin.yml (when
 // metadata is non-empty) and the given tags, returning its file:// URL.
 // file:// (not a bare path) forces git's transport machinery, matching how
@@ -28,9 +53,7 @@ func newTaggedPluginRepo(t *testing.T, metadata string, tags ...string) string {
 	}
 	testutil.GitCommit(t, dir, "init")
 	for _, tag := range tags {
-		if out, err := exec.CommandContext(t.Context(), "git", "-C", dir, "tag", tag).CombinedOutput(); err != nil {
-			t.Fatalf("git tag %s: %v: %s", tag, err, out)
-		}
+		gitTagRepo(t, dir, tag)
 	}
 	return "file://" + filepath.ToSlash(dir)
 }
@@ -144,17 +167,13 @@ func TestValidatePluginRepoURL(t *testing.T) {
 // No t.Parallel: t.Chdir mutates process-global state.
 func TestGitRemote_OptionShapedURLNeverExecutes(t *testing.T) {
 	remote := t.TempDir()
-	if out, err := exec.CommandContext(t.Context(), "git", "init", "-q", "--bare", remote).CombinedOutput(); err != nil {
-		t.Fatalf("git init --bare: %v: %s", err, out)
-	}
+	runGitIsolated(t, "init", "-q", "--bare", remote)
 	work := t.TempDir()
 	testutil.InitRepo(t, work)
 	testutil.WriteFile(t, work, "f.txt", "x")
 	testutil.GitAdd(t, work, "f.txt")
 	testutil.GitCommit(t, work, "init")
-	if out, err := exec.CommandContext(t.Context(), "git", "-C", work, "remote", "add", "origin", remote).CombinedOutput(); err != nil {
-		t.Fatalf("git remote add origin: %v: %s", err, out)
-	}
+	runGitIsolated(t, "-C", work, "remote", "add", "origin", remote)
 	t.Chdir(work)
 
 	markerDir := t.TempDir()

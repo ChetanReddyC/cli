@@ -16,6 +16,15 @@ const depTestOldTag = "v0.1.0"
 // developer whose shell PATH includes a real managed plugin dir (the normal
 // case for anyone using entire plugins) can't leak entire-* binaries into
 // dependencySatisfied's LookPath fallback.
+// withIsolatedPluginEnv is the isolation every plugin test needs: a scratch
+// managed dir plus a PATH that cannot see the developer's real plugins. The two
+// were always applied together, 20 times, never one without the other.
+func withIsolatedPluginEnv(t *testing.T) {
+	t.Helper()
+	withPluginDir(t)
+	withIsolatedPath(t)
+}
+
 func withIsolatedPath(t *testing.T) {
 	t.Helper()
 	gitPath, err := exec.LookPath("git")
@@ -26,8 +35,7 @@ func withIsolatedPath(t *testing.T) {
 }
 
 func TestDependentsOf(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	mustSave := func(m *PluginManifest) {
 		t.Helper()
 		if err := SavePluginManifest(m); err != nil {
@@ -53,8 +61,7 @@ func TestDependentsOf(t *testing.T) { //nolint:paralleltest // mutates env
 }
 
 func TestDependencySatisfied_ManagedManifest(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	if err := SavePluginManifest(&PluginManifest{Name: "sem", RepoURL: "https://x.example/entire-sem", Tag: "v0.3.0"}); err != nil {
 		t.Fatal(err)
 	}
@@ -80,8 +87,7 @@ func TestDependencySatisfied_ManagedManifest(t *testing.T) { //nolint:parallelte
 }
 
 func TestPlanDependencyInstalls(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	ctx := context.Background()
 
 	// sem installed but old; run missing and resolvable via index;
@@ -116,8 +122,7 @@ func TestPlanDependencyInstalls(t *testing.T) { //nolint:paralleltest // mutates
 }
 
 func TestPlanDependencyInstalls_UnresolvableDep(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	_, err := PlanDependencyInstalls(context.Background(), []PluginRequirement{{Name: "mystery"}}, &PluginIndex{Version: 1})
 	if err == nil || !strings.Contains(err.Error(), "mystery") {
 		t.Errorf("err = %v, want unresolvable-dependency error naming the plugin", err)
@@ -125,8 +130,7 @@ func TestPlanDependencyInstalls_UnresolvableDep(t *testing.T) { //nolint:paralle
 }
 
 func TestPlanDependencyInstalls_VisitedSetBreaksCycles(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	// a requires b; b requires a. Both missing, both resolvable. The
 	// visited set must terminate planning with each appearing once.
 	repoA := newTaggedPluginRepo(t, "name: cyca\nrequires:\n  - name: cycb\n", "v1.0.0")
@@ -145,8 +149,7 @@ func TestPlanDependencyInstalls_VisitedSetBreaksCycles(t *testing.T) { //nolint:
 }
 
 func TestRunPluginDoctor_FlagsMissingAndOutdatedDeps(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	if err := SavePluginManifest(&PluginManifest{Name: "brain", RepoURL: "https://x.example/entire-brain", Tag: "v1.0.0",
 		Requires: []PluginRequirement{{Name: "sem", MinVersion: "v0.2.0"}, {Name: "ghost"}}}); err != nil {
 		t.Fatal(err)
@@ -177,8 +180,7 @@ func TestRunPluginDoctor_FlagsMissingAndOutdatedDeps(t *testing.T) { //nolint:pa
 }
 
 func TestPlanDependencyInstalls_WalksSatisfiedTransitives(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	// sem is installed and satisfied, but its own recorded requirement
 	// ("leaf") is missing — e.g. removed with --force after install.
 	// Planning a parent that requires sem must surface leaf.
@@ -201,8 +203,7 @@ func TestPlanDependencyInstalls_WalksSatisfiedTransitives(t *testing.T) { //noli
 }
 
 func TestPlanDependencyInstalls_WarnsOnUninspectableDep(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	// The dependency's repo has no tags, so its own requirements can't be
 	// inspected during planning. The action must still be planned, with a
 	// warning instead of silence.
@@ -233,8 +234,7 @@ func TestPlanDependencyInstalls_WarnsOnUninspectableDep(t *testing.T) { //nolint
 // thing actually executed. BinarySHA256 covers the installed binary, which is
 // what doctor re-hashes.
 func TestRunPluginDoctor_DetectsTamperedBinary(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 
 	dir, err := EnsurePluginPkgDir("demo")
 	if err != nil {
@@ -304,8 +304,7 @@ func TestRunPluginDoctor_DetectsTamperedBinary(t *testing.T) { //nolint:parallel
 // against a too-old sem. Doctor caught it after the fact, but the install
 // should plan the upgrade rather than defer the discovery.
 func TestPlanDependencyInstalls_StricterConstraintOnVisitedDep(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	const dep, depRepo = "sem", "https://x.example/entire-sem"
 	if err := SavePluginManifest(&PluginManifest{
 		Name: dep, RepoURL: depRepo, Tag: "v1.5.0",
@@ -362,8 +361,7 @@ func TestPlanDependencyInstalls_StricterConstraintOnVisitedDep(t *testing.T) { /
 // URL before the confirmation prompt. The capability moved to the user, who can
 // install an out-of-catalog dependency themselves and thereby satisfy it.
 func TestPlanDependencyInstalls_MissingDepMustBeIndexed(t *testing.T) { //nolint:paralleltest // mutates env
-	withPluginDir(t)
-	withIsolatedPath(t)
+	withIsolatedPluginEnv(t)
 	ctx := context.Background()
 
 	listed := newTaggedPluginRepo(t, "", "v1.0.0")
