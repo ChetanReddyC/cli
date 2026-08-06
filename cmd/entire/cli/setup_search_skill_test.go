@@ -237,8 +237,8 @@ func assertStrictJSONSearchInstructions(t *testing.T, content string) {
 	if !strings.Contains(content, "entire checkpoint explain <id>") {
 		t.Fatal("scaffolded file should point drill-down at `entire checkpoint explain <id>`")
 	}
-	if !strings.Contains(content, "entire checkpoint explain --session <id>") {
-		t.Fatal("scaffolded file should route session hits to `entire checkpoint explain --session <id>`")
+	if !strings.Contains(content, "it is a list filter, not a detail view") {
+		t.Fatal("scaffolded file must not oversell `explain --session` as a detail view")
 	}
 	if !strings.Contains(content, "summarize from the compact fields alone") {
 		t.Fatal("scaffolded file should tell agents repo/pr and cross-repo hits aren't explainable")
