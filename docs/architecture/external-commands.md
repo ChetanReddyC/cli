@@ -52,7 +52,7 @@ The manifest is written immediately after the binary swap and before the `bin/` 
 
 The two digests are not redundant. `sha256` covers the downloaded asset, which is usually an archive and is discarded with the staging directory — provenance only, nothing left to compare against. `binary_sha256` covers the executable under `pkg/<name>/`, which is what `entire plugin doctor` re-hashes to detect a binary swapped out after install.
 
-Installing from a URL not listed in the index prints the source and asks for confirmation (`--yes` to skip; required in non-interactive runs). Index-listed repos install without prompting.
+Installing from a URL not listed in the index prints the source and asks for confirmation (`--yes` to skip; required in non-interactive runs). Index-listed repos install without prompting — with one exception: `entire plugin browse` confirms its selection. The picker shows only a name and description, and an index-resolved install would otherwise proceed unprompted, so highlighting a row and pressing Enter would download a binary and link it onto `PATH` in a single keystroke. The confirmation names the repository the binary comes from.
 
 #### Repository URLs are a security boundary
 

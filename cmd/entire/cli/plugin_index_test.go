@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -337,5 +338,29 @@ func TestSyncPluginIndex_ConcurrentSyncsAreSerialized(t *testing.T) { //nolint:p
 		if err := <-errs; err != nil {
 			t.Errorf("concurrent SyncPluginIndex: %v", err)
 		}
+	}
+}
+
+// browse is a TTY-only convenience, so it must say so rather than half-working
+// — the repo's agent-safe-fallback rule requires the same workflow to be
+// reachable non-interactively, which 'search' + 'install <name>' provides.
+func TestPluginBrowse_RequiresTerminal(t *testing.T) { //nolint:paralleltest // mutates env
+	withIndexCache(t)
+	cmd := newPluginBrowseCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs(nil)
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("browse succeeded without a terminal")
+	}
+	if !strings.Contains(err.Error(), "needs a terminal") {
+		t.Errorf("err = %v, want it to say a terminal is needed", err)
+	}
+	// And it must point at the non-interactive equivalent.
+	if !strings.Contains(err.Error(), "plugin search") {
+		t.Errorf("err = %v, want it to name the non-interactive alternative", err)
 	}
 }

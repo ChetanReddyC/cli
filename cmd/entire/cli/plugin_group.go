@@ -664,6 +664,13 @@ func newPluginBrowseCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "browse",
 		Short: "Interactively browse the plugin index and install",
+		Long: `Browse the plugin index in an interactive picker and install a selection.
+
+The picker shows each plugin's name and description; the repository the binary
+would come from is named in a confirmation before anything is downloaded.
+
+Needs a terminal. Use 'entire plugin search' and 'entire plugin install <name>'
+in scripts and non-interactive runs.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			if !interactive.CanPromptInteractively() {
@@ -696,6 +703,29 @@ func newPluginBrowseCmd() *cobra.Command {
 			if choice == "" {
 				return nil
 			}
+
+			// Confirm before installing. An index-resolved install is trusted
+			// and so never prompts inside runRemoteInstall — which means
+			// without this, highlighting a row and pressing Enter downloads a
+			// binary and links it onto PATH in one keystroke. The picker also
+			// only shows name and description, so the repository the binary
+			// actually comes from is named here for the first time.
+			out := cmd.OutOrStdout()
+			prompt := fmt.Sprintf("Install %q?", choice)
+			if entry := idx.Find(choice); entry != nil {
+				prompt = fmt.Sprintf("Install %q from %s?", choice, redactURL(entry.RepoURL))
+			}
+			ok, err := confirmPluginAction(ctx, prompt, false)
+			switch {
+			case err != nil:
+				// Ctrl+C/Esc prints "Install cancelled." and exits cleanly;
+				// real prompt failures surface wrapped.
+				return handleFormCancellation(out, "Install", err)
+			case !ok:
+				fmt.Fprintln(out, "Install cancelled.")
+				return nil
+			}
+
 			// The choice came from the catalog, so it is an index source by
 			// construction — no re-parse needed.
 			src := installSource{Kind: installFromIndex, Ref: choice}
