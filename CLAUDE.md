@@ -492,6 +492,35 @@ reftable and sha256 repositories. Reviewers should flag any new
 `git.PlainOpen*`/`git.Open` outside `gitrepo`. Key files: `gitrepo/repository.go`
 (open entry points) and `gitrepo/reftable.go` (`reftableStorer`).
 
+#### Reading Worktree Status - Always Use `gitrepo.Status`
+
+**Never call go-git's `worktree.Status()` directly.** Use
+`gitrepo.Status(ctx, repo)`; a `forbidigo` rule in `.golangci.yaml` enforces
+this, and `gitrepo/status.go` is the only sanctioned call site.
+
+`Worktree.Status()` walks the whole worktree twice — once in
+`gitignore.ReadPatterns` collecting patterns, once diffing. `ReadPatterns` does
+**not** thread a parent directory's patterns into its recursive walk: each
+recursive call rebuilds its pattern set from that directory's own ignore files,
+so the prune check only ever matches patterns declared by the directory being
+scanned.
+
+**Consequence for `.gitignore` layout:** a rule prunes a subtree only when its
+target is a *direct child* of the `.gitignore` declaring it. A root-level
+`e2e/artifacts/` rule is one level too deep and never prunes, so every
+`Status()` descended ~15k artifact directories and cost 5.25s (against 0.013s
+for `git status --porcelain`), which timed out agent hooks. The rule therefore
+lives in `e2e/.gitignore` as `artifacts/`. When adding a new ignored directory,
+declare it in a `.gitignore` in its parent directory rather than as a nested
+path from the root — reviewers should flag multi-component directory patterns
+added to the root `.gitignore`.
+
+`gitrepo.WithStatusCache(ctx)` memoizes the walk for callers that read status
+more than once. Install it **only** across a window where the worktree cannot
+change: the TurnStart hook qualifies (it runs before the agent acts and writes
+only under `.entire/` and `.git/`), post-agent hooks such as TurnEnd do not —
+`DetectFileChanges` there must observe the agent's edits.
+
 #### go-git v5 Bugs - Use CLI Instead
 
 **Do NOT use go-git v5 for `checkout` or `reset --hard` operations.**

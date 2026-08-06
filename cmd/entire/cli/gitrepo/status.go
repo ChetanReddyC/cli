@@ -7,26 +7,22 @@ import (
 	"github.com/go-git/go-git/v6"
 )
 
-// go-git's Worktree.Status() is expensive: it walks the whole worktree twice
-// (once collecting .gitignore patterns, once diffing), and it does not prune
-// ignored subtrees whose pattern was declared by an ancestor .gitignore. A
-// single call costs seconds in a repo with a large ignored directory, so hooks
-// that need the status more than once must not recompute it.
+// Status is the single entry point for reading go-git worktree status; the
+// forbidigo rule in .golangci.yaml keeps callers off worktree.Status directly.
 //
-// Status is the single entry point for reading worktree status. When ctx
-// carries a cache installed by WithStatusCache, the first call for a worktree
-// computes the status and later calls with that ctx reuse it.
+// go-git's Worktree.Status() is expensive: it walks the whole worktree twice
+// (once collecting .gitignore patterns, once diffing), and gitignore.ReadPatterns
+// does not thread a parent directory's patterns into its recursive walk, so it
+// only prunes an ignored directory when the matching pattern was declared by
+// that directory's own parent .gitignore. A rule one level too deep leaves the
+// whole subtree walked: a single call cost 5.25s in this repo before e2e's
+// artifacts rule moved into e2e/.gitignore.
 
 type statusCacheKey struct{}
 
-type statusResult struct {
-	status git.Status
-	err    error
-}
-
 type statusCache struct {
-	mu      sync.Mutex
-	results map[string]statusResult
+	mu       sync.Mutex
+	statuses map[string]git.Status
 }
 
 // WithStatusCache returns a context that memoizes Status results.
@@ -37,7 +33,7 @@ type statusCache struct {
 // agent has edited files is not.
 func WithStatusCache(ctx context.Context) context.Context {
 	return context.WithValue(ctx, statusCacheKey{}, &statusCache{
-		results: make(map[string]statusResult),
+		statuses: make(map[string]git.Status),
 	})
 }
 
@@ -53,8 +49,8 @@ func Status(ctx context.Context, repo *git.Repository) (git.Status, error) {
 	}
 
 	cache, ok := ctx.Value(statusCacheKey{}).(*statusCache)
-	if !ok || cache == nil {
-		return worktree.Status() //nolint:wrapcheck // callers add their own context
+	if !ok {
+		return worktree.Status() //nolint:wrapcheck,forbidigo // the sanctioned call site
 	}
 
 	// Key on the worktree root rather than the repository pointer: callers on
@@ -64,12 +60,15 @@ func Status(ctx context.Context, repo *git.Repository) (git.Status, error) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 
-	if cached, ok := cache.results[root]; ok {
-		return cached.status, cached.err
+	if cached, hit := cache.statuses[root]; hit {
+		return cached, nil
 	}
 
-	status, statusErr := worktree.Status()
-	cache.results[root] = statusResult{status: status, err: statusErr}
+	status, err := worktree.Status() //nolint:forbidigo // the sanctioned call site
+	if err != nil {
+		return nil, err //nolint:wrapcheck // callers add their own context
+	}
+	cache.statuses[root] = status
 
-	return status, statusErr //nolint:wrapcheck // callers add their own context
+	return status, nil
 }
