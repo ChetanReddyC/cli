@@ -99,7 +99,7 @@ func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest //
 
 	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld, remoteTestTagMid}, "0.1.0", "0.2.0")
 
-	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: repoURL})
+	res, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{})
 	if err != nil {
 		t.Fatalf("InstallPluginFromRepo: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest //
 	}
 
 	// Second install without --force refuses.
-	if _, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: repoURL}); err == nil || !strings.Contains(err.Error(), "--force") {
+	if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{}); err == nil || !strings.Contains(err.Error(), "--force") {
 		t.Errorf("reinstall without force = %v, want already-installed error", err)
 	}
 
@@ -155,7 +155,7 @@ func TestInstallPluginFromRepo_PinnedSkipsUpgrade(t *testing.T) { //nolint:paral
 
 	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld, remoteTestTagMid}, "0.1.0", "0.2.0")
 
-	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: repoURL, Pin: remoteTestTagOld})
+	res, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{Pin: remoteTestTagOld})
 	if err != nil {
 		t.Fatalf("pinned install: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestInstallPluginFromRepo_FallsBackPastAssetlessTag(t *testing.T) { //nolin
 	// reported.
 	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld, remoteTestTagMid}, "0.1.0")
 
-	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: repoURL})
+	res, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{})
 	if err != nil {
 		t.Fatalf("InstallPluginFromRepo: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestRemoveManagedPlugin_CleansBinAndPkg(t *testing.T) { //nolint:parallelte
 	ctx := context.Background()
 
 	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0")
-	if _, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: repoURL}); err != nil {
+	if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	if err := RemoveManagedPlugin("demo"); err != nil {
@@ -243,7 +243,7 @@ func TestUpgradeInstalledPlugin_AssetlessNewestTagReportsUpToDate(t *testing.T) 
 	// Upgrade falls back to the installed version and must report
 	// up-to-date, not a misleading "v0.1.0 → v0.1.0" upgrade line.
 	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0")
-	if _, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{RepoURL: repoURL}); err != nil {
+	if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	gitTag(t, repoURL, remoteTestTagMid) // newer tag, no assets
@@ -266,9 +266,7 @@ func TestInstallPluginFromRepo_RejectsNameMismatch(t *testing.T) { //nolint:para
 	withIsolatedPluginEnv(t)
 	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0")
 
-	_, err := InstallPluginFromRepo(context.Background(), RemoteInstallOptions{
-		RepoURL: repoURL, ExpectedName: "safe",
-	})
+	_, err := InstallPluginFromRepo(context.Background(), repoURL, "safe", RemoteInstallOptions{})
 	if err == nil {
 		t.Fatal("install proceeded under a name the caller did not request")
 	}
@@ -291,14 +289,10 @@ func TestInstallPluginFromRepo_RejectsNameMismatch(t *testing.T) { //nolint:para
 	// The same repo installs fine when the expectation matches, and when the
 	// caller has no expectation at all (a bare `install <url>`, where the
 	// repository legitimately names itself).
-	if _, err := InstallPluginFromRepo(context.Background(), RemoteInstallOptions{
-		RepoURL: repoURL, ExpectedName: "demo",
-	}); err != nil {
+	if _, err := InstallPluginFromRepo(context.Background(), repoURL, "demo", RemoteInstallOptions{}); err != nil {
 		t.Fatalf("matching expectation should install: %v", err)
 	}
-	if _, err := InstallPluginFromRepo(context.Background(), RemoteInstallOptions{
-		RepoURL: repoURL, Force: true,
-	}); err != nil {
+	if _, err := InstallPluginFromRepo(context.Background(), repoURL, "", RemoteInstallOptions{Force: true}); err != nil {
 		t.Errorf("no expectation should install: %v", err)
 	}
 }
@@ -334,7 +328,7 @@ func TestExecuteDepPlan_RejectsNameMismatch(t *testing.T) { //nolint:paralleltes
 func TestUpgradeInstalledPlugin_RejectsRename(t *testing.T) { //nolint:paralleltest // mutates env
 	withIsolatedPluginEnv(t)
 	repoURL, srv := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0", "0.2.0")
-	if _, err := InstallPluginFromRepo(context.Background(), RemoteInstallOptions{RepoURL: repoURL}); err != nil {
+	if _, err := InstallPluginFromRepo(context.Background(), repoURL, "", RemoteInstallOptions{}); err != nil {
 		t.Fatalf("initial install: %v", err)
 	}
 

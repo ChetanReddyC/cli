@@ -220,9 +220,10 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 		}
 	}
 
-	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{
-		RepoURL: repoURL, Pin: flags.pin, Force: flags.force, AllowUnverified: flags.allowUnverified,
-		ExpectedName: expectedName,
+	// expectedName is set on the index path and empty on the URL path, where
+	// the repository names itself.
+	res, err := InstallPluginFromRepo(ctx, repoURL, expectedName, RemoteInstallOptions{
+		Pin: flags.pin, Force: flags.force, AllowUnverified: flags.allowUnverified,
 	})
 	if err != nil {
 		return fmt.Errorf("install plugin: %w", err)

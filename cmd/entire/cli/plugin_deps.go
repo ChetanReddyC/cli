@@ -243,12 +243,11 @@ func unverifiableVersionWarning(req PluginRequirement, source string) string {
 // published checksums.
 func ExecuteDepPlan(ctx context.Context, plan *DepPlan, allowUnverified bool) error {
 	for _, a := range plan.Actions {
-		if _, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{
-			RepoURL: a.RepoURL, Force: a.Upgrade, AllowUnverified: allowUnverified,
-			// The plan named this dependency and the user confirmed that name;
-			// an install landing under a different one would never satisfy the
-			// requirement, leaving doctor to report it missing forever.
-			ExpectedName: a.Name,
+		// The plan named this dependency and the user confirmed that name; an
+		// install landing under a different one would never satisfy the
+		// requirement, leaving doctor to report it missing forever.
+		if _, err := InstallPluginFromRepo(ctx, a.RepoURL, a.Name, RemoteInstallOptions{
+			Force: a.Upgrade, AllowUnverified: allowUnverified,
 		}); err != nil {
 			return fmt.Errorf("install dependency %q: %w", a.Name, err)
 		}

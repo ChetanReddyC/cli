@@ -25,10 +25,11 @@ import (
 // no published assets (tag pushed, release not finished).
 const maxTagFallbacks = 3
 
-// RemoteInstallOptions configures InstallPluginFromRepo.
+// RemoteInstallOptions configures InstallPluginFromRepo. It holds only genuine
+// options — the repository and the expected name are required arguments,
+// because a caller that omits either is making a decision, not accepting a
+// default.
 type RemoteInstallOptions struct {
-	// RepoURL is the full git URL of the plugin repository.
-	RepoURL string
 	// Pin, when non-empty, installs exactly this tag and marks the
 	// manifest pinned so upgrade skips it.
 	Pin string
@@ -39,12 +40,6 @@ type RemoteInstallOptions struct {
 	// executing an unauthenticated binary is the supply-chain risk the
 	// checksum path exists to remove, so it takes an explicit opt-in.
 	AllowUnverified bool
-	// ExpectedName is the plugin name the caller has already committed to —
-	// the index entry the user asked for, the requirement being satisfied, or
-	// the plugin being upgraded. Empty only when the caller genuinely has no
-	// expectation, i.e. a bare `install <url>` where the repository names
-	// itself. See installRepoAtTag for why a mismatch is fatal.
-	ExpectedName string
 }
 
 // RemoteInstallResult is what a successful remote install produced.
@@ -60,8 +55,18 @@ type RemoteInstallResult struct {
 // InstallPluginFromRepo installs a plugin from a git repository URL.
 // Dependency resolution deliberately does not happen here — callers
 // (the install command) plan and confirm dependency installs first.
-func InstallPluginFromRepo(ctx context.Context, opts RemoteInstallOptions) (*RemoteInstallResult, error) {
-	repoURL := strings.TrimRight(opts.RepoURL, "/")
+// expectedName is the plugin name the caller has already committed to — the
+// index entry the user asked for, the requirement being satisfied, or the
+// plugin being upgraded. Pass "" only for a bare `install <url>`, where the
+// repository legitimately names itself; installRepoAtTag explains why a
+// mismatch is otherwise fatal.
+//
+// It is a required argument rather than an options field on purpose. As a
+// field it could be silently omitted, and omitting it reopens a no-prompt
+// name-substitution hole; as an argument, passing "" is a visible choice at
+// the call site.
+func InstallPluginFromRepo(ctx context.Context, repoURL, expectedName string, opts RemoteInstallOptions) (*RemoteInstallResult, error) {
+	repoURL = strings.TrimRight(repoURL, "/")
 
 	var tags []string
 	if opts.Pin != "" {
@@ -82,7 +87,7 @@ func InstallPluginFromRepo(ctx context.Context, opts RemoteInstallOptions) (*Rem
 
 	var lastErr error
 	for i, tag := range tags {
-		res, err := installRepoAtTag(ctx, repoURL, tag, opts)
+		res, err := installRepoAtTag(ctx, repoURL, expectedName, tag, opts)
 		if err == nil {
 			res.SkippedTags = tags[:i]
 			return res, nil
@@ -95,7 +100,7 @@ func InstallPluginFromRepo(ctx context.Context, opts RemoteInstallOptions) (*Rem
 	return nil, lastErr
 }
 
-func installRepoAtTag(ctx context.Context, repoURL, tag string, opts RemoteInstallOptions) (*RemoteInstallResult, error) {
+func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, opts RemoteInstallOptions) (*RemoteInstallResult, error) {
 	meta, err := fetchPluginMetadataAtTag(ctx, repoURL, tag)
 	if err != nil {
 		return nil, err
@@ -126,10 +131,10 @@ func installRepoAtTag(ctx context.Context, repoURL, tag string, opts RemoteInsta
 	// already made a trust decision about *that* name, and silently honoring a
 	// different one voids it. A legitimate rename is a catalog or requirement
 	// to fix, and the message says so.
-	if opts.ExpectedName != "" && name != opts.ExpectedName {
+	if expectedName != "" && name != expectedName {
 		return nil, fmt.Errorf(
 			"%s declares plugin name %q but %q was requested; refusing to install under a name that was not asked for (update the plugin index entry or the requirement if the plugin was renamed)",
-			redactURL(repoURL), name, opts.ExpectedName)
+			redactURL(repoURL), name, expectedName)
 	}
 
 	if existing, err := FindInstalledPlugin(name); err != nil {
@@ -240,9 +245,8 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 	// Inherit the install-time trust decision: a plugin the user knowingly
 	// installed unverified shouldn't start failing on upgrade, and one
 	// installed verified must not silently downgrade to unverified.
-	res, err := InstallPluginFromRepo(ctx, RemoteInstallOptions{
-		RepoURL: m.RepoURL, Force: true, AllowUnverified: m.Unverified,
-		ExpectedName: name,
+	res, err := InstallPluginFromRepo(ctx, m.RepoURL, name, RemoteInstallOptions{
+		Force: true, AllowUnverified: m.Unverified,
 	})
 	if err != nil {
 		return nil, err
