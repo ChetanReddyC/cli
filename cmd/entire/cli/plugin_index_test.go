@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -214,7 +215,7 @@ func TestPluginIndexURL_NotConfigurableViaRepoSettings(t *testing.T) { //nolint:
 	}
 }
 
-func TestClassifyInstallArg(t *testing.T) {
+func TestParseInstallSource(t *testing.T) {
 	t.Parallel()
 	for arg, want := range map[string]installArgKind{
 		"https://github.com/entireio/entire-run": installFromURL,
@@ -240,8 +241,41 @@ func TestClassifyInstallArg(t *testing.T) {
 		// need an explicit ./ prefix.
 		"entire-run": installFromIndex,
 	} {
-		if got := classifyInstallArg(arg); got != want {
-			t.Errorf("classifyInstallArg(%q) = %d, want %d", arg, got, want)
+		src, err := parseInstallSource(arg)
+		if err != nil {
+			t.Errorf("parseInstallSource(%q) = %v, want no error", arg, err)
+			continue
+		}
+		if src.Kind != want {
+			t.Errorf("parseInstallSource(%q).Kind = %d, want %d", arg, src.Kind, want)
+			continue
+		}
+		if src.Ref != arg {
+			t.Errorf("parseInstallSource(%q).Ref = %q, want the argument unchanged", arg, src.Ref)
+		}
+	}
+
+	// Parsing validates as well as classifies, so a malformed source fails at
+	// the boundary with a message about itself rather than being handed to the
+	// catalog or the git CLI.
+	//
+	// Two shapes deliberately are NOT rejected here, because neither can reach
+	// git as a repository URL: "ext::sh -c whoami" has no separator and no
+	// scheme, so it is an index name that simply misses the catalog, and
+	// anything containing a separator is a path that fails at stat.
+	// validatePluginName permits spaces and colons in names — pre-existing
+	// looseness, and harmless on those two routes.
+	for arg, want := range map[string]string{
+		"agent-evil": "reserved",
+		"--upload-pack=touch /tmp/x; git-upload-pack": "must not start with '-'",
+		"http://forge.internal/entire-x":              "must use one of",
+		"git://forge.internal/entire-x":               "must use one of",
+		"-x":                                          "must not start with '-'",
+	} {
+		if _, err := parseInstallSource(arg); err == nil {
+			t.Errorf("parseInstallSource(%q) = nil error, want a rejection", arg)
+		} else if !strings.Contains(err.Error(), want) {
+			t.Errorf("parseInstallSource(%q) = %v, want it to mention %q", arg, err, want)
 		}
 	}
 }

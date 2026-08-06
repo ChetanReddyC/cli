@@ -68,30 +68,60 @@ const (
 	installFromIndex
 )
 
-// classifyInstallArg distinguishes the three install sources. URLs are
-// anything with a scheme or git's scp-like user@host:path form; paths must be
-// explicit — a separator or a leading dot (./entire-foo) — and everything else
-// is a bare name for index lookup. Deliberately NOT stat-based: a stray file or
-// directory in the CWD sharing a plugin's name must not shadow the index
-// (and could never install anyway — path installs require an entire-
-// basename). The spaces stay disjoint because validatePluginName rejects
-// separators in plugin names.
+// installSource is a parsed `plugin install` argument.
+type installSource struct {
+	Kind installArgKind
+	// Ref is the repository URL, the filesystem path, or the catalog name,
+	// according to Kind.
+	Ref string
+}
+
+// parseInstallSource classifies an install argument and validates it in one
+// pass. URLs are anything with a scheme or git's scp-like user@host:path form;
+// paths must be explicit — a separator or a leading dot (./entire-foo) — and
+// everything else is a bare name for index lookup.
 //
-// The scp-like test shares scpLikeGitURL with validatePluginRepoURL rather than
-// matching a "git@" prefix. Two definitions had drifted apart: the validator
-// accepts any SSH username, so deploy@git.corp.io:group/entire-foo.git was a
-// URL it would have installed from, but the classifier sent it down the path
-// branch — where it failed with a confusing "stat: no such file" instead. The
-// scp-like check must precede the separator check, since these URLs contain a
-// path separator too.
-func classifyInstallArg(arg string) installArgKind {
-	if strings.Contains(arg, "://") || scpLikeGitURL.MatchString(arg) {
-		return installFromURL
+// Classifying and validating together is deliberate: they were two functions
+// that answered overlapping questions, and they drifted. The classifier matched
+// a literal "git@" prefix while validatePluginRepoURL's scpLikeGitURL accepts
+// any SSH username, so deploy@git.corp.io:group/entire-foo.git was a URL the
+// validator would install from but the classifier sent down the path branch,
+// failing with a confusing "stat: no such file". One function cannot disagree
+// with itself. The scp-like test still has to precede the separator test, since
+// these URLs contain a separator too.
+//
+// Parsing once and carrying the result also stops the argument being classified
+// twice — the install command and runRemoteInstall each used to re-derive the
+// kind from the raw string.
+//
+// Deliberately NOT stat-based: a stray file or directory in the CWD sharing a
+// plugin's name must not shadow the index (and could never install anyway —
+// path installs require an entire- basename). The spaces stay disjoint because
+// validatePluginName rejects separators in plugin names.
+func parseInstallSource(arg string) (installSource, error) {
+	// An option-shaped argument is not a legitimate source of any kind: the URL
+	// validator rejects it, validatePluginName rejects it, and a path would be
+	// written ./-foo. Refusing it here beats letting it reach the path branch
+	// and surface as "stat: no such file".
+	if strings.HasPrefix(arg, "-") {
+		return installSource{}, fmt.Errorf("install source %q must not start with '-'", arg)
 	}
-	if strings.ContainsAny(arg, `/\`) || strings.HasPrefix(arg, ".") {
-		return installFromPath
+	switch {
+	case strings.Contains(arg, "://") || scpLikeGitURL.MatchString(arg):
+		if err := validatePluginRepoURL(arg); err != nil {
+			return installSource{}, err
+		}
+		return installSource{Kind: installFromURL, Ref: arg}, nil
+	case strings.ContainsAny(arg, `/\`) || strings.HasPrefix(arg, "."):
+		return installSource{Kind: installFromPath, Ref: arg}, nil
+	default:
+		// Validating the name here means a reserved or malformed one says so,
+		// instead of going to the catalog and coming back "not in the index".
+		if err := validatePluginName(arg); err != nil {
+			return installSource{}, err
+		}
+		return installSource{Kind: installFromIndex, Ref: arg}, nil
 	}
-	return installFromIndex
 }
 
 func newPluginInstallCmd() *cobra.Command {
@@ -128,10 +158,13 @@ are listed and installed after a single confirmation (or with --yes);
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			arg := args[0]
+			src, err := parseInstallSource(args[0])
+			if err != nil {
+				return fmt.Errorf("install plugin: %w", err)
+			}
 
-			if classifyInstallArg(arg) == installFromPath {
-				p, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: arg, Force: force})
+			if src.Kind == installFromPath {
+				p, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src.Ref, Force: force})
 				if err != nil {
 					return fmt.Errorf("install plugin: %w", err)
 				}
@@ -139,7 +172,7 @@ are listed and installed after a single confirmation (or with --yes);
 				warnIfShadowsBuiltin(cmd, p.Name)
 				return nil
 			}
-			return silencePluginCancel(ctx, runRemoteInstall(ctx, cmd, arg, remoteInstallFlags{
+			return silencePluginCancel(ctx, runRemoteInstall(ctx, cmd, src, remoteInstallFlags{
 				force: force, yes: yes, noDeps: noDeps, allowUnverified: allowUnverified,
 				pin: pin, index: indexFlag,
 			}))
@@ -167,10 +200,10 @@ type remoteInstallFlags struct {
 	pin, index                          string
 }
 
-func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags remoteInstallFlags) error {
+func runRemoteInstall(ctx context.Context, cmd *cobra.Command, src installSource, flags remoteInstallFlags) error {
 	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
 
-	repoURL := arg
+	repoURL := src.Ref
 	var trusted bool
 	var expectedName string
 
@@ -179,23 +212,23 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, arg string, flags
 	// name-resolution path; a URL install degrades to "not listed".
 	idx, idxErr := SyncPluginIndex(ctx, resolvePluginIndexURL(flags.index), false)
 
-	if classifyInstallArg(arg) == installFromIndex {
+	if src.Kind == installFromIndex {
 		if idxErr != nil {
-			return fmt.Errorf("resolve %q via plugin index: %w", arg, idxErr)
+			return fmt.Errorf("resolve %q via plugin index: %w", src.Ref, idxErr)
 		}
-		entry := idx.Find(arg)
+		entry := idx.Find(src.Ref)
 		if entry == nil {
 			// Bare names never resolve to local files (see
-			// classifyInstallArg), but a user who typed one expecting a
+			// parseInstallSource), but a user who typed one expecting a
 			// path install deserves the pointer.
-			if _, statErr := os.Stat(arg); statErr == nil {
-				return fmt.Errorf("plugin %q is not in the index; to install the local file, use an explicit path: entire plugin install ./%s", arg, arg)
+			if _, statErr := os.Stat(src.Ref); statErr == nil {
+				return fmt.Errorf("plugin %q is not in the index; to install the local file, use an explicit path: entire plugin install ./%s", src.Ref, src.Ref)
 			}
-			return fmt.Errorf("plugin %q is not in the index; pass the repository URL to install from a specific repo (try 'entire plugin search %s')", arg, arg)
+			return fmt.Errorf("plugin %q is not in the index; pass the repository URL to install from a specific repo (try 'entire plugin search %s')", src.Ref, src.Ref)
 		}
 		if len(entry.Platforms) > 0 && !slices.Contains(entry.Platforms, runtime.GOOS) {
 			fmt.Fprintf(errOut, "Warning: index lists %q for %s only; this is %s — continuing anyway.\n",
-				arg, strings.Join(entry.Platforms, "/"), runtime.GOOS)
+				src.Ref, strings.Join(entry.Platforms, "/"), runtime.GOOS)
 		}
 		repoURL = entry.RepoURL
 		// The user asked for this catalog name; the repo must not install
@@ -663,7 +696,10 @@ func newPluginBrowseCmd() *cobra.Command {
 			if choice == "" {
 				return nil
 			}
-			return silencePluginCancel(ctx, runRemoteInstall(ctx, cmd, choice, remoteInstallFlags{index: indexFlag}))
+			// The choice came from the catalog, so it is an index source by
+			// construction — no re-parse needed.
+			src := installSource{Kind: installFromIndex, Ref: choice}
+			return silencePluginCancel(ctx, runRemoteInstall(ctx, cmd, src, remoteInstallFlags{index: indexFlag}))
 		},
 	}
 	addIndexFlag(cmd, &indexFlag)
