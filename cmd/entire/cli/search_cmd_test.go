@@ -134,6 +134,8 @@ func TestWriteSearchCompactJSON_TrimsResults(t *testing.T) {
 		`"src/middleware/auth.go"`,
 		`"score": 0.042`,
 		`"title": "Implement auth middleware"`,
+		`"snippet": "added auth middleware for JWT validation"`,
+		`"matchType": "semantic"`,
 		`"total_pages": 1`,
 	} {
 		if !strings.Contains(output, want) {

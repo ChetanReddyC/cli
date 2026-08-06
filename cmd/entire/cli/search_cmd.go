@@ -54,9 +54,9 @@ search across all accessible repos.
 Run without arguments to open an interactive search. Results are
 displayed in an interactive table. Use --json for machine-readable output,
 and add --compact for a trimmed per-result shape suited to agents (implies
---json): id, type, repo, branch, author, date, files touched, score, and a
-truncated title instead of the full prompt. Fetch full detail for a single
-result with 'entire checkpoint explain <id>'.
+--json): id, type, repo, branch, author, date, files touched, score, match
+snippet, and a truncated title instead of the full prompt. Fetch full detail
+for a single result with 'entire checkpoint explain <id>'.
 
 CLI queries also support inline filters like author:<name>, date:<week|month>,
 branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
@@ -311,7 +311,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	}
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
-	cmd.Flags().BoolVar(&compactOutput, "compact", false, "Trimmed JSON output for agents: id, repo, files touched, score, and a truncated title instead of the full prompt (implies --json)")
+	cmd.Flags().BoolVar(&compactOutput, "compact", false, "Trimmed JSON output for agents: id, repo, files touched, score, match snippet, and a truncated title instead of the full prompt (implies --json)")
 	cmd.Flags().BoolVar(&codeFlag, "code", false, "Search code content across repositories")
 	cmd.Flags().BoolVar(&caseSensitive, "case-sensitive", false, "Case-sensitive code search (only with --code)")
 	cmd.Flags().IntVar(&limitFlag, "limit", resultsPerPage, "Maximum number of results (per page for checkpoint search, total for --code)")
@@ -1012,6 +1012,10 @@ type compactSearchHit struct {
 	Title        string   `json:"title"`
 	FilesTouched []string `json:"filesTouched,omitempty"`
 	Score        float64  `json:"score"`
+	// Snippet is the matched text (the title is just the commit subject or
+	// prompt head) — it's what lets an agent pick which hit to explain.
+	Snippet   string `json:"snippet,omitempty"`
+	MatchType string `json:"matchType,omitempty"`
 }
 
 // writeSearchCompactJSON writes client-side paginated search results as
@@ -1029,14 +1033,16 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int)
 			repo = org + "/" + repo
 		}
 		hit := compactSearchHit{
-			ID:     r.ResultID(),
-			Type:   r.Type,
-			Repo:   repo,
-			Branch: r.ResultBranch(),
-			Author: r.ResultAuthor(),
-			Date:   r.ResultCreatedAt(),
-			Title:  truncateOneLine(r.ResultTitle(), compactTitleMaxLen),
-			Score:  r.Meta.Score,
+			ID:        r.ResultID(),
+			Type:      r.Type,
+			Repo:      repo,
+			Branch:    r.ResultBranch(),
+			Author:    r.ResultAuthor(),
+			Date:      r.ResultCreatedAt(),
+			Title:     truncateOneLine(r.ResultTitle(), compactTitleMaxLen),
+			Score:     r.Meta.Score,
+			Snippet:   truncateOneLine(r.Meta.Snippet, compactTitleMaxLen),
+			MatchType: r.Meta.MatchType,
 		}
 		if r.Checkpoint != nil {
 			hit.FilesTouched = r.Checkpoint.FilesTouched

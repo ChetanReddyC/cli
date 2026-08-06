@@ -94,7 +94,7 @@ func TestResultAccessors_RawDataFallback(t *testing.T) {
 	}
 
 	var prRow Result
-	if err := json.Unmarshal([]byte(`{"type":"pr","data":{"id":"pr-9","title":"Fix login retry","repo":"backend","author":"alice"},"searchMeta":{"score":1}}`), &prRow); err != nil {
+	if err := json.Unmarshal([]byte(`{"type":"pr","data":{"id":"pr-9","title":"Fix login retry","repo":"backend","author":"alice","headRefName":"fix/login"},"searchMeta":{"score":1}}`), &prRow); err != nil {
 		t.Fatal(err)
 	}
 	if got := prRow.ResultTitle(); got != "Fix login retry" {
@@ -106,8 +106,34 @@ func TestResultAccessors_RawDataFallback(t *testing.T) {
 	if got := prRow.ResultAuthor(); got != testAuthor {
 		t.Errorf("pr ResultAuthor() = %q, want \"alice\"", got)
 	}
+	if got := prRow.ResultBranch(); got != "fix/login" {
+		t.Errorf("pr ResultBranch() = %q, want \"fix/login\"", got)
+	}
 	// Fields absent from the payload stay empty.
-	if got := prRow.ResultBranch() + prRow.ResultCreatedAt() + prRow.ResultOrg(); got != "" {
+	if got := prRow.ResultCreatedAt() + prRow.ResultOrg(); got != "" {
 		t.Errorf("pr accessors for absent fields = %q, want all empty", got)
+	}
+}
+
+// TestResultAccessors_TypedRowsNeverReadRawPayload pins the gate: for typed
+// rows (checkpoint/commit/session) an empty typed field stays empty even when
+// the raw payload carries a same-named key — the raw fallback is reserved for
+// types without a typed struct, so backend field additions can't silently
+// change what the TUI or compact output renders.
+func TestResultAccessors_TypedRowsNeverReadRawPayload(t *testing.T) {
+	t.Parallel()
+
+	var sessionRow Result
+	if err := json.Unmarshal([]byte(`{"type":"session","data":{"sessionId":"s1","displayName":"","author":"alice@example.com","title":"stray","branch":null},"searchMeta":{"score":1}}`), &sessionRow); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionRow.ResultAuthor(); got != "" {
+		t.Errorf("session ResultAuthor() = %q, want \"\" (raw author must be suppressed)", got)
+	}
+	if got := sessionRow.ResultTitle(); got != "" {
+		t.Errorf("session ResultTitle() = %q, want \"\" (raw title must be suppressed)", got)
+	}
+	if got := sessionRow.ResultBranch(); got != "" {
+		t.Errorf("session ResultBranch() = %q, want \"\"", got)
 	}
 }

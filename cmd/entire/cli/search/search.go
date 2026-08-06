@@ -122,8 +122,12 @@ type Result struct {
 	Commit     *CommitResult     `json:"-"`
 	Session    *SessionResult    `json:"-"`
 
-	// rawData preserves the original JSON for unknown types (repo, pr)
+	// rawData preserves the original JSON for unknown types (repo, pr).
 	rawData json.RawMessage
+	// rawFields is rawData decoded once at unmarshal time, and only for types
+	// without a typed struct (repo, pr) — accessors never read raw fields for
+	// typed rows, so a backend field addition cannot change what they return.
+	rawFields map[string]json.RawMessage
 }
 
 // resultJSON is the wire format for JSON marshaling/unmarshaling.
@@ -173,6 +177,7 @@ func (r *Result) UnmarshalJSON(b []byte) error {
 	// Clear any previously-decoded payloads so a reused Result keeps the
 	// "exactly one typed pointer is non-nil" invariant.
 	r.Checkpoint, r.Commit, r.Session = nil, nil, nil
+	r.rawFields = nil
 
 	switch raw.Type {
 	case TypeCheckpoint:
@@ -193,6 +198,11 @@ func (r *Result) UnmarshalJSON(b []byte) error {
 			return fmt.Errorf("unmarshaling session data: %w", err)
 		}
 		r.Session = &d
+	default:
+		// Unknown types (repo, pr): decode the payload once so accessors can
+		// read identifying fields without re-parsing per call (the TUI calls
+		// them per row per render).
+		_ = json.Unmarshal(raw.Data, &r.rawFields) //nolint:errcheck // best-effort; accessors return "" when nil
 	}
 	return nil
 }
@@ -219,18 +229,12 @@ func resultField(r *Result, fromCheckpoint func(*CheckpointResult) string, fromC
 
 // rawString returns the first non-empty string value among the given keys in
 // the raw payload of a result without a typed struct (repo, pr). Returns ""
-// for typed results or when no key matches.
+// for typed results — rawFields is only populated for unknown types — or when
+// no key matches.
 func (r *Result) rawString(keys ...string) string {
-	if len(r.rawData) == 0 {
-		return ""
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(r.rawData, &m); err != nil {
-		return ""
-	}
 	for _, k := range keys {
 		var s string
-		if err := json.Unmarshal(m[k], &s); err == nil && s != "" {
+		if err := json.Unmarshal(r.rawFields[k], &s); err == nil && s != "" {
 			return s
 		}
 	}
@@ -260,9 +264,10 @@ func (r *Result) ResultRepo() string {
 	return r.rawString("repo", "fullName", "name")
 }
 
-// ResultBranch returns the branch for any result type.
+// ResultBranch returns the branch for any result type. PR raw payloads carry
+// the head branch under "branch" or "headRefName".
 func (r *Result) ResultBranch() string {
-	return resultField(r,
+	if v := resultField(r,
 		func(c *CheckpointResult) string { return c.Branch },
 		func(c *CommitResult) string { return c.Branch },
 		func(s *SessionResult) string {
@@ -270,7 +275,10 @@ func (r *Result) ResultBranch() string {
 				return *s.Branch
 			}
 			return ""
-		})
+		}); v != "" {
+		return v
+	}
+	return r.rawString("branch", "headRefName")
 }
 
 // ResultCreatedAt returns the createdAt for any result type.
