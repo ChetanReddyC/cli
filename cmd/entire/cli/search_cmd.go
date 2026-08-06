@@ -56,7 +56,8 @@ displayed in an interactive table. Use --json for machine-readable output,
 and add --compact for a trimmed per-result shape suited to agents (implies
 --json): id, type, repo, branch, author, date, files touched, score, match
 snippet, and a truncated title instead of the full prompt. Fetch full detail
-for a single result with 'entire checkpoint explain <id>'.
+for a single result with 'entire checkpoint explain <id>', or add --full to
+that command to pull the checkpoint's entire session transcript.
 
 CLI queries also support inline filters like author:<name>, date:<week|month>,
 branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
@@ -1021,7 +1022,8 @@ type compactSearchHit struct {
 // writeSearchCompactJSON writes client-side paginated search results as
 // compact JSON: per hit only identifiers, ranking, files touched, and a
 // truncated title snippet — never the full prompt. Agents fetch full detail
-// for a single hit via `entire checkpoint explain <id>`.
+// for a single hit via `entire checkpoint explain <id>` (add --full for the
+// checkpoint's entire session transcript).
 func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int) error {
 	pageResults, total, totalPages, limit, page := paginateSearchResults(resp.Results, limit, page)
 
