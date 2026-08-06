@@ -155,7 +155,7 @@ func TestWriteSearchCompactJSON_RepoAndPRRowsKeepIdentifyingFields(t *testing.T)
 	t.Parallel()
 
 	wire := `{"results":[
-		{"type":"repo","data":{"id":"01JREPO","name":"backend","org":"acme"},"searchMeta":{"score":0.9}},
+		{"type":"repo","data":{"id":"01JREPO","name":"backend","org":"acme","fullName":"acme/backend"},"searchMeta":{"score":0.9}},
 		{"type":"pr","data":{"id":"pr-9","title":"Fix login retry","repo":"backend","author":"alice"},"searchMeta":{"score":0.5}}
 	],"total":2,"page":1}`
 	var resp search.Response
@@ -180,6 +180,10 @@ func TestWriteSearchCompactJSON_RepoAndPRRowsKeepIdentifyingFields(t *testing.T)
 		if !strings.Contains(output, want) {
 			t.Errorf("compact output missing %s:\n%s", want, output)
 		}
+	}
+	// The owner must never be doubled when the payload carries a qualified fullName.
+	if strings.Contains(output, "acme/acme/") {
+		t.Errorf("compact output doubled the repo owner:\n%s", output)
 	}
 }
 

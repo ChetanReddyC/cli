@@ -241,7 +241,8 @@ func (r *Result) rawString(keys ...string) string {
 	return ""
 }
 
-// ResultOrg returns the org for any result type.
+// ResultOrg returns the org for any result type. Repo/PR raw payloads may
+// only carry an owner-qualified "fullName"; its owner segment is the org.
 func (r *Result) ResultOrg() string {
 	if v := resultField(r,
 		func(c *CheckpointResult) string { return c.Org },
@@ -249,11 +250,16 @@ func (r *Result) ResultOrg() string {
 		func(s *SessionResult) string { return s.Org }); v != "" {
 		return v
 	}
-	return r.rawString("org")
+	if v := r.rawString("org"); v != "" {
+		return v
+	}
+	owner, _ := splitFullName(r.rawString("fullName"))
+	return owner
 }
 
-// ResultRepo returns the repo for any result type. Repo/PR raw payloads carry
-// the repository under "repo", "fullName", or "name".
+// ResultRepo returns the bare repo name (no owner) for any result type, so
+// callers can join it with ResultOrg without doubling the owner. Repo/PR raw
+// payloads carry it under "repo" or "name", or qualified inside "fullName".
 func (r *Result) ResultRepo() string {
 	if v := resultField(r,
 		func(c *CheckpointResult) string { return c.Repo },
@@ -261,7 +267,20 @@ func (r *Result) ResultRepo() string {
 		func(s *SessionResult) string { return s.Repo }); v != "" {
 		return v
 	}
-	return r.rawString("repo", "fullName", "name")
+	if v := r.rawString("repo", "name"); v != "" {
+		return v
+	}
+	_, name := splitFullName(r.rawString("fullName"))
+	return name
+}
+
+// splitFullName splits an "owner/repo" full name; without a slash the whole
+// value is the repo name.
+func splitFullName(fullName string) (owner, name string) {
+	if i := strings.IndexByte(fullName, '/'); i >= 0 {
+		return fullName[:i], fullName[i+1:]
+	}
+	return "", fullName
 }
 
 // ResultBranch returns the branch for any result type. PR raw payloads carry

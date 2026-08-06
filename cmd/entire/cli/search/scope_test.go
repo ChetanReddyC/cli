@@ -93,6 +93,19 @@ func TestResultAccessors_RawDataFallback(t *testing.T) {
 		t.Errorf("repo ResultCreatedAt() = %q", got)
 	}
 
+	// A row carrying only an owner-qualified fullName splits into org + bare
+	// repo, so org+"/"+repo joins never double the owner (acme/acme/backend).
+	var qualifiedRow Result
+	if err := json.Unmarshal([]byte(`{"type":"repo","data":{"id":"01JQUAL","fullName":"acme/backend"},"searchMeta":{"score":1}}`), &qualifiedRow); err != nil {
+		t.Fatal(err)
+	}
+	if got := qualifiedRow.ResultOrg(); got != "acme" {
+		t.Errorf("fullName-only ResultOrg() = %q, want \"acme\"", got)
+	}
+	if got := qualifiedRow.ResultRepo(); got != repoName {
+		t.Errorf("fullName-only ResultRepo() = %q, want bare \"backend\"", got)
+	}
+
 	var prRow Result
 	if err := json.Unmarshal([]byte(`{"type":"pr","data":{"id":"pr-9","title":"Fix login retry","repo":"backend","author":"alice","headRefName":"fix/login"},"searchMeta":{"score":1}}`), &prRow); err != nil {
 		t.Fatal(err)
