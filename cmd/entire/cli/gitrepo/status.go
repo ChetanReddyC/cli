@@ -27,10 +27,13 @@ type statusCache struct {
 
 // WithStatusCache returns a context that memoizes Status results.
 //
-// Install it only across a window in which the worktree cannot change —
-// otherwise later callers observe a stale status. A hook that runs before the
-// agent acts (such as turn start) is such a window; a hook that runs after the
-// agent has edited files is not.
+// Install it only across a window that neither writes tracked files nor stages
+// anything — otherwise later callers observe a stale status. Staging counts:
+// .git/index lives inside .git/, but the index feeds the status diff, so an
+// index write invalidates a cached result just as a worktree write does. Entire
+// performs no index writes today (no SetIndex calls; the git subcommands on the
+// hook paths are all index-read-only), which is what makes turn start a valid
+// window. A hook that runs after the agent has edited files is not.
 func WithStatusCache(ctx context.Context) context.Context {
 	return context.WithValue(ctx, statusCacheKey{}, &statusCache{
 		statuses: make(map[string]git.Status),

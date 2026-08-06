@@ -521,10 +521,20 @@ newly match `b` at any depth below `a/`; `/b/` preserves the original scope and
 prunes identically.
 
 `gitrepo.WithStatusCache(ctx)` memoizes the walk for callers that read status
-more than once. Install it **only** across a window where the worktree cannot
-change: the TurnStart hook qualifies (it runs before the agent acts and writes
-only under `.entire/` and `.git/`), post-agent hooks such as TurnEnd do not —
-`DetectFileChanges` there must observe the agent's edits.
+more than once. Install it **only** across a window that neither writes tracked
+files nor stages anything: the TurnStart hook qualifies (it runs before the agent
+acts and writes only session metadata under `.entire/` and refs under `.git/`),
+post-agent hooks such as TurnEnd do not — `DetectFileChanges` there must observe
+the agent's edits.
+
+Staging counts as invalidation even though `.git/index` sits inside `.git/`: the
+index feeds the status diff, so an index write makes a cached result stale. Entire
+performs no index writes today — there are no `SetIndex` calls, the single
+`Storer.Index()` use (`strategy/content_overlap.go`) is a read, and the git
+subcommands on the hook paths are all index-read-only. **If you add an
+index-mutating operation, check whether it lands inside a status-cache window.**
+The cache is context-scoped to one short-lived hook process, so it cannot go
+stale across turns.
 
 #### go-git v5 Bugs - Use CLI Instead
 
