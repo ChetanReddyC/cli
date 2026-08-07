@@ -358,9 +358,16 @@ type fixedDiscoverImporter struct {
 	agentimport.Importer
 
 	sessions []agentimport.SessionFile
+	// onDiscover, when set, runs as Discover is reached — the seam for
+	// observing that the import loop got this far, or for injecting a
+	// cancellation at that moment.
+	onDiscover func()
 }
 
 func (f fixedDiscoverImporter) Discover(string, string, time.Time, []string) ([]agentimport.SessionFile, error) {
+	if f.onDiscover != nil {
+		f.onDiscover()
+	}
 	return f.sessions, nil
 }
 
@@ -511,32 +518,6 @@ func TestRunSelectedImports_NonTTYProgressLines_Reimport(t *testing.T) {
 	}
 }
 
-// cancelOnDiscoverImporter cancels the run's context from Discover, standing in
-// for a Ctrl-C landing while the first agent's history is being imported.
-type cancelOnDiscoverImporter struct {
-	agentimport.Importer
-
-	sessions []agentimport.SessionFile
-	cancel   context.CancelFunc
-}
-
-func (c cancelOnDiscoverImporter) Discover(string, string, time.Time, []string) ([]agentimport.SessionFile, error) {
-	c.cancel()
-	return c.sessions, nil
-}
-
-// recordDiscoverImporter records whether the import loop reached it at all.
-type recordDiscoverImporter struct {
-	agentimport.Importer
-
-	reached *bool
-}
-
-func (r recordDiscoverImporter) Discover(string, string, time.Time, []string) ([]agentimport.SessionFile, error) {
-	*r.reached = true
-	return nil, nil
-}
-
 // TestRunSelectedImports_InterruptedStopsBeforeNextAgent proves Ctrl-C during
 // one agent's import ends the whole offer instead of moving straight on to the
 // next agent's history — the last thing a user who just interrupted wants —
@@ -574,8 +555,10 @@ func TestRunSelectedImports_InterruptedStopsBeforeNextAgent(t *testing.T) {
 	var secondReached bool
 	var buf bytes.Buffer
 	runSelectedImports(ctx, &buf, dir, []eligibleImport{
-		{imp: cancelOnDiscoverImporter{Importer: claudeImp, sessions: sessions, cancel: cancel}, displayName: testAgentClaude},
-		{imp: recordDiscoverImporter{Importer: claudeImp, reached: &secondReached}, displayName: "Cursor"},
+		// The first agent's import is interrupted as it starts; the second must
+		// never be reached.
+		{imp: fixedDiscoverImporter{Importer: claudeImp, sessions: sessions, onDiscover: cancel}, displayName: testAgentClaude},
+		{imp: fixedDiscoverImporter{Importer: claudeImp, onDiscover: func() { secondReached = true }}, displayName: "Cursor"},
 	})
 	out := buf.String()
 

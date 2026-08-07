@@ -37,11 +37,9 @@ var (
 // importHistoryFlagUsage is the --import-history help text. It lives here, next
 // to the behavior it describes, so the advertised lookback cannot drift from
 // agentimport's.
-func importHistoryFlagUsage() string {
-	return fmt.Sprintf(
-		"During first-time setup, import the selected agents' existing session history (last %d days) without prompting",
-		agentimport.LookbackDays)
-}
+var importHistoryFlagUsage = fmt.Sprintf(
+	"During first-time setup, import the selected agents' existing session history (last %d days) without prompting",
+	agentimport.LookbackDays)
 
 // noteImportHistoryNotApplicable tells a user who asked for a history import
 // that this run cannot do one. The offer is first-time-setup only, so on an
@@ -88,20 +86,20 @@ func maybeOfferSessionImport(ctx context.Context, w io.Writer, agents []agent.Ag
 		return
 	}
 
+	// No explicit opt-in, and no way (or no intent) to ask: don't silently
+	// import. Leave a pointer so scripted/agent/--yes enables can still import
+	// on demand. The hint names the standalone command rather than the flag:
+	// by the time this prints, setup has written its settings, so a re-run of
+	// enable is no longer a first run and the flag would not apply.
+	if !opts.ImportHistory && (opts.Yes || !interactive.CanPromptInteractively()) {
+		logging.Info(ctx, "session import offer skipped: no explicit opt-in",
+			"eligible", len(eligible), "yes", opts.Yes)
+		fmt.Fprintf(w, "Found importable history for %s. Run 'entire import <agent>' to import it.\n", pluralAgents(len(eligible)))
+		return
+	}
+
 	selected := eligible
 	if !opts.ImportHistory {
-		// No explicit opt-in, and no way (or no intent) to ask: don't silently
-		// import. Leave a pointer so scripted/agent/--yes enables can still
-		// import on demand. The hint names the standalone command rather than
-		// the flag: by the time this prints, setup has written its settings, so
-		// a re-run of enable is no longer a first run and the flag would not
-		// apply.
-		if opts.Yes || !interactive.CanPromptInteractively() {
-			logging.Info(ctx, "session import offer skipped: no explicit opt-in",
-				"eligible", len(eligible), "yes", opts.Yes)
-			fmt.Fprintf(w, "Found importable history for %s. Run 'entire import <agent>' to import it.\n", pluralAgents(len(eligible)))
-			return
-		}
 		selected, err = sessionImportPrompt(ctx, w, eligible)
 		if err != nil {
 			// Best-effort: a prompt/UI failure must never fail enable. Log,

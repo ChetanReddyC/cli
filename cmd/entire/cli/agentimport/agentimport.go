@@ -215,10 +215,7 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 	authorName, authorEmail := cp.GetGitAuthorFromRepo(repo)
 
 	for sessionIndex, sf := range files {
-		// Ctrl-C must stop the import. Nothing else on this path observes
-		// cancellation — go-git object/ref writes and CreateCommit all ignore
-		// ctx — so without these checks an interrupted import runs to
-		// completion, silently minting checkpoints the user asked to stop.
+		// Stop before reading and splitting the next transcript.
 		if err := ctx.Err(); err != nil {
 			return res, err //nolint:wrapcheck // propagate context cancellation
 		}
@@ -240,8 +237,12 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		var red redact.RedactedBytes
 		redacted := false
 		for turnIndex, turn := range turns {
-			// Per-turn, not just per-session: one session can carry hundreds of
-			// turns, and each turn is a checkpoint write.
+			// Ctrl-C must stop the import, and per turn rather than per session:
+			// one session can carry hundreds of turns, each a checkpoint write.
+			// Nothing below this observes cancellation — go-git object/ref
+			// writes and CreateCommit all ignore ctx, and neither git store
+			// guards its create path — so without this an interrupted import
+			// runs to completion, minting checkpoints the user asked to stop.
 			if err := ctx.Err(); err != nil {
 				return res, err //nolint:wrapcheck // propagate context cancellation
 			}

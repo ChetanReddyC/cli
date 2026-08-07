@@ -738,11 +738,8 @@ func TestGitRefsStore_BackfillUnknownCheckpointNotFound(t *testing.T) {
 	assert.Nil(t, summary)
 }
 
-// TestGitRefsStore_WriteRefusesCanceledContext proves a canceled context stops
-// the refs store from minting checkpoints, matching the git-branch store and
-// this store's own backfill writers. Without it a bulk writer that ignores
-// cancellation — `entire import`, which `entire enable` runs on a first-time
-// repo — kept creating checkpoints after Ctrl-C.
+// TestGitRefsStore_WriteRefusesCanceledContext pins that a canceled context
+// stops the refs store from minting checkpoints — see writeSession for why.
 func TestGitRefsStore_WriteRefusesCanceledContext(t *testing.T) {
 	t.Parallel()
 	store := newRefsStore(t)
@@ -766,14 +763,9 @@ func TestGitRefsStore_WriteRefusesCanceledContext(t *testing.T) {
 		"a write refused for cancellation must not leave a checkpoint ref behind")
 }
 
-// TestGitRefsStore_EnqueuesForPushDuringShutdown proves the push-queue record
-// still lands when the context is already canceled. By the time setRef runs the
-// ref is on disk (go-git ref writes don't observe ctx) and the queue is the only
-// push-discovery mechanism there is, so honoring the cancellation here would
-// strand the checkpoint locally forever: writers are idempotent, so no later run
-// re-enqueues it. Resolving the queue shells out to git, which is what made this
-// the one step on the write path that failed under a canceled ctx — the source
-// of the "resolve push queue failed; ref not enqueued" warning flood.
+// TestGitRefsStore_EnqueuesForPushDuringShutdown pins that a ref written during
+// shutdown is still queued for push — see enqueueForPush for why dropping the
+// record would strand the checkpoint locally forever.
 func TestGitRefsStore_EnqueuesForPushDuringShutdown(t *testing.T) {
 	t.Parallel()
 	store := newRefsStore(t)

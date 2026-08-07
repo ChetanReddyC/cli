@@ -16,6 +16,15 @@ const claudeImportFixture = `{"type":"user","uuid":"u1","timestamp":"2026-06-20T
 {"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"second"}}
 `
 
+// writeClaudeHistory drops a discoverable two-turn Claude transcript for the
+// env's repo, so a first-time enable has something to offer to import.
+func writeClaudeHistory(t *testing.T, env *TestEnv) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(env.ClaudeProjectDir, "sess1.jsonl"),
+		[]byte(claudeImportFixture), 0o644))
+}
+
 // freshRepoEnv builds a repo with an initial commit but WITHOUT Entire enabled,
 // so `entire enable` runs its real first-time flow.
 func freshRepoEnv(t *testing.T) *TestEnv {
@@ -32,10 +41,7 @@ func TestEnableOffersImport_FirstRunImportsWithImportHistory(t *testing.T) {
 	t.Parallel()
 	env := freshRepoEnv(t)
 
-	// Pre-existing Claude history for this repo.
-	require.NoError(t, os.WriteFile(
-		filepath.Join(env.ClaudeProjectDir, "sess1.jsonl"),
-		[]byte(claudeImportFixture), 0o644))
+	writeClaudeHistory(t, env)
 
 	// --import-history is the explicit, non-interactive opt-in to importing
 	// the selected agent's discoverable history on first-time enable.
@@ -56,9 +62,7 @@ func TestEnableOffersImport_YesDoesNotImport(t *testing.T) {
 	t.Parallel()
 	env := freshRepoEnv(t)
 
-	require.NoError(t, os.WriteFile(
-		filepath.Join(env.ClaudeProjectDir, "sess1.jsonl"),
-		[]byte(claudeImportFixture), 0o644))
+	writeClaudeHistory(t, env)
 
 	out := env.RunCLI("enable", "--agent", agentClaudeCode, "--yes", "--telemetry=false")
 	require.Contains(t, out, "Ready.", "enable should complete; got: %s", out)
@@ -76,9 +80,7 @@ func TestEnableImportHistory_OnConfiguredRepoIsReported(t *testing.T) {
 	t.Parallel()
 	env := freshRepoEnv(t)
 
-	require.NoError(t, os.WriteFile(
-		filepath.Join(env.ClaudeProjectDir, "sess1.jsonl"),
-		[]byte(claudeImportFixture), 0o644))
+	writeClaudeHistory(t, env)
 
 	env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 
@@ -92,10 +94,7 @@ func TestEnableOffersImport_NonInteractiveWithoutYesHints(t *testing.T) {
 	t.Parallel()
 	env := freshRepoEnv(t)
 
-	// Pre-existing Claude history for this repo.
-	require.NoError(t, os.WriteFile(
-		filepath.Join(env.ClaudeProjectDir, "sess1.jsonl"),
-		[]byte(claudeImportFixture), 0o644))
+	writeClaudeHistory(t, env)
 
 	// A non-interactive (no-TTY) enable without --yes must NOT silently import;
 	// it points at the manual command instead.
@@ -122,9 +121,7 @@ func TestEnableOffersImport_NoHistoryIsSilent(t *testing.T) {
 func TestEnableOffersImport_NotOfferedOnReEnable(t *testing.T) {
 	t.Parallel()
 	env := freshRepoEnv(t)
-	require.NoError(t, os.WriteFile(
-		filepath.Join(env.ClaudeProjectDir, "sess1.jsonl"),
-		[]byte(claudeImportFixture), 0o644))
+	writeClaudeHistory(t, env)
 
 	// First enable imports (--import-history opts in).
 	first := env.RunCLI("enable", "--agent", agentClaudeCode, "--import-history", "--telemetry=false")
@@ -137,14 +134,10 @@ func TestEnableOffersImport_NotOfferedOnReEnable(t *testing.T) {
 		"re-enable must not run import at all; got: %s", second)
 }
 
-// TestEnable_RoutesLoggingToLogFile proves `entire enable` initializes file
-// logging like every other command. Without it the package logger stays nil
-// and every logging.* call under setup — agent detection, hook install, the
-// session import, the checkpoint layer's push and remote warnings — falls back
-// to slog.Default(), which prints them straight onto the user's terminal
-// mid-flow and writes nothing to .entire/logs/. That is how a Ctrl-C'd
-// enable-time import came to flood a user's terminal with "resolve push queue
-// failed; ref not enqueued" lines.
+// TestEnable_RoutesLoggingToLogFile pins that `entire enable` initializes file
+// logging like every other command — see the logging.Init call in enable's
+// RunE for why its absence put operational warnings on the user's terminal
+// instead of in the log.
 func TestEnable_RoutesLoggingToLogFile(t *testing.T) {
 	t.Parallel()
 	env := freshRepoEnv(t)

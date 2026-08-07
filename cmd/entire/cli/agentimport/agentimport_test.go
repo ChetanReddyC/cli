@@ -622,10 +622,9 @@ func TestRun_CodexImportSanitizesAndKeepsOffsetsAligned(t *testing.T) {
 }
 
 // TestRun_StopsOnContextCancellation proves Ctrl-C mid-import halts Run's own
-// loops, independently of whether the configured checkpoint store happens to
-// reject a canceled write. DryRun writes nothing, so the loop checks are the
-// only thing that can stop this run: without them Run walks every remaining
-// session and turn after the cancel.
+// loops, independently of whether the configured checkpoint store rejects a
+// canceled write. DryRun writes nothing, so the loop checks are the only thing
+// that can stop this run.
 func TestRun_StopsOnContextCancellation(t *testing.T) {
 	t.Parallel()
 	repo, repoDir := initRepoWithCommit(t)
@@ -662,12 +661,10 @@ func TestRun_StopsOnContextCancellation(t *testing.T) {
 }
 
 // TestRun_CancellationStopsRefsBackedImport is the end-to-end regression for
-// the reported bug: `entire enable` defaults a first-time repo to the git-refs
-// checkpoint backend and then offers to import agent history. Unlike the
-// git-branch store, the git-refs store did not reject writes on a canceled
-// context, and nothing else on that path observes ctx (go-git object/ref
-// writes and CreateCommit all ignore it) — so Ctrl-C left the import running
-// to completion, minting checkpoints the user had just asked to stop.
+// the reported bug, in the configuration it was reported on: `entire enable`
+// defaults a first-time repo to the git-refs checkpoint backend and then
+// offers to import agent history. See gitRefsStore.writeSession for why no
+// layer below this one stopped the run.
 func TestRun_CancellationStopsRefsBackedImport(t *testing.T) {
 	// Not parallel: sets the checkpoint backend via the environment.
 	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
