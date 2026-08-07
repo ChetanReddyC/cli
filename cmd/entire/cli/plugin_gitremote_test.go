@@ -113,6 +113,8 @@ func TestValidatePluginRepoURL(t *testing.T) {
 	valid := []string{
 		"https://github.com/entireio/entire-run",
 		"ssh://git@github.com/entireio/entire-run.git",
+		// Accepted only because the suite runs under `go test`; see
+		// TestValidatePluginRepoURL_RejectsFileURLsInProduction.
 		"file:///tmp/entire-run",
 		"git@github.com:entireio/entire-run.git",
 		"forge-user@git.example.com:team/entire-run",
@@ -131,9 +133,8 @@ func TestValidatePluginRepoURL(t *testing.T) {
 		// who can rewrite the transport chooses the binary.
 		"http://forge.internal/team/entire-run.git",
 		"git://example.com/entire-run.git",
-		// Bare paths are rejected in favor of file://, which says the same
-		// thing unambiguously — and keeps this validator identical to the
-		// settings one.
+		// Local remotes are rejected outside tests; see
+		// TestValidatePluginRepoURL_RejectsFileURLsInProduction.
 		"/srv/plugin-index",
 		`C:\\repos\\entire-run`,
 		// The injection payloads: git reads an option-shaped positional as an
@@ -259,5 +260,56 @@ func TestListRemoteSemverTags_PrereleaseOnlyRepoIsEmpty(t *testing.T) {
 	}
 	if len(tags) != 0 {
 		t.Errorf("tags = %v, want none", tags)
+	}
+}
+
+// The shipped allowlist has no local-filesystem transport. file:// exists for
+// the test suite only: nothing in production needs it — a file:// plugin
+// repository cannot complete an install, since releaseAssetBaseURL requires an
+// http(s) repo URL to locate the asset — and widening a security allowlist to
+// pay for test convenience is the thing to avoid. A hostile catalog entry
+// therefore cannot use one to probe the filesystem.
+//
+// The gate is a var so this test can reach the production branch;
+// testing.Testing() is true wherever the test itself runs.
+func TestValidatePluginRepoURL_RejectsFileURLsInProduction(t *testing.T) { //nolint:paralleltest // swaps a package-level seam
+	original := allowLocalGitURL
+	t.Cleanup(func() { allowLocalGitURL = original })
+	allowLocalGitURL = func() bool { return false }
+
+	for _, u := range []string{"file:///tmp/entire-run", "file://localhost/srv/entire-run"} {
+		err := validatePluginRepoURL(u)
+		if err == nil {
+			t.Errorf("validatePluginRepoURL(%q) = nil in production, want a rejection", u)
+			continue
+		}
+		if !strings.Contains(err.Error(), "must use one of") {
+			t.Errorf("%q: err = %v, want the allowlist message", u, err)
+		}
+	}
+	// The transports that do ship are unaffected.
+	for _, u := range []string{"https://github.com/entireio/entire-run", "git@github.com:entireio/entire-run.git"} {
+		if err := validatePluginRepoURL(u); err != nil {
+			t.Errorf("validatePluginRepoURL(%q) = %v, want nil", u, err)
+		}
+	}
+}
+
+// The spawned integration binary cannot see testing.Testing(), so it is told
+// through the environment. Losing that wiring would fail every plugin
+// integration test with an allowlist error rather than silently, but pin the
+// contract anyway since the env var is the only thing holding it up.
+func TestAllowLocalGitURL_HonorsTheSpawnedBinaryEnvVar(t *testing.T) { //nolint:paralleltest // mutates env and a package-level seam
+	original := allowLocalGitURL
+	t.Cleanup(func() { allowLocalGitURL = original })
+	allowLocalGitURL = func() bool { return os.Getenv(envAllowFileRemotes) != "" }
+
+	t.Setenv(envAllowFileRemotes, "")
+	if err := validatePluginRepoURL("file:///tmp/x"); err == nil {
+		t.Error("file:// accepted with the sentinel unset")
+	}
+	t.Setenv(envAllowFileRemotes, "1")
+	if err := validatePluginRepoURL("file:///tmp/x"); err != nil {
+		t.Errorf("file:// rejected with the sentinel set: %v", err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -87,14 +88,45 @@ func redactCredentials(text string) string {
 	return credentialInURL.ReplaceAllString(text, "${1}")
 }
 
-// gitURLSchemes are the transports a plugin or index repository URL may use.
+// gitURLSchemes are the transports a plugin or index repository URL may use in
+// production.
 //
 // http:// and git:// are deliberately absent. Both are unauthenticated and
 // unencrypted, and the catalog fetched over them decides which repositories
 // install without a confirmation prompt — so an attacker who can rewrite the
 // transport chooses the binary. That is strictly worse than the plaintext-asset
 // case the download path already refuses.
-var gitURLSchemes = []string{"https://", "ssh://", "file://"}
+//
+// file:// is absent too, and only accepted under test (see allowLocalGitURL).
+// Nothing in production needs it: a file:// plugin repository cannot even
+// complete an install, because releaseAssetBaseURL requires an http(s) repo URL
+// to derive the asset location. Its only real consumer was the test suite, and
+// a security allowlist should not be widened to pay for test convenience —
+// especially when the alternative transports a test could use are worse
+// (git daemon serves git://, which is exactly what was removed above).
+var gitURLSchemes = []string{"https://", "ssh://"}
+
+// envAllowFileRemotes lets a spawned test binary accept file:// remotes.
+// testing.Testing() is false in a subprocess, so the integration harness — which
+// runs the real `entire` against file:// fixture repos — has to say so through
+// the environment, the same way it passes the rest of its isolation down.
+const envAllowFileRemotes = "ENTIRE_TEST_ALLOW_FILE_REMOTES"
+
+// allowLocalGitURL reports whether file:// remotes are acceptable. True only
+// under `go test`, or in a binary a test harness spawned.
+//
+// Setting the env var is not a meaningful weakening: anyone able to set it on
+// the victim's machine already has code execution. What it buys is that the
+// shipped allowlist has no local-filesystem transport, so a hostile catalog
+// entry cannot use one to probe the filesystem.
+// A var, not a func, so a test can flip it and exercise the shipped rejection —
+// testing.Testing() is otherwise always true where the test runs. Same seam
+// pattern as postPluginVersionCheck in this package.
+//
+//nolint:gochecknoglobals // test seam; see above
+var allowLocalGitURL = func() bool {
+	return testing.Testing() || os.Getenv(envAllowFileRemotes) != ""
+}
 
 // scpLikeGitURL matches git's scp-like syntax (user@host:path) — the form
 // `git@github.com:owner/repo.git` uses. Requires a user@, a host without a
@@ -115,10 +147,12 @@ var scpLikeGitURL = regexp.MustCompile(`^[A-Za-z0-9._~-]+@[A-Za-z0-9._-]+:[^\s]`
 // prompts. validatePluginName already refuses a leading '-' on names for the
 // same reason.
 //
-// Bare absolute paths are rejected: file:// expresses the same thing
-// unambiguously, and narrowing a security boundary beats the convenience.
-// Callers additionally pass "--" before positionals, so an option-shaped value
-// would be refused by git even if it got this far.
+// Local remotes — both bare absolute paths and file:// URLs — are rejected
+// outside tests. A local plugin repository could not complete an install anyway
+// (releaseAssetBaseURL needs an http(s) repo URL to locate the asset), and
+// `install ./path` is the supported way to use a local build. Callers
+// additionally pass "--" before positionals, so an option-shaped value would be
+// refused by git even if it got this far.
 func validatePluginRepoURL(rawURL string) error {
 	u := strings.TrimSpace(rawURL)
 	if u == "" {
@@ -131,6 +165,9 @@ func validatePluginRepoURL(rawURL string) error {
 		if strings.HasPrefix(u, scheme) && len(u) > len(scheme) {
 			return nil
 		}
+	}
+	if strings.HasPrefix(u, "file://") && len(u) > len("file://") && allowLocalGitURL() {
+		return nil
 	}
 	if scpLikeGitURL.MatchString(u) {
 		return nil
