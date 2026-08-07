@@ -737,3 +737,60 @@ func TestGitRefsStore_BackfillUnknownCheckpointNotFound(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, summary)
 }
+
+// TestGitRefsStore_WriteRefusesCanceledContext proves a canceled context stops
+// the refs store from minting checkpoints, matching the git-branch store and
+// this store's own backfill writers. Without it a bulk writer that ignores
+// cancellation — `entire import`, which `entire enable` runs on a first-time
+// repo — kept creating checkpoints after Ctrl-C.
+func TestGitRefsStore_WriteRefusesCanceledContext(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := store.Write(ctx, Session{
+		CheckpointID: cid,
+		SessionID:    "sess-1",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("transcript")),
+		AuthorName:   "Test Author",
+		AuthorEmail:  "test@example.com",
+	})
+	require.ErrorIs(t, err, context.Canceled)
+
+	_, refErr := store.repo.Reference(mustRefName(t, cid), true)
+	assert.ErrorIs(t, refErr, plumbing.ErrReferenceNotFound,
+		"a write refused for cancellation must not leave a checkpoint ref behind")
+}
+
+// TestGitRefsStore_EnqueuesForPushDuringShutdown proves the push-queue record
+// still lands when the context is already canceled. By the time setRef runs the
+// ref is on disk (go-git ref writes don't observe ctx) and the queue is the only
+// push-discovery mechanism there is, so honoring the cancellation here would
+// strand the checkpoint locally forever: writers are idempotent, so no later run
+// re-enqueues it. Resolving the queue shells out to git, which is what made this
+// the one step on the write path that failed under a canceled ctx — the source
+// of the "resolve push queue failed; ref not enqueued" warning flood.
+func TestGitRefsStore_EnqueuesForPushDuringShutdown(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	head, err := store.repo.Head()
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NoError(t, store.setRef(ctx, cid, head.Hash()))
+
+	q, err := PushQueueForRepo(context.Background(), store.repo)
+	require.NoError(t, err)
+	refs, err := q.Drain()
+	require.NoError(t, err)
+	assert.Contains(t, refs, mustRefName(t, cid),
+		"a ref written during shutdown must still be queued for push")
+}
