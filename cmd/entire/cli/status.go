@@ -266,7 +266,7 @@ type checkpointSyncInfo struct {
 	// dedicated checkpoint_remote mode. Empty when nothing resolved (no
 	// remotes configured, or the fail-closed case).
 	Remote string
-	// Source is config|tracking|default|sole|first (resolver values) or "dedicated".
+	// Source is config|default|sole|first (resolver values) or "dedicated".
 	Source string
 	// Err is the fail-closed misconfiguration message from the resolver.
 	Err string

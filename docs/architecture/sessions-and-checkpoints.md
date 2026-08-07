@@ -206,22 +206,22 @@ sync remote, resolved in this order:
 1. `strategy_options.checkpoint_push_remote` if set — fail-closed when it
    names a remote that is not configured (checkpoint sync is disabled until
    fixed, since this is explicit user intent).
-2. The current branch's own push destination, mirroring git's own `git push`
-   resolution for the branch: `branch.<name>.pushRemote`, then
-   `remote.pushDefault`, then `branch.<name>.remote` (first non-empty value
-   wins). This fixes the common fork setup — clone the base repo, add a fork
-   as `upstream`, push with `-u upstream` — where `origin` is the unpushable
-   base repo: without this tier `origin` would win by existing alone and
-   every checkpoint would strand locally forever. A dangling tracking entry
-   (left over from a removed remote) is git state, not user intent, so it is
-   skipped rather than failing closed — election just falls through to the
-   next tier. Detached HEAD also falls through. Election follows the
-   checked-out branch, so an explicit push of a non-HEAD branch to its own
-   remote defers checkpoint sync (never leaks) until the user pushes from
-   that branch.
-3. `origin`, if configured.
-4. The sole configured remote.
-5. The first remote in `.git/config` order.
+2. `origin`, if configured.
+3. The sole configured remote.
+4. The first remote in `.git/config` order.
+
+The branch's tracking config (`branch.<name>.pushRemote`,
+`remote.pushDefault`, `branch.<name>.remote`) is deliberately **not** a tier.
+Election is compared against the remote of the push being made, so electing
+the tracking remote turns every push to a different remote into a silent
+no-op — `git push <other> HEAD`, a `git clone -o base` whose checkpoints go to
+a separately added `origin`, any repo with `remote.pushDefault` set. It would
+also elect a remote the read paths cannot see, since `resume` and `explain`
+resolve checkpoints through origin's remote-tracking refs.
+
+For the fork setup where `origin` is an unpushable base repo, name the fork
+explicitly with `checkpoint_push_remote` — the only form of it where the
+checkpoints can also be read back.
 
 The pre-push hook carries checkpoint data only when the push targets the
 elected remote; pushes to any other remote or to a raw URL sync nothing, on

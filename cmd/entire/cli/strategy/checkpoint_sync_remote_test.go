@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -213,140 +214,56 @@ func TestResolveCheckpointSyncRemote_PushurlOnlyRemoteIsInvisible(t *testing.T) 
 }
 
 // Not parallel: uses t.Chdir()
-// The fork fix: origin is a base repo the user cannot push (cloned base,
-// added fork as "upstream", branched with `-u upstream`). Origin must not
-// win the election merely by existing — the branch's own tracking config
-// takes precedence.
-func TestResolveCheckpointSyncRemote_TracksNonOriginRemote(t *testing.T) {
+// Regression guard for the tracking tier that was removed before merge: the
+// branch's tracking config must NOT decide the election.
+//
+// Election is compared against the remote of the push being made, so electing
+// the tracking remote turns every push to a different remote into a silent
+// no-op — the failure TestAlternates_RelativeObjectAlternate_CheckpointSync
+// caught (clone with `-o base`, push checkpoints to a separately added
+// origin). It also elects a remote the read paths cannot see, since resume and
+// explain resolve checkpoints through origin's remote-tracking refs.
+//
+// The fork setup this tier was meant to serve (origin unpushable, push to your
+// own fork) is served explicitly by checkpoint_push_remote, covered above.
+func TestResolveCheckpointSyncRemote_TrackingConfigDoesNotDecide(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "f.txt", "init")
-	testutil.GitAdd(t, tmpDir, "f.txt")
-	testutil.GitCommit(t, tmpDir, "init")
 
-	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-	testutil.AddRemote(t, tmpDir, "upstream", "https://example.com/upstream.git")
+	for _, tt := range []struct {
+		name string
+		keys map[string]string
+	}{
+		{"branch.<name>.remote", map[string]string{"branch.%s.remote": "upstream"}},
+		{"remote.pushDefault", map[string]string{"remote.pushDefault": "upstream"}},
+		{"branch.<name>.pushRemote", map[string]string{"branch.%s.pushRemote": "upstream"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			testutil.InitRepo(t, tmpDir)
+			testutil.WriteFile(t, tmpDir, "f.txt", "init")
+			testutil.GitAdd(t, tmpDir, "f.txt")
+			testutil.GitCommit(t, tmpDir, "init")
 
-	branch := currentBranchName(t, tmpDir)
-	setGitConfig(t, tmpDir, "branch."+branch+".remote", "upstream")
+			testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+			testutil.AddRemote(t, tmpDir, "upstream", "https://example.com/upstream.git")
 
-	t.Chdir(tmpDir)
+			branch := currentBranchName(t, tmpDir)
+			for key, val := range tt.keys {
+				if strings.Contains(key, "%s") {
+					key = fmt.Sprintf(key, branch)
+				}
+				setGitConfig(t, tmpDir, key, val)
+			}
 
-	got, err := ResolveCheckpointSyncRemote(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, CheckpointSyncRemote{Name: "upstream", Source: SyncRemoteSourceTracking}, got)
-}
+			t.Chdir(tmpDir)
 
-// Not parallel: uses t.Chdir()
-func TestResolveCheckpointSyncRemote_PushRemoteOverridesBranchRemote(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "f.txt", "init")
-	testutil.GitAdd(t, tmpDir, "f.txt")
-	testutil.GitCommit(t, tmpDir, "init")
-
-	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-	testutil.AddRemote(t, tmpDir, "upstream", "https://example.com/upstream.git")
-	testutil.AddRemote(t, tmpDir, "fork", "https://example.com/fork.git")
-
-	branch := currentBranchName(t, tmpDir)
-	setGitConfig(t, tmpDir, "branch."+branch+".remote", "upstream")
-	setGitConfig(t, tmpDir, "branch."+branch+".pushRemote", "fork")
-
-	t.Chdir(tmpDir)
-
-	got, err := ResolveCheckpointSyncRemote(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, CheckpointSyncRemote{Name: "fork", Source: SyncRemoteSourceTracking}, got)
-}
-
-// Not parallel: uses t.Chdir()
-// Exercises git's full three-way precedence: branch.<name>.pushRemote beats
-// remote.pushDefault, which beats branch.<name>.remote.
-func TestResolveCheckpointSyncRemote_PushDefaultBeatsBranchRemoteLosesToPushRemote(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "f.txt", "init")
-	testutil.GitAdd(t, tmpDir, "f.txt")
-	testutil.GitCommit(t, tmpDir, "init")
-
-	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-	testutil.AddRemote(t, tmpDir, "upstream", "https://example.com/upstream.git")
-	testutil.AddRemote(t, tmpDir, "fork", "https://example.com/fork.git")
-
-	branch := currentBranchName(t, tmpDir)
-	setGitConfig(t, tmpDir, "branch."+branch+".remote", "upstream")
-
-	// remote.pushDefault beats branch.<name>.remote when pushRemote is unset.
-	setGitConfig(t, tmpDir, "remote.pushDefault", "origin")
-	t.Chdir(tmpDir)
-	got, err := ResolveCheckpointSyncRemote(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, CheckpointSyncRemote{Name: "origin", Source: SyncRemoteSourceTracking}, got)
-
-	// branch.<name>.pushRemote beats remote.pushDefault.
-	setGitConfig(t, tmpDir, "branch."+branch+".pushRemote", "fork")
-	got, err = ResolveCheckpointSyncRemote(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, CheckpointSyncRemote{Name: "fork", Source: SyncRemoteSourceTracking}, got)
-}
-
-// Not parallel: uses t.Chdir()
-// Dangling tracking config (left over from a removed remote) is git state,
-// not user intent — it must not fail closed, just fall through to the next
-// precedence tier.
-func TestResolveCheckpointSyncRemote_DanglingTrackingFallsThroughToOrigin(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "f.txt", "init")
-	testutil.GitAdd(t, tmpDir, "f.txt")
-	testutil.GitCommit(t, tmpDir, "init")
-
-	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-
-	branch := currentBranchName(t, tmpDir)
-	// "removed" was never added as a remote (simulating a remote that was
-	// removed after the branch started tracking it).
-	setGitConfig(t, tmpDir, "branch."+branch+".remote", "removed")
-
-	t.Chdir(tmpDir)
-
-	got, err := ResolveCheckpointSyncRemote(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, CheckpointSyncRemote{Name: "origin", Source: SyncRemoteSourceDefault}, got)
-}
-
-// Not parallel: uses t.Chdir()
-func TestResolveCheckpointSyncRemote_DetachedHEADFallsThroughToOrigin(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "f.txt", "init")
-	testutil.GitAdd(t, tmpDir, "f.txt")
-	testutil.GitCommit(t, tmpDir, "init")
-
-	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-
-	head := testutil.GetHeadHash(t, tmpDir)
-	checkoutCmd := exec.CommandContext(ctx, "git", "checkout", head)
-	checkoutCmd.Dir = tmpDir
-	checkoutCmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, checkoutCmd.Run())
-
-	t.Chdir(tmpDir)
-
-	got, err := ResolveCheckpointSyncRemote(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, CheckpointSyncRemote{Name: "origin", Source: SyncRemoteSourceDefault}, got)
+			got, err := ResolveCheckpointSyncRemote(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, CheckpointSyncRemote{Name: "origin", Source: SyncRemoteSourceDefault}, got,
+				"tracking config must not outrank origin")
+		})
+	}
 }
 
 // Not parallel: uses t.Chdir()
