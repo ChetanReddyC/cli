@@ -446,3 +446,85 @@ func TestRunSelectedImports_NonTTYProgressLines_Reimport(t *testing.T) {
 		t.Errorf("re-import summary line missing or wrong; want %q in:\n%s", want, out)
 	}
 }
+
+// cancelOnDiscoverImporter cancels the run's context from Discover, standing in
+// for a Ctrl-C landing while the first agent's history is being imported.
+type cancelOnDiscoverImporter struct {
+	agentimport.Importer
+
+	sessions []agentimport.SessionFile
+	cancel   context.CancelFunc
+}
+
+func (c cancelOnDiscoverImporter) Discover(string, string, time.Time, []string) ([]agentimport.SessionFile, error) {
+	c.cancel()
+	return c.sessions, nil
+}
+
+// recordDiscoverImporter records whether the import loop reached it at all.
+type recordDiscoverImporter struct {
+	agentimport.Importer
+
+	reached *bool
+}
+
+func (r recordDiscoverImporter) Discover(string, string, time.Time, []string) ([]agentimport.SessionFile, error) {
+	*r.reached = true
+	return nil, nil
+}
+
+// TestRunSelectedImports_InterruptedStopsBeforeNextAgent proves Ctrl-C during
+// one agent's import ends the whole offer instead of moving straight on to the
+// next agent's history — the last thing a user who just interrupted wants —
+// and that the interruption is reported as a resumable state rather than a
+// bare "context canceled" failure note.
+func TestRunSelectedImports_InterruptedStopsBeforeNextAgent(t *testing.T) {
+	// Not parallel: chdirs into a temp repo and performs real checkpoint writes.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sessionsDir := t.TempDir()
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
+
+	var claudeImp agentimport.Importer
+	for _, imp := range agentimport.All() {
+		if imp.Name() == testAgentName {
+			claudeImp = imp
+		}
+	}
+	if claudeImp == nil {
+		t.Fatal("claude-code importer not registered")
+	}
+	sessions, err := claudeImp.Discover(dir, sessionsDir, time.Now(), nil)
+	if err != nil {
+		t.Fatalf("discover fixture sessions: %v", err)
+	}
+
+	var secondReached bool
+	var buf bytes.Buffer
+	runSelectedImports(ctx, &buf, dir, []eligibleImport{
+		{imp: cancelOnDiscoverImporter{Importer: claudeImp, sessions: sessions, cancel: cancel}, displayName: testAgentClaude},
+		{imp: recordDiscoverImporter{Importer: claudeImp, reached: &secondReached}, displayName: "Cursor"},
+	})
+	out := buf.String()
+
+	if secondReached {
+		t.Error("import continued to the next agent after the run was interrupted")
+	}
+	if !strings.Contains(out, "Import interrupted") {
+		t.Errorf("interruption not reported to the user, got %q", out)
+	}
+	if want := "entire import " + testAgentName; !strings.Contains(out, want) {
+		t.Errorf("missing resume hint %q in output %q", want, out)
+	}
+	if strings.Contains(out, "could not import") {
+		t.Errorf("interruption reported as an import failure: %q", out)
+	}
+}

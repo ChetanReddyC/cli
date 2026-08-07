@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -231,6 +232,19 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selec
 		})
 		stopProgress(err == nil)
 		if err != nil {
+			// Ctrl-C: stop here instead of moving on to the next agent's
+			// history, which is the last thing a user who just interrupted
+			// wants. Report what landed and how to finish it.
+			if errors.Is(err, context.Canceled) {
+				logging.Info(ctx, "session import interrupted",
+					"agent", e.imp.Name(), "turns", res.TurnsImported)
+				if res.TurnsImported > 0 {
+					importedLocalHistory = true
+				}
+				fmt.Fprintf(w, "Import interrupted after %d turn(s). Run 'entire import %s' to finish.\n",
+					res.TurnsImported, e.imp.Name())
+				break
+			}
 			logging.Warn(ctx, "session import failed", "agent", e.imp.Name(), "error", err)
 			fmt.Fprintf(w, "Note: could not import %s history: %v\n", e.displayName, err)
 			continue
