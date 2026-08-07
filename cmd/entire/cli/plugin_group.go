@@ -236,8 +236,14 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, src installSource
 		// only thing tying the request to what lands on PATH.
 		expectedName = entry.Name
 		trusted = true
-	} else {
-		trusted = idxErr == nil && idx.HasRepoURL(repoURL)
+	} else if entry := idx.FindByRepoURL(repoURL); idxErr == nil && entry != nil {
+		// A listed URL installs without a prompt, so the catalog entry is the
+		// only thing tying the request to what lands on PATH. Taking the name
+		// from it means the reconciliation guard applies here too — otherwise
+		// the remote names itself and --force replaces whatever it picked, with
+		// no prompt at all.
+		expectedName = entry.Name
+		trusted = true
 	}
 
 	if !trusted {
@@ -269,6 +275,10 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, src installSource
 	if err != nil {
 		return fmt.Errorf("install plugin: %w", err)
 	}
+	if res.ReplacedFrom != "" {
+		fmt.Fprintf(errOut, "Warning: replaced plugin %q, which was installed from %s.\n",
+			res.Manifest.Name, redactURL(res.ReplacedFrom))
+	}
 	for _, t := range res.SkippedTags {
 		fmt.Fprintf(errOut, "Warning: tag %s has no release asset for this platform; fell back to %s.\n", t, res.Manifest.Tag)
 	}
@@ -279,6 +289,15 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, src installSource
 	warnIfShadowsBuiltin(cmd, res.Manifest.Name)
 
 	if flags.noDeps || res.Metadata == nil || len(res.Metadata.Requires) == 0 {
+		return nil
+	}
+	if idx == nil {
+		// The index never loaded (offline, no cache). Dependencies resolve by
+		// name through it and nowhere else, so planning would report every one
+		// as "not in the plugin index" — blaming the catalog for a fetch that
+		// failed, and failing the command after the plugin already installed
+		// and said so. Degrade to a warning, as this path's contract says.
+		fmt.Fprintln(errOut, "Warning: the plugin index is unavailable, so dependencies were not resolved. 'entire plugin doctor' will report what's missing.")
 		return nil
 	}
 	return installPlannedDeps(ctx, cmd, res.Metadata.Requires, idx, flags)

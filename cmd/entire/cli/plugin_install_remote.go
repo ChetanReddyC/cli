@@ -50,6 +50,13 @@ type RemoteInstallResult struct {
 	// SkippedTags lists newer tags that were passed over for missing
 	// assets, newest first. Callers surface these as warnings.
 	SkippedTags []string
+	// ReplacedFrom is the repository a --force install displaced, set only
+	// when it differs from the one just installed. --force is *for* replacing,
+	// so this is not an error — but the confirmation for a URL install names a
+	// URL, never the plugin it is about to overwrite, and the remote picks that
+	// name. Surfacing it is what turns an uninformed replacement into an
+	// informed one, and gives the user the URL to put things back.
+	ReplacedFrom string
 }
 
 // InstallPluginFromRepo installs a plugin from a git repository URL.
@@ -137,10 +144,23 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 			redactURL(repoURL), name, expectedName)
 	}
 
-	if existing, err := FindInstalledPlugin(name); err != nil {
+	existing, err := FindInstalledPlugin(name)
+	if err != nil {
 		return nil, err
-	} else if existing != nil && !opts.Force {
+	}
+	if existing != nil && !opts.Force {
 		return nil, fmt.Errorf("plugin %q already installed at %s; use --force to replace", name, existing.Path)
+	}
+	// Note a --force replace that changes where the plugin comes from. A repo
+	// move is legitimate (entire-sem → entire-graph), which is why this is not
+	// refused — but the caller should be able to tell the user what was
+	// displaced and from where.
+	var replacedFrom string
+	if existing != nil {
+		if prev, prevErr := LoadPluginManifest(name); prevErr == nil && prev != nil &&
+			normalizeRepoURL(prev.RepoURL) != normalizeRepoURL(repoURL) {
+			replacedFrom = prev.RepoURL
+		}
 	}
 
 	staging, err := os.MkdirTemp("", "entire-plugin-fetch-")
@@ -213,7 +233,7 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	if err != nil {
 		return nil, err
 	}
-	return &RemoteInstallResult{Installed: installed, Manifest: manifest, Metadata: meta}, nil
+	return &RemoteInstallResult{Installed: installed, Manifest: manifest, Metadata: meta, ReplacedFrom: replacedFrom}, nil
 }
 
 // UpgradeOutcome describes what UpgradeInstalledPlugin did.

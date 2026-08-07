@@ -403,3 +403,36 @@ func TestUpgrade_LeavesManifestConsistentWithBinary(t *testing.T) { //nolint:par
 		}
 	}
 }
+
+// --force is for replacing, so a repo move (entire-sem → entire-graph) must
+// still work. What was missing is that the user learns *what* was displaced:
+// a URL install's confirmation names a URL, and the remote picks which plugin
+// that URL overwrites.
+func TestInstallPluginFromRepo_ReportsWhatForceReplaced(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+	ctx := context.Background()
+
+	oldRepo, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0")
+	if _, err := InstallPluginFromRepo(ctx, oldRepo, "", RemoteInstallOptions{}); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+
+	// The same plugin name, published from a different repository.
+	newRepo, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0")
+	res, err := InstallPluginFromRepo(ctx, newRepo, "", RemoteInstallOptions{Force: true})
+	if err != nil {
+		t.Fatalf("a repo move must still be allowed: %v", err)
+	}
+	if res.ReplacedFrom != oldRepo {
+		t.Errorf("ReplacedFrom = %q, want the previous repo %q", res.ReplacedFrom, oldRepo)
+	}
+
+	// Reinstalling from the same repo is not a displacement and must stay quiet.
+	res, err = InstallPluginFromRepo(ctx, newRepo, "", RemoteInstallOptions{Force: true})
+	if err != nil {
+		t.Fatalf("reinstall from the same repo: %v", err)
+	}
+	if res.ReplacedFrom != "" {
+		t.Errorf("ReplacedFrom = %q for a same-repo reinstall, want empty", res.ReplacedFrom)
+	}
+}

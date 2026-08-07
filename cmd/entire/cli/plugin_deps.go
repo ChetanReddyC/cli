@@ -333,7 +333,7 @@ func RunPluginDoctor(ctx context.Context) ([]PluginDoctorIssue, error) {
 			issues = append(issues, PluginDoctorIssue{
 				Plugin:  m.Name,
 				Problem: "has an install manifest but no entry in the managed bin dir",
-				Fix:     fmt.Sprintf("reinstall: entire plugin install %s --force", redactURL(m.RepoURL)),
+				Fix:     "reinstall: " + reinstallCommand(m),
 			})
 		}
 		issues = append(issues, checkManagedBinaryIntegrity(m)...)
@@ -377,6 +377,19 @@ func RunPluginDoctor(ctx context.Context) ([]PluginDoctorIssue, error) {
 // A manifest without BinarySHA256 predates integrity recording, so there is
 // nothing to compare and silence is correct; nagging about it would only tell
 // the user to reinstall a plugin that is probably fine.
+// reinstallCommand is the suggested repair for a broken managed install. It
+// carries --allow-unverified for a plugin installed that way, because the
+// reinstall re-runs the checksum requirement and would otherwise fail with
+// errUnverifiedAsset — handing the user a command that cannot succeed on
+// exactly the plugins doctor flags.
+func reinstallCommand(m *PluginManifest) string {
+	cmd := fmt.Sprintf("entire plugin install %s --force", redactURL(m.RepoURL))
+	if m.Unverified {
+		cmd += " --allow-unverified"
+	}
+	return cmd
+}
+
 func checkManagedBinaryIntegrity(m *PluginManifest) []PluginDoctorIssue {
 	var issues []PluginDoctorIssue
 	if m.Unverified {
@@ -399,7 +412,7 @@ func checkManagedBinaryIntegrity(m *PluginManifest) []PluginDoctorIssue {
 		issues = append(issues, PluginDoctorIssue{
 			Plugin:  m.Name,
 			Problem: "managed binary is missing or unreadable: " + err.Error(),
-			Fix:     fmt.Sprintf("reinstall: entire plugin install %s --force", redactURL(m.RepoURL)),
+			Fix:     "reinstall: " + reinstallCommand(m),
 		})
 		return issues
 	}
@@ -407,7 +420,7 @@ func checkManagedBinaryIntegrity(m *PluginManifest) []PluginDoctorIssue {
 		issues = append(issues, PluginDoctorIssue{
 			Plugin:  m.Name,
 			Problem: "managed binary no longer matches the digest recorded at install; it was modified or replaced outside entire",
-			Fix:     fmt.Sprintf("reinstall from the recorded source: entire plugin install %s --force", redactURL(m.RepoURL)),
+			Fix:     "reinstall from the recorded source: " + reinstallCommand(m),
 		})
 	}
 	return issues

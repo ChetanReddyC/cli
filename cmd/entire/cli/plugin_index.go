@@ -103,16 +103,27 @@ func (idx *PluginIndex) Search(term string) []PluginIndexEntry {
 // check for install confirmations. Compared with the .git suffix and
 // trailing slashes normalized.
 func (idx *PluginIndex) HasRepoURL(repoURL string) bool {
+	return idx.FindByRepoURL(repoURL) != nil
+}
+
+// FindByRepoURL returns the entry published at repoURL, or nil. Comparison
+// normalizes the .git suffix and trailing slashes.
+//
+// The name matters as much as the presence: a URL install of a listed repo is
+// trusted and never prompts, so the catalog entry is the only thing that says
+// what the plugin should be called. Without it the remote picks the name
+// unchallenged, and --force would replace whichever plugin it named.
+func (idx *PluginIndex) FindByRepoURL(repoURL string) *PluginIndexEntry {
 	if idx == nil {
-		return false
+		return nil
 	}
 	want := normalizeRepoURL(repoURL)
-	for _, e := range idx.Plugins {
-		if normalizeRepoURL(e.RepoURL) == want {
-			return true
+	for i := range idx.Plugins {
+		if normalizeRepoURL(idx.Plugins[i].RepoURL) == want {
+			return &idx.Plugins[i]
 		}
 	}
-	return false
+	return nil
 }
 
 func normalizeRepoURL(u string) string {

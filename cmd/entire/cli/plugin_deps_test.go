@@ -438,3 +438,19 @@ func TestExecuteDepPlan_RejectsOutcomeBelowMinVersion(t *testing.T) { //nolint:p
 		t.Errorf("satisfiable minimum should install: %v", err)
 	}
 }
+
+// Doctor's repair suggestion has to be a command that works. A plugin installed
+// with --allow-unverified needs the same flag on the reinstall, or the fix
+// fails with errUnverifiedAsset on exactly the plugins doctor flags.
+func TestDoctorReinstallCommand_CarriesAllowUnverified(t *testing.T) {
+	t.Parallel()
+	verified := &PluginManifest{Name: "demo", RepoURL: "https://x.example/entire-demo"}
+	if got := reinstallCommand(verified); strings.Contains(got, "allow-unverified") {
+		t.Errorf("verified install should not need the opt-in: %q", got)
+	}
+	unverified := &PluginManifest{Name: "demo", RepoURL: "https://x.example/entire-demo", Unverified: true}
+	got := reinstallCommand(unverified)
+	if !strings.Contains(got, "--force") || !strings.Contains(got, "--allow-unverified") {
+		t.Errorf("unverified install needs both flags to be reinstallable: %q", got)
+	}
+}
