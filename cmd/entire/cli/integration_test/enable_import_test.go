@@ -151,3 +151,26 @@ func TestEnable_RoutesLoggingToLogFile(t *testing.T) {
 	require.Contains(t, out, "Ready.", "enable should complete; got: %s", out)
 	require.FileExists(t, logPath, "enable should route its logging to .entire/logs; got output: %s", out)
 }
+
+// TestEnable_RejectedInvocationLeavesRepoUntouched pins that enable's logging
+// init cannot seed a repo that enable then refuses to configure. Init creates
+// .entire/logs/, so running it before the invocation is known-valid left an
+// untracked .entire/ behind on every rejected `entire enable` — in a repo that
+// does not yet carry Entire's gitignore entry to cover it.
+func TestEnable_RejectedInvocationLeavesRepoUntouched(t *testing.T) {
+	t.Parallel()
+	env := freshRepoEnv(t)
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"mutually exclusive scopes", []string{"enable", "--local", "--project"}},
+		{"unknown agent", []string{"enable", "--agent", "definitely-not-an-agent"}},
+	} {
+		out, err := env.RunCLIWithError(tc.args...)
+		require.Error(t, err, "%s: expected enable to be rejected; got: %s", tc.name, out)
+		require.NoDirExists(t, filepath.Join(env.RepoDir, ".entire"),
+			"%s: a rejected enable must not create .entire/; got: %s", tc.name, out)
+	}
+}
