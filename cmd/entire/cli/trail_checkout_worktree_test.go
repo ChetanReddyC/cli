@@ -420,6 +420,28 @@ func TestCheckoutTrailWorktree_CreatesWorktree(t *testing.T) {
 	}
 }
 
+func TestCheckoutReviewWorktree_CreatesWorktreeWithoutTrail(t *testing.T) {
+	repoDir := newTrailWorktreeTestRepo(t)
+	runGit(t, repoDir, "branch", "feature/review")
+	startBranch := currentBranchInDir(t, repoDir)
+	t.Chdir(repoDir)
+
+	var out, errOut bytes.Buffer
+	worktreePath, err := checkoutReviewWorktree(context.Background(), &out, &errOut, "feature/review")
+	if err != nil {
+		t.Fatalf("checkoutReviewWorktree: %v; stderr: %s", err, errOut.String())
+	}
+	if worktreePath != defaultReviewWorktreePath(repoDir, "feature/review") {
+		t.Fatalf("worktree path = %q, want %q", worktreePath, defaultReviewWorktreePath(repoDir, "feature/review"))
+	}
+	if got := currentBranchInDir(t, repoDir); got != startBranch {
+		t.Fatalf("current branch = %q, want unchanged %q", got, startBranch)
+	}
+	if got := currentBranchInDir(t, worktreePath); got != "feature/review" {
+		t.Fatalf("worktree branch = %q, want feature/review", got)
+	}
+}
+
 func TestCheckoutTrailWorktree_FromLinkedWorktreeCreatesSibling(t *testing.T) {
 	repoDir := newTrailWorktreeTestRepo(t)
 	runGit(t, repoDir, "branch", "feature/first")
