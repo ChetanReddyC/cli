@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
@@ -549,6 +550,16 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// background lock holder can't stall the user's prompt (see the const doc).
 	ctx = strategy.WithSessionLockWait(ctx, turnStartSessionLockWait)
 
+	// Read the worktree status at most once for this hook. TurnStart runs before
+	// the agent acts, and it neither stages anything nor writes tracked files —
+	// only session metadata under .entire/ and refs under .git/ — so the status
+	// cannot change while this hook executes. Note the precondition is "no index
+	// writes and no tracked-file writes", not merely "nothing outside .git/":
+	// .git/index lives inside .git/ and staging does change reported status.
+	// Without the cache both CapturePrePromptState and the strategy's prompt
+	// attribution pay for a full go-git worktree walk.
+	ctx = gitrepo.WithStatusCache(ctx)
+
 	// Fill model from hint file if the agent didn't provide it on this hook
 	if event.Model == "" {
 		if hint := strategy.LoadModelHint(ctx, sessionID); hint != "" {
@@ -741,14 +752,20 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		copySpan.End()
 		return fmt.Errorf("failed to read transcript: %w", err)
 	}
+	// Sanitize before writing: this copy is what the shadow-branch walk blobs and
+	// redacts on every Stop. See agent.TranscriptSanitizer for why order matters.
+	// The agent's own rollout is untouched.
+	storedTranscript := agent.SanitizeTranscriptForStorage(ag, transcriptData)
 	logFile := filepath.Join(sessionDirAbs, paths.TranscriptFileName)
-	if err := os.WriteFile(logFile, transcriptData, 0o600); err != nil {
+	if err := os.WriteFile(logFile, storedTranscript, 0o600); err != nil {
 		copySpan.RecordError(err)
 		copySpan.End()
 		return fmt.Errorf("failed to write transcript: %w", err)
 	}
 	logging.Debug(logCtx, "copied transcript",
-		slog.String("path", sessionDir+"/"+paths.TranscriptFileName))
+		slog.String("path", sessionDir+"/"+paths.TranscriptFileName),
+		slog.Int("raw_bytes", len(transcriptData)),
+		slog.Int("stored_bytes", len(storedTranscript)))
 	copySpan.End()
 
 	// Load pre-prompt state (captured on TurnStart)
