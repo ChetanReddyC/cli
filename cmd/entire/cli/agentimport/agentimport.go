@@ -239,10 +239,9 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		for turnIndex, turn := range turns {
 			// Ctrl-C must stop the import, and per turn rather than per session:
 			// one session can carry hundreds of turns, each a checkpoint write.
-			// Nothing below this observes cancellation — go-git object/ref
-			// writes and CreateCommit all ignore ctx, and neither git store
-			// guards its create path — so without this an interrupted import
-			// runs to completion, minting checkpoints the user asked to stop.
+			// The store guards its create path too, but only this stops the
+			// per-turn work leading up to it (reading, splitting, redacting),
+			// and it is the only brake at all under DryRun, which never writes.
 			if err := ctx.Err(); err != nil {
 				return res, err //nolint:wrapcheck // propagate context cancellation
 			}
