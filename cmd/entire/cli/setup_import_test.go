@@ -98,7 +98,7 @@ func TestMaybeOfferSessionImport_FirstRunGate(t *testing.T) {
 	}
 }
 
-func TestMaybeOfferSessionImport_NonInteractiveAutoImportsAll(t *testing.T) {
+func TestMaybeOfferSessionImport_ImportHistoryImportsAllWithoutPrompting(t *testing.T) {
 	// Not parallel: overrides seams and chdirs into a temp repo.
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -119,17 +119,81 @@ func TestMaybeOfferSessionImport_NonInteractiveAutoImportsAll(t *testing.T) {
 		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
 	)
 
-	// opts.Yes forces the non-interactive path even if a TTY is present.
-	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{Yes: true}, true)
+	// --import-history is the explicit, non-interactive opt-in: it imports
+	// every eligible agent and never asks.
+	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{ImportHistory: true}, true)
 	if promptCalled {
-		t.Error("prompt shown under --yes; non-interactive enable must not prompt")
+		t.Error("prompt shown under --import-history; the flag is already the answer")
 	}
 	if len(ran) != len(eligible) {
 		t.Fatalf("imported %d agents, want all %d", len(ran), len(eligible))
 	}
 }
 
-func TestMaybeOfferSessionImport_NonInteractiveWithoutYesSkips(t *testing.T) {
+// TestMaybeOfferSessionImport_YesDoesNotImport pins the decision that --yes
+// ("accept all defaults") does not import agent history. The interactive
+// default is to import nothing — the multi-select pre-checks nothing — so
+// implying an import from --yes would make the unattended path do the opposite
+// of the attended one, and ingesting a month of local transcripts is its own
+// decision rather than a setup default.
+func TestMaybeOfferSessionImport_YesDoesNotImport(t *testing.T) {
+	// Not parallel: overrides seams, chdirs into a temp repo, and sets env.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	// A real TTY is available: --yes must still not import, and must not fall
+	// through to the prompt either.
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+
+	promptCalled := false
+	var ran []eligibleImport
+	withImportSeams(t,
+		func(context.Context, []agent.Agent, string) []eligibleImport {
+			return []eligibleImport{{displayName: testAgentClaude, sessionCount: 3}}
+		},
+		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) {
+			promptCalled = true
+			return nil, nil
+		},
+		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
+	)
+
+	var buf bytes.Buffer
+	maybeOfferSessionImport(context.Background(), &buf, nil, EnableOptions{Yes: true}, true)
+	if promptCalled {
+		t.Error("prompt shown under --yes; it means accept defaults without prompting")
+	}
+	if len(ran) != 0 {
+		t.Errorf("--yes auto-imported %d agent(s); history import needs its own opt-in", len(ran))
+	}
+	if got := buf.String(); !strings.Contains(got, "entire import") {
+		t.Errorf("expected a pointer to 'entire import', got %q", got)
+	}
+}
+
+// TestMaybeOfferSessionImport_ImportHistoryOnNonFirstRunIsReported proves the
+// flag is not silently dropped when it cannot apply — the user would otherwise
+// believe their history had been imported.
+func TestMaybeOfferSessionImport_ImportHistoryOnNonFirstRunIsReported(t *testing.T) {
+	// Not parallel: overrides package seams.
+	called := false
+	withImportSeams(t,
+		func(context.Context, []agent.Agent, string) []eligibleImport {
+			called = true
+			return nil
+		}, nil, nil)
+
+	var buf bytes.Buffer
+	maybeOfferSessionImport(context.Background(), &buf, nil, EnableOptions{ImportHistory: true}, false /* firstRun */)
+	if called {
+		t.Error("discovery ran on a non-first-run enable")
+	}
+	if got := buf.String(); !strings.Contains(got, flagImportHistory) || !strings.Contains(got, "entire import") {
+		t.Errorf("expected a note that --%s does not apply plus a pointer to the command, got %q", flagImportHistory, got)
+	}
+}
+
+func TestMaybeOfferSessionImport_NonInteractiveWithoutOptInSkips(t *testing.T) {
 	// Not parallel: overrides seams and chdirs into a temp repo.
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -150,15 +214,15 @@ func TestMaybeOfferSessionImport_NonInteractiveWithoutYesSkips(t *testing.T) {
 		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
 	)
 
-	// No --yes and no TTY: neither prompt nor auto-import; just hint at the
-	// manual command.
+	// No opt-in flag and no TTY: neither prompt nor auto-import; just hint at
+	// the manual command.
 	var buf bytes.Buffer
 	maybeOfferSessionImport(context.Background(), &buf, nil, EnableOptions{}, true)
 	if promptCalled {
 		t.Error("prompt shown in a non-interactive context")
 	}
 	if len(ran) != 0 {
-		t.Errorf("auto-imported %d agent(s) without --yes in a non-interactive context; expected skip", len(ran))
+		t.Errorf("auto-imported %d agent(s) without --import-history in a non-interactive context; expected skip", len(ran))
 	}
 	if got := buf.String(); !strings.Contains(got, "entire import") {
 		t.Errorf("expected a pointer to 'entire import', got %q", got)

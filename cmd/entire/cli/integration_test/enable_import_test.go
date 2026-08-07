@@ -28,7 +28,7 @@ func freshRepoEnv(t *testing.T) *TestEnv {
 	return env
 }
 
-func TestEnableOffersImport_FirstRunAutoImportsWithYes(t *testing.T) {
+func TestEnableOffersImport_FirstRunImportsWithImportHistory(t *testing.T) {
 	t.Parallel()
 	env := freshRepoEnv(t)
 
@@ -37,15 +37,55 @@ func TestEnableOffersImport_FirstRunAutoImportsWithYes(t *testing.T) {
 		filepath.Join(env.ClaudeProjectDir, "sess1.jsonl"),
 		[]byte(claudeImportFixture), 0o644))
 
-	// --yes ("accept all defaults") auto-imports the selected agent's
-	// discoverable history on first-time enable, even non-interactively.
-	out := env.RunCLI("enable", "--agent", agentClaudeCode, "--yes", "--telemetry=false")
+	// --import-history is the explicit, non-interactive opt-in to importing
+	// the selected agent's discoverable history on first-time enable.
+	out := env.RunCLI("enable", "--agent", agentClaudeCode, "--import-history", "--telemetry=false")
 	require.Contains(t, out, "Ready.", "enable should complete; got: %s", out)
-	require.Contains(t, out, "Imported 2 turn(s)", "first-time enable --yes should import discovered history; got: %s", out)
+	require.Contains(t, out, "Imported 2 turn(s)", "--import-history should import discovered history; got: %s", out)
 
 	// The imported turns are real checkpoints on the v1 metadata branch.
 	require.Contains(t, env.RunCLI("checkpoint", "list"), "[imported]",
 		"imported checkpoints should be listed")
+}
+
+// TestEnableOffersImport_YesDoesNotImport pins the decision that --yes does
+// not carry a history import with it. --yes means "accept all defaults", and
+// the interactive default is to import nothing, so an unattended enable must
+// not ingest a month of local transcripts on its own.
+func TestEnableOffersImport_YesDoesNotImport(t *testing.T) {
+	t.Parallel()
+	env := freshRepoEnv(t)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(env.ClaudeProjectDir, "sess1.jsonl"),
+		[]byte(claudeImportFixture), 0o644))
+
+	out := env.RunCLI("enable", "--agent", agentClaudeCode, "--yes", "--telemetry=false")
+	require.Contains(t, out, "Ready.", "enable should complete; got: %s", out)
+	require.NotContains(t, out, "Imported", "--yes must not import agent history; got: %s", out)
+	require.Contains(t, out, "entire import", "should point at the manual import command; got: %s", out)
+
+	require.NotContains(t, env.RunCLI("checkpoint", "list"), "[imported]",
+		"no checkpoints should be imported under --yes alone")
+}
+
+// TestEnableImportHistory_OnConfiguredRepoIsReported proves the flag is not
+// silently dropped when the repo is already set up (the offer is first-run
+// only), so a user cannot come away believing history was imported.
+func TestEnableImportHistory_OnConfiguredRepoIsReported(t *testing.T) {
+	t.Parallel()
+	env := freshRepoEnv(t)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(env.ClaudeProjectDir, "sess1.jsonl"),
+		[]byte(claudeImportFixture), 0o644))
+
+	env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
+
+	out := env.RunCLI("enable", "--import-history")
+	require.Contains(t, out, "import-history", "re-run should report the flag does not apply; got: %s", out)
+	require.Contains(t, out, "entire import", "should point at the manual import command; got: %s", out)
+	require.NotContains(t, out, "Imported", "a non-first-run enable must not import; got: %s", out)
 }
 
 func TestEnableOffersImport_NonInteractiveWithoutYesHints(t *testing.T) {
@@ -86,8 +126,8 @@ func TestEnableOffersImport_NotOfferedOnReEnable(t *testing.T) {
 		filepath.Join(env.ClaudeProjectDir, "sess1.jsonl"),
 		[]byte(claudeImportFixture), 0o644))
 
-	// First enable imports (--yes accepts the import).
-	first := env.RunCLI("enable", "--agent", agentClaudeCode, "--yes", "--telemetry=false")
+	// First enable imports (--import-history opts in).
+	first := env.RunCLI("enable", "--agent", agentClaudeCode, "--import-history", "--telemetry=false")
 	require.Contains(t, first, "Imported 2 turn(s)", "first enable should import; got: %s", first)
 
 	// Re-enable must not re-offer or re-import, even though history is still present.
