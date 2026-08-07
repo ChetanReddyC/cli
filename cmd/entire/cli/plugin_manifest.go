@@ -33,7 +33,34 @@ const (
 	pluginManifestFileName = "manifest.yml"
 	// windowsExeExt is the extension Windows executables need.
 	windowsExeExt = ".exe"
+	// maxPluginManifestSize bounds manifest.yml. We write it ourselves, but a
+	// read with no ceiling is a ceiling of "however large the file on disk is",
+	// and this one sits in a directory the user can edit.
+	maxPluginManifestSize = 1 << 20
 )
+
+// readFileLimited reads at most limit bytes from path, erroring rather than
+// silently truncating when the file is larger. os.ReadFile has no ceiling: it
+// sizes its buffer from the file and reads to EOF, so every caller inherits
+// whatever is on disk.
+func readFileLimited(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path) //nolint:gosec // paths here are inside the managed plugin tree or our cache
+	if err != nil {
+		// Returned bare so callers can still test it with errors.Is against
+		// os.ErrNotExist — LoadPluginManifest depends on that to report an
+		// absent manifest as (nil, nil) rather than a failure.
+		return nil, err //nolint:wrapcheck // see above
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", filepath.Base(path), err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s exceeds the %d byte limit", filepath.Base(path), limit)
+	}
+	return data, nil
+}
 
 // pluginBinaryName returns the on-disk executable name for a bare plugin
 // name: entire-<name>, plus the Windows extension where the host needs it.
@@ -214,7 +241,7 @@ func LoadPluginManifest(name string) (*PluginManifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(filepath.Join(dir, pluginManifestFileName)) //nolint:gosec // path is inside the managed pkg tree
+	data, err := readFileLimited(filepath.Join(dir, pluginManifestFileName), maxPluginManifestSize)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil //nolint:nilnil // no-manifest signal

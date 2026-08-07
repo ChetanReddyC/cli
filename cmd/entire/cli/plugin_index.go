@@ -39,6 +39,10 @@ const (
 	// pluginIndexSyncMarker records the last successful sync time as the
 	// marker file's mtime. Untracked, so fetch/reset never touches it.
 	pluginIndexSyncMarker = ".entire-last-sync"
+	// maxPluginIndexSize bounds index.json. krew's catalog carries a few
+	// hundred entries; 8 MiB leaves room for far more without letting a hostile
+	// index exhaust memory.
+	maxPluginIndexSize = 8 << 20
 	// pluginIndexTTL is how long a synced copy is considered fresh. Fixed
 	// rather than configurable: `plugin index update` already forces a refresh
 	// and stale-on-offline already covers a failed one, so a knob here tuned a
@@ -206,12 +210,14 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 	defer release()
 
 	marker := filepath.Join(dir, pluginIndexSyncMarker)
-	_, statErr := os.Stat(filepath.Join(dir, ".git"))
+	// Lstat, not Stat: this asks whether *our* cache dir contains a clone.
+	// Following a symlink would let a link pointing elsewhere answer yes.
+	_, statErr := os.Lstat(filepath.Join(dir, ".git"))
 	cloned := statErr == nil
 
 	fresh := false
 	if cloned && !force {
-		if info, err := os.Stat(marker); err == nil {
+		if info, err := os.Lstat(marker); err == nil {
 			// A negative age means the marker is dated in the future (clock
 			// rollback, restored backup, bad container clock). Treating that as
 			// fresh would freeze the catalog until someone ran `index update`
@@ -231,8 +237,8 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 		if err := os.RemoveAll(dir); err != nil {
 			return nil, fmt.Errorf("clear stale index cache: %w", err)
 		}
-		if _, err := runGitQuiet(ctx, "clone", "--depth", "1", "--quiet", "--", indexURL, dir); err != nil {
-			return nil, fmt.Errorf("clone plugin index %s: %w%s", redactURL(indexURL), err, stderrSuffix(err))
+		if _, err := runGitQuiet(ctx, maxGitNoOutput, "clone", "--depth", "1", "--quiet", "--", indexURL, dir); err != nil {
+			return nil, fmt.Errorf("clone plugin index %s: %w", redactURL(indexURL), err)
 		}
 		touchFile(marker)
 	case !fresh:
@@ -250,11 +256,11 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 // refreshPluginIndexClone updates an existing shallow clone to the remote
 // tip regardless of the remote's default branch name.
 func refreshPluginIndexClone(ctx context.Context, dir string) error {
-	if _, err := runGitQuiet(ctx, "-C", dir, "fetch", "--depth", "1", "--quiet", "origin", "HEAD"); err != nil {
-		return fmt.Errorf("fetch: %w%s", err, stderrSuffix(err))
+	if _, err := runGitQuiet(ctx, maxGitNoOutput, "-C", dir, "fetch", "--depth", "1", "--quiet", "origin", "HEAD"); err != nil {
+		return fmt.Errorf("fetch: %w", err)
 	}
-	if _, err := runGitQuiet(ctx, "-C", dir, "reset", "--hard", "--quiet", "FETCH_HEAD"); err != nil {
-		return fmt.Errorf("reset: %w%s", err, stderrSuffix(err))
+	if _, err := runGitQuiet(ctx, maxGitNoOutput, "-C", dir, "reset", "--hard", "--quiet", "FETCH_HEAD"); err != nil {
+		return fmt.Errorf("reset: %w", err)
 	}
 	return nil
 }
@@ -270,7 +276,10 @@ func touchFile(path string) {
 }
 
 func loadPluginIndexFromDir(ctx context.Context, dir, indexURL string) (*PluginIndex, error) {
-	data, err := os.ReadFile(filepath.Join(dir, pluginIndexFileName)) //nolint:gosec // file inside our cache dir
+	// Bounded: the catalog is cloned from a remote repository, so its size is
+	// not ours to trust. A few hundred entries with descriptions is well under
+	// a megabyte.
+	data, err := readFileLimited(filepath.Join(dir, pluginIndexFileName), maxPluginIndexSize)
 	if err != nil {
 		return nil, fmt.Errorf("plugin index %s has no readable %s: %w", redactURL(indexURL), pluginIndexFileName, err)
 	}

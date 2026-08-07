@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -198,5 +200,35 @@ func TestSavePluginManifest_StripsCredentials(t *testing.T) { //nolint:parallelt
 	}
 	if len(m.Requires) != 1 || m.Requires[0].Name != "dep" {
 		t.Errorf("requirements not round-tripped: %+v", m.Requires)
+	}
+}
+
+// os.ReadFile sizes its buffer from the file and reads to EOF, so every caller
+// inherits whatever is on disk. These files come from a cloned remote (the
+// catalog) or a user-writable directory (the manifest), so the read is bounded.
+func TestReadFileLimited(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f")
+
+	if err := os.WriteFile(path, []byte(strings.Repeat("a", 100)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readFileLimited(path, 100)
+	if err != nil {
+		t.Fatalf("exactly at the limit should read: %v", err)
+	}
+	if len(got) != 100 {
+		t.Errorf("read %d bytes, want 100", len(got))
+	}
+	// One byte over must error rather than hand back a truncated file, which
+	// would parse as valid-but-wrong.
+	if _, err := readFileLimited(path, 99); err == nil {
+		t.Error("oversize file was accepted")
+	} else if !strings.Contains(err.Error(), "limit") {
+		t.Errorf("err = %v, want it to name the limit", err)
+	}
+	if _, err := readFileLimited(filepath.Join(dir, "absent"), 100); err == nil {
+		t.Error("missing file should still error")
 	}
 }

@@ -313,3 +313,35 @@ func TestAllowLocalGitURL_HonorsTheSpawnedBinaryEnvVar(t *testing.T) { //nolint:
 		t.Errorf("file:// rejected with the sentinel set: %v", err)
 	}
 }
+
+// `git show <tag>:entire-plugin.yml` returns whatever an author committed, and
+// cmd.Output() would buffer all of it. A hostile repository could otherwise
+// hand back an arbitrarily large file and take the process down, so the runner
+// caps stdout and reports the overflow instead of truncating.
+func TestFetchPluginMetadataAtTag_RejectsOversizeMetadata(t *testing.T) {
+	t.Parallel()
+	huge := "name: oversize\ndescription: \"" + strings.Repeat("A", maxPluginMetadataSize) + "\"\n"
+	url := newTaggedPluginRepo(t, huge, "v1.0.0")
+
+	_, err := fetchPluginMetadataAtTag(context.Background(), url, "v1.0.0")
+	if err == nil {
+		t.Fatal("oversize entire-plugin.yml was accepted")
+	}
+	if !strings.Contains(err.Error(), "limit") {
+		t.Errorf("err = %v, want it to name the size limit", err)
+	}
+}
+
+// A repository whose metadata is comfortably under the cap still parses, so the
+// bound is not so tight that real files trip it.
+func TestFetchPluginMetadataAtTag_AcceptsNormalMetadata(t *testing.T) {
+	t.Parallel()
+	url := newTaggedPluginRepo(t, "name: sizable\ndescription: "+strings.Repeat("x", 4096)+"\n", "v1.0.0")
+	meta, err := fetchPluginMetadataAtTag(context.Background(), url, "v1.0.0")
+	if err != nil {
+		t.Fatalf("fetchPluginMetadataAtTag: %v", err)
+	}
+	if meta == nil || meta.Name != "sizable" {
+		t.Errorf("meta = %+v, want name sizable", meta)
+	}
+}

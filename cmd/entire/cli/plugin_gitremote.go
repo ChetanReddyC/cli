@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -44,7 +46,25 @@ const pluginGitTimeout = 2 * time.Minute
 // otherwise fail to install. BatchMode stops ssh prompting for a key
 // passphrase on /dev/tty, which GIT_TERMINAL_PROMPT does not cover — but only
 // when the user has not set GIT_SSH_COMMAND themselves.
-func runGitQuiet(ctx context.Context, args ...string) ([]byte, error) {
+// Output caps for git subprocesses. cmd.Output() buffers the whole of stdout in
+// memory, and both stdout-producing calls read remote-controlled data: ls-remote
+// returns whatever refs a repository advertises, and `show <tag>:file` returns
+// whatever an author committed. A hostile repository could otherwise hand us an
+// arbitrarily large response and take the process down.
+const (
+	// maxGitRefsOutput bounds `ls-remote`. Each ref line is ~60 bytes, so this
+	// still admits a repository with hundreds of thousands of tags.
+	maxGitRefsOutput = 16 << 20
+	// maxPluginMetadataSize bounds entire-plugin.yml. It holds a name, a
+	// description, a URL template and a short requires list; 64 KiB is orders
+	// of magnitude more than any real one needs.
+	maxPluginMetadataSize = 64 << 10
+	// maxGitNoOutput is for commands run with --quiet that should print
+	// nothing. A non-empty stdout there means something unexpected happened.
+	maxGitNoOutput = 4 << 10
+)
+
+func runGitQuiet(ctx context.Context, maxOutput int64, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, pluginGitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -59,13 +79,43 @@ func runGitQuiet(ctx context.Context, args ...string) ([]byte, error) {
 		env = append(env, "GIT_SSH_COMMAND=ssh -oBatchMode=yes")
 	}
 	cmd.Env = env
-	out, err := cmd.Output()
+
+	// Not cmd.Output(): that reads stdout to EOF with no bound. Capture stderr
+	// ourselves so it can still be reported, and read one byte past the cap so
+	// an oversize response is detected rather than silently truncated.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		// Wrapped by callers with the operation and (redacted) URL; the bare
-		// verb here keeps the deadline case legible.
-		return out, fmt.Errorf("git %s: %w", args[0], err)
+		return nil, fmt.Errorf("git %s: %w", args[0], err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("git %s: %w", args[0], err)
+	}
+	out, readErr := io.ReadAll(io.LimitReader(stdout, maxOutput+1))
+	waitErr := cmd.Wait()
+	switch {
+	case readErr != nil:
+		return nil, fmt.Errorf("git %s: read output: %w", args[0], readErr)
+	case int64(len(out)) > maxOutput:
+		return nil, fmt.Errorf("git %s: output exceeds the %d byte limit", args[0], maxOutput)
+	case waitErr != nil:
+		// stderr is folded in here rather than left for callers to dig out of
+		// ExitError: cmd.Stderr is set, so ExitError.Stderr is empty now.
+		return out, fmt.Errorf("git %s: %w%s", args[0], waitErr, stderrDetail(stderr.Bytes()))
 	}
 	return out, nil
+}
+
+// stderrDetail formats captured git stderr for an error message. git's stderr
+// is where the actionable detail lives, and it can echo a remote URL, so it is
+// scrubbed for credentials on the way out.
+func stderrDetail(raw []byte) string {
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return ""
+	}
+	return ": " + redactCredentials(text)
 }
 
 // redactURL strips credentials from a URL so they never reach stderr,
@@ -185,9 +235,9 @@ func listRemoteSemverTags(ctx context.Context, repoURL string) ([]string, error)
 	}
 	// --refs suppresses peeled ^{} entries for annotated tags. "--" keeps an
 	// option-shaped URL from being parsed as a git option.
-	out, err := runGitQuiet(ctx, "ls-remote", "--tags", "--refs", "--", repoURL)
+	out, err := runGitQuiet(ctx, maxGitRefsOutput, "ls-remote", "--tags", "--refs", "--", repoURL)
 	if err != nil {
-		return nil, fmt.Errorf("list tags of %s: %w%s", redactURL(repoURL), err, stderrSuffix(err))
+		return nil, fmt.Errorf("list tags of %s: %w", redactURL(repoURL), err)
 	}
 	var tags []string
 	for _, line := range strings.Split(string(out), "\n") {
@@ -225,17 +275,6 @@ func canonicalSemver(tag string) string {
 	return "v" + tag
 }
 
-// stderrSuffix extracts captured stderr from an exec.ExitError for error
-// messages; git's stderr is where the actionable detail lives. Only
-// populated when the command was started via Output().
-func stderrSuffix(err error) string {
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-		return ": " + redactCredentials(strings.TrimSpace(string(exitErr.Stderr)))
-	}
-	return ""
-}
-
 // fetchPluginMetadataAtTag reads entire-plugin.yml at the given tag without
 // a user-visible clone: a blobless shallow clone into a discarded temp dir,
 // falling back to a plain shallow clone for servers that don't allow
@@ -262,26 +301,26 @@ func fetchPluginMetadataAtTag(ctx context.Context, repoURL, tag string) (*Plugin
 	}
 	// Output() (not Run()) so stderr is captured into the ExitError for
 	// error messages; clone --quiet writes nothing to stdout.
-	if _, err := runGitQuiet(ctx, cloneArgs(true)...); err != nil {
+	if _, err := runGitQuiet(ctx, maxGitNoOutput, cloneArgs(true)...); err != nil {
 		// Retry without the filter; the clone dir may be half-created.
 		if rmErr := os.RemoveAll(tmp); rmErr != nil {
 			return nil, fmt.Errorf("clean temp clone dir: %w", rmErr)
 		}
-		if _, err := runGitQuiet(ctx, cloneArgs(false)...); err != nil {
-			return nil, fmt.Errorf("clone %s at %s: %w%s", redactURL(repoURL), tag, err, stderrSuffix(err))
+		if _, err := runGitQuiet(ctx, maxGitNoOutput, cloneArgs(false)...); err != nil {
+			return nil, fmt.Errorf("clone %s at %s: %w", redactURL(repoURL), tag, err)
 		}
 	}
 	// `git show <rev>:<path>` peels annotated tags and, in a blobless
 	// clone, lazily fetches just this one blob from the promisor remote.
-	out, err := runGitQuiet(ctx, "-C", tmp, "show", tag+":"+pluginMetadataFileName)
+	out, err := runGitQuiet(ctx, maxPluginMetadataSize, "-C", tmp, "show", tag+":"+pluginMetadataFileName)
 	if err != nil {
 		// Missing file and missing tag both surface as exit 128; only the
 		// missing-file case is benign. Disambiguate via stderr.
-		if strings.Contains(stderrSuffix(err), "does not exist") ||
-			strings.Contains(stderrSuffix(err), "exists on disk, but not in") {
+		if strings.Contains(err.Error(), "does not exist") ||
+			strings.Contains(err.Error(), "exists on disk, but not in") {
 			return nil, nil //nolint:nilnil // metadata is optional
 		}
-		return nil, fmt.Errorf("read %s at %s: %w%s", pluginMetadataFileName, tag, err, stderrSuffix(err))
+		return nil, fmt.Errorf("read %s at %s: %w", pluginMetadataFileName, tag, err)
 	}
 	return ParsePluginMetadata(out)
 }
