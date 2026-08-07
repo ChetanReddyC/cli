@@ -883,6 +883,19 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				}()
 			}
 
+			// Route setup's logging to .entire/logs/ like every other command.
+			// Without Init the package logger stays nil and every logging.*
+			// call under setup — agent detection, hook install, session import,
+			// the checkpoint layer's push/remote warnings — falls back to
+			// slog.Default(), which prints them straight onto the user's
+			// terminal mid-flow (and writes nothing to the log file). Placed
+			// after the git-repo check above so it cannot create .entire/logs/
+			// outside a repository.
+			logging.SetLogLevelGetter(GetLogLevel)
+			if err := logging.Init(ctx, ""); err == nil {
+				defer logging.Close()
+			}
+
 			if err := validateSetupFlags(opts.UseLocalSettings, opts.UseProjectSettings); err != nil {
 				return err
 			}

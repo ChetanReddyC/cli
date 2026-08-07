@@ -96,3 +96,25 @@ func TestEnableOffersImport_NotOfferedOnReEnable(t *testing.T) {
 	require.NotContains(t, second, "already imported",
 		"re-enable must not run import at all; got: %s", second)
 }
+
+// TestEnable_RoutesLoggingToLogFile proves `entire enable` initializes file
+// logging like every other command. Without it the package logger stays nil
+// and every logging.* call under setup — agent detection, hook install, the
+// session import, the checkpoint layer's push and remote warnings — falls back
+// to slog.Default(), which prints them straight onto the user's terminal
+// mid-flow and writes nothing to .entire/logs/. That is how a Ctrl-C'd
+// enable-time import came to flood a user's terminal with "resolve push queue
+// failed; ref not enqueued" lines.
+func TestEnable_RoutesLoggingToLogFile(t *testing.T) {
+	t.Parallel()
+	env := freshRepoEnv(t)
+	logPath := filepath.Join(env.RepoDir, ".entire", "logs", "entire.log")
+
+	// Nothing has run in this repo yet, so the log file's existence after
+	// enable can only come from enable itself.
+	require.NoFileExists(t, logPath)
+
+	out := env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
+	require.Contains(t, out, "Ready.", "enable should complete; got: %s", out)
+	require.FileExists(t, logPath, "enable should route its logging to .entire/logs; got output: %s", out)
+}
