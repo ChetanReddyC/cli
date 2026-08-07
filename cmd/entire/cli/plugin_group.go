@@ -247,23 +247,14 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, src installSource
 	}
 
 	if !trusted {
-		ok, err := confirmPluginAction(ctx,
+		// An untrusted source cannot proceed unconfirmed: automation never
+		// reaches this prompt, because the non-interactive path fails above
+		// with the --yes hint.
+		proceed, err := confirmInstallOrCancel(ctx, out,
 			fmt.Sprintf("Install from %s? The repository is not listed in the plugin index.", redactURL(repoURL)),
 			flags.yes)
-		switch {
-		case errors.Is(err, errConfirmNeedsTerminal):
-			return err // untrusted source can't proceed unconfirmed
-		case err != nil:
-			// Ctrl+C/Esc in the prompt prints "Install cancelled." and
-			// exits cleanly; real prompt failures surface wrapped.
-			return handleFormCancellation(out, "Install", err)
-		case !ok:
-			// Same outcome as an abort: nothing installed, clean exit.
-			// Exit codes must not differ between Esc and answering "No" —
-			// and automation never reaches this prompt at all (the
-			// non-interactive path fails above with the --yes hint).
-			fmt.Fprintln(out, "Install cancelled.")
-			return nil
+		if err != nil || !proceed {
+			return err
 		}
 	}
 
@@ -355,11 +346,21 @@ func installPlannedDeps(ctx context.Context, cmd *cobra.Command, reqs []PluginRe
 		fmt.Fprintln(errOut, "Skipping dependency installs; 'entire plugin doctor' will report what's missing.")
 		return nil
 	}
-	if err := ExecuteDepPlan(ctx, plan, flags.allowUnverified); err != nil {
+	results, err := ExecuteDepPlan(ctx, plan, flags.allowUnverified)
+	if err != nil {
 		return err
 	}
-	for _, a := range plan.Actions {
-		fmt.Fprintf(out, "Installed dependency %q\n", a.Name)
+	for _, res := range results {
+		fmt.Fprintf(out, "Installed dependency %q\n", res.Manifest.Name)
+		if res.ReplacedFrom != "" {
+			// The top-level install names what it replaced; this path must too,
+			// and it matters more here. Dependency installs are confirmed once
+			// as a batch, apt-style, and their repo URLs come from the catalog —
+			// so an upgrade action can repoint a plugin the user had installed
+			// from their own fork without ever naming the swap.
+			fmt.Fprintf(errOut, "Warning: dependency %q replaced an existing install from %s\n",
+				res.Manifest.Name, redactURL(res.ReplacedFrom))
+		}
 	}
 	return nil
 }
@@ -390,6 +391,26 @@ func confirmPluginAction(ctx context.Context, prompt string, assumeYes bool) (bo
 		return false, fmt.Errorf("confirm: %w", err)
 	}
 	return confirmed, nil
+}
+
+// confirmInstallOrCancel asks an install confirmation and collapses the three
+// non-proceed outcomes onto their shared handling. An abort (Ctrl+C/Esc) and a
+// plain "no" both print "Install cancelled." and exit cleanly: the exit code
+// must not depend on which one the user chose. Real prompt failures surface
+// wrapped, and errConfirmNeedsTerminal propagates unchanged so the caller
+// decides whether an unattended run may proceed without an answer.
+func confirmInstallOrCancel(ctx context.Context, out io.Writer, prompt string, assumeYes bool) (bool, error) {
+	ok, err := confirmPluginAction(ctx, prompt, assumeYes)
+	switch {
+	case errors.Is(err, errConfirmNeedsTerminal):
+		return false, err
+	case err != nil:
+		return false, handleFormCancellation(out, "Install", err)
+	case !ok:
+		fmt.Fprintln(out, "Install cancelled.")
+		return false, nil
+	}
+	return true, nil
 }
 
 // silencePluginCancel maps Ctrl+C-induced failures to a SilentError per the
@@ -734,15 +755,11 @@ in scripts and non-interactive runs.`,
 			if entry := idx.Find(choice); entry != nil {
 				prompt = fmt.Sprintf("Install %q from %s?", choice, redactURL(entry.RepoURL))
 			}
-			ok, err := confirmPluginAction(ctx, prompt, false)
-			switch {
-			case err != nil:
-				// Ctrl+C/Esc prints "Install cancelled." and exits cleanly;
-				// real prompt failures surface wrapped.
-				return handleFormCancellation(out, "Install", err)
-			case !ok:
-				fmt.Fprintln(out, "Install cancelled.")
-				return nil
+			// Reachable only behind the CanPromptInteractively gate above, so
+			// the errConfirmNeedsTerminal arm can never fire here.
+			proceed, err := confirmInstallOrCancel(ctx, out, prompt, false)
+			if err != nil || !proceed {
+				return err
 			}
 
 			// The choice came from the catalog, so it is an index source by

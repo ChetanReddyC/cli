@@ -307,7 +307,7 @@ func TestExecuteDepPlan_RejectsNameMismatch(t *testing.T) { //nolint:paralleltes
 
 	// The plan says "sem"; the repo declares "demo".
 	plan := &DepPlan{Actions: []DepAction{{Name: "sem", RepoURL: repoURL}}}
-	err := ExecuteDepPlan(context.Background(), plan, false)
+	_, err := ExecuteDepPlan(context.Background(), plan, false)
 	if err == nil {
 		t.Fatal("ExecuteDepPlan installed a dependency under the wrong name")
 	}

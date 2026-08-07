@@ -241,7 +241,8 @@ func unverifiableVersionWarning(req PluginRequirement, source string) string {
 // --allow-unverified covers the whole transitive set the user confirmed,
 // rather than failing partway through on the first dependency without
 // published checksums.
-func ExecuteDepPlan(ctx context.Context, plan *DepPlan, allowUnverified bool) error {
+func ExecuteDepPlan(ctx context.Context, plan *DepPlan, allowUnverified bool) ([]*RemoteInstallResult, error) {
+	results := make([]*RemoteInstallResult, 0, len(plan.Actions))
 	for _, a := range plan.Actions {
 		// The plan named this dependency and the user confirmed that name; an
 		// install landing under a different one would never satisfy the
@@ -250,8 +251,9 @@ func ExecuteDepPlan(ctx context.Context, plan *DepPlan, allowUnverified bool) er
 			Force: a.Upgrade, AllowUnverified: allowUnverified,
 		})
 		if err != nil {
-			return fmt.Errorf("install dependency %q: %w", a.Name, err)
+			return results, fmt.Errorf("install dependency %q: %w", a.Name, err)
 		}
+		results = append(results, res)
 		// Verify the outcome, not just that an install happened. The install
 		// takes the newest published tag, which may still be below the minimum
 		// the plan computed — in which case reporting success would silently
@@ -259,11 +261,11 @@ func ExecuteDepPlan(ctx context.Context, plan *DepPlan, allowUnverified bool) er
 		// complaining forever about a dependency we just "installed".
 		if a.MinVersion != "" &&
 			semver.Compare(canonicalSemver(res.Manifest.Tag), canonicalSemver(a.MinVersion)) < 0 {
-			return fmt.Errorf("dependency %q: newest release is %s but %s or later is required; ask the plugin author to publish a release that meets it",
+			return results, fmt.Errorf("dependency %q: newest release is %s but %s or later is required; ask the plugin author to publish a release that meets it",
 				a.Name, res.Manifest.Tag, a.MinVersion)
 		}
 	}
-	return nil
+	return results, nil
 }
 
 // DependentsOf returns the names of managed plugins whose manifests list
@@ -365,6 +367,26 @@ func RunPluginDoctor(ctx context.Context) ([]PluginDoctorIssue, error) {
 	return issues, nil
 }
 
+// reinstallCommand is the suggested repair for a broken managed install. It
+// carries --allow-unverified for a plugin installed that way, because the
+// reinstall re-runs the checksum requirement and would otherwise fail with
+// errUnverifiedAsset — handing the user a command that cannot succeed on
+// exactly the plugins doctor flags.
+func reinstallCommand(m *PluginManifest) string {
+	cmd := fmt.Sprintf("entire plugin install %s --force", redactURL(m.RepoURL))
+	if m.Unverified {
+		cmd += " --allow-unverified"
+	}
+	if m.Pinned {
+		// Without this the repair silently unpins: the reinstall would take the
+		// newest tag and write a manifest with Pinned cleared, so a plugin the
+		// user deliberately held at a version would start tracking latest as a
+		// side effect of fixing something unrelated.
+		cmd += " --pin " + m.Tag
+	}
+	return cmd
+}
+
 // checkManagedBinaryIntegrity re-hashes a managed plugin's binary and
 // compares it to the digest recorded at install time, catching a binary
 // swapped out under the managed directory after install.
@@ -377,19 +399,6 @@ func RunPluginDoctor(ctx context.Context) ([]PluginDoctorIssue, error) {
 // A manifest without BinarySHA256 predates integrity recording, so there is
 // nothing to compare and silence is correct; nagging about it would only tell
 // the user to reinstall a plugin that is probably fine.
-// reinstallCommand is the suggested repair for a broken managed install. It
-// carries --allow-unverified for a plugin installed that way, because the
-// reinstall re-runs the checksum requirement and would otherwise fail with
-// errUnverifiedAsset — handing the user a command that cannot succeed on
-// exactly the plugins doctor flags.
-func reinstallCommand(m *PluginManifest) string {
-	cmd := fmt.Sprintf("entire plugin install %s --force", redactURL(m.RepoURL))
-	if m.Unverified {
-		cmd += " --allow-unverified"
-	}
-	return cmd
-}
-
 func checkManagedBinaryIntegrity(m *PluginManifest) []PluginDoctorIssue {
 	var issues []PluginDoctorIssue
 	if m.Unverified {

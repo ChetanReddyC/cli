@@ -413,7 +413,7 @@ func TestExecuteDepPlan_RejectsOutcomeBelowMinVersion(t *testing.T) { //nolint:p
 
 	// Newest available is v0.1.0; the plan demands v9.0.0.
 	plan := &DepPlan{Actions: []DepAction{{Name: "demo", RepoURL: repoURL, MinVersion: "v9.0.0"}}}
-	err := ExecuteDepPlan(context.Background(), plan, false)
+	_, err := ExecuteDepPlan(context.Background(), plan, false)
 	if err == nil {
 		t.Fatal("ExecuteDepPlan reported success for an unmet minimum")
 	}
@@ -434,7 +434,7 @@ func TestExecuteDepPlan_RejectsOutcomeBelowMinVersion(t *testing.T) { //nolint:p
 	// A minimum the newest tag does satisfy succeeds. Upgrade:true because the
 	// failed action above already installed it, so this needs Force.
 	plan = &DepPlan{Actions: []DepAction{{Name: "demo", RepoURL: repoURL, MinVersion: remoteTestTagOld, Upgrade: true}}}
-	if err := ExecuteDepPlan(context.Background(), plan, false); err != nil {
+	if _, err := ExecuteDepPlan(context.Background(), plan, false); err != nil {
 		t.Errorf("satisfiable minimum should install: %v", err)
 	}
 }

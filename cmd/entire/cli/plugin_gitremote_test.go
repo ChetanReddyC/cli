@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -299,18 +301,21 @@ func TestValidatePluginRepoURL_RejectsFileURLsInProduction(t *testing.T) { //nol
 // through the environment. Losing that wiring would fail every plugin
 // integration test with an allowlist error rather than silently, but pin the
 // contract anyway since the env var is the only thing holding it up.
-func TestAllowLocalGitURL_HonorsTheSpawnedBinaryEnvVar(t *testing.T) { //nolint:paralleltest // mutates env and a package-level seam
-	original := allowLocalGitURL
-	t.Cleanup(func() { allowLocalGitURL = original })
-	allowLocalGitURL = func() bool { return os.Getenv(envAllowFileRemotes) != "" }
-
-	t.Setenv(envAllowFileRemotes, "")
-	if err := validatePluginRepoURL("file:///tmp/x"); err == nil {
-		t.Error("file:// accepted with the sentinel unset")
+//
+// Exercises fileRemotesAllowed rather than the ambient allowLocalGitURL: the
+// spawned-binary case is precisely underTest=false, which an in-process test
+// cannot produce. Substituting a stand-in closure here would only assert that
+// the stand-in works.
+func TestFileRemotesAllowed_HonorsTheSpawnedBinaryEnvVar(t *testing.T) {
+	t.Parallel()
+	if fileRemotesAllowed(false, "") {
+		t.Error("file:// allowed in a spawned binary with the sentinel unset")
 	}
-	t.Setenv(envAllowFileRemotes, "1")
-	if err := validatePluginRepoURL("file:///tmp/x"); err != nil {
-		t.Errorf("file:// rejected with the sentinel set: %v", err)
+	if !fileRemotesAllowed(false, "1") {
+		t.Error("file:// refused in a spawned binary with the sentinel set")
+	}
+	if !fileRemotesAllowed(true, "") {
+		t.Error("file:// refused under go test")
 	}
 }
 
@@ -329,6 +334,51 @@ func TestFetchPluginMetadataAtTag_RejectsOversizeMetadata(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "limit") {
 		t.Errorf("err = %v, want it to name the size limit", err)
+	}
+}
+
+// Capping stdout alone left stderr unbounded: cmd.Output() had supplied a
+// 32 KiB ceiling for free, and replacing it with a plain bytes.Buffer silently
+// dropped that. git's stderr carries the remote's sideband, so it is
+// remote-controlled by the same standard stdout is.
+//
+// The two streams differ on overflow, and that difference is the point: a
+// truncated stdout is not the payload and must fail, while stderr is
+// diagnostic and must never fail a command git itself completed.
+func TestLimitedWriter_OverflowPolicyDiffersPerStream(t *testing.T) {
+	t.Parallel()
+
+	stdout := &limitedWriter{limit: 8, failOnOverflow: true}
+	n, err := stdout.Write([]byte("0123456789"))
+	if !errors.Is(err, errOutputTooLarge) {
+		t.Errorf("stdout Write err = %v, want errOutputTooLarge", err)
+	}
+	if n != 0 {
+		t.Errorf("stdout Write n = %d, want 0 so os/exec stops the copy", n)
+	}
+	if !stdout.exceeded {
+		t.Error("stdout did not record the overflow")
+	}
+	if got := stdout.buf.String(); got != "01234567" {
+		t.Errorf("stdout kept %q, want the first 8 bytes for diagnostics", got)
+	}
+
+	stderr := &limitedWriter{limit: 8}
+	if n, err := stderr.Write([]byte("0123456789")); err != nil || n != 10 {
+		t.Errorf("stderr Write = (%d, %v), want (10, nil) so a chatty but successful command still succeeds", n, err)
+	}
+	if !stderr.exceeded {
+		t.Error("stderr did not record the overflow")
+	}
+	if got := stderr.buf.String(); got != "01234567" {
+		t.Errorf("stderr kept %q, want the first 8 bytes — git's own message precedes any remote bulk", got)
+	}
+	// Still bounded after further writes: the excess is dropped, not buffered.
+	if _, err := stderr.Write(bytes.Repeat([]byte("x"), 1<<20)); err != nil {
+		t.Errorf("stderr Write after overflow: %v", err)
+	}
+	if stderr.buf.Len() != 8 {
+		t.Errorf("stderr buffered %d bytes, want it pinned at the 8-byte cap", stderr.buf.Len())
 	}
 }
 

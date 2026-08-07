@@ -17,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
@@ -105,6 +106,10 @@ var pluginHTTPClient = &http.Client{
 // of MB; the cap exists so a misconfigured URL serving an endless stream
 // can't fill the disk.
 const maxPluginAssetSize = 512 << 20 // 512 MiB
+
+// maxChecksumsSize caps a checksums.txt fetch. One line per released artifact,
+// so 1 MiB covers thousands.
+const maxChecksumsSize = 1 << 20
 
 // releaseAssetBaseURL returns the URL prefix release assets live under for
 // the repo's host. GitHub and the Gitea family share a convention; GitLab
@@ -377,7 +382,10 @@ func httpGetSmall(ctx context.Context, rawURL string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s: %s", redactURL(rawURL), resp.Status)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// readWithinLimit, not a bare LimitReader: this fetches checksums.txt, and
+	// silently truncating it would drop the line covering our asset — turning a
+	// verifiable download into an "unverified" one for a reason nobody could see.
+	data, err := readWithinLimit(resp.Body, maxChecksumsSize)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", redactURL(rawURL), err)
 	}
@@ -490,7 +498,7 @@ func matchesPluginBinary(entryName, binName string) bool {
 // root. We only ever extract a single matched file to a fixed dest, so this
 // is defense in depth against a hostile archive masking as a plugin.
 func safeArchiveEntry(entryName string) bool {
-	clean := path.Clean(filepath.ToSlash(entryName))
+	clean := archiveEntryPath(entryName)
 	return !strings.HasPrefix(clean, "../") && !path.IsAbs(clean) && !strings.Contains(entryName, "\x00")
 }
 
@@ -508,63 +516,58 @@ func safeArchiveEntry(entryName string) bool {
 // at worst one directory down; a same-named file deeper in the tree is a
 // completion script or a doc, not the command.
 func preferredArchiveEntry(names []string, binName string) string {
-	best := ""
-	bestDepth := 0
+	p := archiveEntryPicker{binName: binName}
 	for _, name := range names {
-		if !safeArchiveEntry(name) || !matchesPluginBinary(name, binName) {
-			continue
-		}
-		clean := path.Clean(filepath.ToSlash(name))
-		depth := strings.Count(clean, "/")
-		if best == "" || depth < bestDepth || (depth == bestDepth && clean < best) {
-			best, bestDepth = clean, depth
-		}
+		p.consider(name)
 	}
-	return best
+	return p.best
 }
 
-// tarEntryNames lists the regular-file entries in a tar.gz.
-func tarEntryNames(archivePath string) ([]string, error) {
-	f, err := os.Open(archivePath) //nolint:gosec // staging-dir file we just wrote
-	if err != nil {
-		return nil, fmt.Errorf("open archive: %w", err)
+// archiveEntryPicker keeps only the best candidate seen so far, so an archive
+// can be scanned without materializing every entry name.
+//
+// That matters because the entry list is remote-controlled and the only prior
+// check on it is that the asset's sha256 matched what the release published.
+// Entry headers compress extremely well, so the 512 MiB maxPluginAssetSize
+// admits tens of millions of them — enough that collecting the names would
+// cost gigabytes of heap to end up choosing between the one or two entries a
+// real release actually contains. A running minimum costs one string.
+type archiveEntryPicker struct {
+	binName string
+	best    string
+	depth   int
+}
+
+func (p *archiveEntryPicker) consider(name string) {
+	if !safeArchiveEntry(name) || !matchesPluginBinary(name, p.binName) {
+		return
 	}
-	defer f.Close()
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		return nil, fmt.Errorf("open gzip: %w", err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	var names []string
-	for {
-		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			return names, nil
-		}
-		if err != nil {
-			return nil, fmt.Errorf("read tar: %w", err)
-		}
-		if hdr.Typeflag == tar.TypeReg {
-			names = append(names, hdr.Name)
-		}
+	clean := archiveEntryPath(name)
+	depth := strings.Count(clean, "/")
+	if p.best == "" || depth < p.depth || (depth == p.depth && clean < p.best) {
+		p.best, p.depth = clean, depth
 	}
 }
 
-func extractFromTarGz(archivePath, binName, destPath string) error {
-	// Two passes: a tar stream cannot seek backwards, so choosing among
-	// candidates means listing first and extracting second. The cost is one
-	// extra inflation of an archive already capped at maxPluginAssetSize,
-	// which buys a deterministic choice.
-	names, err := tarEntryNames(archivePath)
-	if err != nil {
-		return err
-	}
-	want := preferredArchiveEntry(names, binName)
-	if want == "" {
-		return fmt.Errorf("archive %s contains no %s entry", filepath.Base(archivePath), binName)
-	}
+// archiveEntryPath normalizes an archive entry name to cleaned, slash-separated
+// form. Selection and extraction must normalize identically — otherwise the
+// entry preferredArchiveEntry picked would not match the one extraction
+// compares against, and the install would fail on an archive that contains the
+// binary.
+func archiveEntryPath(name string) string {
+	return path.Clean(filepath.ToSlash(name))
+}
 
+// errNoArchiveEntry reports an archive that holds no usable binary, either
+// because nothing matched or because the chosen entry vanished between passes.
+func errNoArchiveEntry(archivePath, binName string) error {
+	return fmt.Errorf("archive %s contains no %s entry", filepath.Base(archivePath), binName)
+}
+
+// walkTarGz calls fn for each regular-file entry in a tar.gz, stopping early
+// when fn returns stop. Both the listing pass and the extraction pass go
+// through it, so the open/gzip/tar scaffolding exists in one place.
+func walkTarGz(archivePath string, fn func(hdr *tar.Header, r io.Reader) (stop bool, err error)) error {
 	f, err := os.Open(archivePath) //nolint:gosec // staging-dir file we just wrote
 	if err != nil {
 		return fmt.Errorf("open archive: %w", err)
@@ -579,17 +582,64 @@ func extractFromTarGz(archivePath, binName, destPath string) error {
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			break
+			return nil
 		}
 		if err != nil {
 			return fmt.Errorf("read tar: %w", err)
 		}
-		if hdr.Typeflag != tar.TypeReg || path.Clean(filepath.ToSlash(hdr.Name)) != want {
+		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
-		return writeExecutable(tr, destPath)
+		stop, err := fn(hdr, tr)
+		if err != nil {
+			return err
+		}
+		if stop {
+			return nil
+		}
 	}
-	return fmt.Errorf("archive %s contains no %s entry", filepath.Base(archivePath), binName)
+}
+
+// selectTarEntry scans a tar.gz and returns the entry extraction should take,
+// holding one candidate name at a time rather than the whole listing.
+func selectTarEntry(archivePath, binName string) (string, error) {
+	p := archiveEntryPicker{binName: binName}
+	if err := walkTarGz(archivePath, func(hdr *tar.Header, _ io.Reader) (bool, error) {
+		p.consider(hdr.Name)
+		return false, nil
+	}); err != nil {
+		return "", err
+	}
+	return p.best, nil
+}
+
+func extractFromTarGz(archivePath, binName, destPath string) error {
+	// Two passes: a tar stream cannot seek backwards, so choosing among
+	// candidates means selecting first and extracting second. The cost is one
+	// extra inflation of an archive already capped at maxPluginAssetSize —
+	// ~100ms on a 50 MiB archive, against a download measured in seconds —
+	// which buys a deterministic choice.
+	want, err := selectTarEntry(archivePath, binName)
+	if err != nil {
+		return err
+	}
+	if want == "" {
+		return errNoArchiveEntry(archivePath, binName)
+	}
+	found := false
+	if err := walkTarGz(archivePath, func(hdr *tar.Header, r io.Reader) (bool, error) {
+		if archiveEntryPath(hdr.Name) != want {
+			return false, nil
+		}
+		found = true
+		return true, writeExecutable(r, destPath)
+	}); err != nil {
+		return err
+	}
+	if !found {
+		return errNoArchiveEntry(archivePath, binName)
+	}
+	return nil
 }
 
 func extractFromZip(archivePath, binName, destPath string) error {
@@ -598,28 +648,30 @@ func extractFromZip(archivePath, binName, destPath string) error {
 		return fmt.Errorf("open zip: %w", err)
 	}
 	defer zr.Close()
-	names := make([]string, 0, len(zr.File))
+	p := archiveEntryPicker{binName: binName}
 	for _, f := range zr.File {
 		if !f.FileInfo().IsDir() {
-			names = append(names, f.Name)
+			p.consider(f.Name)
 		}
 	}
-	want := preferredArchiveEntry(names, binName)
+	want := p.best
 	if want == "" {
-		return fmt.Errorf("archive %s contains no %s entry", filepath.Base(archivePath), binName)
+		return errNoArchiveEntry(archivePath, binName)
 	}
-	for _, f := range zr.File {
-		if f.FileInfo().IsDir() || path.Clean(filepath.ToSlash(f.Name)) != want {
-			continue
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return fmt.Errorf("open zip entry: %w", err)
-		}
-		defer rc.Close()
-		return writeExecutable(rc, destPath)
+	// zip is random-access, so the chosen entry is reachable directly — no
+	// second scan, and no Close deferred inside a loop.
+	i := slices.IndexFunc(zr.File, func(f *zip.File) bool {
+		return !f.FileInfo().IsDir() && archiveEntryPath(f.Name) == want
+	})
+	if i < 0 {
+		return errNoArchiveEntry(archivePath, binName)
 	}
-	return fmt.Errorf("archive %s contains no %s entry", filepath.Base(archivePath), binName)
+	rc, err := zr.File[i].Open()
+	if err != nil {
+		return fmt.Errorf("open zip entry: %w", err)
+	}
+	defer rc.Close()
+	return writeExecutable(rc, destPath)
 }
 
 // fileSHA256 returns the hex SHA-256 of the file at path. Used to record the

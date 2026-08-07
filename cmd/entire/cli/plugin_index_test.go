@@ -59,11 +59,11 @@ func TestSyncPluginIndex_CloneSearchFind(t *testing.T) { //nolint:paralleltest /
 	if got := idx.Search("semantic"); len(got) != 1 || got[0].Name != "sem" {
 		t.Errorf("Search(semantic) = %+v", got)
 	}
-	if !idx.HasRepoURL("https://github.com/entireio/entire-run.git") {
-		t.Error("HasRepoURL should normalize .git suffix")
+	if e := idx.FindByRepoURL("https://github.com/entireio/entire-run.git"); e == nil || e.Name != "run" {
+		t.Errorf("FindByRepoURL should normalize the .git suffix, got %+v", e)
 	}
-	if idx.HasRepoURL("https://github.com/entireio/entire-other") {
-		t.Error("HasRepoURL matched an unlisted repo")
+	if e := idx.FindByRepoURL("https://github.com/entireio/entire-other"); e != nil {
+		t.Errorf("FindByRepoURL matched an unlisted repo: %+v", e)
 	}
 }
 

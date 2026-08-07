@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -35,17 +34,6 @@ import (
 // minutes; this is the git half of the same bound.
 const pluginGitTimeout = 2 * time.Minute
 
-// runGitQuiet runs git and returns stdout, with a bounded deadline and an
-// environment that cannot block on a prompt.
-//
-// Output() (not Run()) so stderr lands in the ExitError for error messages.
-// LC_ALL=C/LANG=C keep git's messages in English: fetchPluginMetadataAtTag decides
-// the benign "no metadata file" case by substring-matching git's stderr, and
-// git builds with NLS translate those strings — on a localized host every
-// plugin repo without an entire-plugin.yml (the documented default) would
-// otherwise fail to install. BatchMode stops ssh prompting for a key
-// passphrase on /dev/tty, which GIT_TERMINAL_PROMPT does not cover — but only
-// when the user has not set GIT_SSH_COMMAND themselves.
 // Output caps for git subprocesses. cmd.Output() buffers the whole of stdout in
 // memory, and both stdout-producing calls read remote-controlled data: ls-remote
 // returns whatever refs a repository advertises, and `show <tag>:file` returns
@@ -62,8 +50,69 @@ const (
 	// maxGitNoOutput is for commands run with --quiet that should print
 	// nothing. A non-empty stdout there means something unexpected happened.
 	maxGitNoOutput = 4 << 10
+	// maxGitStderr bounds captured stderr. Capping stdout alone left the same
+	// hole open on the other channel: the remote controls what git echoes, and
+	// a bytes.Buffer grows without limit. git's own diagnostics are short, so
+	// this only ever truncates a hostile one.
+	maxGitStderr = 64 << 10
 )
 
+// errOutputTooLarge fails a write once a subprocess exceeds its cap.
+var errOutputTooLarge = errors.New("output exceeds the limit")
+
+// limitedWriter buffers at most limit bytes of a subprocess stream.
+//
+// Used as cmd.Stdout/cmd.Stderr rather than reading a pipe ourselves: os/exec
+// closes the pipe as soon as a write fails, so an oversize response kills the
+// child immediately, where reading a pipe and returning early left Wait
+// blocked on a full pipe until pluginGitTimeout — a two-minute hang in exactly
+// the case the cap exists to handle.
+//
+// Overflow policy differs per stream. stdout fails, because a truncated
+// payload is not the payload. stderr absorbs and drops the excess: diagnostics
+// are best-effort and must never fail a command git itself completed. Either
+// way the buffered prefix is kept, so fetchPluginMetadataAtTag can still match
+// git's message — git emits that before any remote-supplied bulk.
+type limitedWriter struct {
+	buf            bytes.Buffer
+	limit          int64
+	exceeded       bool
+	failOnOverflow bool
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	room := w.limit - int64(w.buf.Len())
+	if int64(len(p)) <= room {
+		n, err := w.buf.Write(p)
+		return n, err //nolint:wrapcheck // bytes.Buffer.Write never errors
+	}
+	if room > 0 {
+		_, _ = w.buf.Write(p[:room])
+	}
+	w.exceeded = true
+	if w.failOnOverflow {
+		return 0, errOutputTooLarge
+	}
+	return len(p), nil
+}
+
+// runGitDiscard runs a git command that is expected to print nothing, and
+// reports only whether it succeeded. Every --quiet call site wants this shape.
+func runGitDiscard(ctx context.Context, args ...string) error {
+	_, err := runGitQuiet(ctx, maxGitNoOutput, args...)
+	return err
+}
+
+// runGitQuiet runs git and returns stdout, with a bounded deadline and an
+// environment that cannot block on a prompt.
+//
+// LC_ALL=C/LANG=C keep git's messages in English: fetchPluginMetadataAtTag decides
+// the benign "no metadata file" case by substring-matching git's stderr, and
+// git builds with NLS translate those strings — on a localized host every
+// plugin repo without an entire-plugin.yml (the documented default) would
+// otherwise fail to install. BatchMode stops ssh prompting for a key
+// passphrase on /dev/tty, which GIT_TERMINAL_PROMPT does not cover — but only
+// when the user has not set GIT_SSH_COMMAND themselves.
 func runGitQuiet(ctx context.Context, maxOutput int64, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, pluginGitTimeout)
 	defer cancel()
@@ -80,31 +129,23 @@ func runGitQuiet(ctx context.Context, maxOutput int64, args ...string) ([]byte, 
 	}
 	cmd.Env = env
 
-	// Not cmd.Output(): that reads stdout to EOF with no bound. Capture stderr
-	// ourselves so it can still be reported, and read one byte past the cap so
-	// an oversize response is detected rather than silently truncated.
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("git %s: %w", args[0], err)
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("git %s: %w", args[0], err)
-	}
-	out, readErr := io.ReadAll(io.LimitReader(stdout, maxOutput+1))
-	waitErr := cmd.Wait()
+	// Not cmd.Output(): that buffers stdout to EOF with no bound, and leaves
+	// stderr unbounded too. Both streams get a cap instead.
+	stdout := &limitedWriter{limit: maxOutput, failOnOverflow: true}
+	stderr := &limitedWriter{limit: maxGitStderr}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	runErr := cmd.Run()
 	switch {
-	case readErr != nil:
-		return nil, fmt.Errorf("git %s: read output: %w", args[0], readErr)
-	case int64(len(out)) > maxOutput:
-		return nil, fmt.Errorf("git %s: output exceeds the %d byte limit", args[0], maxOutput)
-	case waitErr != nil:
+	case stdout.exceeded:
+		// Checked before runErr: killing the child is how the cap is enforced,
+		// so the exit status here is a symptom, not the diagnosis.
+		return nil, fmt.Errorf("git %s: stdout exceeds the %d-byte limit", args[0], maxOutput)
+	case runErr != nil:
 		// stderr is folded in here rather than left for callers to dig out of
 		// ExitError: cmd.Stderr is set, so ExitError.Stderr is empty now.
-		return out, fmt.Errorf("git %s: %w%s", args[0], waitErr, stderrDetail(stderr.Bytes()))
+		return stdout.buf.Bytes(), fmt.Errorf("git %s: %w%s", args[0], runErr, stderrDetail(stderr.buf.Bytes()))
 	}
-	return out, nil
+	return stdout.buf.Bytes(), nil
 }
 
 // stderrDetail formats captured git stderr for an error message. git's stderr
@@ -162,6 +203,15 @@ var gitURLSchemes = []string{"https://", "ssh://"}
 // the environment, the same way it passes the rest of its isolation down.
 const envAllowFileRemotes = "ENTIRE_TEST_ALLOW_FILE_REMOTES"
 
+// fileRemotesAllowed is the policy itself, taking its two inputs as arguments
+// so it can be tested directly. In-process, testing.Testing() is always true
+// where a test runs, so a test that reads the ambient value can only ever
+// observe "allowed" — the spawned-binary case, which is the one the env var
+// exists for, is unreachable without parameterizing it.
+func fileRemotesAllowed(underTest bool, envValue string) bool {
+	return underTest || envValue != ""
+}
+
 // allowLocalGitURL reports whether file:// remotes are acceptable. True only
 // under `go test`, or in a binary a test harness spawned.
 //
@@ -169,13 +219,13 @@ const envAllowFileRemotes = "ENTIRE_TEST_ALLOW_FILE_REMOTES"
 // the victim's machine already has code execution. What it buys is that the
 // shipped allowlist has no local-filesystem transport, so a hostile catalog
 // entry cannot use one to probe the filesystem.
-// A var, not a func, so a test can flip it and exercise the shipped rejection —
-// testing.Testing() is otherwise always true where the test runs. Same seam
-// pattern as postPluginVersionCheck in this package.
+//
+// A var, not a func, so a test can flip it and exercise the shipped rejection.
+// Same seam pattern as postPluginVersionCheck in this package.
 //
 //nolint:gochecknoglobals // test seam; see above
 var allowLocalGitURL = func() bool {
-	return testing.Testing() || os.Getenv(envAllowFileRemotes) != ""
+	return fileRemotesAllowed(testing.Testing(), os.Getenv(envAllowFileRemotes))
 }
 
 // scpLikeGitURL matches git's scp-like syntax (user@host:path) — the form
@@ -299,14 +349,12 @@ func fetchPluginMetadataAtTag(ctx context.Context, repoURL, tag string) (*Plugin
 		// "--" so an option-shaped URL can't be parsed as a git option.
 		return append(args, "--", repoURL, tmp)
 	}
-	// Output() (not Run()) so stderr is captured into the ExitError for
-	// error messages; clone --quiet writes nothing to stdout.
-	if _, err := runGitQuiet(ctx, maxGitNoOutput, cloneArgs(true)...); err != nil {
+	if err := runGitDiscard(ctx, cloneArgs(true)...); err != nil {
 		// Retry without the filter; the clone dir may be half-created.
 		if rmErr := os.RemoveAll(tmp); rmErr != nil {
 			return nil, fmt.Errorf("clean temp clone dir: %w", rmErr)
 		}
-		if _, err := runGitQuiet(ctx, maxGitNoOutput, cloneArgs(false)...); err != nil {
+		if err := runGitDiscard(ctx, cloneArgs(false)...); err != nil {
 			return nil, fmt.Errorf("clone %s at %s: %w", redactURL(repoURL), tag, err)
 		}
 	}

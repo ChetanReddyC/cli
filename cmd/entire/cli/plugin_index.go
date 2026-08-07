@@ -103,13 +103,6 @@ func (idx *PluginIndex) Search(term string) []PluginIndexEntry {
 	return out
 }
 
-// HasRepoURL reports whether a repo URL is listed in the index — the trust
-// check for install confirmations. Compared with the .git suffix and
-// trailing slashes normalized.
-func (idx *PluginIndex) HasRepoURL(repoURL string) bool {
-	return idx.FindByRepoURL(repoURL) != nil
-}
-
 // FindByRepoURL returns the entry published at repoURL, or nil. Comparison
 // normalizes the .git suffix and trailing slashes.
 //
@@ -237,7 +230,7 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 		if err := os.RemoveAll(dir); err != nil {
 			return nil, fmt.Errorf("clear stale index cache: %w", err)
 		}
-		if _, err := runGitQuiet(ctx, maxGitNoOutput, "clone", "--depth", "1", "--quiet", "--", indexURL, dir); err != nil {
+		if err := runGitDiscard(ctx, "clone", "--depth", "1", "--quiet", "--", indexURL, dir); err != nil {
 			return nil, fmt.Errorf("clone plugin index %s: %w", redactURL(indexURL), err)
 		}
 		touchFile(marker)
@@ -256,10 +249,10 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 // refreshPluginIndexClone updates an existing shallow clone to the remote
 // tip regardless of the remote's default branch name.
 func refreshPluginIndexClone(ctx context.Context, dir string) error {
-	if _, err := runGitQuiet(ctx, maxGitNoOutput, "-C", dir, "fetch", "--depth", "1", "--quiet", "origin", "HEAD"); err != nil {
+	if err := runGitDiscard(ctx, "-C", dir, "fetch", "--depth", "1", "--quiet", "origin", "HEAD"); err != nil {
 		return fmt.Errorf("fetch: %w", err)
 	}
-	if _, err := runGitQuiet(ctx, maxGitNoOutput, "-C", dir, "reset", "--hard", "--quiet", "FETCH_HEAD"); err != nil {
+	if err := runGitDiscard(ctx, "-C", dir, "reset", "--hard", "--quiet", "FETCH_HEAD"); err != nil {
 		return fmt.Errorf("reset: %w", err)
 	}
 	return nil

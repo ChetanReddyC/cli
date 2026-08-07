@@ -52,12 +52,9 @@ func readFileLimited(path string, limit int64) ([]byte, error) {
 		return nil, err //nolint:wrapcheck // see above
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	data, err := readWithinLimit(f, limit)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", filepath.Base(path), err)
-	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("%s exceeds the %d byte limit", filepath.Base(path), limit)
+		return nil, fmt.Errorf("%s: %w", filepath.Base(path), err)
 	}
 	return data, nil
 }
