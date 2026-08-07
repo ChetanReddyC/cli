@@ -778,3 +778,116 @@ func TestDownloadErrors_NeverLeakCredentials(t *testing.T) {
 		}
 	}
 }
+
+// A plugin gets exactly one binary, named entire-<name>, and the archive does
+// not get to choose either fact. The entry name only *selects* what to extract;
+// the destination is built from the validated plugin name, and every extraction
+// branch returns on the first match.
+//
+// Both properties are emergent from how the code is written rather than checked
+// anywhere, so this pins them: a refactor that used the archive's own name, or
+// kept looping after a match, would let a plugin write a second command onto
+// PATH — including one belonging to somebody else.
+func TestExtractPluginBinary_TakesOnlyItsOwnBinary(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "a.tar.gz")
+	payload := []byte("the real one")
+	if err := os.WriteFile(archive, makeTarGz(t, map[string][]byte{
+		"entire-mine":      payload,
+		"entire-otherplug": []byte("a second command name"),
+		"helper":           []byte("no prefix"),
+		"docs/README.md":   []byte("docs"),
+		"../escape":        []byte("traversal"),
+		"bin/entire-mine":  []byte("same name, nested"),
+	}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := filepath.Join(dir, "out", pluginBinaryName("mine"))
+	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractPluginBinary(archive, "mine", dest); err != nil {
+		t.Fatalf("extractPluginBinary: %v", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Dir(dest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("extraction wrote %v, want only %s", names, filepath.Base(dest))
+	}
+	if got := entries[0].Name(); !strings.HasPrefix(got, pluginBinaryPrefix) {
+		t.Errorf("wrote %q, which is not an %s* command", got, pluginBinaryPrefix)
+	}
+	// The other entire-* entry must not have been taken: a plugin claiming a
+	// second command name is the squatting case the name checks exist to stop.
+	written, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(written) != string(payload) {
+		t.Errorf("extracted %q, want the entry matching this plugin's own name", written)
+	}
+}
+
+// Matching is by basename, so an archive can hold several candidates: the
+// binary at the root, the same name nested under a versioned directory
+// (goreleaser's wrap_in_directory), and unrelated files like
+// completions/entire-<name>. Selection must not depend on the order the
+// author's tar happened to be built in.
+func TestPreferredArchiveEntry_IsDeterministic(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		label string
+		names []string
+		want  string
+	}{
+		{"root wins over nested", []string{"bin/entire-mine", "entire-mine"}, "entire-mine"},
+		{"order does not matter", []string{"entire-mine", "bin/entire-mine"}, "entire-mine"},
+		{"shallowest of several", []string{"a/b/c/entire-mine", "a/entire-mine", "a/b/entire-mine"}, "a/entire-mine"},
+		{"equal depth is lexicographic", []string{"z/entire-mine", "a/entire-mine"}, "a/entire-mine"},
+		{"a different plugin's name is not a candidate", []string{"entire-other"}, ""},
+		{"traversal entries are not candidates", []string{"../entire-mine"}, ""},
+		{"nested-only still resolves", []string{"pkg/v1/entire-mine"}, "pkg/v1/entire-mine"},
+	}
+	for _, tt := range tests {
+		if got := preferredArchiveEntry(tt.names, "entire-mine"); got != tt.want {
+			t.Errorf("%s: preferredArchiveEntry(%v) = %q, want %q", tt.label, tt.names, got, tt.want)
+		}
+	}
+}
+
+// The end-to-end version of the above: the same archive extracted repeatedly
+// must always yield the root-level entry, whatever order tar wrote it in.
+func TestExtractPluginBinary_PrefersRootEntryEveryTime(t *testing.T) {
+	t.Parallel()
+	for i := range 8 {
+		dir := t.TempDir()
+		archive := filepath.Join(dir, "a.tar.gz")
+		if err := os.WriteFile(archive, makeTarGz(t, map[string][]byte{
+			"entire-mine":             []byte("root"),
+			"bin/entire-mine":         []byte("nested"),
+			"completions/entire-mine": []byte("completion script"),
+		}), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dest := filepath.Join(dir, "out")
+		if err := extractPluginBinary(archive, "mine", dest); err != nil {
+			t.Fatalf("extractPluginBinary: %v", err)
+		}
+		got, err := os.ReadFile(dest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "root" {
+			t.Fatalf("run %d extracted %q, want the root entry", i, got)
+		}
+	}
+}

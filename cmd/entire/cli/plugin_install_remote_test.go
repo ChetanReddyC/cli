@@ -436,3 +436,47 @@ func TestInstallPluginFromRepo_ReportsWhatForceReplaced(t *testing.T) { //nolint
 		t.Errorf("ReplacedFrom = %q for a same-repo reinstall, want empty", res.ReplacedFrom)
 	}
 }
+
+// After a real install, the managed directories hold exactly what we put there:
+// one entire-<name> binary plus its manifest under pkg/, and one entire-<name>
+// entry in bin/. Nothing the archive carried leaks out alongside it.
+func TestInstallPluginFromRepo_WritesOnlyItsOwnBinary(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0")
+	if _, err := InstallPluginFromRepo(context.Background(), repoURL, "", RemoteInstallOptions{}); err != nil {
+		t.Fatalf("InstallPluginFromRepo: %v", err)
+	}
+
+	pkgDir, err := PluginPkgDir("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	entries, err := os.ReadDir(pkgDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		got[e.Name()] = true
+	}
+	want := map[string]bool{pluginBinaryName("demo"): true, pluginManifestFileName: true}
+	if len(got) != len(want) {
+		t.Errorf("pkg dir holds %v, want exactly %v", got, want)
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("pkg dir missing %q (has %v)", name, got)
+		}
+	}
+
+	installed, err := ListInstalledPlugins()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(installed) != 1 {
+		t.Fatalf("bin dir holds %d entries, want 1", len(installed))
+	}
+	if base := filepath.Base(installed[0].Path); base != pluginBinaryName("demo") {
+		t.Errorf("bin entry is %q, want %q", base, pluginBinaryName("demo"))
+	}
+}

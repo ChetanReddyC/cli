@@ -494,7 +494,77 @@ func safeArchiveEntry(entryName string) bool {
 	return !strings.HasPrefix(clean, "../") && !path.IsAbs(clean) && !strings.Contains(entryName, "\x00")
 }
 
+// preferredArchiveEntry picks among entries whose basename matches the plugin
+// binary. Shallowest path wins, then lexicographic order.
+//
+// Selection has to be deterministic and independent of archive order. Matching
+// is by basename, so an archive can legitimately hold more than one candidate —
+// goreleaser writes the binary at the root by default but nests it under a
+// versioned directory with wrap_in_directory, and archives also ship things like
+// completions/entire-<name>. Taking whichever came first meant the installed
+// binary depended on the order the author's tar happened to be built in.
+//
+// Shallowest-first encodes the convention: the real binary sits at the root, or
+// at worst one directory down; a same-named file deeper in the tree is a
+// completion script or a doc, not the command.
+func preferredArchiveEntry(names []string, binName string) string {
+	best := ""
+	bestDepth := 0
+	for _, name := range names {
+		if !safeArchiveEntry(name) || !matchesPluginBinary(name, binName) {
+			continue
+		}
+		clean := path.Clean(filepath.ToSlash(name))
+		depth := strings.Count(clean, "/")
+		if best == "" || depth < bestDepth || (depth == bestDepth && clean < best) {
+			best, bestDepth = clean, depth
+		}
+	}
+	return best
+}
+
+// tarEntryNames lists the regular-file entries in a tar.gz.
+func tarEntryNames(archivePath string) ([]string, error) {
+	f, err := os.Open(archivePath) //nolint:gosec // staging-dir file we just wrote
+	if err != nil {
+		return nil, fmt.Errorf("open archive: %w", err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, fmt.Errorf("open gzip: %w", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	var names []string
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return names, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read tar: %w", err)
+		}
+		if hdr.Typeflag == tar.TypeReg {
+			names = append(names, hdr.Name)
+		}
+	}
+}
+
 func extractFromTarGz(archivePath, binName, destPath string) error {
+	// Two passes: a tar stream cannot seek backwards, so choosing among
+	// candidates means listing first and extracting second. The cost is one
+	// extra inflation of an archive already capped at maxPluginAssetSize,
+	// which buys a deterministic choice.
+	names, err := tarEntryNames(archivePath)
+	if err != nil {
+		return err
+	}
+	want := preferredArchiveEntry(names, binName)
+	if want == "" {
+		return fmt.Errorf("archive %s contains no %s entry", filepath.Base(archivePath), binName)
+	}
+
 	f, err := os.Open(archivePath) //nolint:gosec // staging-dir file we just wrote
 	if err != nil {
 		return fmt.Errorf("open archive: %w", err)
@@ -514,7 +584,7 @@ func extractFromTarGz(archivePath, binName, destPath string) error {
 		if err != nil {
 			return fmt.Errorf("read tar: %w", err)
 		}
-		if hdr.Typeflag != tar.TypeReg || !safeArchiveEntry(hdr.Name) || !matchesPluginBinary(hdr.Name, binName) {
+		if hdr.Typeflag != tar.TypeReg || path.Clean(filepath.ToSlash(hdr.Name)) != want {
 			continue
 		}
 		return writeExecutable(tr, destPath)
@@ -528,8 +598,18 @@ func extractFromZip(archivePath, binName, destPath string) error {
 		return fmt.Errorf("open zip: %w", err)
 	}
 	defer zr.Close()
+	names := make([]string, 0, len(zr.File))
 	for _, f := range zr.File {
-		if f.FileInfo().IsDir() || !safeArchiveEntry(f.Name) || !matchesPluginBinary(f.Name, binName) {
+		if !f.FileInfo().IsDir() {
+			names = append(names, f.Name)
+		}
+	}
+	want := preferredArchiveEntry(names, binName)
+	if want == "" {
+		return fmt.Errorf("archive %s contains no %s entry", filepath.Base(archivePath), binName)
+	}
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() || path.Clean(filepath.ToSlash(f.Name)) != want {
 			continue
 		}
 		rc, err := f.Open()
