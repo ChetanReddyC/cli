@@ -47,7 +47,7 @@ func TestCodexResumeRestoredSessionWithSanitizedCompactedHistory(t *testing.T) {
 		testutil.WaitForSessionIdle(t, s.Dir, 15*time.Second)
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 
-		// Close the original Codex process before resuming the same thread.
+		// Kill the original Codex process before resuming the same thread.
 		// Codex serialises writers per thread: "Only one app-server process can
 		// hold a paginated thread open for writing at a time. If another process
 		// already owns the thread, thread/resume ... fail[s] with JSON-RPC error
@@ -55,7 +55,14 @@ func TestCodexResumeRestoredSessionWithSanitizedCompactedHistory(t *testing.T) {
 		// still alive it owns the writer, so the resume below aborts with
 		// "already has an active writer (code -32600)". Killing it releases the
 		// lock before the resume attaches.
-		require.NoError(t, codexSession.Close(), "close original Codex session before resume")
+		//
+		// Use Terminate, not Close: Close runs the OnClose cleanup that
+		// RemoveAll's this isolated CODEX_HOME, but the resume flow below still
+		// reads and restores rollouts under it. Terminate kills only the
+		// process, so we take over removing the home at test end.
+		home := codexSession.Home()
+		t.Cleanup(func() { _ = os.RemoveAll(home) })
+		require.NoError(t, codexSession.Terminate(), "terminate original Codex session before resume")
 
 		s.Git(t, "checkout", mainBranch)
 

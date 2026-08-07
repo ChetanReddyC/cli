@@ -240,6 +240,15 @@ func (s *TmuxSession) Close() error {
 	for _, fn := range s.cleanups {
 		fn()
 	}
+	return s.Terminate()
+}
+
+// Terminate kills the tmux session (and the process it runs) WITHOUT running
+// the registered OnClose cleanups. Use it when the process must die but a
+// resource it registered for teardown — e.g. an isolated HOME that a later
+// step in the same test still reads — has to outlive the process. Callers that
+// bypass Close this way own the surviving resource's cleanup themselves.
+func (s *TmuxSession) Terminate() error {
 	cmd := exec.Command("tmux", "kill-session", "-t", s.name)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
