@@ -47,6 +47,16 @@ func TestCodexResumeRestoredSessionWithSanitizedCompactedHistory(t *testing.T) {
 		testutil.WaitForSessionIdle(t, s.Dir, 15*time.Second)
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 
+		// Close the original Codex process before resuming the same thread.
+		// Codex serialises writers per thread: "Only one app-server process can
+		// hold a paginated thread open for writing at a time. If another process
+		// already owns the thread, thread/resume ... fail[s] with JSON-RPC error
+		// -32600" (codex-rs/app-server/README.md). While the StartSession TUI is
+		// still alive it owns the writer, so the resume below aborts with
+		// "already has an active writer (code -32600)". Killing it releases the
+		// lock before the resume attaches.
+		require.NoError(t, codexSession.Close(), "close original Codex session before resume")
+
 		s.Git(t, "checkout", mainBranch)
 
 		out, err := entire.ResumeWithEnv(s.Dir, "feature", []string{"CODEX_HOME=" + codexSession.Home()})
