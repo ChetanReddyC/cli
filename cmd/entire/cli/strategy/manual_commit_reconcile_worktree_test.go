@@ -56,13 +56,14 @@ func TestReconcileWorktreePathForResumedTurn_LeavesValidSiblingUntouched(t *test
 		"a recorded path that still resolves to this repo must be left untouched")
 }
 
-// TestReconcileWorktreePathForResumedTurn_PreservesWorktreeIDAcrossRelocation
-// covers the reachable data-loss path: a session started in a linked worktree
-// whose path is later gone (whole-repo relocation), resumed from the main
-// worktree. Reconcile must repoint WorktreePath without changing WorktreeID —
-// the shadow branch is keyed on WorktreeID, so rewriting it (main worktree ID is
-// "") would orphan the session's prior checkpoints and lose rewind history.
-func TestReconcileWorktreePathForResumedTurn_PreservesWorktreeIDAcrossRelocation(t *testing.T) {
+// TestReconcileWorktreePathForResumedTurn_LeavesLinkedWorktreeSessionUntouched
+// covers the disalignment guard: a session started in a linked worktree
+// (WorktreeID != "") whose path is later gone must NOT be reconciled. Repointing
+// its WorktreePath to the main worktree while keeping WorktreeID would leave the
+// two describing different worktrees, which breaks the shadow-branch derivation
+// in `entire clean`/`entire explain` and the post-commit base/attribution
+// updates. Linked-worktree relocation is a documented non-goal.
+func TestReconcileWorktreePathForResumedTurn_LeavesLinkedWorktreeSessionUntouched(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 
@@ -80,8 +81,8 @@ func TestReconcileWorktreePathForResumedTurn_PreservesWorktreeIDAcrossRelocation
 		WorktreeID:   linkedID,
 	}
 
-	// Remove the linked worktree so its recorded path no longer resolves to this
-	// repo's git common dir — the trigger condition for reconciliation.
+	// Remove the linked worktree so its recorded path no longer resolves — the
+	// condition that would trigger reconciliation for a main-worktree session.
 	removeSessionMatchWorktree(mainDir, linkedDir)
 
 	t.Chdir(mainDir)
@@ -89,10 +90,36 @@ func TestReconcileWorktreePathForResumedTurn_PreservesWorktreeIDAcrossRelocation
 
 	reconcileWorktreePathForResumedTurn(ctx, state)
 
-	require.Equal(t, mainDir, state.WorktreePath,
-		"a stale recorded path should be repointed at the current worktree")
+	require.Equal(t, linkedDir, state.WorktreePath,
+		"a linked-worktree session must be left untouched (no path/ID disalignment)")
 	require.Equal(t, linkedID, state.WorktreeID,
-		"WorktreeID must be preserved so the session's existing shadow branch stays reachable")
+		"a linked-worktree session's WorktreeID must be left untouched")
+}
+
+// TestReconcileWorktreePathForResumedTurn_LeavesSessionResumedFromLinkedWorktree
+// covers the reverse disalignment guard: a main-worktree session (WorktreeID "")
+// resumed from a LINKED worktree must NOT be reconciled, otherwise WorktreePath
+// would point at the linked worktree while WorktreeID stayed "".
+func TestReconcileWorktreePathForResumedTurn_LeavesSessionResumedFromLinkedWorktree(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+
+	mainDir := setupSessionMatchRepo(t)
+	linkedDir := filepath.Join(mainDir, ".worktrees", "feature")
+	createSessionMatchWorktree(t, mainDir, linkedDir, "feature")
+	t.Cleanup(func() { removeSessionMatchWorktree(mainDir, linkedDir) })
+
+	gonePath := resolvedRemovedTempDir(t)
+	state := &SessionState{SessionID: "main-session", WorktreePath: gonePath}
+
+	// Resume from the linked worktree rather than the main worktree.
+	t.Chdir(linkedDir)
+	clearSessionMatchCaches()
+
+	reconcileWorktreePathForResumedTurn(ctx, state)
+
+	require.Equal(t, gonePath, state.WorktreePath,
+		"resuming into a linked worktree must not reconcile (would disalign path/ID)")
 }
 
 // TestReconcileWorktreePathForResumedTurn_NoopWhenPathUnchanged covers the common
