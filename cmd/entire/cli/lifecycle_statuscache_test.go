@@ -7,11 +7,13 @@ import (
 )
 
 // TestStatusCacheSafe_ClosedAllowlist pins which lifecycle events may reuse a
-// single worktree status. Adding an event here without confirming its handler
-// performs no tracked-file write between its first and last status read produces
-// silently stale checkpoints, so this test is deliberately exhaustive: every
-// EventType is listed, and a new one fails to compile into the table unnoticed
-// only if someone also edits this test.
+// single worktree status. Allowing an event whose handler writes a tracked file
+// between its first and last status read produces silently stale checkpoints.
+//
+// This table is a manual enumeration, not a compile-time exhaustive one: adding
+// a constant to the agent package does not break this test. The exhaustive
+// linter on statusCacheSafe's switch is what forces a new EventType to be
+// classified — update this table alongside that switch.
 func TestStatusCacheSafe_ClosedAllowlist(t *testing.T) {
 	t.Parallel()
 
