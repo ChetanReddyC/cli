@@ -956,7 +956,7 @@ func (s *treeWriter) reaggregateFromEntries(basePath string, sessionCount int, e
 		}
 		totalCount += meta.CheckpointsCount
 		allFiles = mergeFilesTouched(allFiles, meta.FilesTouched)
-		totalTokens = aggregateTokenUsage(totalTokens, meta.TokenUsage)
+		totalTokens = types.AddTokenUsage(totalTokens, meta.TokenUsage)
 	}
 
 	return totalCount, allFiles, totalTokens, nil
@@ -1000,47 +1000,6 @@ func readJSONFromBlob[T any](repo *git.Repository, hash plumbing.Hash) (*T, erro
 // readSummaryFromBlob reads CheckpointSummary from a blob hash.
 func (s *treeWriter) readSummaryFromBlob(hash plumbing.Hash) (*CheckpointSummary, error) {
 	return readJSONFromBlob[CheckpointSummary](s.repo, hash)
-}
-
-// aggregateTokenUsage sums two TokenUsage structs, including their nested
-// SubagentTokens. Returns nil if both inputs are nil.
-//
-// This sums across the *sessions* of one checkpoint, where each session's
-// SubagentTokens is that session's checkpoint-scoped total, so adding them is
-// correct. (The replace-don't-add rule for SubagentTokens applies to accumulating
-// steps *within* a session, where each step re-reports a cumulative snapshot —
-// see accumulateTokenUsage in the strategy package.)
-//
-// Dropping the nested total here left the root metadata.json reporting
-// "subagent_tokens": null even when the per-session metadata carried one.
-func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
-	if a == nil && b == nil {
-		return nil
-	}
-	result := &agent.TokenUsage{}
-	if a != nil {
-		result.InputTokens = a.InputTokens
-		result.CacheCreationTokens = a.CacheCreationTokens
-		result.CacheReadTokens = a.CacheReadTokens
-		result.OutputTokens = a.OutputTokens
-		result.APICallCount = a.APICallCount
-	}
-	if b != nil {
-		result.InputTokens += b.InputTokens
-		result.CacheCreationTokens += b.CacheCreationTokens
-		result.CacheReadTokens += b.CacheReadTokens
-		result.OutputTokens += b.OutputTokens
-		result.APICallCount += b.APICallCount
-	}
-	result.SubagentTokens = aggregateTokenUsage(subagentTokensOf(a), subagentTokensOf(b))
-	return result
-}
-
-func subagentTokensOf(usage *agent.TokenUsage) *agent.TokenUsage {
-	if usage == nil {
-		return nil
-	}
-	return usage.SubagentTokens
 }
 
 // SanitizeTranscriptForAgentType strips non-portable agent state from a transcript
