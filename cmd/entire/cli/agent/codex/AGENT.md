@@ -248,6 +248,7 @@ The `systemMessage` field can be used to display messages to the user via the ag
 - **SessionEnd needs Codex 0.146+:** Added 2026-07-17 (openai/codex#33895), first tagged in `rust-v0.146.0-alpha.3`. On older Codex the hook is simply never called, and such sessions are instead reclaimed by the exited-owner sweep in `entire status` / `entire doctor` (`session.State.OwnerExited`).
 - **`reason` carries no information:** always `"other"`, so a session ended by `/clear` is indistinguishable from one ended by quitting.
 - **Transcript may be null:** In `--ephemeral` mode, `transcript_path` is null. The integration handles this gracefully.
+- **No hooks fire under `-s read-only`:** verified against 0.147.0 — a `codex exec -s read-only` run produces no hook invocations at all, so no session is tracked. `-s workspace-write` fires the full set.
 - **Hook response protocol differs from Claude Code:** Codex uses `systemMessage` (same field name) but also supports `hookSpecificOutput` with `additionalContext` for injecting context into the model. For Entire's purposes, `systemMessage` is sufficient.
 
 ### Resolved since the original assessment
@@ -264,8 +265,22 @@ The `systemMessage` field can be used to display messages to the user via the ag
 
 ## Review integration (`entire review`)
 
-Codex review runs via `codex exec --skip-git-repo-check --json [-m <model>] [-c model_reasoning_effort=<level>] -` (prompt on stdin). **`codex exec` fires no lifecycle hooks**, which shapes the whole integration (see CLAUDE.md → `entire review` → "Codex specifics"):
+Codex review runs via `codex exec --skip-git-repo-check --json [-m <model>] [-c model_reasoning_effort=<level>] -` (prompt on stdin).
+
+> **Stale premise — needs follow-up.** This integration was built on "`codex exec`
+> fires no lifecycle hooks". That is no longer true. Measured against
+> codex-cli 0.147.0, a `codex exec` run under a write-capable sandbox fires the
+> full set — `session-start`, `user-prompt-submit`, `post-tool-use`, `stop`,
+> `session-end` — and with `ENTIRE_REVIEW_*` set in the environment the resulting
+> session **is** tagged `kind: agent_review` with skills and prompt captured.
+>
+> Caveat that keeps it from being a straight simplification: **hooks do not fire
+> under `-s read-only`**. `buildCodexReviewCmd` passes no `-s` flag, so whether a
+> review produces a tagged session depends on the user's default sandbox in
+> `config.toml`. The `run.Buffer` fallback below is therefore still required, but
+> it is no longer the *only* path — reworking review to prefer the tagged session
+> when one exists is deliberately left as separate work.
 
 - **Skills are passed verbatim, not paraphrased.** Codex injects its installed-skill catalog into every exec session and loads the matching `SKILL.md`; configured skills use codex's `$name` / `$plugin:name` form (`DiscoverReviewSkills` in `discovery.go`). Native `codex exec review` is not used — it rejects a prompt under a scope flag and can't carry Entire's scope/per-run/checkpoint context.
 - **Live tokens come from the rollout file, not stdout.** `codex exec --json` carries `usage` only on the terminal `turn.completed`, and a review is a single turn. `review_tokens.go` resolves the rollout transcript by `thread_id` (from the `thread.started` envelope), tails it (the same `~/.codex/.../rollout-*-<thread-id>.jsonl` documented under Transcript above), and emits cumulative `Tokens` per `token_count` event — the source codex's interactive UI reads.
-- **No tagged review session.** Because no hook fires, codex's session is never tagged `KindAgentReview`. The fix manifest therefore sources codex from its **live run output** (`run.Buffer`), and `entire review fix` skill verification is advisory for codex (loose description match), not a hard block.
+- **The fix manifest sources codex from live run output.** Because a tagged session cannot be *relied* on (see the sandbox caveat above), the manifest reads codex's **live run output** (`run.Buffer`), and `entire review fix` skill verification is advisory for codex (loose description match), not a hard block. Under a write-capable sandbox a `KindAgentReview` session now also exists alongside it.
