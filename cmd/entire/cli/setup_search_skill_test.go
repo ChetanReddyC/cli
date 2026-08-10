@@ -237,8 +237,11 @@ func assertStrictJSONSearchInstructions(t *testing.T, content string) {
 	if !strings.Contains(content, "entire checkpoint explain <id>") {
 		t.Fatal("scaffolded file should point drill-down at `entire checkpoint explain <id>`")
 	}
-	if strings.Contains(content, "--session") {
-		t.Fatal("scaffolded file should not route drill-down through `explain --session`")
+	if !strings.Contains(content, "entire checkpoint explain --session <id>") {
+		t.Fatal("scaffolded file should bridge session hits via `explain --session`")
+	}
+	if !strings.Contains(content, "session hit on the current branch") {
+		t.Fatal("scaffolded file should scope the session bridge to the current branch")
 	}
 	if !strings.Contains(content, "session hits are projections of the same checkpoints") {
 		t.Fatal("scaffolded file should frame session hits as projections of checkpoints")
