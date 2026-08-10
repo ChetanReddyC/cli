@@ -2,7 +2,9 @@
 
 ## Verdict: COMPATIBLE
 
-Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` config files with JSON stdin/stdout transport. The hook mechanism closely mirrors Claude Code's architecture (matcher-based hook groups, JSON on stdin, structured JSON output on stdout). Four hook events are available: SessionStart, UserPromptSubmit, Stop, and PreToolUse (shell/Bash only).
+Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` config files with JSON stdin/stdout transport. The hook mechanism closely mirrors Claude Code's architecture (matcher-based hook groups, JSON on stdin, structured JSON output on stdout). Eleven hook events are available: PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, and Stop.
+
+**Verified against** codex `main` @ `1c042dd4d8` (2026-08-10); installed reference `codex-cli 0.147.0`. Re-check `codex-rs/hooks/schema/generated/` and `codex-rs/config/src/hook_config.rs` when revisiting — this surface moves.
 
 ## Static Checks
 
@@ -10,7 +12,7 @@ Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` conf
 |-------|--------|-------|
 | Binary present | PASS | `codex` found on PATH |
 | Help available | PASS | `codex --help` shows full subcommand list |
-| Version info | PASS | `codex-cli 0.116.0` |
+| Version info | PASS | `codex-cli 0.147.0` (assessed at 0.116.0) |
 | Hook keywords | PASS | Hook system via `hooks.json` config files |
 | Session keywords | PASS | `resume`, `fork` subcommands; session stored as threads in SQLite + JSONL rollout files |
 | Config directory | PASS | `~/.codex/` (overridable via `CODEX_HOME`) |
@@ -19,7 +21,7 @@ Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` conf
 ## Binary
 
 - Name: `codex`
-- Version: `codex-cli 0.116.0`
+- Version: `codex-cli 0.147.0` (SessionEnd requires 0.146+)
 - Install: `npm install -g @openai/codex` or build from source
 
 ## Hook Mechanism
@@ -45,9 +47,21 @@ Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` conf
         ]
       }
     ],
+    "SessionEnd": [
+      {
+        "matcher": null,
+        "hooks": [
+          {
+            "type": "command",
+            "command": "entire hooks codex session-end",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [...],
     "Stop": [...],
-    "PreToolUse": [...]
+    "PostToolUse": [...]
   }
 }
 ```
@@ -69,9 +83,30 @@ Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` conf
 | Native Hook Name | When It Fires | Entire EventType | Notes |
 |-----------------|---------------|-----------------|-------|
 | `SessionStart` | Session begins (startup, resume, or clear) | `SessionStart` | Includes `source` field |
+| `SessionEnd` | Thread teardown completes | `SessionEnd` | **Hard 3s cap** — see below |
 | `UserPromptSubmit` | User submits a prompt | `TurnStart` | Includes `prompt` text |
 | `Stop` | Agent finishes a turn | `TurnEnd` | Includes `last_assistant_message` |
-| `PreToolUse` | Before tool execution | *(pass-through)* | Shell/Bash only for now; no lifecycle action needed |
+| `PostToolUse` | After tool execution | `ToolUse` | Consumed for `apply_patch` only |
+| `PreToolUse` | Before tool execution | *(pass-through)* | No lifecycle action needed |
+
+Not consumed by Entire: `PermissionRequest`, `PreCompact`, `PostCompact`,
+`SubagentStart`, `SubagentStop`.
+
+### SessionEnd's timeout ceiling
+
+`SessionEnd` runs inside Codex's shutdown sequence, so it is budgeted far more
+tightly than every other hook: it defaults to **1s** and is clamped to
+**3s** (`SESSION_END_MAX_TIMEOUT_SEC`, `codex-rs/hooks/src/events/session_end.rs`),
+keeping teardown inside app-server's five-second bound. Asking for more prints a
+"clamping SessionEnd hook timeout" warning at every startup, and on expiry Codex
+terminates the hook's whole process tree (openai/codex#37527).
+
+Entire therefore installs `SessionEnd` at exactly 3s while every other hook keeps
+30s, and `CodexAgent.SessionEndBudget` declares a slightly shorter self-imposed
+budget (`agent.SessionEndBudgeter`). That budget bounds only the eager condense;
+marking the session ENDED is one atomic state-file rename and always runs to
+completion. A curtailed condense is safe — `FullyCondensed` stays false and
+PostCommit retries.
 
 ### Hook Input (stdin JSON)
 
@@ -96,6 +131,22 @@ Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` conf
 }
 ```
 - `source` (string) — `"startup"`, `"resume"`, or `"clear"`
+
+**SessionEnd-specific:**
+```json
+{
+  "session_id": "...",
+  "transcript_path": "...",
+  "cwd": "/path/to/repo",
+  "hook_event_name": "SessionEnd",
+  "reason": "other"
+}
+```
+- `reason` (string) — currently the constant `"other"`; it cannot distinguish quit from `/clear`
+- **Does not share the common fields**: no `model`, no `permission_mode`, no `turn_id`
+- **No output schema exists** — stdout is ignored; only the exit code is read
+- Codex flushes the rollout before firing, so `transcript_path` is complete when the hook reads it
+- Root sessions only; subagent threads use `SubagentStop`
 
 **UserPromptSubmit-specific:**
 ```json
@@ -193,12 +244,18 @@ The `systemMessage` field can be used to display messages to the user via the ag
 
 ## Gaps & Limitations
 
-- **Hooks require feature flag:** The `codex_hooks` feature is `default_enabled: false` (stage: UnderDevelopment). It must be enabled via `--enable codex_hooks` CLI flag, or `features.codex_hooks = true` in `config.toml`, or `-c features.codex_hooks=true`. Without this, hooks.json is ignored entirely.
-- **No SessionEnd hook:** Codex does not fire a hook when a session is completely terminated. The `Stop` hook fires at end-of-turn, not end-of-session. This is similar to some other agents — the framework handles this gracefully.
-- **PreToolUse is shell-only:** Currently only fires for `Bash` tool (direct shell execution). MCP tools, stdin streaming, and other tool types are not yet hooked. PostToolUse is in review.
-- **Transcript may be null:** In `--ephemeral` mode, `transcript_path` is null. The integration should handle this gracefully.
-- **No subagent hooks:** No PreTask/PostTask equivalent for subagent spawning.
+- **SessionEnd is tightly budgeted:** 1s default, 3s hard cap, process tree killed on expiry. See "SessionEnd's timeout ceiling" above. This is the only Entire hook that cannot assume it will finish.
+- **SessionEnd needs Codex 0.146+:** Added 2026-07-17 (openai/codex#33895), first tagged in `rust-v0.146.0-alpha.3`. On older Codex the hook is simply never called, and such sessions are instead reclaimed by the exited-owner sweep in `entire status` / `entire doctor` (`session.State.OwnerExited`).
+- **`reason` carries no information:** always `"other"`, so a session ended by `/clear` is indistinguishable from one ended by quitting.
+- **Transcript may be null:** In `--ephemeral` mode, `transcript_path` is null. The integration handles this gracefully.
 - **Hook response protocol differs from Claude Code:** Codex uses `systemMessage` (same field name) but also supports `hookSpecificOutput` with `additionalContext` for injecting context into the model. For Entire's purposes, `systemMessage` is sufficient.
+
+### Resolved since the original assessment
+
+- ~~Hooks require feature flag~~ — `CodexHooks` became `Stage::Stable, default_enabled: true` on 2026-04-23 (openai/codex#19012) and the config key was aliased from `codex_hooks` to `hooks` on 2026-05-01 (openai/codex#20522). No flag is needed.
+- ~~No SessionEnd hook~~ — added in 0.146; Entire consumes it.
+- ~~PreToolUse is shell-only~~ — now dispatched generically from the tool registry (`codex-rs/core/src/tools/registry.rs`), covering shell, `apply_patch`, MCP tools and unified_exec.
+- ~~No subagent hooks~~ — `SubagentStart` / `SubagentStop` exist, carrying `agent_id`, `agent_type` and `agent_transcript_path`. Entire does not consume them yet; they are the natural PreTask/PostTask equivalents if subagent checkpoints are wanted for Codex.
 
 ## Captured Payloads
 
