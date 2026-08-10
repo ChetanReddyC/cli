@@ -41,6 +41,11 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	if strings.Contains(body, "go run") {
 		t.Error("production extension should not contain 'go run'")
 	}
+	// The nesting guard keeps a subagent's nested `pi` process from forwarding its
+	// lifecycle as the user's session — see nestedInvocation in lifecycle.go.
+	if !strings.Contains(body, `process.env.ENTIRE_PI_NESTED`) {
+		t.Error("nested-invocation guard missing from installed extension")
+	}
 }
 
 func TestInstallHooks_LocalDev(t *testing.T) {

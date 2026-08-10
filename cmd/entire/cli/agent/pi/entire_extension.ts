@@ -11,6 +11,18 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 
 export default function (pi: ExtensionAPI) {
+  // A Pi subagent is a nested `pi` process: subagent extensions spawn one per
+  // task (`pi --mode json -p --no-session`) with cwd inside the project, where Pi
+  // auto-discovers project-local `.pi/extensions/*/index.ts` — this file. Without
+  // a guard the child forwards its own lifecycle as if it were the user's session,
+  // claiming the parent's session (a sessionless child) or opening a second one.
+  // Mark this process so any Pi it spawns can tell that it is nested.
+  //
+  // Only this extension reads the marker. Entire's hook subprocesses inherit it
+  // too, so the CLI side must NOT treat it as a skip signal.
+  if (process.env.ENTIRE_PI_NESTED === "1") return;
+  process.env.ENTIRE_PI_NESTED = "1";
+
   const ENTIRE_CMD = '__ENTIRE_CMD__';
   let pendingSkillEvents: Array<{ skill_name: string; invocation: string; timestamp: string }> = [];
 

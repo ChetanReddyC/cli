@@ -142,6 +142,36 @@ func piSkillEvents(in []piSkillEventInput) []agent.SkillEvent {
 	return out
 }
 
+// nestedInvocation reports whether a hook payload came from a Pi process that has
+// no session of its own, in which case the payload must not be resolved against
+// the per-repo session-ID cache.
+//
+// Pi has no subagent events; subagents come from an extension (see Pi's
+// `subagent/` example) that spawns `pi --mode json -p --no-session` with cwd set to
+// the project directory. Pi auto-discovers project-local `.pi/extensions/*/index.ts`
+// there, so the child loads Entire's own extension and fires these hooks too. With
+// --no-session it reports no session file, so sessionID is empty — and the cache is
+// a single per-repo file, so falling back to it handed the child its *parent's*
+// session ID. The nested turn then overwrote the parent's last prompt with the
+// subagent's internal task text and opened a new turn mid-flight, so the
+// checkpoint's title and turn-scoped windows described the subagent, not the user.
+//
+// Requiring a session file keeps the legitimate fallback — a session file whose
+// name carries no parseable ID — while making sessionless invocations a clean
+// no-op. Nothing is lost for agent_end either: captureTranscript returns "" without
+// a session file, so such an event could only ever fail downstream with "transcript
+// file not specified".
+//
+// An explicit payload session_id is always honoured; only the cache is distrusted.
+func nestedInvocation(payload piHookPayload, sessionID string) bool {
+	return sessionID == "" && payload.SessionFile == ""
+}
+
+func logNestedInvocationSkip(ctx context.Context, hookName string) {
+	logging.Debug(ctx, "pi: skipping hook for sessionless (nested) Pi invocation",
+		slog.String("hook", hookName))
+}
+
 // ParseHookEvent translates a Pi hook invocation into a normalised lifecycle
 // event. Implements agent.HookSupport.
 func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
@@ -162,6 +192,12 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 
 	switch hookName {
 	case HookNameSessionStart:
+		if sessionID == "" {
+			// Sessionless Pi (`--no-session`) — nothing to track. See
+			// nestedInvocation.
+			logNestedInvocationSkip(ctx, hookName)
+			return nil, nil //nolint:nilnil // no session to track = no lifecycle event
+		}
 		cacheSessionID(ctx, sessionID)
 		return &agent.Event{
 			Type:      agent.SessionStart,
@@ -170,6 +206,10 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		}, nil
 
 	case HookNameBeforeAgentStart:
+		if nestedInvocation(payload, sessionID) {
+			logNestedInvocationSkip(ctx, hookName)
+			return nil, nil //nolint:nilnil // nested/sessionless Pi = no lifecycle event
+		}
 		// Pi emits before_agent_start with a fully-populated session ID, but
 		// we cache it anyway to support the agent_end fallback below.
 		if sessionID == "" {
@@ -190,6 +230,10 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		}, nil
 
 	case HookNameAgentEnd:
+		if nestedInvocation(payload, sessionID) {
+			logNestedInvocationSkip(ctx, hookName)
+			return nil, nil //nolint:nilnil // nested/sessionless Pi = no lifecycle event
+		}
 		if sessionID == "" {
 			sessionID = readCachedSessionID(ctx)
 		}
