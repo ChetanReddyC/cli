@@ -24,10 +24,26 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 	logCtx := logging.WithComponent(ctx, "session")
 
 	var store *session.StateStore // lazily created on first finalize
+	var closeLogging func()
+	defer func() {
+		if closeLogging != nil {
+			closeLogging()
+		}
+	}()
 	finalized := 0
 	for _, st := range states {
 		if !st.OwnerExited() {
 			continue // cheap pre-filter on the (possibly stale) list snapshot
+		}
+
+		// Both callers are plain commands (`entire status`, `entire doctor`)
+		// that never initialize logging, so the phase-transition and condense
+		// lines below would otherwise land on the user's terminal via
+		// slog.Default() instead of the log file. Deferred to the first actual
+		// candidate: the common case finalizes nothing, and initializing eagerly
+		// would create .entire/logs/ on every status invocation.
+		if closeLogging == nil {
+			closeLogging = logging.EnsureInitialized(ctx)
 		}
 
 		// Finalize via the same path a clean SessionStop hook would take, but

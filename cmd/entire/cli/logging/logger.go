@@ -139,6 +139,32 @@ func Init(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// EnsureInitialized routes logging to .entire/logs/ unless it is already
+// initialized, and returns a function that tears down only what it set up.
+//
+// It exists for code that emits logging.* calls from a plain command rather
+// than a hook. Without an initialized logger, log() falls back to
+// slog.Default(), which prints internal structured lines straight onto the
+// user's terminal in the middle of command output — see the same hazard called
+// out at the Init call sites in setup.go and investigate/cmd.go.
+//
+// Unlike Init it is a no-op when a logger already exists, so a caller reachable
+// from a hook cannot close the hook's log file out from under it. Like Init, it
+// CREATES .entire/logs/, so call it only once the command is committed to doing
+// work in an Entire-enabled repository.
+func EnsureInitialized(ctx context.Context) func() {
+	mu.RLock()
+	already := logger != nil
+	mu.RUnlock()
+	if already {
+		return func() {}
+	}
+	if err := Init(ctx, ""); err != nil {
+		return func() {}
+	}
+	return Close
+}
+
 // Close closes the log file if one is open.
 // Flushes any buffered data before closing.
 // Safe to call multiple times.

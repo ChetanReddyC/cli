@@ -246,6 +246,58 @@ func TestInit_FallsBackToStderrOnError(t *testing.T) {
 	Close()
 }
 
+// EnsureInitialized must route logs to the file for commands that never call
+// Init — otherwise they land on the user's terminal via slog.Default().
+func TestEnsureInitialized_InitializesWhenUnset(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	initGitRepo(t, tmpDir)
+	resetLogger()
+
+	done := EnsureInitialized(context.Background())
+	Info(context.Background(), "swept a session")
+	done()
+
+	data, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("EnsureInitialized() did not create a log file: %v", err)
+	}
+	if !strings.Contains(string(data), "swept a session") {
+		t.Errorf("log file missing the message; got %q", string(data))
+	}
+}
+
+// A caller reachable from a hook must not close the hook's log file out from
+// under it, so the cleanup returned for an already-initialized logger is inert.
+func TestEnsureInitialized_NoOpWhenAlreadyInitialized(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	initGitRepo(t, tmpDir)
+	resetLogger()
+
+	if err := Init(context.Background(), testSessionID); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	defer Close()
+
+	done := EnsureInitialized(context.Background())
+	done() // must not tear down the logger installed by Init above
+
+	Info(context.Background(), "still logging after ensure cleanup")
+	Close() // flush
+
+	data, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(data), "still logging after ensure cleanup") {
+		t.Errorf("EnsureInitialized cleanup closed a logger it did not open; got %q", string(data))
+	}
+	if !strings.Contains(string(data), testSessionID) {
+		t.Errorf("session ID from the original Init was lost; got %q", string(data))
+	}
+}
+
 func TestClose_SafeToCallMultipleTimes(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
