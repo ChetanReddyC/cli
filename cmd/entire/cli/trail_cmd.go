@@ -32,9 +32,8 @@ const (
 	defaultTrailListStatus = string(trail.StatusOpen)
 	// trailListStatusAny disables the status filter; user-facing value for --status.
 	trailListStatusAny = "any"
-	// trailListServerMaxLimit is the most trails the server returns per
-	// request (the list endpoint clamps limit to 200).
-	trailListServerMaxLimit = 200
+	// trailListServerMaxLimit is entire-api's maximum pageSize.
+	trailListServerMaxLimit = 100
 	trailFindMaxPages       = 10
 )
 
@@ -384,16 +383,29 @@ func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner
 	if err := checkTrailResponse(resp); err != nil {
 		return "", err
 	}
-	var detail struct {
-		Trail api.TrailResource `json:"trail"`
-	}
-	if err := api.DecodeJSON(resp, &detail); err != nil {
+	var raw json.RawMessage
+	if err := api.DecodeJSON(resp, &raw); err != nil {
 		return "", fmt.Errorf("failed to decode trail detail: %w", err)
 	}
-	if detail.Trail.BodyDocument == nil {
+	// entire-api returns the detail resource directly. Accept the former BFF's
+	// {trail:{...}} envelope as a compatibility fallback for older fixtures.
+	var detail api.TrailResource
+	if err := json.Unmarshal(raw, &detail); err != nil {
+		return "", fmt.Errorf("failed to decode trail detail: %w", err)
+	}
+	if detail.ID == "" && detail.Number == 0 {
+		var envelope struct {
+			Trail api.TrailResource `json:"trail"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			return "", fmt.Errorf("failed to decode trail detail: %w", err)
+		}
+		detail = envelope.Trail
+	}
+	if detail.BodyDocument == nil {
 		return "", nil
 	}
-	return strings.TrimSpace(detail.Trail.BodyDocument.TextSnapshot), nil
+	return strings.TrimSpace(detail.BodyDocument.TextSnapshot), nil
 }
 
 func newTrailListCmd() *cobra.Command {
@@ -453,36 +465,22 @@ func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Cli
 		return err
 	}
 
-	// Filtering, sorting (updated_at desc), and truncation all happen
-	// server-side; the response carries the total match count so a capped
-	// page never reads as the total number of matches.
-	resp, err := client.Get(ctx, trailsBasePath(forge, owner, repo)+trailListQuery(statusFilters, authorFilter, opts.Limit))
+	// entire-api uses opaque cursor pagination and a 100-row page cap. Walk as
+	// many pages as needed for --limit. Author login is filtered client-side:
+	// the new backend's author query is account-ID based, while the CLI's public
+	// flag has always accepted GitHub logins.
+	resources, totalMatched, err := listTrailResources(ctx, client, forge, owner, repo, statusFilters, authorFilter, opts.Limit)
 	if err != nil {
-		return fmt.Errorf("failed to list trails: %w", err)
-	}
-	defer resp.Body.Close()
-	if err := checkTrailResponse(resp); err != nil {
 		return err
 	}
 
-	var listResp api.TrailListResponse
-	if err := api.DecodeJSON(resp, &listResp); err != nil {
-		return fmt.Errorf("failed to decode trail list: %w", err)
-	}
-
-	// Convert to metadata for display, attaching the browser URL (server-provided
-	// when present, locally constructed as a fallback for older servers).
-	trails := make([]*trail.Metadata, 0, len(listResp.Trails))
-	for i := range listResp.Trails {
-		m := listResp.Trails[i].ToMetadata()
-		m.URL = trailDisplayURL(listResp.Trails[i], forge, owner, repo)
+	// Convert to metadata for display, attaching the browser URL (entire-api does
+	// not compose the web-app URL on this lower-level surface).
+	trails := make([]*trail.Metadata, 0, len(resources))
+	for i := range resources {
+		m := resources[i].ToMetadata()
+		m.URL = trailDisplayURL(resources[i], forge, owner, repo)
 		trails = append(trails, m)
-	}
-
-	totalMatched := listResp.Total
-	if totalMatched < len(trails) {
-		// Older servers don't report a total; fall back to the page size.
-		totalMatched = len(trails)
 	}
 
 	if opts.JSON {
@@ -506,17 +504,98 @@ func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Cli
 		TotalMatched:    totalMatched,
 	})
 
-	if opts.Limit > trailListServerMaxLimit && totalMatched > len(trails) {
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "Note: --limit %d exceeds the server maximum of %d trails per request.\n", opts.Limit, trailListServerMaxLimit)
-	}
-
 	return nil
 }
 
-// trailListQuery builds the server-side filter query for the trail list
-// endpoint. Empty statusFilters (--status any) omits the status param so the
-// server returns all statuses; the limit is capped at the server maximum.
+func listTrailResources(ctx context.Context, client *api.Client, forge, owner, repo string, statuses []trail.Status, author string, limit int) ([]api.TrailResource, int, error) {
+	items := make([]api.TrailResource, 0, min(limit, trailListServerMaxLimit))
+	pageToken := ""
+	seenTokens := map[string]bool{}
+	totalMatched := 0
+	for {
+		pageSize := trailListServerMaxLimit
+		if author == "" && limit-len(items) < pageSize {
+			pageSize = limit - len(items)
+		}
+		resp, err := client.Get(ctx, trailsBasePath(forge, owner, repo)+trailListPageQuery(statuses, pageSize, pageToken))
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to list trails: %w", err)
+		}
+		var page api.TrailListResponse
+		decodeErr := func() error {
+			defer resp.Body.Close()
+			if err := checkTrailResponse(resp); err != nil {
+				return err
+			}
+			if err := api.DecodeJSON(resp, &page); err != nil {
+				return fmt.Errorf("failed to decode trail list: %w", err)
+			}
+			return nil
+		}()
+		if decodeErr != nil {
+			return nil, 0, decodeErr
+		}
+
+		for _, resource := range page.Trails {
+			if author != "" {
+				login := ""
+				if resource.Author != nil && resource.Author.Login != nil {
+					login = *resource.Author.Login
+				}
+				if !strings.EqualFold(login, author) {
+					continue
+				}
+			}
+			totalMatched++
+			if len(items) < limit {
+				items = append(items, resource)
+			}
+		}
+		if author == "" {
+			totalMatched = page.Total
+			if totalMatched < len(items) {
+				totalMatched = len(items)
+			}
+			if len(items) >= limit {
+				break
+			}
+		}
+		if page.NextPageToken == nil || strings.TrimSpace(*page.NextPageToken) == "" {
+			break
+		}
+		pageToken = strings.TrimSpace(*page.NextPageToken)
+		if seenTokens[pageToken] {
+			return nil, 0, fmt.Errorf("trail list pagination repeated page token %q", pageToken)
+		}
+		seenTokens[pageToken] = true
+	}
+	return items, totalMatched, nil
+}
+
+// trailListPageQuery builds entire-api's cursor-paginated list query. Empty
+// statuses (--status any) omit the filter. Author is intentionally absent: the
+// CLI accepts a login while this API's author filter accepts account ULIDs.
+func trailListPageQuery(statusFilters []trail.Status, pageSize int, pageToken string) string {
+	q := url.Values{}
+	if len(statusFilters) > 0 {
+		parts := make([]string, len(statusFilters))
+		for i, status := range statusFilters {
+			parts[i] = string(status)
+		}
+		q.Set("status", strings.Join(parts, ","))
+	}
+	if pageSize <= 0 || pageSize > trailListServerMaxLimit {
+		pageSize = trailListServerMaxLimit
+	}
+	q.Set("pageSize", strconv.Itoa(pageSize))
+	if strings.TrimSpace(pageToken) != "" {
+		q.Set("pageToken", strings.TrimSpace(pageToken))
+	}
+	return "?" + q.Encode()
+}
+
+// Legacy query builders remain for tests and downstream package callers that
+// only format URLs. Trail commands themselves use trailListPageQuery.
 func trailListQuery(statusFilters []trail.Status, author string, limit int) string {
 	return trailListQueryWithOffset(statusFilters, author, limit, 0)
 }
@@ -533,8 +612,8 @@ func trailListQueryWithOffset(statusFilters []trail.Status, author string, limit
 	if author != "" {
 		q.Set("author", author)
 	}
-	if limit > trailListServerMaxLimit {
-		limit = trailListServerMaxLimit
+	if limit > 200 {
+		limit = 200
 	}
 	q.Set("limit", strconv.Itoa(limit))
 	if offset > 0 {
@@ -886,13 +965,13 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 		return err
 	}
 
-	client, err := NewAuthenticatedAPIClient(ctx, trailInsecureHTTP(cmd))
-	if err != nil {
-		return renderDataAPIAuthError(cmd.ErrOrStderr(), err)
-	}
 	forge, owner, repoName, err := resolveTrailRemote(ctx)
 	if err != nil {
 		return err
+	}
+	client, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), owner+"/"+repoName)
+	if err != nil {
+		return renderDataAPIAuthError(cmd.ErrOrStderr(), err)
 	}
 
 	branchState, err := prepareTrailCreateBranch(w, errW, repo, branch, currentBranch, noBranch)
@@ -1196,6 +1275,9 @@ type trailUpdateInputs struct {
 }
 
 func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, inputs trailUpdateInputs) error {
+	if len(inputs.LabelAdd) > 0 || len(inputs.LabelRemove) > 0 {
+		return errors.New("trail labels are not supported by the new trails backend")
+	}
 	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, inputs.Repo, func(ctx context.Context, client *api.Client) error {
 		forge, owner, repoName, err := resolveTrailRepoOrRemote(ctx, inputs.Repo)
 		if err != nil {
@@ -1711,10 +1793,9 @@ func runTrailDelete(cmd *cobra.Command, number int, branch string, force bool) e
 	})
 }
 
-// deleteTrailByNumber deletes the trail with the given integer number and
-// verifies the server's {ok:true} signal. CheckResponse accepts any 2xx and the
-// body is otherwise unread, so a destructive delete must confirm ok before
-// reporting success (decoding also drains the body for connection reuse).
+// deleteTrailByNumber deletes the trail with the given integer number.
+// entire-api confirms deletion with 204 No Content; the successful status is
+// the complete acknowledgement and there is no response body to decode.
 func deleteTrailByNumber(ctx context.Context, client *api.Client, forge, owner, repo string, number int) error {
 	resp, err := client.Delete(ctx, trailNumberPath(forge, owner, repo, number))
 	if err != nil {
@@ -1723,13 +1804,6 @@ func deleteTrailByNumber(ctx context.Context, client *api.Client, forge, owner, 
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
 		return err
-	}
-	var delResp api.TrailDeleteResponse
-	if err := api.DecodeJSON(resp, &delResp); err != nil {
-		return fmt.Errorf("failed to decode delete response: %w", err)
-	}
-	if !delResp.OK {
-		return fmt.Errorf("trail API did not confirm deletion of trail #%d", number)
 	}
 	return nil
 }
@@ -1910,12 +1984,12 @@ func findTrailByNumber(ctx context.Context, client *api.Client, forge, owner, re
 }
 
 func findTrail(ctx context.Context, client *api.Client, forge, owner, repo string, match func(api.TrailResource) bool) (*api.TrailResource, error) {
-	// The list endpoint paginates; walk bounded pages so branch/number/id lookups do
-	// not silently miss older trails beyond the first server-max page.
-	offset := 0
-	previousPageSignature := ""
+	// Walk bounded opaque-cursor pages so selector lookups do not silently miss
+	// trails beyond the first entire-api page.
+	pageToken := ""
+	seenTokens := map[string]bool{}
 	for range trailFindMaxPages {
-		resp, err := client.Get(ctx, trailsBasePath(forge, owner, repo)+trailListQueryWithOffset(nil, "", trailListServerMaxLimit, offset))
+		resp, err := client.Get(ctx, trailsBasePath(forge, owner, repo)+trailListPageQuery(nil, trailListServerMaxLimit, pageToken))
 		if err != nil {
 			return nil, fmt.Errorf("list trails: %w", err)
 		}
@@ -1940,39 +2014,22 @@ func findTrail(ctx context.Context, client *api.Client, forge, owner, repo strin
 				return &listResp.Trails[i], nil
 			}
 		}
-
-		pageLen := len(listResp.Trails)
-		if pageLen == 0 || pageLen < trailListServerMaxLimit {
+		if listResp.NextPageToken == nil || strings.TrimSpace(*listResp.NextPageToken) == "" {
 			break
 		}
-		if listResp.Total == 0 {
-			pageSignature := trailListPageSignature(listResp.Trails)
-			if pageSignature != "" && pageSignature == previousPageSignature {
-				break
-			}
-			previousPageSignature = pageSignature
-		}
-		offset += pageLen
-		if listResp.Total > 0 && offset >= listResp.Total {
+		pageToken = strings.TrimSpace(*listResp.NextPageToken)
+		if seenTokens[pageToken] {
 			break
 		}
+		seenTokens[pageToken] = true
 	}
 	return nil, nil //nolint:nilnil // nil, nil means "not found" — callers check both
-}
-
-func trailListPageSignature(trails []api.TrailResource) string {
-	if len(trails) == 0 {
-		return ""
-	}
-	first := trails[0]
-	last := trails[len(trails)-1]
-	return fmt.Sprintf("%s/%d/%s:%s/%d/%s", first.ID, first.Number, first.Branch, last.ID, last.Number, last.Branch)
 }
 
 // trailsBasePath returns the API path prefix for trails endpoints
 // (e.g., "/api/v1/trails/gh/org/repo").
 func trailsBasePath(forge, owner, repo string) string {
-	return fmt.Sprintf("/api/v1/trails/%s/%s/%s", forge, owner, repo)
+	return fmt.Sprintf("/api/v1/trails/%s/%s/%s", url.PathEscape(forge), url.PathEscape(owner), url.PathEscape(repo))
 }
 
 // trailNumberPath returns the single-trail API path keyed by integer trail

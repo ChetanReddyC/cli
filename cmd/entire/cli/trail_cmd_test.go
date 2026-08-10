@@ -197,6 +197,11 @@ func TestRunTrailCreateInteractiveBranchlessSkipsBranchPrompt(t *testing.T) {
 
 func TestRunTrailCreateBranchlessHappyPath(t *testing.T) {
 	// No t.Parallel: uses t.Chdir plus auth/tokenstore package-level test seams.
+	prevTrailClient := newTrailAPIClient
+	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _ string) (*api.Client, error) {
+		return NewAuthenticatedAPIClient(ctx, insecureHTTP)
+	}
+	t.Cleanup(func() { newTrailAPIClient = prevTrailClient })
 	var gotCreate map[string]any
 	var gotCreateAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -370,6 +375,12 @@ func gitBranchExistsTrailTest(t *testing.T, repoDir, branch string) bool {
 
 func TestRunTrailListAll_PrintsLoginHintWhenNotLoggedIn(t *testing.T) {
 	// No t.Parallel: SetResolveContextForAPIForTest and
+	prevTrailClient := newTrailAPIClient
+	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _ string) (*api.Client, error) {
+		return NewAuthenticatedAPIClient(ctx, insecureHTTP)
+	}
+	t.Cleanup(func() { newTrailAPIClient = prevTrailClient })
+	//
 	// tokenstore.UseFileBackendForTesting mutate package-level state.
 	//
 	// Discovery selects a context whose keyring slot holds nothing, so the
@@ -754,14 +765,12 @@ func TestConfirmTrailDeletion(t *testing.T) {
 func TestDeleteTrailByNumber(t *testing.T) {
 	t.Parallel()
 
-	t.Run("deletes via the integer number path and accepts ok:true", func(t *testing.T) {
+	t.Run("deletes via the integer number path and accepts 204", func(t *testing.T) {
 		t.Parallel()
 		var gotMethod, gotPath string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gotMethod, gotPath = r.Method, r.URL.Path
-			if err := json.NewEncoder(w).Encode(api.TrailDeleteResponse{OK: true}); err != nil {
-				t.Errorf("encode response: %v", err)
-			}
+			w.WriteHeader(http.StatusNoContent)
 		}))
 		defer srv.Close()
 
@@ -774,21 +783,6 @@ func TestDeleteTrailByNumber(t *testing.T) {
 		}
 		if want := "/api/v1/trails/gh/acme/repo/575"; gotPath != want {
 			t.Fatalf("path = %q, want %q (integer number, not UUID)", gotPath, want)
-		}
-	})
-
-	t.Run("treats a 2xx without ok:true as failure", func(t *testing.T) {
-		t.Parallel()
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			if err := json.NewEncoder(w).Encode(api.TrailDeleteResponse{OK: false}); err != nil {
-				t.Errorf("encode response: %v", err)
-			}
-		}))
-		defer srv.Close()
-
-		client := api.NewClientWithBaseURL("tok", srv.URL)
-		if err := deleteTrailByNumber(t.Context(), client, "gh", "acme", "repo", 575); err == nil {
-			t.Fatal("expected error for 2xx without ok:true, got nil")
 		}
 	})
 
@@ -977,31 +971,36 @@ func TestTrailListQueryWithOffsetIncludesOffset(t *testing.T) {
 	}
 }
 
+func TestTrailListPageQueryUsesEntireAPIPagination(t *testing.T) {
+	t.Parallel()
+	got := trailListPageQuery([]trail.Status{trail.StatusOpen}, 100, "next page")
+	want := "?pageSize=100&pageToken=next+page&status=open"
+	if got != want {
+		t.Fatalf("trailListPageQuery = %q, want %q", got, want)
+	}
+}
+
 func TestFindTrailPaginatesPastServerMax(t *testing.T) {
 	t.Parallel()
-	var offsets []int
+	const nextPage = "next-page"
+	var tokens []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		offsetStr := r.URL.Query().Get("offset")
-		offset := 0
-		if offsetStr != "" {
-			var err error
-			offset, err = strconv.Atoi(offsetStr)
-			if err != nil {
-				t.Fatalf("parse offset %q: %v", offsetStr, err)
-			}
-		}
-		offsets = append(offsets, offset)
+		token := r.URL.Query().Get("pageToken")
+		tokens = append(tokens, token)
 		trails := []api.TrailResource{}
-		switch offset {
-		case 0:
+		var next *string
+		switch token {
+		case "":
 			trails = make([]api.TrailResource, trailListServerMaxLimit)
 			for i := range trails {
 				trails[i] = api.TrailResource{ID: "trl_first_" + strconv.Itoa(i), Number: i + 1, Branch: "old/" + strconv.Itoa(i)}
 			}
-		case trailListServerMaxLimit:
+			n := nextPage
+			next = &n
+		case nextPage:
 			trails = []api.TrailResource{{ID: "trl_target", Number: 201, Branch: "target"}}
 		}
-		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails, Total: trailListServerMaxLimit + 1}); err != nil {
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails, Total: trailListServerMaxLimit + 1, NextPageToken: next}); err != nil {
 			t.Fatalf("encode response: %v", err)
 		}
 	}))
@@ -1015,8 +1014,8 @@ func TestFindTrailPaginatesPastServerMax(t *testing.T) {
 	if found == nil || found.ID != "trl_target" {
 		t.Fatalf("found = %#v, want trl_target", found)
 	}
-	if len(offsets) != 2 || offsets[0] != 0 || offsets[1] != trailListServerMaxLimit {
-		t.Fatalf("offsets = %v, want [0 %d]", offsets, trailListServerMaxLimit)
+	if len(tokens) != 2 || tokens[0] != "" || tokens[1] != nextPage {
+		t.Fatalf("page tokens = %v, want [\"\" next-page]", tokens)
 	}
 }
 
@@ -1029,7 +1028,8 @@ func TestFindTrailStopsWhenServerRepeatsUnpaginatedFullPage(t *testing.T) {
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&requests, 1)
-		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails}); err != nil {
+		next := "same-page"
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails, NextPageToken: &next}); err != nil {
 			t.Fatalf("encode response: %v", err)
 		}
 	}))
@@ -1058,7 +1058,8 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 			trailNumber := (requestNumber-1)*trailListServerMaxLimit + i + 1
 			trails[i] = api.TrailResource{ID: "trl_" + strconv.Itoa(trailNumber), Number: trailNumber, Branch: "old/" + strconv.Itoa(trailNumber)}
 		}
-		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails}); err != nil {
+		next := "page-" + strconv.Itoa(requestNumber)
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: trails, NextPageToken: &next}); err != nil {
 			t.Fatalf("encode response: %v", err)
 		}
 	}))

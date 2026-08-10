@@ -24,6 +24,13 @@ type Client struct {
 	httpClient *http.Client
 	baseURL    string
 
+	// trailRoutes maps the legacy trail-id prefix used internally by the CLI's
+	// review helpers to the repo/number-addressed entire-api route. It lets the
+	// review command keep passing a stable trail ID through its domain helpers
+	// while requests go to the new cell API, whose public routes are addressed
+	// as /trails/{host}/{owner}/{repo}/{number}.
+	trailRoutes map[string]string
+
 	// authSessionsPath is the base path for entire-core's login-session
 	// endpoints (list / revoke / current). Set via WithAuthSessionsPath when the
 	// client targets the auth host; empty otherwise, and the session methods
@@ -188,7 +195,40 @@ func (c *Client) Request(ctx context.Context, method, path string, headers http.
 	return c.do(ctx, method, path, body, headers)
 }
 
+// SetTrailRoute registers the entire-api base path for a resolved trail. The
+// CLI's review/finding helpers historically build paths from the trail ID; the
+// new backend addresses those same resources by repository and trail number.
+func (c *Client) SetTrailRoute(trailID, path string) {
+	trailID = strings.TrimSpace(trailID)
+	path = strings.TrimRight(strings.TrimSpace(path), "/")
+	if trailID == "" || path == "" {
+		return
+	}
+	if c.trailRoutes == nil {
+		c.trailRoutes = make(map[string]string)
+	}
+	c.trailRoutes[url.PathEscape(trailID)] = path
+}
+
+func (c *Client) rewriteTrailRoute(path string) string {
+	const prefix = "/api/v1/trails/"
+	if !strings.HasPrefix(path, prefix) || len(c.trailRoutes) == 0 {
+		return path
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	id, suffix, _ := strings.Cut(rest, "/")
+	base, ok := c.trailRoutes[id]
+	if !ok {
+		return path
+	}
+	if suffix == "" {
+		return base
+	}
+	return base + "/" + suffix
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader, headers http.Header) (*http.Response, error) {
+	path = c.rewriteTrailRoute(path)
 	endpoint, err := ResolveURLFromBase(c.baseURL, path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve URL %s: %w", path, err)

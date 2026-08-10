@@ -524,6 +524,14 @@ func resolveTrailReviewTarget(ctx context.Context, client *api.Client, selector,
 	if found.ID == "" {
 		return trailReviewTarget{}, errors.New("trail has no id yet")
 	}
+	if found.Number <= 0 {
+		return trailReviewTarget{}, errors.New("trail has no number yet")
+	}
+	// Review helpers carry the stable trail ID internally, but entire-api's
+	// public routes are repo/number addressed. Register that translation once
+	// when the target is resolved so findings, snapshots, and SSE all hit the
+	// owning cell's native route.
+	client.SetTrailRoute(found.ID, trailNumberPath(host, owner, repo, found.Number))
 	return trailReviewTarget{Host: host, Owner: owner, Repo: repo, Trail: *found}, nil
 }
 

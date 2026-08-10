@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
@@ -65,4 +66,18 @@ func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool,
 	// (login hint, discovery-unavailable, region guidance); re-wrapping here
 	// would bury them, so surface them verbatim.
 	return auth.NewEntireAPICellClient(ctx, insecureHTTP, target) //nolint:wrapcheck // pass through contextual auth errors
+}
+
+// newTrailAPIClient is the construction seam for trail commands. Trails are
+// repo-scoped data owned by an entire-api cell, so route them exactly like the
+// experts surface instead of through ENTIRE_API_BASE_URL (the BFF origin).
+var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
+	client, err := NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, "")
+	if err != nil && strings.Contains(err.Error(), "no auth context for") {
+		// cluster discovery's no-match error predates ErrNotLoggedIn and does not
+		// wrap it. Preserve its detailed host/context hint while restoring the
+		// sentinel trail commands use for the standard login UX.
+		return nil, fmt.Errorf("%w: %w", auth.ErrNotLoggedIn, err)
+	}
+	return client, err
 }

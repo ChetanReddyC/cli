@@ -4,7 +4,9 @@ package integration
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -137,10 +139,10 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 				Limit:        200,
 				RepoFullName: "entireio/cli",
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/"+url.PathEscape(trail.ID)+"/reviews/comments":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/321/reviews/comments":
 			writeTrailResumeIntegrationJSON(t, w, http.StatusOK, map[string]any{
 				"comments": []any{},
-				"has_more": false,
+				"hasMore":  false,
 			})
 		default:
 			http.NotFound(w, r)
@@ -191,7 +193,7 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 
 	tokenStore := map[string]map[string]string{
 		service: {
-			handle: tokenstore.EncodeTokenWithExpiration(fakeLoginJWT(coreURL), 7200),
+			handle: tokenstore.EncodeTokenWithExpiration(fakeTrailCellLoginJWT(coreURL), 7200),
 		},
 	}
 	tokenData, err := json.Marshal(tokenStore)
@@ -209,6 +211,15 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 		"ENTIRE_TOKEN_STORE=file",
 		"ENTIRE_TOKEN_STORE_PATH="+tokenStorePath,
 	)
+}
+
+func fakeTrailCellLoginJWT(iss string) string {
+	enc := base64.RawURLEncoding
+	header := enc.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	payload := enc.EncodeToString(fmt.Appendf(nil,
+		`{"iss":%q,"sub":"user-123","home_jurisdiction":"us","exp":%d}`,
+		iss, time.Now().Add(time.Hour).Unix()))
+	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
 }
 
 func mustTrailResumeIntegrationHost(t *testing.T, rawURL string) string {
