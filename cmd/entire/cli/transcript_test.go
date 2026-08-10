@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -96,6 +97,90 @@ func TestAgentTranscriptPath(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSubagentsDir(t *testing.T) {
+	t.Parallel()
+
+	got := SubagentsDir("/home/user/.claude/projects/myproject", "sess-1")
+	want := filepath.Join("/home/user/.claude/projects/myproject", "sess-1", "subagents")
+	if got != want {
+		t.Errorf("SubagentsDir() = %q, want %q", got, want)
+	}
+}
+
+// TestResolveAgentTranscriptPath covers both subagent transcript layouts Claude
+// Code has used: the current one nests them under <dir>/<sessionID>/subagents/,
+// while older versions wrote them as siblings of the main transcript.
+func TestResolveAgentTranscriptPath(t *testing.T) {
+	t.Parallel()
+
+	const (
+		sessionID = "11111111-2222-3333-4444-555555555555"
+		agentID   = "a0123456789abcdef"
+	)
+
+	writeFile := func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	t.Run("current nested layout", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		want := filepath.Join(dir, sessionID, "subagents", "agent-"+agentID+".jsonl")
+		writeFile(t, want)
+
+		if got := ResolveAgentTranscriptPath(dir, sessionID, agentID); got != want {
+			t.Errorf("ResolveAgentTranscriptPath() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("legacy sibling layout", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		want := filepath.Join(dir, "agent-"+agentID+".jsonl")
+		writeFile(t, want)
+
+		if got := ResolveAgentTranscriptPath(dir, sessionID, agentID); got != want {
+			t.Errorf("ResolveAgentTranscriptPath() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("prefers nested over legacy", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		nested := filepath.Join(dir, sessionID, "subagents", "agent-"+agentID+".jsonl")
+		writeFile(t, nested)
+		writeFile(t, filepath.Join(dir, "agent-"+agentID+".jsonl"))
+
+		if got := ResolveAgentTranscriptPath(dir, sessionID, agentID); got != nested {
+			t.Errorf("ResolveAgentTranscriptPath() = %q, want %q", got, nested)
+		}
+	})
+
+	t.Run("neither exists", func(t *testing.T) {
+		t.Parallel()
+		if got := ResolveAgentTranscriptPath(t.TempDir(), sessionID, agentID); got != "" {
+			t.Errorf("ResolveAgentTranscriptPath() = %q, want empty", got)
+		}
+	})
+
+	t.Run("empty agent ID never resolves", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		// A stray agent-.jsonl must not be mistaken for a real subagent transcript.
+		writeFile(t, filepath.Join(dir, "agent-.jsonl"))
+
+		if got := ResolveAgentTranscriptPath(dir, sessionID, ""); got != "" {
+			t.Errorf("ResolveAgentTranscriptPath() = %q, want empty", got)
+		}
+	})
 }
 
 func TestFindCheckpointUUID(t *testing.T) {
