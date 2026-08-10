@@ -351,10 +351,8 @@ func checkoutManagedBranchWorktree(
 			if !match.managed && !reuseExternal {
 				return "", fmt.Errorf("branch %q is already checked out at %s", branch, match.path)
 			}
-			if match.managed {
-				if err := validateTrailWorktreeReuse(ctx, match.path, branch); err != nil {
-					return "", staleTrailWorktreeError(branch, match.path)
-				}
+			if err := validateTrailWorktreeReuse(ctx, match.path, branch); err != nil {
+				return "", staleTrailWorktreeError(branch, match.path)
 			}
 			printTrailWorktreeLocation(w, errW, "Worktree already exists at "+match.path, match.path)
 			return match.path, nil

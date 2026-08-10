@@ -85,7 +85,7 @@ type Deps struct {
 
 	// RunInWorktree re-runs the current CLI invocation in worktreeRoot after the
 	// target flags have been removed. nil uses the production subprocess runner.
-	RunInWorktree func(ctx context.Context, worktreeRoot string, args []string, stdin io.Reader, stdout, stderr io.Writer) error
+	RunInWorktree func(ctx context.Context, worktreeRoot string, args, env []string, stdin io.Reader, stdout, stderr io.Writer) error
 }
 
 // NewCommand returns the `entire review` cobra command wired with the
@@ -181,7 +181,7 @@ To tag an already-finished session as a review, use
 			ctx := cmd.Context()
 			if target != "" {
 				modeSelected := configure || edit || findings || listProfiles || listAgents || listModels
-				return runTargetReview(ctx, cmd, target, cleanupWorktree, modeSelected, deps)
+				return runTargetReview(ctx, cmd, target, reviewTargetChildArgs(cmd, args), cleanupWorktree, modeSelected, deps)
 			}
 			if cleanupWorktree {
 				return errors.New("--cleanup-worktree requires --target")
@@ -1596,6 +1596,7 @@ func writePostReviewManifest(
 		warnManifestNotWritten(out, "could not load session state: "+err.Error())
 		return
 	}
+	manifest.WorktreePath = reviewManifestWorktreePath(worktreeRoot)
 	if len(manifest.Sources) == 0 {
 		reason, sentinel := explainEmptyManifest(worktreeRoot, headSHA, summary, states)
 		if sentinel {
@@ -1620,6 +1621,13 @@ func writePostReviewManifest(
 		return
 	}
 	writeReviewCompletionFooter(out, manifest)
+}
+
+func reviewManifestWorktreePath(actualWorktree string) string {
+	if ownerWorktree := strings.TrimSpace(os.Getenv(envReviewFindingsWorktree)); ownerWorktree != "" {
+		return ownerWorktree
+	}
+	return actualWorktree
 }
 
 // warnManifestNotWritten prints a user-visible note explaining that the

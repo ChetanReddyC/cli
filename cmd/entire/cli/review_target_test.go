@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestNormalizeReviewTargetSelector(t *testing.T) {
 	t.Parallel()
@@ -29,6 +32,42 @@ func TestNormalizeReviewTargetSelector(t *testing.T) {
 			}
 			if got != tt.want || gotURL != tt.wantURL {
 				t.Fatalf("normalizeReviewTargetSelector() = (%q, %v), want (%q, %v)", got, gotURL, tt.want, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestPrepareReviewTargetLocalBranchDoesNotRequireRemote(t *testing.T) {
+	repoDir := newTrailWorktreeTestRepo(t)
+	t.Chdir(repoDir)
+
+	var out, errOut bytes.Buffer
+	target, err := prepareReviewTarget(t.Context(), &out, &errOut, currentBranchInDir(t, repoDir))
+	if err != nil {
+		t.Fatalf("prepareReviewTarget: %v; stderr: %s", err, errOut.String())
+	}
+	if normalizeWorktreePath(target.Path) != normalizeWorktreePath(repoDir) || target.Created {
+		t.Fatalf("target = %+v, want reused main worktree %s", target, repoDir)
+	}
+}
+
+func TestReviewTargetMayBeBranch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		selector string
+		want     bool
+	}{
+		{selector: "feature/review", want: true},
+		{selector: "trail-id", want: true},
+		{selector: "42", want: false},
+		{selector: "https://entire.io/gh/entireio/cli/trails/42", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.selector, func(t *testing.T) {
+			t.Parallel()
+			if got := reviewTargetMayBeBranch(tt.selector); got != tt.want {
+				t.Fatalf("reviewTargetMayBeBranch(%q) = %v, want %v", tt.selector, got, tt.want)
 			}
 		})
 	}

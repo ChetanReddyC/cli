@@ -467,6 +467,25 @@ func TestRemoveReviewTargetKeepsDirtyWorktree(t *testing.T) {
 	}
 }
 
+func TestCheckoutReviewWorktreeRejectsStaleExternalWorktree(t *testing.T) {
+	repoDir := newTrailWorktreeTestRepo(t)
+	runGit(t, repoDir, "branch", "feature/stale-external")
+	externalPath := filepath.Join(t.TempDir(), "external")
+	runGit(t, repoDir, "worktree", "add", externalPath, "feature/stale-external")
+	if err := os.RemoveAll(externalPath); err != nil {
+		t.Fatalf("remove external worktree: %v", err)
+	}
+	if err := os.MkdirAll(externalPath, 0o750); err != nil {
+		t.Fatalf("replace external worktree: %v", err)
+	}
+	t.Chdir(repoDir)
+
+	_, err := checkoutReviewWorktree(context.Background(), io.Discard, io.Discard, "feature/stale-external")
+	if err == nil || !strings.Contains(err.Error(), "git worktree prune") {
+		t.Fatalf("checkoutReviewWorktree error = %v, want stale worktree error", err)
+	}
+}
+
 func TestCheckoutTrailWorktree_FromLinkedWorktreeCreatesSibling(t *testing.T) {
 	repoDir := newTrailWorktreeTestRepo(t)
 	runGit(t, repoDir, "branch", "feature/first")

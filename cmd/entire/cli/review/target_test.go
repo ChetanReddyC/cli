@@ -11,27 +11,27 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func TestStripReviewTargetArgs(t *testing.T) {
+func TestReviewTargetChildArgsUsesParsedCommandFlags(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name string
-		args []string
-		want []string
-	}{
-		{name: "separate value", args: []string{"review", "general", "--target", "feature/x", "--base", "main"}, want: []string{"review", "general", "--base", "main"}},
-		{name: "equals value", args: []string{"review", "--target=https://entire.io/gh/acme/app/trails/42/topic", "general"}, want: []string{"review", "general"}},
-		{name: "cleanup", args: []string{"review", "general", "--target=feature/x", "--cleanup-worktree"}, want: []string{"review", "general"}},
-		{name: "cleanup equals", args: []string{"review", "general", "--cleanup-worktree=true", "--target", "feature/x"}, want: []string{"review", "general"}},
-		{name: "absent", args: []string{"review", "general"}, want: []string{"review", "general"}},
+	cmd := &cobra.Command{}
+	cmd.Flags().String("target", "", "")
+	cmd.Flags().Bool("cleanup-worktree", false, "")
+	cmd.Flags().String("base", "", "")
+	cmd.Flags().String("prompt", "", "")
+	if err := cmd.Flags().Parse([]string{"--target=feature/x", "--cleanup-worktree", "--base=main", "--prompt=focus here"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := stripReviewTargetArgs(tt.args); !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("stripReviewTargetArgs(%q) = %q, want %q", tt.args, got, tt.want)
-			}
-		})
+	want := []string{"review", "general", "--base=main", "--prompt=focus here"}
+	if got := reviewTargetChildArgs(cmd, []string{"general"}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("reviewTargetChildArgs() = %q, want %q", got, want)
+	}
+}
+
+func TestReviewManifestWorktreePathUsesCallerWorktree(t *testing.T) {
+	t.Setenv(envReviewFindingsWorktree, "/caller")
+	if got := reviewManifestWorktreePath("/target"); got != "/caller" {
+		t.Fatalf("reviewManifestWorktreePath() = %q, want /caller", got)
 	}
 }
 
@@ -80,15 +80,18 @@ func TestRunReviewInWorktreeUsesInjectedRunner(t *testing.T) {
 
 	var gotRoot string
 	var gotArgs []string
-	runner := func(_ context.Context, root string, args []string, _ io.Reader, _, _ io.Writer) error {
+	var gotEnv []string
+	runner := func(_ context.Context, root string, args, env []string, _ io.Reader, _, _ io.Writer) error {
 		gotRoot = root
 		gotArgs = append([]string(nil), args...)
+		gotEnv = append([]string(nil), env...)
 		return nil
 	}
-	if err := runReviewInWorktree(t.Context(), runner, "/tmp/review", []string{"review", "general"}, bytes.NewReader(nil), io.Discard, io.Discard); err != nil {
+	wantEnv := []string{envReviewFindingsWorktree + "=/caller"}
+	if err := runReviewInWorktree(t.Context(), runner, "/tmp/review", []string{"review", "general"}, wantEnv, bytes.NewReader(nil), io.Discard, io.Discard); err != nil {
 		t.Fatalf("runReviewInWorktree: %v", err)
 	}
-	if gotRoot != "/tmp/review" || !reflect.DeepEqual(gotArgs, []string{"review", "general"}) {
-		t.Fatalf("runner got root=%q args=%q", gotRoot, gotArgs)
+	if gotRoot != "/tmp/review" || !reflect.DeepEqual(gotArgs, []string{"review", "general"}) || !reflect.DeepEqual(gotEnv, wantEnv) {
+		t.Fatalf("runner got root=%q args=%q env=%q", gotRoot, gotArgs, gotEnv)
 	}
 }

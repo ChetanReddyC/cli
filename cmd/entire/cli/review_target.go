@@ -16,19 +16,26 @@ import (
 )
 
 func prepareReviewTarget(ctx context.Context, out, errOut io.Writer, selector string) (cliReview.TargetWorktree, error) {
-	forge, owner, repo, err := resolveTrailRemote(ctx)
-	if err != nil {
-		return cliReview.TargetWorktree{}, err
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return cliReview.TargetWorktree{}, errors.New("review target cannot be empty")
 	}
 
-	normalized, isURL, err := normalizeReviewTargetSelector(selector, forge, owner, repo)
-	if err != nil {
-		return cliReview.TargetWorktree{}, err
-	}
+	// A plain, non-numeric branch needs no trail remote or API. Positive
+	// integers are reserved for trail numbers so a branch named "42" cannot
+	// silently shadow trail #42; use a non-numeric branch name to target git.
 	branch := ""
-	if !isURL && reviewTargetBranchExists(ctx, normalized) {
-		branch = normalized
+	if reviewTargetMayBeBranch(selector) && reviewTargetBranchExists(ctx, selector) {
+		branch = selector
 	} else {
+		forge, owner, repo, err := resolveTrailRemote(ctx)
+		if err != nil {
+			return cliReview.TargetWorktree{}, err
+		}
+		normalized, _, normalizeErr := normalizeReviewTargetSelector(selector, forge, owner, repo)
+		if normalizeErr != nil {
+			return cliReview.TargetWorktree{}, normalizeErr
+		}
 		err = runAuthenticatedTrailAPI(ctx, errOut, false, "", func(ctx context.Context, client *api.Client) error {
 			found, findErr := resolveTrailBySelector(ctx, client, forge, owner, repo, normalized, "")
 			if findErr != nil {
@@ -99,6 +106,14 @@ func removeReviewTarget(ctx context.Context, worktreeRoot string) error {
 		return fmt.Errorf("git worktree remove: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
+}
+
+func reviewTargetMayBeBranch(selector string) bool {
+	if strings.Contains(selector, "://") {
+		return false
+	}
+	_, numeric := parseTrailNumberSelector(selector)
+	return !numeric
 }
 
 func reviewTargetBranchExists(ctx context.Context, branch string) bool {

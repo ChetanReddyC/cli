@@ -33,7 +33,12 @@ branch is already checked out in another worktree, that worktree is reused.
 After a successful interactive review, a newly-created worktree prompts for
 removal. Non-interactive reviews keep it unless `--cleanup-worktree` is passed.
 A reused worktree is never removed by the review command, and failed reviews
-retain newly-created worktrees for inspection.
+retain newly-created worktrees for inspection. Cancelling the optional cleanup
+prompt also keeps the worktree without changing the successful review exit.
+Findings are attributed to the caller's worktree, so the completion handle
+remains available through `entire review --findings` even after target cleanup.
+Positive integer targets always mean trail numbers rather than numeric branch
+names; this avoids a local branch silently shadowing a trail selector.
 
 ## Profiles
 
