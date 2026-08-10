@@ -12,8 +12,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
-// TestFinalizeExitedSessions finalizes an ACTIVE session whose owner process is
-// gone, and leaves an ACTIVE session without a recorded owner untouched.
+// TestFinalizeExitedSessions finalizes sessions whose owner process is gone
+// from every non-ended phase, and leaves a session without a recorded owner
+// untouched. The IDLE case is the shape agents without a session-end hook leave
+// behind — the agent finished its last turn and then quit (Codex before 0.146,
+// or any agent killed before its hook runs) — and must not linger as "active".
 //
 // Not parallel: setupAttachTestRepo uses t.Chdir.
 func TestFinalizeExitedSessions(t *testing.T) {
@@ -27,19 +30,17 @@ func TestFinalizeExitedSessions(t *testing.T) {
 
 	// Owner with a mismatched start fingerprint reads as a reused (dead) PID, a
 	// deterministic "agent exited" signal on linux/darwin.
-	exited := &session.State{
-		SessionID: "exited-session",
-		Phase:     session.PhaseActive,
-		StartedAt: time.Now(),
-		Owner:     &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
+	deadOwner := func() *proclive.Identity {
+		return &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"}
 	}
-	// No owner recorded: must be left alone (liveness unknown → timeout fallback).
-	noOwner := &session.State{
-		SessionID: "no-owner-session",
-		Phase:     session.PhaseActive,
-		StartedAt: time.Now(),
+	exitedIDs := []string{"exited-active-session", "exited-idle-session"}
+	saved := []*session.State{
+		{SessionID: exitedIDs[0], Phase: session.PhaseActive, StartedAt: time.Now(), Owner: deadOwner()},
+		{SessionID: exitedIDs[1], Phase: session.PhaseIdle, StartedAt: time.Now(), Owner: deadOwner()},
+		// No owner recorded: must be left alone (liveness unknown → timeout fallback).
+		{SessionID: "no-owner-session", Phase: session.PhaseActive, StartedAt: time.Now()},
 	}
-	for _, s := range []*session.State{exited, noOwner} {
+	for _, s := range saved {
 		if err := store.Save(ctx, s); err != nil {
 			t.Fatalf("save %s: %v", s.SessionID, err)
 		}
@@ -50,24 +51,26 @@ func TestFinalizeExitedSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if n := finalizeExitedSessions(ctx, states); n != 1 {
-		t.Fatalf("finalizeExitedSessions = %d, want 1", n)
+	if n := finalizeExitedSessions(ctx, states); n != len(exitedIDs) {
+		t.Fatalf("finalizeExitedSessions = %d, want %d", n, len(exitedIDs))
 	}
 
-	// The exited session is now ended on disk.
-	got, err := store.Load(ctx, "exited-session")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.EndedAt == nil {
-		t.Error("exited session EndedAt = nil, want set")
-	}
-	if got.Phase != session.PhaseEnded {
-		t.Errorf("exited session Phase = %q, want %q", got.Phase, session.PhaseEnded)
+	// Every exited session is now ended on disk.
+	for _, id := range exitedIDs {
+		got, err := store.Load(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.EndedAt == nil {
+			t.Errorf("%s EndedAt = nil, want set", id)
+		}
+		if got.Phase != session.PhaseEnded {
+			t.Errorf("%s Phase = %q, want %q", id, got.Phase, session.PhaseEnded)
+		}
 	}
 
 	// The owner-less session is untouched.
-	got, err = store.Load(ctx, "no-owner-session")
+	got, err := store.Load(ctx, "no-owner-session")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,14 +79,13 @@ func TestFinalizeExitedSessions(t *testing.T) {
 	}
 }
 
-// TestFinalizeExitedSessions_IdleSession covers the shape agents without a
-// session-end hook leave behind: the agent finished its last turn (so the
-// session is IDLE, not ACTIVE) and then quit. Codex before 0.146 had no
-// SessionEnd hook at all, and any agent can be killed before its hook runs.
-// These must be finalized by the sweep, not left lingering as "active".
+// TestEndSessionNow_SpentBudgetStillMarksEnded pins the split that makes the
+// sweep's condense budget safe: exhausting it may drop the eager condense, but
+// never the mark-ended write. Dropping that would leave the session showing as
+// active — the exact bug the sweep exists to fix.
 //
 // Not parallel: setupAttachTestRepo uses t.Chdir.
-func TestFinalizeExitedSessions_IdleSession(t *testing.T) {
+func TestEndSessionNow_SpentBudgetStillMarksEnded(t *testing.T) {
 	setupAttachTestRepo(t)
 	ctx := context.Background()
 
@@ -91,35 +93,36 @@ func TestFinalizeExitedSessions_IdleSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	idleExited := &session.State{
-		SessionID: "idle-exited-session",
-		Phase:     session.PhaseIdle,
-		StartedAt: time.Now(),
-		Owner:     &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
-	}
-	if err := store.Save(ctx, idleExited); err != nil {
+	if err := store.Save(ctx, &session.State{
+		SessionID:  "budget-spent-session",
+		Phase:      session.PhaseIdle,
+		StartedAt:  time.Now(),
+		StepCount:  3, // would otherwise be a condense candidate
+		BaseCommit: "abcdef1234567890abcdef1234567890abcdef12",
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	states, err := store.List(ctx)
+	// A deadline already in the past: every condense is skipped from here on.
+	spent := time.Now().Add(-time.Second)
+	ended, err := endSessionNow(ctx, nil, "budget-spent-session", nil, spent)
+	if err != nil {
+		t.Fatalf("endSessionNow: %v", err)
+	}
+	if !ended {
+		t.Fatal("endSessionNow = false, want true (mark-ended must not be budgeted)")
+	}
+
+	got, err := store.Load(ctx, "budget-spent-session")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	if n := finalizeExitedSessions(ctx, states); n != 1 {
-		t.Fatalf("finalizeExitedSessions = %d, want 1", n)
+	if got.EndedAt == nil || got.Phase != session.PhaseEnded {
+		t.Errorf("session not finalized: phase=%q endedAt=%v", got.Phase, got.EndedAt)
 	}
-
-	got, err := store.Load(ctx, "idle-exited-session")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.EndedAt == nil {
-		t.Error("idle exited session EndedAt = nil, want set")
-	}
-	if got.Phase != session.PhaseEnded {
-		t.Errorf("idle exited session Phase = %q, want %q", got.Phase, session.PhaseEnded)
+	// The condense was skipped, so PostCommit must still see work pending.
+	if got.FullyCondensed {
+		t.Error("FullyCondensed = true, want false (condense should have been skipped)")
 	}
 }
 

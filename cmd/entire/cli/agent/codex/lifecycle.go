@@ -92,9 +92,9 @@ func (c *CodexAgent) SessionEndBudget() time.Duration { return sessionEndBudget 
 func (c *CodexAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
-		return c.parseSessionStart(stdin)
+		return c.parseSessionInfoEvent(stdin, agent.SessionStart)
 	case HookNameSessionEnd:
-		return c.parseSessionEnd(stdin)
+		return c.parseSessionInfoEvent(stdin, agent.SessionEnd)
 	case HookNameUserPromptSubmit:
 		return c.parseTurnStart(stdin)
 	case HookNameStop:
@@ -109,36 +109,21 @@ func (c *CodexAgent) ParseHookEvent(_ context.Context, hookName string, stdin io
 	}
 }
 
-func (c *CodexAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionStartRaw](stdin)
+// parseSessionInfoEvent parses the hooks whose payload is sessionInfoRaw —
+// SessionStart and SessionEnd differ only in the event type. Model is empty on
+// SessionEnd (Codex omits it there); the session state already recorded the
+// model at turn start.
+func (c *CodexAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent.EventType) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
 	if err != nil {
 		return nil, err
 	}
 	return &agent.Event{
-		Type:       agent.SessionStart,
-		SessionID:  raw.SessionID,
-		SessionRef: derefString(raw.TranscriptPath),
-		Model:      raw.Model,
-		Timestamp:  time.Now(),
-	}, nil
-}
-
-// parseSessionEnd translates Codex's SessionEnd hook (added in 0.146) into the
-// normalized SessionEnd event, so a Codex session that the user quits is
-// finalized like any other agent's instead of lingering as active.
-//
-// Model is left empty: the payload omits it, and the session state already
-// recorded the model at turn start.
-func (c *CodexAgent) parseSessionEnd(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionEndRaw](stdin)
-	if err != nil {
-		return nil, err
-	}
-	return &agent.Event{
-		Type:       agent.SessionEnd,
+		Type:       eventType,
 		SessionID:  raw.SessionID,
 		SessionRef: derefString(raw.TranscriptPath),
 		CWD:        raw.CWD,
+		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
 }

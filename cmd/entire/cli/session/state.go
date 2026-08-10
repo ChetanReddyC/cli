@@ -523,12 +523,24 @@ func (s *State) OwnerLiveness() proclive.Liveness {
 // (Codex before 0.146) or killed before that hook could run: they lingered as
 // "active" in `entire status` until StaleSessionThreshold deleted the state
 // file outright, discarding pending checkpoint work instead of condensing it.
-// Only ENDED sessions are excluded — they are already finalized.
+// Only already-finalized sessions are excluded — see IsEnded.
 func (s *State) OwnerExited() bool {
-	if s.Phase == PhaseEnded || s.EndedAt != nil {
+	if s.IsEnded() {
 		return false
 	}
 	return s.OwnerLiveness() == proclive.LivenessDead
+}
+
+// IsEnded reports whether this session has been finalized — the canonical
+// "no longer a live session" predicate.
+//
+// Both halves matter and neither implies the other in practice: Phase is what
+// the state machine sets, EndedAt is what the finalizing write stamps, and a
+// state file can carry one without the other (a legacy record, or a partial
+// write). Callers that filter for active sessions must agree on this rule, so
+// it lives here rather than being re-spelled at each site.
+func (s *State) IsEnded() bool {
+	return s.Phase == PhaseEnded || s.EndedAt != nil
 }
 
 func (s *State) IsStale() bool {

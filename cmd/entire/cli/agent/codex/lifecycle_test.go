@@ -10,91 +10,89 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestParseHookEvent_SessionStart(t *testing.T) {
-	t.Parallel()
-	ag := &CodexAgent{}
-	input := `{
-		"session_id": "550e8400-e29b-41d4-a716-446655440000",
-		"transcript_path": "/Users/test/.codex/rollouts/01/01/rollout-20260324-550e8400.jsonl",
-		"cwd": "/tmp/testrepo",
-		"hook_event_name": "SessionStart",
-		"model": "gpt-4.1",
-		"permission_mode": "default",
-		"source": "startup"
-	}`
+const testRolloutPath = "/Users/test/.codex/rollouts/01/01/rollout-20260324-550e8400.jsonl"
 
-	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionStart, strings.NewReader(input))
-	require.NoError(t, err)
-	require.NotNil(t, event)
-	require.Equal(t, agent.SessionStart, event.Type)
-	require.Equal(t, "550e8400-e29b-41d4-a716-446655440000", event.SessionID)
-	require.Equal(t, "/Users/test/.codex/rollouts/01/01/rollout-20260324-550e8400.jsonl", event.SessionRef)
-	require.Equal(t, "gpt-4.1", event.Model)
-}
-
-func TestParseHookEvent_SessionStartNullTranscript(t *testing.T) {
-	t.Parallel()
-	ag := &CodexAgent{}
-	input := `{
-		"session_id": "test-uuid",
-		"transcript_path": null,
-		"cwd": "/tmp/testrepo",
-		"hook_event_name": "SessionStart",
-		"model": "gpt-4.1",
-		"permission_mode": "default",
-		"source": "startup"
-	}`
-
-	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionStart, strings.NewReader(input))
-	require.NoError(t, err)
-	require.NotNil(t, event)
-	require.Equal(t, agent.SessionStart, event.Type)
-	require.Equal(t, "test-uuid", event.SessionID)
-	require.Empty(t, event.SessionRef)
-}
-
+// SessionStart and SessionEnd share one parser, so they are covered together.
 // SessionEnd (Codex 0.146+) is what finally lets a quit Codex session be
-// finalized. Its payload is thinner than every other Codex hook: no model, no
-// permission_mode, no turn_id.
-func TestParseHookEvent_SessionEnd(t *testing.T) {
+// finalized; its payload is thinner than every other Codex hook — no model, no
+// permission_mode, no turn_id — which is why the shared struct must tolerate
+// the absent fields.
+func TestParseHookEvent_SessionInfoEvents(t *testing.T) {
 	t.Parallel()
-	ag := &CodexAgent{}
-	input := `{
-		"session_id": "550e8400-e29b-41d4-a716-446655440000",
-		"transcript_path": "/Users/test/.codex/rollouts/01/01/rollout-20260324-550e8400.jsonl",
-		"cwd": "/tmp/testrepo",
-		"hook_event_name": "SessionEnd",
-		"reason": "other"
-	}`
+	tests := []struct {
+		name      string
+		hookName  string
+		input     string
+		wantType  agent.EventType
+		wantModel string
+	}{
+		{
+			name:     "session start",
+			hookName: HookNameSessionStart,
+			input: `{
+				"session_id": "550e8400-e29b-41d4-a716-446655440000",
+				"transcript_path": "` + testRolloutPath + `",
+				"cwd": "/tmp/testrepo",
+				"hook_event_name": "SessionStart",
+				"model": "gpt-4.1",
+				"permission_mode": "default",
+				"source": "startup"
+			}`,
+			wantType:  agent.SessionStart,
+			wantModel: "gpt-4.1",
+		},
+		{
+			name:     "session end",
+			hookName: HookNameSessionEnd,
+			input: `{
+				"session_id": "550e8400-e29b-41d4-a716-446655440000",
+				"transcript_path": "` + testRolloutPath + `",
+				"cwd": "/tmp/testrepo",
+				"hook_event_name": "SessionEnd",
+				"reason": "other"
+			}`,
+			wantType: agent.SessionEnd,
+			// Codex omits model on SessionEnd; the session state already has it.
+			wantModel: "",
+		},
+	}
 
-	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionEnd, strings.NewReader(input))
-	require.NoError(t, err)
-	require.NotNil(t, event)
-	require.Equal(t, agent.SessionEnd, event.Type)
-	require.Equal(t, "550e8400-e29b-41d4-a716-446655440000", event.SessionID)
-	require.Equal(t, "/Users/test/.codex/rollouts/01/01/rollout-20260324-550e8400.jsonl", event.SessionRef)
-	require.Equal(t, "/tmp/testrepo", event.CWD)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ag := &CodexAgent{}
+			event, err := ag.ParseHookEvent(context.Background(), tt.hookName, strings.NewReader(tt.input))
+			require.NoError(t, err)
+			require.NotNil(t, event)
+			require.Equal(t, tt.wantType, event.Type)
+			require.Equal(t, "550e8400-e29b-41d4-a716-446655440000", event.SessionID)
+			require.Equal(t, testRolloutPath, event.SessionRef)
+			require.Equal(t, "/tmp/testrepo", event.CWD)
+			require.Equal(t, tt.wantModel, event.Model)
+		})
+	}
 }
 
-func TestParseHookEvent_SessionEndNullTranscript(t *testing.T) {
+// Ephemeral mode leaves transcript_path null. The session must still parse —
+// for SessionEnd that is the whole point of the hook.
+func TestParseHookEvent_SessionInfoEventsNullTranscript(t *testing.T) {
 	t.Parallel()
-	ag := &CodexAgent{}
-	// Ephemeral mode leaves transcript_path null. The session must still be
-	// finalized — that is the whole point of the hook.
-	input := `{
-		"session_id": "test-uuid",
-		"transcript_path": null,
-		"cwd": "/tmp/testrepo",
-		"hook_event_name": "SessionEnd",
-		"reason": "other"
-	}`
-
-	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionEnd, strings.NewReader(input))
-	require.NoError(t, err)
-	require.NotNil(t, event)
-	require.Equal(t, agent.SessionEnd, event.Type)
-	require.Equal(t, "test-uuid", event.SessionID)
-	require.Empty(t, event.SessionRef)
+	for _, hookName := range []string{HookNameSessionStart, HookNameSessionEnd} {
+		t.Run(hookName, func(t *testing.T) {
+			t.Parallel()
+			ag := &CodexAgent{}
+			input := `{
+				"session_id": "test-uuid",
+				"transcript_path": null,
+				"cwd": "/tmp/testrepo"
+			}`
+			event, err := ag.ParseHookEvent(context.Background(), hookName, strings.NewReader(input))
+			require.NoError(t, err)
+			require.NotNil(t, event)
+			require.Equal(t, "test-uuid", event.SessionID)
+			require.Empty(t, event.SessionRef)
+		})
+	}
 }
 
 // Codex enforces SESSION_END_MAX_TIMEOUT_SEC = 3 and kills the hook's process

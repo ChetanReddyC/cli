@@ -197,9 +197,11 @@ func AsSkillEventExtractor(ag Agent) (SkillEventExtractor, bool) {
 }
 
 // AsSessionEndBudgeter returns the agent as SessionEndBudgeter if it implements
-// the interface. Built-in only: the budget mirrors a ceiling the agent's own
-// host enforces, so an external agent that needs one enforces it itself rather
-// than declaring it through the plugin protocol.
+// the interface. Built-in only because no external agent needs it yet — not
+// because external agents could enforce a budget themselves: a plugin supplies
+// only parse-hook, while the work being bounded (endSessionNow, the condense)
+// runs in the entire process. Widen DeclaredCaps with a session_end_budget
+// field when an external agent has a host that clamps its session-end hook.
 func AsSessionEndBudgeter(ag Agent) (SessionEndBudgeter, bool) {
 	return builtinCapability[SessionEndBudgeter](ag)
 }

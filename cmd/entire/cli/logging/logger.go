@@ -159,9 +159,10 @@ func EnsureInitialized(ctx context.Context) func() {
 	if already {
 		return func() {}
 	}
-	if err := Init(ctx, ""); err != nil {
-		return func() {}
-	}
+	// Init only errors on an invalid non-empty session ID; with "" it always
+	// succeeds, falling back to stderr internally if the log file can't be
+	// opened. Close is correct on that path too — it tolerates a nil logFile.
+	_ = Init(ctx, "") //nolint:errcheck // cannot fail for an empty session ID
 	return Close
 }
 

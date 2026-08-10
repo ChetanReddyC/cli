@@ -278,17 +278,16 @@ func runStop(ctx context.Context, cmd *cobra.Command, sessionID string, all, for
 	return runStopMultiSelect(ctx, cmd, activeSessions, force)
 }
 
-// filterActiveSessions returns sessions that have not been explicitly ended.
-// A session is considered ended if Phase == PhaseEnded OR EndedAt is set.
-// This matches the logic in status.go's writeActiveSessions for consistency:
-// any session visible in `entire status` should also be visible in `sessions stop`.
+// filterActiveSessions returns sessions that have not been explicitly ended,
+// per session.State.IsEnded — the shared rule, so any session visible in
+// `entire status` is also visible in `sessions stop`.
 func filterActiveSessions(states []*strategy.SessionState) []*strategy.SessionState {
 	var active []*strategy.SessionState
 	for _, s := range states {
 		if s == nil {
 			continue
 		}
-		if s.Phase != session.PhaseEnded && s.EndedAt == nil {
+		if !s.IsEnded() {
 			active = append(active, s)
 		}
 	}
@@ -736,7 +735,7 @@ func runStopSession(ctx context.Context, cmd *cobra.Command, sessionID string, f
 		return NewSilentError(fmt.Errorf("session not found: %s", sessionID))
 	}
 
-	if state.Phase == session.PhaseEnded || state.EndedAt != nil {
+	if state.IsEnded() {
 		fmt.Fprintf(cmd.OutOrStdout(), "Session %s is already stopped.\n", sessionID)
 		return nil
 	}

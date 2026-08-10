@@ -23,6 +23,35 @@ var entireHookPrefixes = []string{
 	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
 }
 
+// defaultHookTimeoutSec is the timeout Entire configures for Codex hooks that
+// run between turns, where Codex allows up to its standard 600s.
+const defaultHookTimeoutSec = 30
+
+// managedHook describes one hooks.json event Entire owns. Keeping the event
+// key, verb, timeout and production wrapper together means adding or removing
+// an event is a single table edit rather than parallel edits in InstallHooks,
+// UninstallHooks and AreHooksInstalled.
+type managedHook struct {
+	event   string // hooks.json key
+	verb    string // `entire hooks codex <verb>`
+	timeout int
+	wrap    func(cmd string, windows bool) string
+}
+
+// managedHooks is the full set of Codex events Entire installs.
+var managedHooks = []managedHook{
+	{"SessionStart", HookNameSessionStart, defaultHookTimeoutSec, func(cmd string, windows bool) string {
+		return agent.WrapProductionJSONWarningHookCommandForOS(cmd, agent.WarningFormatSingleLine, windows)
+	}},
+	// SessionEnd is the one event Codex clamps: it caps handlers at
+	// SESSION_END_MAX_TIMEOUT_SEC and warns at every startup when a config asks
+	// for more, so it is installed at exactly the ceiling. See SessionEndTimeoutSec.
+	{"SessionEnd", HookNameSessionEnd, SessionEndTimeoutSec, agent.WrapProductionSilentHookCommandForOS},
+	{"UserPromptSubmit", HookNameUserPromptSubmit, defaultHookTimeoutSec, agent.WrapProductionSilentHookCommandForOS},
+	{"Stop", HookNameStop, defaultHookTimeoutSec, agent.WrapProductionSilentHookCommandForOS},
+	{"PostToolUse", HookNamePostToolUse, defaultHookTimeoutSec, agent.WrapProductionSilentHookCommandForOS},
+}
+
 // InstallHooks installs Codex hooks in .codex/hooks.json.
 func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
@@ -54,90 +83,42 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		rawHooks = make(map[string]json.RawMessage)
 	}
 
-	// Parse event types we manage
-	var sessionStart, sessionEnd, userPromptSubmit, stop, postToolUse []MatcherGroup
-	if err := parseHookType(rawHooks, "SessionStart", &sessionStart); err != nil {
-		return 0, err
-	}
-	if err := parseHookType(rawHooks, "SessionEnd", &sessionEnd); err != nil {
-		return 0, err
-	}
-	if err := parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit); err != nil {
-		return 0, err
-	}
-	if err := parseHookType(rawHooks, "Stop", &stop); err != nil {
-		return 0, err
-	}
-	if err := parseHookType(rawHooks, "PostToolUse", &postToolUse); err != nil {
-		return 0, err
-	}
-
-	if force {
-		sessionStart = removeEntireHooks(sessionStart)
-		sessionEnd = removeEntireHooks(sessionEnd)
-		userPromptSubmit = removeEntireHooks(userPromptSubmit)
-		stop = removeEntireHooks(stop)
-		postToolUse = removeEntireHooks(postToolUse)
-	}
-
-	// Build hook commands
 	var cmdPrefix string
 	if localDev {
 		cmdPrefix = agent.LocalDevHookScript + " hooks codex "
 	} else {
 		cmdPrefix = "entire hooks codex "
 	}
-	sessionStartCmd := cmdPrefix + "session-start"
 	useWindowsProductionHooks := agent.UseWindowsProductionHooks(ctx, localDev)
-	if !localDev {
-		sessionStartCmd = agent.WrapProductionJSONWarningHookCommandForOS(sessionStartCmd, agent.WarningFormatSingleLine, useWindowsProductionHooks)
-	}
-	sessionEndCmd := cmdPrefix + HookNameSessionEnd
-	userPromptSubmitCmd := cmdPrefix + "user-prompt-submit"
-	stopCmd := cmdPrefix + "stop"
-	postToolUseCmd := cmdPrefix + "post-tool-use"
-	if !localDev {
-		sessionEndCmd = agent.WrapProductionSilentHookCommandForOS(sessionEndCmd, useWindowsProductionHooks)
-		userPromptSubmitCmd = agent.WrapProductionSilentHookCommandForOS(userPromptSubmitCmd, useWindowsProductionHooks)
-		stopCmd = agent.WrapProductionSilentHookCommandForOS(stopCmd, useWindowsProductionHooks)
-		postToolUseCmd = agent.WrapProductionSilentHookCommandForOS(postToolUseCmd, useWindowsProductionHooks)
-	}
 
 	count := 0
-
-	if updated, changed := syncHookCommand(sessionStart, sessionStartCmd, defaultHookTimeoutSec); changed {
-		sessionStart = updated
-		count++
-	}
-	// SessionEnd carries a shorter timeout than the rest — Codex clamps it and
-	// warns on every startup otherwise. See SessionEndTimeoutSec.
-	if updated, changed := syncHookCommand(sessionEnd, sessionEndCmd, SessionEndTimeoutSec); changed {
-		sessionEnd = updated
-		count++
-	}
-	if updated, changed := syncHookCommand(userPromptSubmit, userPromptSubmitCmd, defaultHookTimeoutSec); changed {
-		userPromptSubmit = updated
-		count++
-	}
-	if updated, changed := syncHookCommand(stop, stopCmd, defaultHookTimeoutSec); changed {
-		stop = updated
-		count++
-	}
-	if updated, changed := syncHookCommand(postToolUse, postToolUseCmd, defaultHookTimeoutSec); changed {
-		postToolUse = updated
-		count++
+	updated := make([][]MatcherGroup, len(managedHooks))
+	for i, h := range managedHooks {
+		var groups []MatcherGroup
+		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
+			return 0, err
+		}
+		if force {
+			groups = removeEntireHooks(groups)
+		}
+		hookCmd := cmdPrefix + h.verb
+		if !localDev {
+			hookCmd = h.wrap(hookCmd, useWindowsProductionHooks)
+		}
+		if synced, changed := syncHookCommand(groups, hookCmd, h.timeout); changed {
+			groups = synced
+			count++
+		}
+		updated[i] = groups
 	}
 
 	if count == 0 {
 		return 0, nil
 	}
 
-	// Marshal modified types back
-	marshalHookType(rawHooks, "SessionStart", sessionStart)
-	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
-	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
-	marshalHookType(rawHooks, "Stop", stop)
-	marshalHookType(rawHooks, "PostToolUse", postToolUse)
+	for i, h := range managedHooks {
+		marshalHookType(rawHooks, h.event, updated[i])
+	}
 
 	// Preserve existing top-level keys (e.g., $schema) by reusing the parsed file
 	topLevel := make(map[string]json.RawMessage)
@@ -201,34 +182,13 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 		return nil
 	}
 
-	var sessionStart, sessionEnd, userPromptSubmit, stop, postToolUse []MatcherGroup
-	if err := parseHookType(rawHooks, "SessionStart", &sessionStart); err != nil {
-		return err
+	for _, h := range managedHooks {
+		var groups []MatcherGroup
+		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
+			return err
+		}
+		marshalHookType(rawHooks, h.event, removeEntireHooks(groups))
 	}
-	if err := parseHookType(rawHooks, "SessionEnd", &sessionEnd); err != nil {
-		return err
-	}
-	if err := parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit); err != nil {
-		return err
-	}
-	if err := parseHookType(rawHooks, "Stop", &stop); err != nil {
-		return err
-	}
-	if err := parseHookType(rawHooks, "PostToolUse", &postToolUse); err != nil {
-		return err
-	}
-
-	sessionStart = removeEntireHooks(sessionStart)
-	sessionEnd = removeEntireHooks(sessionEnd)
-	userPromptSubmit = removeEntireHooks(userPromptSubmit)
-	stop = removeEntireHooks(stop)
-	postToolUse = removeEntireHooks(postToolUse)
-
-	marshalHookType(rawHooks, "SessionStart", sessionStart)
-	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
-	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
-	marshalHookType(rawHooks, "Stop", stop)
-	marshalHookType(rawHooks, "PostToolUse", postToolUse)
 
 	if len(rawHooks) > 0 {
 		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
@@ -263,16 +223,27 @@ func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 		return false
 	}
 
-	var hooksFile HooksFile
-	if err := json.Unmarshal(data, &hooksFile); err != nil {
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(data, &topLevel); err != nil {
 		return false
 	}
+	var rawHooks map[string]json.RawMessage
+	if hooksRaw, ok := topLevel["hooks"]; ok {
+		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
+			return false
+		}
+	}
 
-	return hasEntireHook(hooksFile.Hooks.SessionStart) &&
-		hasEntireHook(hooksFile.Hooks.SessionEnd) &&
-		hasEntireHook(hooksFile.Hooks.UserPromptSubmit) &&
-		hasEntireHook(hooksFile.Hooks.Stop) &&
-		hasEntireHook(hooksFile.Hooks.PostToolUse)
+	for _, h := range managedHooks {
+		var groups []MatcherGroup
+		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
+			return false
+		}
+		if !hasEntireHook(groups) {
+			return false
+		}
+	}
+	return true
 }
 
 // --- Helpers ---
@@ -313,10 +284,6 @@ func hookCommandExists(groups []MatcherGroup, command string, timeoutSec int) bo
 	}
 	return false
 }
-
-// defaultHookTimeoutSec is the timeout Entire configures for Codex hooks that
-// run between turns, where Codex allows up to its standard 600s.
-const defaultHookTimeoutSec = 30
 
 func syncHookCommand(groups []MatcherGroup, command string, timeoutSec int) ([]MatcherGroup, bool) {
 	if hookCommandExists(groups, command, timeoutSec) {

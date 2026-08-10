@@ -27,15 +27,9 @@ func TestInstallHooks_CreatesHooksJSONOnly(t *testing.T) {
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 5, count) // SessionStart, SessionEnd, UserPromptSubmit, Stop, PostToolUse
+	require.Equal(t, len(managedHooks), count)
 
-	// Verify hooks.json was created in the repo
-	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
-	data, err := os.ReadFile(hooksPath)
-	require.NoError(t, err)
-
-	var hooksFile HooksFile
-	require.NoError(t, json.Unmarshal(data, &hooksFile))
+	hooksFile, _ := readHooksFile(t, tempDir)
 
 	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
 	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
@@ -59,14 +53,9 @@ func TestInstallHooks_WindowsWrapperProbeSuccessKeepsWrappedCommands(t *testing.
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 5, count)
+	require.Equal(t, len(managedHooks), count)
 
-	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
-	data, err := os.ReadFile(hooksPath)
-	require.NoError(t, err)
-
-	var hooksFile HooksFile
-	require.NoError(t, json.Unmarshal(data, &hooksFile))
+	hooksFile, _ := readHooksFile(t, tempDir)
 
 	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
 	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
@@ -82,14 +71,9 @@ func TestInstallHooks_WindowsWrapperProbeFailureUsesWindowsCommands(t *testing.T
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 5, count)
+	require.Equal(t, len(managedHooks), count)
 
-	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
-	data, err := os.ReadFile(hooksPath)
-	require.NoError(t, err)
-
-	var hooksFile HooksFile
-	require.NoError(t, json.Unmarshal(data, &hooksFile))
+	hooksFile, data := readHooksFile(t, tempDir)
 
 	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
 	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
@@ -111,19 +95,14 @@ func TestInstallHooks_WindowsWrapperProbeFailureMigratesToWindowsCommands(t *tes
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 5, count)
+	require.Equal(t, len(managedHooks), count)
 
 	wrapperWorks = false
 	count, err = ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 5, count)
+	require.Equal(t, len(managedHooks), count)
 
-	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
-	data, err := os.ReadFile(hooksPath)
-	require.NoError(t, err)
-
-	var hooksFile HooksFile
-	require.NoError(t, json.Unmarshal(data, &hooksFile))
+	hooksFile, data := readHooksFile(t, tempDir)
 
 	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
 	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
@@ -142,7 +121,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 
 	count1, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 5, count1)
+	require.Equal(t, len(managedHooks), count1)
 
 	count2, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
@@ -155,7 +134,7 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), true, false)
 	require.NoError(t, err)
-	require.Equal(t, 5, count)
+	require.Equal(t, len(managedHooks), count)
 
 	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
 	data, err := os.ReadFile(hooksPath)
@@ -174,7 +153,7 @@ func TestInstallHooks_Force(t *testing.T) {
 
 	count, err := ag.InstallHooks(context.Background(), false, true)
 	require.NoError(t, err)
-	require.Equal(t, 5, count)
+	require.Equal(t, len(managedHooks), count)
 }
 
 // Codex clamps SessionEnd handlers to SESSION_END_MAX_TIMEOUT_SEC = 3 and
@@ -188,11 +167,7 @@ func TestInstallHooks_SessionEndUsesCodexTimeoutCeiling(t *testing.T) {
 	_, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
 
-	data, err := os.ReadFile(filepath.Join(tempDir, ".codex", HooksFileName))
-	require.NoError(t, err)
-
-	var hooksFile HooksFile
-	require.NoError(t, json.Unmarshal(data, &hooksFile))
+	hooksFile, _ := readHooksFile(t, tempDir)
 
 	require.Equal(t, SessionEndTimeoutSec, entireHookTimeout(t, hooksFile.Hooks.SessionEnd, "SessionEnd"))
 	require.Equal(t, defaultHookTimeoutSec, entireHookTimeout(t, hooksFile.Hooks.Stop, "Stop"))
@@ -221,12 +196,21 @@ func TestInstallHooks_RewritesSessionEndWithStaleTimeout(t *testing.T) {
 	_, err = ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
 
-	data, err := os.ReadFile(hooksPath)
+	hooksFile, _ := readHooksFile(t, tempDir)
+
+	require.Equal(t, SessionEndTimeoutSec, entireHookTimeout(t, hooksFile.Hooks.SessionEnd, "SessionEnd"))
+}
+
+// readHooksFile reads and parses .codex/hooks.json under repoRoot, returning
+// both the parsed form and the raw bytes (some assertions check the literal
+// text, e.g. that no POSIX shell wrapper leaked into a Windows config).
+func readHooksFile(t *testing.T, repoRoot string) (HooksFile, []byte) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot, ".codex", HooksFileName))
 	require.NoError(t, err)
 	var hooksFile HooksFile
 	require.NoError(t, json.Unmarshal(data, &hooksFile))
-
-	require.Equal(t, SessionEndTimeoutSec, entireHookTimeout(t, hooksFile.Hooks.SessionEnd, "SessionEnd"))
+	return hooksFile, data
 }
 
 // entireHookTimeout returns the timeout of the single Entire-managed hook in

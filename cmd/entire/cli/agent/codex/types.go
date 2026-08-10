@@ -30,31 +30,22 @@ type HookEntry struct {
 	Timeout int    `json:"timeout,omitempty"`
 }
 
-// sessionStartRaw is the JSON structure from SessionStart hooks.
-type sessionStartRaw struct {
-	SessionID      string  `json:"session_id"`
-	TranscriptPath *string `json:"transcript_path"` // nullable
-	CWD            string  `json:"cwd"`
-	HookEventName  string  `json:"hook_event_name"`
-	Model          string  `json:"model"`
-	PermissionMode string  `json:"permission_mode"`
-	Source         string  `json:"source"` // "startup", "resume", "clear"
-}
-
-// sessionEndRaw is the JSON structure from SessionEnd hooks.
-// Schema source: codex-rs/hooks/schema/generated/session-end.command.input.schema.json.
+// sessionInfoRaw is the JSON structure shared by the session-scoped hooks,
+// SessionStart and SessionEnd, which differ only in the event they represent.
 //
-// Deliberately thinner than every other Codex hook payload: SessionEnd carries
-// no model, permission_mode, or turn_id, because it fires after teardown rather
-// than within a turn. Reason is a constant ("other") in Codex today, so it
-// cannot distinguish quit from /clear — it is read anyway so a future
-// widening of the enum shows up in logs rather than being silently dropped.
-type sessionEndRaw struct {
+// SessionEnd's payload is a strict subset: it carries no model or
+// permission_mode (it fires after teardown, not within a turn), and swaps
+// `source` for a `reason` that is the constant "other" in Codex today, so it
+// cannot distinguish quit from /clear. Unmarshalling is not strict, so the
+// absent fields simply stay zero.
+type sessionInfoRaw struct {
 	SessionID      string  `json:"session_id"`
 	TranscriptPath *string `json:"transcript_path"` // nullable (ephemeral mode)
 	CWD            string  `json:"cwd"`
 	HookEventName  string  `json:"hook_event_name"`
-	Reason         string  `json:"reason"`
+	Model          string  `json:"model"`
+	PermissionMode string  `json:"permission_mode"`
+	Source         string  `json:"source"` // SessionStart: "startup", "resume", "clear"
 }
 
 // userPromptSubmitRaw is the JSON structure from UserPromptSubmit hooks.
