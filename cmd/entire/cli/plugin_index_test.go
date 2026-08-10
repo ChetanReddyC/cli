@@ -364,3 +364,46 @@ func TestPluginBrowse_RequiresTerminal(t *testing.T) { //nolint:paralleltest // 
 		t.Errorf("err = %v, want it to name the non-interactive alternative", err)
 	}
 }
+
+// index.json is remote and attacker-influenced, and its name/description/repo_url
+// are printed straight to the terminal by search, info, and the browse picker.
+// An escape sequence in any of them could repaint the row — forging the
+// "[official]" marker, or the repository name in the confirmation whose whole
+// job is to say where the binary comes from.
+//
+// repo_url is the one that used to get through: url.Parse rejects control
+// characters, but git's scp-like form never reaches url.Parse — RedactURL
+// returns it verbatim — so it was the single shape that could carry an escape
+// into that prompt.
+func TestSyncPluginIndex_DropsEntriesCarryingTerminalEscapes(t *testing.T) { //nolint:paralleltest // mutates env via cache isolation
+	withIndexCache(t)
+	// JSON \u escapes, so these decode to a real ESC and a real
+	// RIGHT-TO-LEFT OVERRIDE rather than the text spelling them.
+	const esc = "\\u001b[2K"
+	const bidi = "\\u202e"
+	url, _ := newIndexRepo(t, `{
+  "version": 1,
+  "plugins": [
+    {"name": "good", "repo_url": "https://example.com/entire-good", "description": "fine"},
+    {"name": "esc`+esc+`name", "repo_url": "https://example.com/entire-a", "description": "x"},
+    {"name": "escdesc", "repo_url": "https://example.com/entire-b", "description": "y`+esc+`[official]"},
+    {"name": "escurl", "repo_url": "git@example.com:`+esc+`entire-c", "description": "z"},
+    {"name": "bidi", "repo_url": "https://example.com/entire-d", "description": "`+bidi+`gro.live"}
+  ]
+}`)
+	idx, err := SyncPluginIndex(context.Background(), url, false)
+	if err != nil {
+		t.Fatalf("SyncPluginIndex: %v", err)
+	}
+	if len(idx.Plugins) != 1 || idx.Plugins[0].Name != "good" {
+		t.Fatalf("plugins = %+v, want only the clean entry", idx.Plugins)
+	}
+	// Nothing a terminal would act on survived into what gets printed.
+	for _, e := range idx.Plugins {
+		for _, field := range []string{e.Name, e.Description, e.RepoURL} {
+			if hasTerminalControlChars(field) {
+				t.Errorf("field %q reached a render path with control characters", field)
+			}
+		}
+	}
+}

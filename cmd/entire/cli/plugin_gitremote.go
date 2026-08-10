@@ -258,6 +258,14 @@ func validatePluginRepoURL(rawURL string) error {
 	if u == "" {
 		return errors.New("repository URL is empty")
 	}
+	// Before the scheme checks, because the scp-like form bypasses them and
+	// RedactURL passes it through untouched — no url.Parse, which is what
+	// rejects control characters in the https:// case. So an scp-like URL was
+	// the one shape that could carry an escape sequence all the way into the
+	// confirmation prompt that names the repository.
+	if hasTerminalControlChars(u) {
+		return fmt.Errorf("repository URL %q must not contain control characters", rawURL)
+	}
 	if strings.HasPrefix(u, "-") {
 		return fmt.Errorf("repository URL %q must not start with '-'", redactURL(rawURL))
 	}

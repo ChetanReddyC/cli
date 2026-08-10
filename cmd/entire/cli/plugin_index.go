@@ -308,6 +308,13 @@ func loadPluginIndexFromDir(ctx context.Context, dir, indexURL string) (*PluginI
 		if validatePluginName(e.Name) != nil || validatePluginRepoURL(e.RepoURL) != nil {
 			continue // tolerate bad entries rather than failing the catalog
 		}
+		// description has no validator of its own — it is free text, and the
+		// only thing that can go wrong with it is what it does to a terminal.
+		// Checked here so search, info, and the browse picker can print it
+		// without each remembering to.
+		if hasTerminalControlChars(e.Description) {
+			continue
+		}
 		valid = append(valid, e)
 	}
 	idx.Plugins = valid
