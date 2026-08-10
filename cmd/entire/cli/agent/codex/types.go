@@ -10,6 +10,7 @@ type HooksFile struct {
 // HookEvents contains the hook configurations by event type.
 type HookEvents struct {
 	SessionStart     []MatcherGroup `json:"SessionStart,omitempty"`
+	SessionEnd       []MatcherGroup `json:"SessionEnd,omitempty"`
 	UserPromptSubmit []MatcherGroup `json:"UserPromptSubmit,omitempty"`
 	Stop             []MatcherGroup `json:"Stop,omitempty"`
 	PreToolUse       []MatcherGroup `json:"PreToolUse,omitempty"`
@@ -38,6 +39,22 @@ type sessionStartRaw struct {
 	Model          string  `json:"model"`
 	PermissionMode string  `json:"permission_mode"`
 	Source         string  `json:"source"` // "startup", "resume", "clear"
+}
+
+// sessionEndRaw is the JSON structure from SessionEnd hooks.
+// Schema source: codex-rs/hooks/schema/generated/session-end.command.input.schema.json.
+//
+// Deliberately thinner than every other Codex hook payload: SessionEnd carries
+// no model, permission_mode, or turn_id, because it fires after teardown rather
+// than within a turn. Reason is a constant ("other") in Codex today, so it
+// cannot distinguish quit from /clear — it is read anyway so a future
+// widening of the enum shows up in logs rather than being silently dropped.
+type sessionEndRaw struct {
+	SessionID      string  `json:"session_id"`
+	TranscriptPath *string `json:"transcript_path"` // nullable (ephemeral mode)
+	CWD            string  `json:"cwd"`
+	HookEventName  string  `json:"hook_event_name"`
+	Reason         string  `json:"reason"`
 }
 
 // userPromptSubmitRaw is the JSON structure from UserPromptSubmit hooks.

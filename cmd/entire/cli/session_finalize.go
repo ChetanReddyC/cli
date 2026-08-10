@@ -34,9 +34,11 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 		// re-validate OwnerExited on the freshly-loaded state under the lock:
 		// a turn may have started since the snapshot and replaced the dead
 		// owner with a live one, in which case ended is false and we leave it be.
+		// No condense deadline: the sweep runs from `entire status` / `entire
+		// doctor`, not inside an agent's bounded shutdown.
 		ended, err := endSessionNow(ctx, nil, st.SessionID, func(s *session.State) bool {
 			return s.OwnerExited()
-		})
+		}, time.Time{})
 		if err != nil {
 			logging.Warn(logCtx, "failed to finalize exited session",
 				slog.String("session_id", st.SessionID),

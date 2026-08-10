@@ -16,6 +16,7 @@ var (
 	_ agent.HookSupport        = (*CodexAgent)(nil)
 	_ agent.HookResponseWriter = (*CodexAgent)(nil)
 	_ agent.ContextInjector    = (*CodexAgent)(nil)
+	_ agent.SessionEndBudgeter = (*CodexAgent)(nil)
 )
 
 // WriteHookResponse outputs a JSON hook response to stdout.
@@ -48,6 +49,7 @@ func (c *CodexAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte,
 // Codex hook names — these become subcommands under `entire hooks codex`
 const (
 	HookNameSessionStart     = "session-start"
+	HookNameSessionEnd       = "session-end"
 	HookNameUserPromptSubmit = "user-prompt-submit"
 	HookNameStop             = "stop"
 	HookNamePreToolUse       = "pre-tool-use"
@@ -58,6 +60,7 @@ const (
 func (c *CodexAgent) HookNames() []string {
 	return []string{
 		HookNameSessionStart,
+		HookNameSessionEnd,
 		HookNameUserPromptSubmit,
 		HookNameStop,
 		HookNamePreToolUse,
@@ -65,12 +68,33 @@ func (c *CodexAgent) HookNames() []string {
 	}
 }
 
+// SessionEndTimeoutSec is the timeout Entire configures for Codex's SessionEnd
+// hook. Codex clamps SessionEnd handlers to
+// SESSION_END_MAX_TIMEOUT_SEC = 3 (codex-rs/hooks/src/events/session_end.rs) and
+// prints a "clamping SessionEnd hook timeout" warning on every startup when a
+// config asks for more, so requesting exactly the ceiling gets the longest run
+// available without nagging the user. Every other Codex hook keeps the
+// standard 30s that addHook applies.
+const SessionEndTimeoutSec = 3
+
+// sessionEndBudget is how long the whole session-end hook process may run
+// before Codex kills its process tree. Held just under the configured
+// SessionEndTimeoutSec so Entire stops itself cleanly instead of being
+// terminated part-way through a condense.
+const sessionEndBudget = 2500 * time.Millisecond
+
+// SessionEndBudget implements agent.SessionEndBudgeter. Codex runs SessionEnd
+// inside its shutdown sequence under a hard cap; see the interface docs.
+func (c *CodexAgent) SessionEndBudget() time.Duration { return sessionEndBudget }
+
 // ParseHookEvent translates a Codex hook into a normalized lifecycle Event.
 // Returns nil if the hook has no lifecycle significance.
 func (c *CodexAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
 		return c.parseSessionStart(stdin)
+	case HookNameSessionEnd:
+		return c.parseSessionEnd(stdin)
 	case HookNameUserPromptSubmit:
 		return c.parseTurnStart(stdin)
 	case HookNameStop:
@@ -95,6 +119,26 @@ func (c *CodexAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {
 		SessionID:  raw.SessionID,
 		SessionRef: derefString(raw.TranscriptPath),
 		Model:      raw.Model,
+		Timestamp:  time.Now(),
+	}, nil
+}
+
+// parseSessionEnd translates Codex's SessionEnd hook (added in 0.146) into the
+// normalized SessionEnd event, so a Codex session that the user quits is
+// finalized like any other agent's instead of lingering as active.
+//
+// Model is left empty: the payload omits it, and the session state already
+// recorded the model at turn start.
+func (c *CodexAgent) parseSessionEnd(stdin io.Reader) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[sessionEndRaw](stdin)
+	if err != nil {
+		return nil, err
+	}
+	return &agent.Event{
+		Type:       agent.SessionEnd,
+		SessionID:  raw.SessionID,
+		SessionRef: derefString(raw.TranscriptPath),
+		CWD:        raw.CWD,
 		Timestamp:  time.Now(),
 	}, nil
 }

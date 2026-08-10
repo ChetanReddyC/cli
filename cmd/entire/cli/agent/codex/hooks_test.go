@@ -27,7 +27,7 @@ func TestInstallHooks_CreatesHooksJSONOnly(t *testing.T) {
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 4, count) // SessionStart, UserPromptSubmit, Stop, PostToolUse
+	require.Equal(t, 5, count) // SessionStart, SessionEnd, UserPromptSubmit, Stop, PostToolUse
 
 	// Verify hooks.json was created in the repo
 	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
@@ -38,6 +38,7 @@ func TestInstallHooks_CreatesHooksJSONOnly(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &hooksFile))
 
 	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
 	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
 	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapProductionSilentHookCommand("entire hooks codex stop"), "Stop")
 	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
@@ -58,7 +59,7 @@ func TestInstallHooks_WindowsWrapperProbeSuccessKeepsWrappedCommands(t *testing.
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 4, count)
+	require.Equal(t, 5, count)
 
 	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
 	data, err := os.ReadFile(hooksPath)
@@ -68,6 +69,7 @@ func TestInstallHooks_WindowsWrapperProbeSuccessKeepsWrappedCommands(t *testing.
 	require.NoError(t, json.Unmarshal(data, &hooksFile))
 
 	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
 	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
 	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapProductionSilentHookCommand("entire hooks codex stop"), "Stop")
 	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
@@ -80,7 +82,7 @@ func TestInstallHooks_WindowsWrapperProbeFailureUsesWindowsCommands(t *testing.T
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 4, count)
+	require.Equal(t, 5, count)
 
 	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
 	data, err := os.ReadFile(hooksPath)
@@ -90,6 +92,7 @@ func TestInstallHooks_WindowsWrapperProbeFailureUsesWindowsCommands(t *testing.T
 	require.NoError(t, json.Unmarshal(data, &hooksFile))
 
 	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
 	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
 	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex stop"), "Stop")
 	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
@@ -108,12 +111,12 @@ func TestInstallHooks_WindowsWrapperProbeFailureMigratesToWindowsCommands(t *tes
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 4, count)
+	require.Equal(t, 5, count)
 
 	wrapperWorks = false
 	count, err = ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 4, count)
+	require.Equal(t, 5, count)
 
 	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
 	data, err := os.ReadFile(hooksPath)
@@ -123,6 +126,7 @@ func TestInstallHooks_WindowsWrapperProbeFailureMigratesToWindowsCommands(t *tes
 	require.NoError(t, json.Unmarshal(data, &hooksFile))
 
 	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
 	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
 	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex stop"), "Stop")
 	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
@@ -138,7 +142,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 
 	count1, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 4, count1)
+	require.Equal(t, 5, count1)
 
 	count2, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
@@ -151,7 +155,7 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), true, false)
 	require.NoError(t, err)
-	require.Equal(t, 4, count)
+	require.Equal(t, 5, count)
 
 	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
 	data, err := os.ReadFile(hooksPath)
@@ -170,7 +174,75 @@ func TestInstallHooks_Force(t *testing.T) {
 
 	count, err := ag.InstallHooks(context.Background(), false, true)
 	require.NoError(t, err)
-	require.Equal(t, 4, count)
+	require.Equal(t, 5, count)
+}
+
+// Codex clamps SessionEnd handlers to SESSION_END_MAX_TIMEOUT_SEC = 3 and
+// prints "clamping SessionEnd hook timeout" at every startup when a config asks
+// for more, so SessionEnd must be installed at exactly the ceiling while the
+// between-turn hooks keep the standard timeout.
+func TestInstallHooks_SessionEndUsesCodexTimeoutCeiling(t *testing.T) {
+	tempDir := setupTestEnv(t)
+
+	ag := &CodexAgent{}
+	_, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(tempDir, ".codex", HooksFileName))
+	require.NoError(t, err)
+
+	var hooksFile HooksFile
+	require.NoError(t, json.Unmarshal(data, &hooksFile))
+
+	require.Equal(t, SessionEndTimeoutSec, entireHookTimeout(t, hooksFile.Hooks.SessionEnd, "SessionEnd"))
+	require.Equal(t, defaultHookTimeoutSec, entireHookTimeout(t, hooksFile.Hooks.Stop, "Stop"))
+}
+
+// A SessionEnd hook left behind by an older Entire carries the 30s default,
+// which makes Codex warn on every startup. Reinstalling must rewrite it rather
+// than treat the command match alone as up to date.
+func TestInstallHooks_RewritesSessionEndWithStaleTimeout(t *testing.T) {
+	tempDir := setupTestEnv(t)
+
+	codexDir := filepath.Join(tempDir, ".codex")
+	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	staleCommand := agentpkg.WrapProductionSilentHookCommand("entire hooks codex session-end")
+	stale := HooksFile{Hooks: HookEvents{
+		SessionEnd: []MatcherGroup{{
+			Hooks: []HookEntry{{Type: "command", Command: staleCommand, Timeout: 30}},
+		}},
+	}}
+	staleData, err := json.Marshal(stale)
+	require.NoError(t, err)
+	hooksPath := filepath.Join(codexDir, HooksFileName)
+	require.NoError(t, os.WriteFile(hooksPath, staleData, 0o600))
+
+	ag := &CodexAgent{}
+	_, err = ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(hooksPath)
+	require.NoError(t, err)
+	var hooksFile HooksFile
+	require.NoError(t, json.Unmarshal(data, &hooksFile))
+
+	require.Equal(t, SessionEndTimeoutSec, entireHookTimeout(t, hooksFile.Hooks.SessionEnd, "SessionEnd"))
+}
+
+// entireHookTimeout returns the timeout of the single Entire-managed hook in
+// groups, failing if there is not exactly one.
+func entireHookTimeout(t *testing.T, groups []MatcherGroup, label string) int {
+	t.Helper()
+	var timeouts []int
+	for _, group := range groups {
+		for _, hook := range group.Hooks {
+			if isEntireHook(hook.Command) {
+				timeouts = append(timeouts, hook.Timeout)
+			}
+		}
+	}
+	require.Len(t, timeouts, 1, "%s should have exactly one Entire hook", label)
+	return timeouts[0]
 }
 
 func TestUninstallHooks(t *testing.T) {

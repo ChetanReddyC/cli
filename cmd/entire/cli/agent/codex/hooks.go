@@ -55,8 +55,11 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	}
 
 	// Parse event types we manage
-	var sessionStart, userPromptSubmit, stop, postToolUse []MatcherGroup
+	var sessionStart, sessionEnd, userPromptSubmit, stop, postToolUse []MatcherGroup
 	if err := parseHookType(rawHooks, "SessionStart", &sessionStart); err != nil {
+		return 0, err
+	}
+	if err := parseHookType(rawHooks, "SessionEnd", &sessionEnd); err != nil {
 		return 0, err
 	}
 	if err := parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit); err != nil {
@@ -71,6 +74,7 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 
 	if force {
 		sessionStart = removeEntireHooks(sessionStart)
+		sessionEnd = removeEntireHooks(sessionEnd)
 		userPromptSubmit = removeEntireHooks(userPromptSubmit)
 		stop = removeEntireHooks(stop)
 		postToolUse = removeEntireHooks(postToolUse)
@@ -88,10 +92,12 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	if !localDev {
 		sessionStartCmd = agent.WrapProductionJSONWarningHookCommandForOS(sessionStartCmd, agent.WarningFormatSingleLine, useWindowsProductionHooks)
 	}
+	sessionEndCmd := cmdPrefix + HookNameSessionEnd
 	userPromptSubmitCmd := cmdPrefix + "user-prompt-submit"
 	stopCmd := cmdPrefix + "stop"
 	postToolUseCmd := cmdPrefix + "post-tool-use"
 	if !localDev {
+		sessionEndCmd = agent.WrapProductionSilentHookCommandForOS(sessionEndCmd, useWindowsProductionHooks)
 		userPromptSubmitCmd = agent.WrapProductionSilentHookCommandForOS(userPromptSubmitCmd, useWindowsProductionHooks)
 		stopCmd = agent.WrapProductionSilentHookCommandForOS(stopCmd, useWindowsProductionHooks)
 		postToolUseCmd = agent.WrapProductionSilentHookCommandForOS(postToolUseCmd, useWindowsProductionHooks)
@@ -99,19 +105,25 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 
 	count := 0
 
-	if updated, changed := syncHookCommand(sessionStart, sessionStartCmd); changed {
+	if updated, changed := syncHookCommand(sessionStart, sessionStartCmd, defaultHookTimeoutSec); changed {
 		sessionStart = updated
 		count++
 	}
-	if updated, changed := syncHookCommand(userPromptSubmit, userPromptSubmitCmd); changed {
+	// SessionEnd carries a shorter timeout than the rest — Codex clamps it and
+	// warns on every startup otherwise. See SessionEndTimeoutSec.
+	if updated, changed := syncHookCommand(sessionEnd, sessionEndCmd, SessionEndTimeoutSec); changed {
+		sessionEnd = updated
+		count++
+	}
+	if updated, changed := syncHookCommand(userPromptSubmit, userPromptSubmitCmd, defaultHookTimeoutSec); changed {
 		userPromptSubmit = updated
 		count++
 	}
-	if updated, changed := syncHookCommand(stop, stopCmd); changed {
+	if updated, changed := syncHookCommand(stop, stopCmd, defaultHookTimeoutSec); changed {
 		stop = updated
 		count++
 	}
-	if updated, changed := syncHookCommand(postToolUse, postToolUseCmd); changed {
+	if updated, changed := syncHookCommand(postToolUse, postToolUseCmd, defaultHookTimeoutSec); changed {
 		postToolUse = updated
 		count++
 	}
@@ -122,6 +134,7 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 
 	// Marshal modified types back
 	marshalHookType(rawHooks, "SessionStart", sessionStart)
+	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
 	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
 	marshalHookType(rawHooks, "Stop", stop)
 	marshalHookType(rawHooks, "PostToolUse", postToolUse)
@@ -188,8 +201,11 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 		return nil
 	}
 
-	var sessionStart, userPromptSubmit, stop, postToolUse []MatcherGroup
+	var sessionStart, sessionEnd, userPromptSubmit, stop, postToolUse []MatcherGroup
 	if err := parseHookType(rawHooks, "SessionStart", &sessionStart); err != nil {
+		return err
+	}
+	if err := parseHookType(rawHooks, "SessionEnd", &sessionEnd); err != nil {
 		return err
 	}
 	if err := parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit); err != nil {
@@ -203,11 +219,13 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	}
 
 	sessionStart = removeEntireHooks(sessionStart)
+	sessionEnd = removeEntireHooks(sessionEnd)
 	userPromptSubmit = removeEntireHooks(userPromptSubmit)
 	stop = removeEntireHooks(stop)
 	postToolUse = removeEntireHooks(postToolUse)
 
 	marshalHookType(rawHooks, "SessionStart", sessionStart)
+	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
 	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
 	marshalHookType(rawHooks, "Stop", stop)
 	marshalHookType(rawHooks, "PostToolUse", postToolUse)
@@ -251,6 +269,7 @@ func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 	}
 
 	return hasEntireHook(hooksFile.Hooks.SessionStart) &&
+		hasEntireHook(hooksFile.Hooks.SessionEnd) &&
 		hasEntireHook(hooksFile.Hooks.UserPromptSubmit) &&
 		hasEntireHook(hooksFile.Hooks.Stop) &&
 		hasEntireHook(hooksFile.Hooks.PostToolUse)
@@ -279,10 +298,15 @@ func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, group
 	rawHooks[hookType] = data
 }
 
-func hookCommandExists(groups []MatcherGroup, command string) bool {
+// hookCommandExists reports whether the exact command is already configured
+// with the timeout we want. The timeout is part of the match so an upgrade
+// rewrites a hook installed by an older Entire with a different budget —
+// notably SessionEnd, where a leftover 30s makes Codex print a clamping warning
+// at every startup.
+func hookCommandExists(groups []MatcherGroup, command string, timeoutSec int) bool {
 	for _, group := range groups {
 		for _, hook := range group.Hooks {
-			if hook.Command == command {
+			if hook.Command == command && hook.Timeout == timeoutSec {
 				return true
 			}
 		}
@@ -290,21 +314,25 @@ func hookCommandExists(groups []MatcherGroup, command string) bool {
 	return false
 }
 
-func syncHookCommand(groups []MatcherGroup, command string) ([]MatcherGroup, bool) {
-	if hookCommandExists(groups, command) {
+// defaultHookTimeoutSec is the timeout Entire configures for Codex hooks that
+// run between turns, where Codex allows up to its standard 600s.
+const defaultHookTimeoutSec = 30
+
+func syncHookCommand(groups []MatcherGroup, command string, timeoutSec int) ([]MatcherGroup, bool) {
+	if hookCommandExists(groups, command, timeoutSec) {
 		return groups, false
 	}
 	if hasEntireHook(groups) {
 		groups = removeEntireHooks(groups)
 	}
-	return addHook(groups, command), true
+	return addHook(groups, command, timeoutSec), true
 }
 
-func addHook(groups []MatcherGroup, command string) []MatcherGroup {
+func addHook(groups []MatcherGroup, command string, timeoutSec int) []MatcherGroup {
 	entry := HookEntry{
 		Type:    "command",
 		Command: command,
-		Timeout: 30,
+		Timeout: timeoutSec,
 	}
 
 	// Add to an existing group with null matcher, or create a new one

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/stretchr/testify/require"
@@ -50,6 +51,62 @@ func TestParseHookEvent_SessionStartNullTranscript(t *testing.T) {
 	require.Equal(t, agent.SessionStart, event.Type)
 	require.Equal(t, "test-uuid", event.SessionID)
 	require.Empty(t, event.SessionRef)
+}
+
+// SessionEnd (Codex 0.146+) is what finally lets a quit Codex session be
+// finalized. Its payload is thinner than every other Codex hook: no model, no
+// permission_mode, no turn_id.
+func TestParseHookEvent_SessionEnd(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{}
+	input := `{
+		"session_id": "550e8400-e29b-41d4-a716-446655440000",
+		"transcript_path": "/Users/test/.codex/rollouts/01/01/rollout-20260324-550e8400.jsonl",
+		"cwd": "/tmp/testrepo",
+		"hook_event_name": "SessionEnd",
+		"reason": "other"
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionEnd, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, agent.SessionEnd, event.Type)
+	require.Equal(t, "550e8400-e29b-41d4-a716-446655440000", event.SessionID)
+	require.Equal(t, "/Users/test/.codex/rollouts/01/01/rollout-20260324-550e8400.jsonl", event.SessionRef)
+	require.Equal(t, "/tmp/testrepo", event.CWD)
+}
+
+func TestParseHookEvent_SessionEndNullTranscript(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{}
+	// Ephemeral mode leaves transcript_path null. The session must still be
+	// finalized — that is the whole point of the hook.
+	input := `{
+		"session_id": "test-uuid",
+		"transcript_path": null,
+		"cwd": "/tmp/testrepo",
+		"hook_event_name": "SessionEnd",
+		"reason": "other"
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionEnd, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, agent.SessionEnd, event.Type)
+	require.Equal(t, "test-uuid", event.SessionID)
+	require.Empty(t, event.SessionRef)
+}
+
+// Codex enforces SESSION_END_MAX_TIMEOUT_SEC = 3 and kills the hook's process
+// tree on expiry, so Entire's self-imposed budget must stay strictly under the
+// timeout it configures.
+func TestCodexAgent_SessionEndBudgetFitsConfiguredTimeout(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{}
+	budget := ag.SessionEndBudget()
+	require.Positive(t, budget)
+	require.Less(t, budget, time.Duration(SessionEndTimeoutSec)*time.Second,
+		"budget must leave headroom before Codex terminates the hook process tree")
 }
 
 func TestParseHookEvent_UserPromptSubmit(t *testing.T) {

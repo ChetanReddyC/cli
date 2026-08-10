@@ -1084,12 +1084,34 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 	// the transcript to extract file changes. Cleanup is handled by
 	// `entire clean` or when the session state is fully removed.
 
-	if _, err := endSessionNow(ctx, event, event.SessionID, nil); err != nil {
+	if _, err := endSessionNow(ctx, event, event.SessionID, nil, sessionEndCondenseDeadline(ag)); err != nil {
 		logging.Warn(logCtx, "failed to mark session ended",
 			slog.String("error", err.Error()))
 	}
 
 	return nil
+}
+
+// processStart approximates when this hook process began. Package
+// initialization runs before main, so it is within milliseconds of exec —
+// precise enough to bound work against a deadline the agent measures from the
+// moment it spawned us.
+var processStart = time.Now()
+
+// sessionEndCondenseDeadline returns the wall-clock instant by which the eager
+// condense must be done, for agents that run session-end inside their own
+// shutdown under a hard cap (see agent.SessionEndBudgeter). The zero time means
+// no deadline.
+func sessionEndCondenseDeadline(ag agent.Agent) time.Time {
+	budgeter, ok := agent.AsSessionEndBudgeter(ag)
+	if !ok {
+		return time.Time{}
+	}
+	budget := budgeter.SessionEndBudget()
+	if budget <= 0 {
+		return time.Time{}
+	}
+	return processStart.Add(budget)
 }
 
 // endSessionNow runs the canonical "this session is over" sequence: it marks the
@@ -1106,13 +1128,34 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 // event drives the end (the sweep), which skips event-metadata persistence.
 // guard is forwarded to markSessionEnded (see there); when it skips the end,
 // the condense is skipped too and ended is false.
-func endSessionNow(ctx context.Context, event *agent.Event, sessionID string, guard func(*strategy.SessionState) bool) (ended bool, err error) {
+//
+// condenseDeadline, when non-zero, bounds only the condense — never the
+// mark-ended write, which is a single atomic state-file rename that must always
+// complete so the session cannot be left un-finalized. The bound is best-effort:
+// it cancels git subprocesses and any context-aware step, but condensation does
+// not poll ctx between stages, so it curtails rather than guarantees. Its
+// purpose is to stop short of a host that kills the hook's whole process tree
+// (Codex) rather than to make condensation interruptible. Being cut off either
+// way is safe: MutateSessionState persists at the end, so an incomplete
+// condense leaves FullyCondensed false and PostCommit retries.
+func endSessionNow(ctx context.Context, event *agent.Event, sessionID string, guard func(*strategy.SessionState) bool, condenseDeadline time.Time) (ended bool, err error) {
 	ended, err = markSessionEnded(ctx, event, sessionID, guard)
 	if err != nil || !ended {
 		return ended, err
 	}
+	logCtx := logging.WithComponent(ctx, "lifecycle")
+	if !condenseDeadline.IsZero() {
+		if remaining := time.Until(condenseDeadline); remaining <= 0 {
+			logging.Info(logCtx, "skipping eager condense: session-end budget already spent",
+				slog.String("session_id", sessionID))
+			return true, nil
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, condenseDeadline)
+		defer cancel()
+	}
 	if condErr := GetStrategy(ctx).CondenseAndMarkFullyCondensed(ctx, sessionID); condErr != nil {
-		logging.Warn(logging.WithComponent(ctx, "lifecycle"), "eager condense on session end failed",
+		logging.Warn(logCtx, "eager condense on session end failed",
 			slog.String("session_id", sessionID),
 			slog.String("error", condErr.Error()))
 	}
