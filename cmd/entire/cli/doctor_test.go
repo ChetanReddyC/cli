@@ -514,7 +514,7 @@ func TestCheckClaudeCodeHookDrift_SilentWhenNotInstalled(t *testing.T) {
 	t.Chdir(dir)
 
 	cmd, stdout := newTestCmd(t)
-	checkClaudeCodeHookDrift(cmd)
+	checkHookDrift(cmd)
 	require.NotContains(t, stdout.String(), "Claude Code hook")
 }
 
@@ -529,7 +529,7 @@ func TestCheckClaudeCodeHookDrift_OKWhenCurrent(t *testing.T) {
 	}
 
 	cmd, stdout := newTestCmd(t)
-	checkClaudeCodeHookDrift(cmd)
+	checkHookDrift(cmd)
 	require.Contains(t, stdout.String(), "✓ Claude Code hook config: OK")
 }
 
@@ -555,7 +555,7 @@ func TestCheckClaudeCodeHookDrift_WarnsWhenOutdated(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, claudecode.ClaudeSettingsFileName), []byte(stale), 0o600))
 
 	cmd, stdout := newTestCmd(t)
-	checkClaudeCodeHookDrift(cmd)
+	checkHookDrift(cmd)
 
 	out := stdout.String()
 	require.Contains(t, out, "Claude Code hooks: OUT OF DATE")
