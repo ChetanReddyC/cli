@@ -1002,8 +1002,17 @@ func (s *treeWriter) readSummaryFromBlob(hash plumbing.Hash) (*CheckpointSummary
 	return readJSONFromBlob[CheckpointSummary](s.repo, hash)
 }
 
-// aggregateTokenUsage sums two TokenUsage structs.
-// Returns nil if both inputs are nil.
+// aggregateTokenUsage sums two TokenUsage structs, including their nested
+// SubagentTokens. Returns nil if both inputs are nil.
+//
+// This sums across the *sessions* of one checkpoint, where each session's
+// SubagentTokens is that session's checkpoint-scoped total, so adding them is
+// correct. (The replace-don't-add rule for SubagentTokens applies to accumulating
+// steps *within* a session, where each step re-reports a cumulative snapshot —
+// see accumulateTokenUsage in the strategy package.)
+//
+// Dropping the nested total here left the root metadata.json reporting
+// "subagent_tokens": null even when the per-session metadata carried one.
 func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 	if a == nil && b == nil {
 		return nil
@@ -1023,7 +1032,15 @@ func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 		result.OutputTokens += b.OutputTokens
 		result.APICallCount += b.APICallCount
 	}
+	result.SubagentTokens = aggregateTokenUsage(subagentTokensOf(a), subagentTokensOf(b))
 	return result
+}
+
+func subagentTokensOf(usage *agent.TokenUsage) *agent.TokenUsage {
+	if usage == nil {
+		return nil
+	}
+	return usage.SubagentTokens
 }
 
 // SanitizeTranscriptForAgentType strips non-portable agent state from a transcript

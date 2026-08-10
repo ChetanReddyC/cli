@@ -306,6 +306,11 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		sessionData.TokenUsage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
 	}
 
+	// Restore the checkpoint-scoped subagent total onto the value written to
+	// metadata. This must run after applyBackfilledSessionTokenUsage, which needs
+	// to see the recomputed usage without it (see that function).
+	sessionData.TokenUsage = withCheckpointSubagentTokens(sessionData.TokenUsage, state.CheckpointTokenUsage)
+
 	// Backfill the model from the transcript for agents that don't report it via
 	// hooks (e.g., Pi records message.model but its hook events carry no model
 	// field). Only fills when the model is otherwise unknown — hook-reported
@@ -764,6 +769,44 @@ func hasTokenUsageData(usage *agent.TokenUsage) bool {
 	return hasTokenUsageData(usage.SubagentTokens)
 }
 
+// withCheckpointSubagentTokens returns usage carrying the checkpoint-scoped
+// subagent total from checkpointUsage, filling it in only when usage has none of
+// its own.
+//
+// Condensation recomputes token usage from the transcript with subagentsDir=""
+// (see extractSessionData), which by contract leaves SubagentTokens nil, and that
+// recomputed value replaces what SaveStep produced. Without this fill, committed
+// checkpoints reported "subagent_tokens": null even for sessions that ran many
+// subagents, while `entire status` still showed them — the session-wide cumulative
+// survives on state.TokenUsage via applyBackfilledSessionTokenUsage.
+//
+// state.CheckpointTokenUsage.SubagentTokens is the right source: SaveStep already
+// rescoped it to this window (cumulative minus SubagentTokensBaseline), so
+// checkpoints stay summable instead of each re-reporting the session total. That
+// also avoids re-reading subagent transcripts here, which would return a cumulative
+// snapshot needing the same rescoping — and would fail outright once the agent has
+// cleaned the transcripts up.
+//
+// Returns a copy and never mutates either input: applyBackfilledSessionTokenUsage
+// can adopt the checkpoint usage as state.TokenUsage (Copilot CLI), so mutating in
+// place would overwrite the session-wide cumulative with a window delta and make
+// resetCheckpointWindow snapshot a too-small baseline.
+//
+// Known gap: a mid-turn commit that condenses before any SaveStep in the window has
+// no state.CheckpointTokenUsage to draw on, so that checkpoint still records no
+// subagent tokens.
+func withCheckpointSubagentTokens(usage, checkpointUsage *agent.TokenUsage) *agent.TokenUsage {
+	if usage == nil || usage.SubagentTokens != nil {
+		return usage
+	}
+	if checkpointUsage == nil || checkpointUsage.SubagentTokens == nil {
+		return usage
+	}
+	filled := *usage
+	filled.SubagentTokens = checkpointUsage.SubagentTokens
+	return &filled
+}
+
 // applyBackfilledSessionTokenUsage overwrites state.TokenUsage with the
 // transcript-recomputed session total (see sessionStateBackfillTokenUsage) when
 // one is available, preserving the cumulative subagent total across the backfill.
@@ -1082,7 +1125,12 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
 	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "") //TODO: why do we not use here subagents dir?
+		// subagentsDir="" on purpose: re-reading subagent transcripts here yields a
+		// cumulative-since-session-start snapshot that would still need rescoping
+		// against SubagentTokensBaseline, and it finds nothing once the agent has
+		// cleaned them up. CondenseSession fills the already-rescoped window total
+		// in instead — see withCheckpointSubagentTokens.
+		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -1124,7 +1172,8 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
 	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "") //TODO: why do we not use here subagents dir?
+		// subagentsDir="" for the same reason as extractSessionData above.
+		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
