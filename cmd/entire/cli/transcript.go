@@ -96,46 +96,30 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 	return "", errors.New("transcript not found in any project directory")
 }
 
-// AgentTranscriptPath returns the legacy path to a subagent's transcript file,
-// stored as agent-{agentId}.jsonl as a sibling of the main transcript.
-//
-// Current Claude Code versions nest subagent transcripts one level deeper — see
-// SubagentsDir. Prefer ResolveAgentTranscriptPath, which handles both layouts.
-func AgentTranscriptPath(transcriptDir, agentID string) string {
-	return filepath.Join(transcriptDir, fmt.Sprintf("agent-%s.jsonl", agentID))
-}
-
-// SubagentsDir returns the directory holding a session's subagent transcripts:
-// <transcriptDir>/<sessionID>/subagents. This is where Claude Code writes them
-// today (alongside an agent-<id>.meta.json per subagent), whereas older versions
-// wrote agent-<id>.jsonl directly into transcriptDir.
-func SubagentsDir(transcriptDir, sessionID string) string {
-	return filepath.Join(transcriptDir, sessionID, "subagents")
-}
-
 // ResolveAgentTranscriptPath returns the path to an existing subagent transcript
 // for agentID, or "" when none exists.
 //
-// It prefers the current layout (<transcriptDir>/<sessionID>/subagents/) and falls
-// back to the legacy sibling layout so sessions recorded by older agent versions
-// still resolve. Checking the current layout first matters: resolving only the
-// legacy path silently yielded "" for every modern Claude Code session, which left
-// task checkpoints without a subagent transcript and made file extraction fall back
-// to scanning the main transcript, where the subagent's edits never appear.
+// It prefers the current layout, paths.SubagentsDir (which is also what the
+// turn-end extractor scans), and falls back to the legacy sibling layout —
+// agent-<id>.jsonl directly beside the main transcript — so sessions recorded by
+// older agent versions still resolve.
+//
+// Order is the whole point: resolving only the legacy path silently yielded "" for
+// every modern Claude Code session, which left task checkpoints without a subagent
+// transcript and made file extraction fall back to scanning the main transcript,
+// where a subagent's edits never appear.
 //
 // An empty agentID never resolves — agent-.jsonl is not a real transcript.
 func ResolveAgentTranscriptPath(transcriptDir, sessionID, agentID string) string {
 	if agentID == "" {
 		return ""
 	}
-	candidates := []string{
-		AgentTranscriptPath(SubagentsDir(transcriptDir, sessionID), agentID),
-		AgentTranscriptPath(transcriptDir, agentID),
+	name := paths.AgentTranscriptFileName(agentID)
+	if nested := filepath.Join(paths.SubagentsDir(transcriptDir, sessionID), name); fileExists(nested) {
+		return nested
 	}
-	for _, candidate := range candidates {
-		if fileExists(candidate) {
-			return candidate
-		}
+	if legacy := filepath.Join(transcriptDir, name); fileExists(legacy) {
+		return legacy
 	}
 	return ""
 }

@@ -68,47 +68,6 @@ func TestResolveTranscriptPath_AllowsLegitSessionID(t *testing.T) {
 	}
 }
 
-func TestAgentTranscriptPath(t *testing.T) {
-	tests := []struct {
-		name          string
-		transcriptDir string
-		agentID       string
-		expected      string
-	}{
-		{
-			name:          "standard path",
-			transcriptDir: "/home/user/.claude/projects/myproject",
-			agentID:       "agent_abc123",
-			expected:      "/home/user/.claude/projects/myproject/agent-agent_abc123.jsonl",
-		},
-		{
-			name:          "empty agent ID",
-			transcriptDir: "/path/to/transcripts",
-			agentID:       "",
-			expected:      "/path/to/transcripts/agent-.jsonl",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := AgentTranscriptPath(tt.transcriptDir, tt.agentID)
-			if got != tt.expected {
-				t.Errorf("AgentTranscriptPath() = %v, want %v", got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestSubagentsDir(t *testing.T) {
-	t.Parallel()
-
-	got := SubagentsDir("/home/user/.claude/projects/myproject", "sess-1")
-	want := filepath.Join("/home/user/.claude/projects/myproject", "sess-1", "subagents")
-	if got != want {
-		t.Errorf("SubagentsDir() = %q, want %q", got, want)
-	}
-}
-
 // TestResolveAgentTranscriptPath covers both subagent transcript layouts Claude
 // Code has used: the current one nests them under <dir>/<sessionID>/subagents/,
 // while older versions wrote them as siblings of the main transcript.
