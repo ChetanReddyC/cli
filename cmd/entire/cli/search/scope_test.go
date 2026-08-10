@@ -107,7 +107,7 @@ func TestResultAccessors_RawDataFallback(t *testing.T) {
 	}
 
 	var prRow Result
-	if err := json.Unmarshal([]byte(`{"type":"pr","data":{"id":"pr-9","title":"Fix login retry","repo":"backend","author":"alice","headRefName":"fix/login"},"searchMeta":{"score":1}}`), &prRow); err != nil {
+	if err := json.Unmarshal([]byte(`{"type":"pr","data":{"id":"pr-9","title":"Fix login retry","repo":"backend","userLogin":"alice","headBranch":"fix/login"},"searchMeta":{"score":1}}`), &prRow); err != nil {
 		t.Fatal(err)
 	}
 	if got := prRow.ResultTitle(); got != "Fix login retry" {

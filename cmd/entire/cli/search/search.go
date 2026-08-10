@@ -284,7 +284,7 @@ func splitFullName(fullName string) (owner, name string) {
 }
 
 // ResultBranch returns the branch for any result type. PR raw payloads carry
-// the head branch under "branch" or "headRefName".
+// the head branch under "headBranch" (searcher.PRResult).
 func (r *Result) ResultBranch() string {
 	if v := resultField(r,
 		func(c *CheckpointResult) string { return c.Branch },
@@ -297,7 +297,7 @@ func (r *Result) ResultBranch() string {
 		}); v != "" {
 		return v
 	}
-	return r.rawString("branch", "headRefName")
+	return r.rawString("headBranch")
 }
 
 // ResultCreatedAt returns the createdAt for any result type.
@@ -311,7 +311,8 @@ func (r *Result) ResultCreatedAt() string {
 	return r.rawString("createdAt")
 }
 
-// ResultAuthor returns the display author for any result type.
+// ResultAuthor returns the display author for any result type. PR raw payloads
+// carry the author login under "userLogin" (searcher.PRResult).
 func (r *Result) ResultAuthor() string {
 	if v := resultField(r,
 		func(c *CheckpointResult) string {
@@ -334,7 +335,7 @@ func (r *Result) ResultAuthor() string {
 		}); v != "" {
 		return v
 	}
-	return r.rawString("authorUsername", "author")
+	return r.rawString("userLogin")
 }
 
 // ResultID returns the primary ID for any result type. Types without a typed
