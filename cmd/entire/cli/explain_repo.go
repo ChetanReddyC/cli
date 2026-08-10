@@ -191,13 +191,18 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 	switch {
 	case opts.transcript || opts.rawTranscript:
 		content, contentErr := readCrossRepoSessionContent(ctx, reader, cid, summary, opts.sessionIndex)
-		stop(contentErr == nil)
 		if contentErr != nil {
+			stop(false)
 			return contentErr
 		}
+		// Every failure has to land before stop(true): an empty transcript is a
+		// failure, and reporting it after a ✓ line tells the reader the read
+		// succeeded and then contradicts it.
 		if len(content.Transcript) == 0 {
+			stop(false)
 			return fmt.Errorf("checkpoint %s in %s has no transcript", cid, ownerRepo)
 		}
+		stop(true)
 		if _, err := w.Write(content.Transcript); err != nil {
 			return fmt.Errorf("failed to write transcript: %w", err)
 		}

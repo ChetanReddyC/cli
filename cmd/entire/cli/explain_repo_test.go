@@ -268,6 +268,8 @@ func TestRunCrossRepoExplain_EmptyTranscriptIsAnError(t *testing.T) {
 		transcript:   true,
 	})
 	require.ErrorContains(t, err, "has no transcript")
+	// Copilot (PR #1942): a failure must not be preceded by a success marker.
+	assert.NotContains(t, errOut.String(), "✓", "an empty transcript must not report success first")
 }
 
 func TestRunCrossRepoExplain_RejectsPrefix(t *testing.T) {
