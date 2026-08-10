@@ -431,6 +431,7 @@ func resolvedHooksPath(t *testing.T, dir string) string {
 func canonicalCodexHooksJSON() string {
 	return `{"hooks":{
 		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-start","timeout":30}]}],
+		"SessionEnd":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-end","timeout":3}]}],
 		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}],
 		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]
@@ -452,6 +453,9 @@ func TestCheckCodexHookTrust_OKWhenAllTrusted(t *testing.T) {
 	require.NoError(t, os.MkdirAll(codexHome, 0o750))
 	configTOML := `[hooks.state."` + hooksPath + `:session_start:0:0"]
 trusted_hash = "sha256:aaa"
+
+[hooks.state."` + hooksPath + `:session_end:0:0"]
+trusted_hash = "sha256:eee"
 
 [hooks.state."` + hooksPath + `:user_prompt_submit:0:0"]
 trusted_hash = "sha256:bbb"
@@ -484,9 +488,12 @@ func TestCheckCodexHookTrust_ListsMissingEvents(t *testing.T) {
 	hooksPath := resolvedHooksPath(t, dir)
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
 	require.NoError(t, os.MkdirAll(codexHome, 0o750))
-	// Trust three of four — PostToolUse is the gap.
+	// Trust all but one — PostToolUse is the gap.
 	configTOML := `[hooks.state."` + hooksPath + `:session_start:0:0"]
 trusted_hash = "sha256:aaa"
+
+[hooks.state."` + hooksPath + `:session_end:0:0"]
+trusted_hash = "sha256:eee"
 
 [hooks.state."` + hooksPath + `:user_prompt_submit:0:0"]
 trusted_hash = "sha256:bbb"
@@ -572,6 +579,8 @@ func TestCheckCodexHookTrust_FlagsStaleHooksFile(t *testing.T) {
 
 	codexDir := filepath.Join(dir, ".codex")
 	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	// The install set of an older release: no PostToolUse, and no SessionEnd
+	// either — both post-date it.
 	staleHooksJSON := `{"hooks":{
 		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-start","timeout":30}]}],
 		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
@@ -601,8 +610,11 @@ trusted_hash = "sha256:ccc"
 
 	out := stdout.String()
 	require.Contains(t, out, "Codex hooks: OUT OF DATE")
+	require.Contains(t, out, "- session_end")
 	require.Contains(t, out, "- post_tool_use")
 	require.Contains(t, out, "entire enable")
+	// Trust stays quiet: every event the stale file actually declares is trusted,
+	// so only the out-of-date finding should fire.
 	require.NotContains(t, out, "Codex hook trust: REVIEW NEEDED")
 }
 

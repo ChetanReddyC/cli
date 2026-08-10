@@ -246,6 +246,7 @@ The `systemMessage` field can be used to display messages to the user via the ag
 
 - **SessionEnd is tightly budgeted:** 1s default, 3s hard cap, process tree killed on expiry. See "SessionEnd's timeout ceiling" above. This is the only Entire hook that cannot assume it will finish.
 - **SessionEnd needs Codex 0.146+:** Added 2026-07-17 (openai/codex#33895), first tagged in `rust-v0.146.0-alpha.3`. On older Codex the hook is simply never called, and such sessions are instead reclaimed by the exited-owner sweep in `entire status` / `entire doctor` (`session.State.OwnerExited`).
+- **SessionEnd must be trusted before it fires:** Codex silently skips hooks with no `trusted_hash` entry in the user's `config.toml`. Existing users have trusted the four older events but not `session_end`, so the hook does nothing until they approve it via `/hooks` inside Codex. `HookTrustGaps` and `MissingEntireHooks` both cover `session_end`, so `entire doctor` and the SessionStart banner say so — without that it would fail silently.
 - **`reason` carries no information:** always `"other"`, so a session ended by `/clear` is indistinguishable from one ended by quitting.
 - **Transcript may be null:** In `--ephemeral` mode, `transcript_path` is null. The integration handles this gracefully.
 - **No hooks fire under `-s read-only`:** verified against 0.147.0 — a `codex exec -s read-only` run produces no hook invocations at all, so no session is tracked. `-s workspace-write` fires the full set.
@@ -267,19 +268,36 @@ The `systemMessage` field can be used to display messages to the user via the ag
 
 Codex review runs via `codex exec --skip-git-repo-check --json [-m <model>] [-c model_reasoning_effort=<level>] -` (prompt on stdin).
 
-> **Stale premise — needs follow-up.** This integration was built on "`codex exec`
-> fires no lifecycle hooks". That is no longer true. Measured against
-> codex-cli 0.147.0, a `codex exec` run under a write-capable sandbox fires the
-> full set — `session-start`, `user-prompt-submit`, `post-tool-use`, `stop`,
-> `session-end` — and with `ENTIRE_REVIEW_*` set in the environment the resulting
-> session **is** tagged `kind: agent_review` with skills and prompt captured.
+> **Stale premise, and a live blocker — needs follow-up.** This integration was
+> built on "`codex exec` fires no lifecycle hooks". That is no longer true:
+> against codex-cli 0.147.0 a `codex exec` run fires the full set, and with
+> `ENTIRE_REVIEW_*` in the environment the session **is** tagged
+> `kind: agent_review` with skills and prompt captured.
 >
-> Caveat that keeps it from being a straight simplification: **hooks do not fire
-> under `-s read-only`**. `buildCodexReviewCmd` passes no `-s` flag, so whether a
-> review produces a tagged session depends on the user's default sandbox in
-> `config.toml`. The `run.Buffer` fallback below is therefore still required, but
-> it is no longer the *only* path — reworking review to prefer the tagged session
-> when one exists is deliberately left as separate work.
+> But an end-to-end `entire review` in a fresh repo still produced **zero** hooks
+> and no session ("review skills ran but findings were not persisted"). The gate
+> is **hook trust**, not the sandbox. Holding review's exact argv fixed and
+> varying one flag at a time:
+>
+> | added to review's argv | hooks | sessions |
+> |---|---|---|
+> | *(nothing — what review runs today)* | 0 | 0 |
+> | `--dangerously-bypass-hook-trust` | 5 | 1 |
+> | `-s workspace-write` | 0 | 0 |
+>
+> Codex silently skips hooks with no `trusted_hash` in the user's `config.toml`,
+> keyed per `<hooks.json path>:<event>:<group>:<handler>`, and `codex exec` is
+> non-interactive so it can never prompt. Codex review therefore only yields a
+> tagged session in a repo where the user already approved Entire's hooks from an
+> interactive Codex session — and after this change `session_end` is untrusted
+> even there, until re-approved (`entire doctor` now reports it).
+>
+> Separately, `-s read-only` suppresses hooks even when trust is bypassed, so the
+> sandbox is a second independent gate.
+>
+> The `run.Buffer` fallback below is therefore still required. Reworking review to
+> prefer a tagged session when one exists is left as separate work, and needs a
+> decision about trust bootstrapping first.
 
 - **Skills are passed verbatim, not paraphrased.** Codex injects its installed-skill catalog into every exec session and loads the matching `SKILL.md`; configured skills use codex's `$name` / `$plugin:name` form (`DiscoverReviewSkills` in `discovery.go`). Native `codex exec review` is not used — it rejects a prompt under a scope flag and can't carry Entire's scope/per-run/checkpoint context.
 - **Live tokens come from the rollout file, not stdout.** `codex exec --json` carries `usage` only on the terminal `turn.completed`, and a review is a single turn. `review_tokens.go` resolves the rollout transcript by `thread_id` (from the `thread.started` envelope), tails it (the same `~/.codex/.../rollout-*-<thread-id>.jsonl` documented under Transcript above), and emits cumulative `Tokens` per `token_count` event — the source codex's interactive UI reads.
