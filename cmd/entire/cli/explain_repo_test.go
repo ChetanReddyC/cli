@@ -342,3 +342,53 @@ func TestExplainCmd_RepoFlagValidation(t *testing.T) {
 		})
 	}
 }
+
+// Bugbot (PR #1942): the default no-summary hint tells the reader to run
+// `explain --generate`, which is rejected with --repo and impossible against a
+// read-only reader. A foreign checkpoint must say why instead of naming a
+// command that cannot succeed.
+func TestRunCrossRepoExplain_NoDeadGenerateHint(t *testing.T) {
+	withStubCrossRepoReader(t, &stubCrossRepoReader{
+		transcript: []byte(`{"type":"user","message":{"role":"user","content":"do the foreign thing"}}` + "\n"),
+	})
+
+	var out, errOut bytes.Buffer
+	require.NoError(t, runCrossRepoExplain(context.Background(), &out, &errOut, crossRepoExplainOptions{
+		repoFlag:     "acme/widgets",
+		target:       testAPICheckpointID.String(),
+		sessionIndex: -1,
+		verbose:      true,
+		noPager:      true,
+	}))
+
+	got := out.String()
+	assert.NotContains(t, got, "--generate", "must not advertise a flag that --repo rejects")
+	assert.Contains(t, got, "repo that owns it (acme/widgets)")
+}
+
+// The local path keeps its hint: the fix must be scoped to cross-repo reads.
+func TestFormatCheckpointOutput_LocalKeepsGenerateHint(t *testing.T) {
+	t.Parallel()
+
+	summary := &checkpoint.CheckpointSummary{CheckpointID: testAPICheckpointID}
+	content := &checkpoint.SessionContent{
+		Metadata: checkpoint.Metadata{CheckpointID: testAPICheckpointID, SessionID: "s"},
+		Prompts:  "do the local thing",
+	}
+	got := formatCheckpointOutput(context.Background(), summary, content, testAPICheckpointID, nil, checkpoint.Author{}, true, false, &bytes.Buffer{})
+	assert.Contains(t, got, "--generate", "the local hint is still actionable")
+}
+
+func TestCrossRepoReadSource(t *testing.T) {
+	t.Parallel()
+
+	_, ok := crossRepoReadSource(context.Background())
+	assert.False(t, ok, "an unmarked context is a local read")
+
+	src, ok := crossRepoReadSource(withCrossRepoRead(context.Background(), "acme/widgets"))
+	assert.True(t, ok)
+	assert.Equal(t, "acme/widgets", src)
+
+	_, ok = crossRepoReadSource(withCrossRepoRead(context.Background(), ""))
+	assert.False(t, ok, "an empty repo name must not count as a cross-repo read")
+}

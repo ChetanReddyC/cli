@@ -205,3 +205,81 @@ func TestResolveRepoCellTarget_JurisdictionLowercased(t *testing.T) {
 		t.Fatalf("target = %+v, want lowercased jurisdiction eu", target)
 	}
 }
+
+// Bugbot (PR #1942): cross-repo reads must take the repo_id and the cell from
+// the SAME placement. A mirror id is only resolvable by the cell holding that
+// placement, so pairing one placement's id with a cell picked another way (the
+// caller's home cell, which is what resolveRepoCellTarget falls back to for a
+// multi-region repo) asks a cell about an id it has never seen.
+func TestResolveRepoCellPlacement_PairsIDWithItsOwnCell(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
+		mirrors: []coreapi.Mirror{
+			{Repo: "widget", MirrorId: "mirror-eu", ClusterHost: "eu.entire.io", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusReady)},
+		},
+		clusters: euClusters(),
+	})
+	got, err := resolveRepoCellPlacement(context.Background(), "acme", "widget")
+	if err != nil {
+		t.Fatalf("resolveRepoCellPlacement: %v", err)
+	}
+	if got.RepoID != "mirror-eu" {
+		t.Errorf("RepoID = %q, want mirror-eu", got.RepoID)
+	}
+	if got.Target == nil || got.Target.Jurisdiction != "eu" || got.Target.BaseURL != euCellAPIURL {
+		t.Fatalf("Target = %+v, want the eu cell that holds mirror-eu", got.Target)
+	}
+}
+
+// A multi-region repo must still resolve to a real placement's cell. This is the
+// case resolveRepoCellTarget deliberately refuses (returning nil so the auth
+// layer routes to the caller's home cell) — for a repo_id-keyed read that
+// fallback is a wrong-cell 404, so this path picks a placement instead.
+func TestResolveRepoCellPlacement_MultiRegionPicksAPlacement(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
+		mirrors: []coreapi.Mirror{
+			{Repo: "widget", MirrorId: "mirror-eu", ClusterHost: "eu.entire.io", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusReady)},
+			{Repo: "widget", MirrorId: "mirror-us", ClusterHost: "us.entire.io", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusReady)},
+		},
+		clusters: euClusters(),
+	})
+	got, err := resolveRepoCellPlacement(context.Background(), "acme", "widget")
+	if err != nil {
+		t.Fatalf("resolveRepoCellPlacement: %v", err)
+	}
+	// Whichever placement is chosen, its id and its cell must agree.
+	wantJurisdiction := map[string]string{"mirror-eu": "eu", "mirror-us": "us"}[got.RepoID]
+	if wantJurisdiction == "" {
+		t.Fatalf("RepoID = %q, want one of the two placements", got.RepoID)
+	}
+	if got.Target == nil || got.Target.Jurisdiction != wantJurisdiction {
+		t.Fatalf("Target = %+v, want the %s cell to match %s", got.Target, wantJurisdiction, got.RepoID)
+	}
+}
+
+// An inactive placement can't serve the repo, so it must not be chosen.
+func TestResolveRepoCellPlacement_SkipsInactiveAndUnplaceable(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
+		mirrors: []coreapi.Mirror{
+			{Repo: "widget", MirrorId: "mirror-failed", ClusterHost: "eu.entire.io", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusFailed)},
+			// Not in the cluster catalog: unplaceable, so skip rather than fall
+			// back to a cell that doesn't know this id.
+			{Repo: "widget", MirrorId: "mirror-unknown", ClusterHost: "nowhere.entire.io", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusReady)},
+			{Repo: "widget", MirrorId: "mirror-eu", ClusterHost: "eu.entire.io", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusReady)},
+		},
+		clusters: euClusters(),
+	})
+	got, err := resolveRepoCellPlacement(context.Background(), "acme", "widget")
+	if err != nil {
+		t.Fatalf("resolveRepoCellPlacement: %v", err)
+	}
+	if got.RepoID != "mirror-eu" {
+		t.Errorf("RepoID = %q, want mirror-eu (the only active, placeable mirror)", got.RepoID)
+	}
+}
+
+func TestResolveRepoCellPlacement_NoMirror(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{clusters: euClusters()})
+	if _, err := resolveRepoCellPlacement(context.Background(), "acme", "widget"); err == nil {
+		t.Fatal("expected an error when the repo has no reachable mirror")
+	}
+}

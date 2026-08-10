@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -65,6 +66,14 @@ func resolveRepoCellTarget(ctx context.Context, fullName, ulid string) *auth.Cel
 		return nil
 	}
 
+	return cellTargetForClusterHost(ctx, c, clusterHost)
+}
+
+// cellTargetForClusterHost maps a known cluster host to a cell apiUrl +
+// jurisdiction via the coreapi cluster catalog, the authoritative source for a
+// jurisdiction's cell URL. Returns nil for every unresolvable case so callers
+// fall back to home-jurisdiction routing.
+func cellTargetForClusterHost(ctx context.Context, c cellCoreClient, clusterHost string) *auth.CellTarget {
 	clusters, err := c.ListClusters(ctx)
 	if err != nil {
 		logging.Debug(ctx, "cell target: list clusters failed, using home-jurisdiction routing", "error", err.Error())
@@ -85,6 +94,55 @@ func resolveRepoCellTarget(ctx context.Context, fullName, ulid string) *auth.Cel
 		return nil
 	}
 	return &auth.CellTarget{BaseURL: apiURL, Jurisdiction: jurisdiction}
+}
+
+// repoCellPlacement is one active mirror placement: the id entire-api keys
+// repo-scoped routes on, paired with the cell that actually holds it.
+type repoCellPlacement struct {
+	// RepoID is the mirror id, which entire-api uses as its repo_id.
+	RepoID string
+	// Target is the cell hosting THIS placement.
+	Target *auth.CellTarget
+}
+
+// resolveRepoCellPlacement resolves a GitHub repo to one active placement's
+// (repo_id, cell) pair for repo-scoped cell reads.
+//
+// The pair must come from the same placement: each placement has its own mirror
+// id, and only the cell hosting that placement can resolve it. Taking the id
+// from one placement and routing to a cell chosen some other way — the caller's
+// home cell, say — asks a cell about an id it has never seen, which comes back
+// as an indistinguishable 404. That is also why this does not reuse
+// resolveRepoCellTarget's owner/repo path: that one deliberately refuses to pick
+// among multi-region placements and falls back to the home cell, which is
+// exactly the mismatch to avoid here.
+func resolveRepoCellPlacement(ctx context.Context, owner, repo string) (repoCellPlacement, error) {
+	c, err := newCellCoreClient()
+	if err != nil {
+		return repoCellPlacement{}, fmt.Errorf("control plane unavailable: %w", err)
+	}
+	mirrors, err := listMirrorsForRepo(ctx, c, mirrorCloneProviderGitHub, strings.ToLower(owner), strings.ToLower(repo))
+	if err != nil {
+		return repoCellPlacement{}, fmt.Errorf("list mirrors for %s/%s: %w", owner, repo, err)
+	}
+	for i := range mirrors {
+		if !isActiveMirror(mirrors[i]) {
+			continue
+		}
+		repoID := strings.TrimSpace(mirrors[i].MirrorId)
+		clusterHost := strings.TrimSpace(mirrors[i].ClusterHost)
+		if repoID == "" || clusterHost == "" {
+			continue
+		}
+		target := cellTargetForClusterHost(ctx, c, clusterHost)
+		if target == nil {
+			// The catalog can't place this cluster; try the next placement
+			// rather than falling back to a cell that doesn't know this id.
+			continue
+		}
+		return repoCellPlacement{RepoID: repoID, Target: target}, nil
+	}
+	return repoCellPlacement{}, fmt.Errorf("no reachable Entire mirror for %s/%s", owner, repo)
 }
 
 // resolveRepoClusterHost finds the public cluster host that owns the repo. It

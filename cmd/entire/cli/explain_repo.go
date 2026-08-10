@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -28,17 +29,40 @@ type crossRepoReader interface {
 // tests can substitute a fake cell (see explain_repo_test.go).
 var newCrossRepoReader = func(ctx context.Context, insecureHTTP bool, owner, repo string) (crossRepoReader, error) {
 	ownerRepo := owner + "/" + repo
-	repoID, err := resolveRepoIDFromMirror(ctx, mirrorCloneProviderGitHub, owner, repo)
+	// Resolve the repo_id and the cell together, from one placement: a mirror id
+	// is only resolvable by the cell holding that placement, so a
+	// separately-chosen cell (the caller's home cell, for a multi-region repo)
+	// would be asked about an id it has never seen and answer 404.
+	placement, err := resolveRepoCellPlacement(ctx, owner, repo)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", ownerRepo, err)
 	}
-	client, err := NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, ownerRepo, "")
+	client, err := auth.NewEntireAPICellClient(ctx, insecureHTTP, placement.Target)
 	if err != nil {
 		// NewEntireAPICellClient already returns user-facing, context-rich
 		// errors (login hint, discovery guidance); surface them verbatim.
-		return nil, err
+		return nil, err //nolint:wrapcheck // pass through contextual auth errors
 	}
-	return newAPICheckpointReader(client, repoID, ownerRepo), nil
+	return newAPICheckpointReader(client, placement.RepoID, ownerRepo), nil
+}
+
+// crossRepoReadKey marks a context as rendering a checkpoint read from another
+// repo. Context-scoped like gitrepo.WithStatusCache / checkpoint's remote-list
+// discovery, so the renderers can adjust their guidance without an extra
+// positional parameter through every formatCheckpointOutput call site.
+type crossRepoReadKey struct{}
+
+// withCrossRepoRead marks ctx as reading ownerRepo's checkpoint from that
+// repo's cell.
+func withCrossRepoRead(ctx context.Context, ownerRepo string) context.Context {
+	return context.WithValue(ctx, crossRepoReadKey{}, ownerRepo)
+}
+
+// crossRepoReadSource returns the repo a checkpoint is being read from when the
+// current render is a cross-repo one.
+func crossRepoReadSource(ctx context.Context) (string, bool) {
+	ownerRepo, ok := ctx.Value(crossRepoReadKey{}).(string)
+	return ownerRepo, ok && ownerRepo != ""
 }
 
 // crossRepoExplainOptions carries what `explain --repo` needs to render a
@@ -145,6 +169,9 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 	if err != nil {
 		return err
 	}
+	// Marked for the renderers: a foreign checkpoint cannot be written to, so
+	// they must not offer actions that only work in the owning repo.
+	ctx = withCrossRepoRead(ctx, ownerRepo)
 
 	stop := startSpinner(errW, fmt.Sprintf("Reading checkpoint %s from %s", cid, ownerRepo))
 	// Read directly rather than through checkpoint.ReadCheckpoint: the helper
