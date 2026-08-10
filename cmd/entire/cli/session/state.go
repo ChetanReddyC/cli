@@ -509,15 +509,23 @@ func (s *State) OwnerLiveness() proclive.Liveness {
 	return proclive.Check(*s.Owner)
 }
 
-// OwnerExited reports true when this session is ACTIVE but its owning agent
-// process is gone — exited cleanly, crashed, was killed, or the machine
-// rebooted — without a SessionStop hook firing. Unlike IsStuckActive (a
-// time-based heuristic), this is detected immediately, regardless of how
-// recently the session interacted. It returns false when liveness is Unknown
-// (no owner recorded, cross-host state, or an unsupported platform) so behavior
-// degrades to the StuckActiveThreshold timeout.
+// OwnerExited reports true when this session's owning agent process is gone —
+// exited cleanly, crashed, was killed, or the machine rebooted — without a
+// SessionStop hook firing. Unlike IsStuckActive (a time-based heuristic), this
+// is detected immediately, regardless of how recently the session interacted.
+// It returns false when liveness is Unknown (no owner recorded, cross-host
+// state, or an unsupported platform) so behavior degrades to the
+// StuckActiveThreshold timeout.
+//
+// It deliberately covers IDLE as well as ACTIVE. An agent that finishes its
+// last turn and then quits leaves the session IDLE, so gating on ACTIVE alone
+// missed precisely the sessions left behind by agents with no session-end hook
+// (Codex before 0.146) or killed before that hook could run: they lingered as
+// "active" in `entire status` until StaleSessionThreshold deleted the state
+// file outright, discarding pending checkpoint work instead of condensing it.
+// Only ENDED sessions are excluded — they are already finalized.
 func (s *State) OwnerExited() bool {
-	if !s.Phase.IsActive() {
+	if s.Phase == PhaseEnded || s.EndedAt != nil {
 		return false
 	}
 	return s.OwnerLiveness() == proclive.LivenessDead

@@ -76,6 +76,53 @@ func TestFinalizeExitedSessions(t *testing.T) {
 	}
 }
 
+// TestFinalizeExitedSessions_IdleSession covers the shape agents without a
+// session-end hook leave behind: the agent finished its last turn (so the
+// session is IDLE, not ACTIVE) and then quit. Codex before 0.146 had no
+// SessionEnd hook at all, and any agent can be killed before its hook runs.
+// These must be finalized by the sweep, not left lingering as "active".
+//
+// Not parallel: setupAttachTestRepo uses t.Chdir.
+func TestFinalizeExitedSessions_IdleSession(t *testing.T) {
+	setupAttachTestRepo(t)
+	ctx := context.Background()
+
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	idleExited := &session.State{
+		SessionID: "idle-exited-session",
+		Phase:     session.PhaseIdle,
+		StartedAt: time.Now(),
+		Owner:     &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
+	}
+	if err := store.Save(ctx, idleExited); err != nil {
+		t.Fatal(err)
+	}
+
+	states, err := store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if n := finalizeExitedSessions(ctx, states); n != 1 {
+		t.Fatalf("finalizeExitedSessions = %d, want 1", n)
+	}
+
+	got, err := store.Load(ctx, "idle-exited-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.EndedAt == nil {
+		t.Error("idle exited session EndedAt = nil, want set")
+	}
+	if got.Phase != session.PhaseEnded {
+		t.Errorf("idle exited session Phase = %q, want %q", got.Phase, session.PhaseEnded)
+	}
+}
+
 // TestFinalizeExitedSessions_RevalidatesUnderLock guards against the
 // time-of-check/time-of-use race: the sweep must re-check OwnerExited on the
 // freshly-loaded state, not act on a stale list snapshot. Here the on-disk

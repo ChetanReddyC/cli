@@ -23,6 +23,33 @@ func TestOwnerExited_DeadOwnerActiveIsTrue(t *testing.T) {
 	}
 }
 
+func TestOwnerExited_DeadOwnerIdleIsTrue(t *testing.T) {
+	t.Parallel()
+	// The Codex shape: the agent finished its last turn (ACTIVE -> IDLE) and
+	// then quit without firing a session-end hook. Such a session must still be
+	// reclaimable, or it lingers as "active" in `entire status` until
+	// StaleSessionThreshold hard-deletes it.
+	exitedOwner := &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"}
+	s := &State{Phase: PhaseIdle, Owner: exitedOwner}
+	if !s.OwnerExited() {
+		t.Error("OwnerExited(idle, dead owner) = false, want true")
+	}
+}
+
+func TestOwnerExited_LiveOwnerIdleIsFalse(t *testing.T) {
+	t.Parallel()
+	// An idle session whose agent is still running (agent sitting at its prompt
+	// between turns) must never be swept — that is the common case.
+	id, ok := proclive.ResolveOwner()
+	if !ok {
+		t.Skip("no stable owner resolved in this environment")
+	}
+	s := &State{Phase: PhaseIdle, Owner: &id}
+	if s.OwnerExited() {
+		t.Error("OwnerExited(idle, live owner) = true, want false")
+	}
+}
+
 func TestOwnerExited_LiveOwnerActiveIsFalse(t *testing.T) {
 	t.Parallel()
 	// A faithfully-captured identity of a live process must NOT read as exited.
