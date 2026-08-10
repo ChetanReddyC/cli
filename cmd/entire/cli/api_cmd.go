@@ -222,7 +222,7 @@ func expandAPIPlaceholders(ctx context.Context, s string) (string, error) {
 		s = strings.ReplaceAll(s, "{repo}", repo)
 	}
 	if needRepoID {
-		id, err := resolveCurrentRepoID(ctx, forge, owner, repo)
+		id, err := resolveRepoIDFromMirror(ctx, forge, owner, repo)
 		if err != nil {
 			return "", err
 		}
@@ -231,10 +231,12 @@ func expandAPIPlaceholders(ctx context.Context, s string) (string, error) {
 	return s, nil
 }
 
-// resolveCurrentRepoID resolves a repo's Entire ULID from its mirror (the mirror
-// id, which entire-api uses as the repo_id), given its already-resolved origin
-// coordinates. Picks the first active placement.
-func resolveCurrentRepoID(ctx context.Context, forge, owner, repo string) (string, error) {
+// resolveRepoIDFromMirror resolves a repo's Entire ULID from its mirror (the
+// mirror id, which entire-api uses as the repo_id), given its already-resolved
+// coordinates. Picks the first active placement. Used for the current repo by
+// `entire api`'s {repo_id} placeholder and for a foreign repo by cross-repo
+// `checkpoint explain --repo`.
+func resolveRepoIDFromMirror(ctx context.Context, forge, owner, repo string) (string, error) {
 	if f := strings.ToLower(strings.TrimSpace(forge)); f != "gh" && f != mirrorCloneProviderGitHub {
 		return "", fmt.Errorf("{repo_id} needs a GitHub repo; origin forge is %q", forge)
 	}
