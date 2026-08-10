@@ -20,7 +20,7 @@ func TestAgentStrategyComposition(t *testing.T) {
 
 	env := NewFeatureBranchEnv(t)
 	// Get agent and strategy
-	ag, err := agent.Get("claude-code")
+	ag, err := agent.Get(agentClaudeCode)
 	if err != nil {
 		t.Fatalf("Get(claude-code) error = %v", err)
 	}
@@ -76,7 +76,10 @@ func TestAgentGetSessionDir(t *testing.T) {
 	env := NewTestEnv(t)
 	env.InitRepo()
 
-	ag, _ := agent.Get("claude-code")
+	ag, err := agent.Get(agentClaudeCode)
+	if err != nil {
+		t.Fatalf("Get(claude-code) error = %v", err)
+	}
 
 	// With test override
 	sessionDir, err := ag.GetSessionDir(env.RepoDir)
@@ -97,7 +100,10 @@ func TestAgentGetSessionDir(t *testing.T) {
 func TestAgentFormatResumeCommand(t *testing.T) {
 	t.Parallel()
 
-	ag, _ := agent.Get("claude-code")
+	ag, err := agent.Get(agentClaudeCode)
+	if err != nil {
+		t.Fatalf("Get(claude-code) error = %v", err)
+	}
 
 	cmd := ag.FormatResumeCommand("test-session-123")
 	expected := "claude -r test-session-123"
@@ -115,7 +121,7 @@ func TestSetupAgentFlag(t *testing.T) {
 	env.InitRepo()
 
 	// Run enable with --agent flag
-	output := env.RunCLI("enable", "--agent", "claude-code")
+	output := env.RunCLI("enable", "--agent", agentClaudeCode)
 	if strings.Contains(output, "error") || strings.Contains(output, "Error") {
 		t.Fatalf("enable --agent claude-code failed\nOutput: %s", output)
 	}

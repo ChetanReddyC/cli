@@ -669,15 +669,6 @@ func LoadClonePreferences(ctx context.Context) (*ClonePreferences, error) {
 	return loadClonePreferencesFromFile(path)
 }
 
-// SaveClonePreferences saves clone-local preferences to the git common dir.
-func SaveClonePreferences(ctx context.Context, prefs *ClonePreferences) error {
-	path, err := ClonePreferencesPath(ctx)
-	if err != nil {
-		return err
-	}
-	return saveClonePreferencesToFile(prefs, path)
-}
-
 // ModifyClonePreferences runs a read-modify-write under the preferences lock.
 func ModifyClonePreferences(ctx context.Context, fn func(*ClonePreferences) error) error {
 	path, err := ClonePreferencesPath(ctx)
@@ -1416,6 +1407,47 @@ func (c *CheckpointRemoteConfig) Owner() string {
 	return parts[0]
 }
 
+// HasCheckpointRemoteKey reports whether a checkpoint_remote entry exists in
+// strategy options at all — deliberately including malformed entries that
+// GetCheckpointRemote rejects (it returns nil for absent AND malformed, so it
+// cannot distinguish "no intent" from "botched intent"). Presence in any form
+// means the user intends a checkpoint remote.
+func (s *EntireSettings) HasCheckpointRemoteKey() bool {
+	if s.StrategyOptions == nil {
+		return false
+	}
+	_, ok := s.StrategyOptions["checkpoint_remote"]
+	return ok
+}
+
+// CheckpointRemoteIsLocalOnly reports whether a checkpoint_remote entry is
+// present in .entire/settings.local.json.
+//
+// That file is gitignored and per-clone, so a checkpoint_remote living there
+// cannot have arrived by cloning or forking someone else's project — it is this
+// developer's own explicit choice. Callers use this to distinguish "I configured
+// where my checkpoints go" from "I inherited a committed setting that points at
+// the upstream project's checkpoint repo".
+//
+// Best-effort: an unreadable or malformed local file reports false, which is the
+// conservative answer (callers then fall back to weaker ownership signals).
+func CheckpointRemoteIsLocalOnly(ctx context.Context) bool {
+	_, raw, exists, err := LoadLocalRaw(ctx)
+	if err != nil || !exists {
+		return false
+	}
+	optionsRaw, ok := raw["strategy_options"]
+	if !ok {
+		return false
+	}
+	var options map[string]json.RawMessage
+	if err := json.Unmarshal(optionsRaw, &options); err != nil {
+		return false
+	}
+	_, ok = options["checkpoint_remote"]
+	return ok
+}
+
 // GetCheckpointRemote returns the configured checkpoint remote.
 // Expects a structured object: {"provider": "github", "repo": "org/repo"}.
 // Returns nil if not configured, wrong type, or missing required fields.
@@ -1440,6 +1472,22 @@ func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
 		return nil
 	}
 	return &CheckpointRemoteConfig{Provider: provider, Repo: repo}
+}
+
+// GetCheckpointPushRemote returns the configured checkpoint push remote name.
+// Stored in strategy_options.checkpoint_push_remote as a plain git remote
+// name (e.g. "origin", "private"). This selects WHICH configured remote
+// carries checkpoint data — distinct from checkpoint_remote, which derives a
+// dedicated URL. Returns "" if unset, empty, or not a string.
+func (s *EntireSettings) GetCheckpointPushRemote() string {
+	if s.StrategyOptions == nil {
+		return ""
+	}
+	val, ok := s.StrategyOptions["checkpoint_push_remote"].(string)
+	if !ok {
+		return ""
+	}
+	return val
 }
 
 // IsFilteredFetchesEnabled checks if fetches should use --filter=blob:none.

@@ -49,6 +49,7 @@ const (
 	flagLocalDev             = "local-dev"
 	flagSearchSkill          = "search-skill"
 	flagAgentHelpSkill       = "agent-help-skill"
+	flagImportHistory        = "import-history"
 	checkpointProviderGitHub = "github"
 )
 
@@ -78,8 +79,13 @@ type EnableOptions struct {
 	// presentation of the final state (commit, push, done).
 	SuppressDoneMessage bool
 	Yes                 bool
-	SearchSkill         bool
-	AgentHelpSkill      bool
+	// ImportHistory opts into importing the selected agents' pre-existing
+	// session history during first-time setup. Deliberately NOT implied by
+	// Yes: ingesting a month of local transcripts is not a setup default (see
+	// maybeOfferSessionImport).
+	ImportHistory  bool
+	SearchSkill    bool
+	AgentHelpSkill bool
 }
 
 // applyStrategyOptions sets strategy_options on settings from CLI flags.
@@ -785,7 +791,7 @@ Examples:
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Reinstall the Entire git hook")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: branch (default) or refs (one git ref per checkpoint)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
 	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, pi, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears (falls back to 5m default).")
@@ -898,16 +904,42 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				return NewSilentError(errors.New("missing agent name"))
 			}
 
+			// Resolve --agent before logging starts, so a bad agent name is
+			// rejected without touching the repo (see below).
+			var selectedAgent agent.Agent
 			if agentName != "" {
 				ag, err := agent.Get(types.AgentName(agentName))
 				if err != nil {
 					printWrongAgentError(cmd.ErrOrStderr(), agentName)
 					return NewSilentError(errors.New("wrong agent name"))
 				}
+				selectedAgent = ag
+			}
+
+			// Route setup's logging to .entire/logs/ like every other command.
+			// Without Init the package logger stays nil and every logging.*
+			// call under setup — agent detection, hook install, session import,
+			// the checkpoint layer's push/remote warnings — falls back to
+			// slog.Default(), which prints them straight onto the user's
+			// terminal mid-flow (and writes nothing to the log file).
+			//
+			// Placement is load-bearing in both directions: after the git-repo
+			// check above so it cannot create .entire/logs/ outside a
+			// repository, and after every check that can still reject this
+			// invocation, because Init CREATES .entire/logs/ — a rejected
+			// enable must leave a previously untouched repo untouched rather
+			// than seeding it with an untracked directory Entire's gitignore
+			// entry does not exist yet to cover.
+			logging.SetLogLevelGetter(GetLogLevel)
+			if err := logging.Init(ctx, ""); err == nil {
+				defer logging.Close()
+			}
+
+			if selectedAgent != nil {
 				// --agent is a targeted operation: set up this specific agent without
 				// affecting other agents. Unlike the interactive path, it does not
 				// uninstall hooks for other previously-enabled agents.
-				return setupAgentHooksNonInteractive(ctx, cmd.OutOrStdout(), ag, opts)
+				return setupAgentHooksNonInteractive(ctx, cmd.OutOrStdout(), selectedAgent, opts)
 			}
 
 			// Any setup-mutating flags should behave like `configure` on repos that
@@ -931,12 +963,13 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: branch (default) or refs (one git ref per checkpoint)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
 	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit, and push; then enable all agents and accept telemetry)")
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit, and push; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
+	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
 	// Bootstrap flags for non-git-repo folders.
@@ -1096,6 +1129,11 @@ To completely remove Entire integrations from this repository, use --uninstall:
 // flag or reports current status.
 func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts EnableOptions) error {
 	w := cmd.OutOrStdout()
+	// This path is by definition not a first run, so it never reaches the
+	// import offer. Say so rather than dropping the flag silently.
+	if opts.ImportHistory {
+		noteImportHistoryNotApplicable(w)
+	}
 	usedSetupFlow := enableUsesSetupFlow(cmd, "")
 	if usedSetupFlow {
 		if hasStrategyFlags(cmd) {
@@ -1239,17 +1277,8 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	opts.applyStrategyOptions(settings)
 
-	// Checkpoint storage backend. An explicit --checkpoint-backend always wins.
-	// Otherwise, on the first interactive setup, offer a choice (default: branch).
-	// Non-interactive or --yes first runs keep the default git-branch backend.
-	if opts.CheckpointBackend == "" && firstRun && !opts.Yes && interactive.CanPromptInteractively() {
-		chosen, err := promptCheckpointBackend(ctx, w)
-		if err != nil {
-			return err
-		}
-		opts.CheckpointBackend = chosen // "" keeps the default (or cancelled) backend
-	}
-	if err := applyCheckpointBackendFlag(settings, opts.CheckpointBackend); err != nil {
+	backend := resolveFirstRunCheckpointBackend(opts, firstRun)
+	if err := applyCheckpointBackendFlag(settings, backend); err != nil {
 		return err
 	}
 
@@ -1350,6 +1379,8 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		}
 	}
 
+	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
+
 	return nil
 }
 
@@ -1359,6 +1390,40 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 		fmt.Fprintf(w, "Agents: %s\n", strings.Join(displayNames, ", "))
 	}
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
+	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
+}
+
+// resolveFirstRunCheckpointBackend decides the checkpoint storage backend
+// the setup flow writes. An explicit --checkpoint-backend always wins;
+// otherwise a first run takes the git-refs default silently (branch remains
+// selectable via --checkpoint-backend branch). The choice is written
+// explicitly into the new settings file, and the config-less runtime
+// fallback stays git-branch so existing repos are untouched. The default is
+// empty — write nothing — while ENTIRE_CHECKPOINTS_PRIMARY is active
+// (firstRunCheckpointBackendDefault returns ""): the env fully replaces
+// settings, so persisting a default would only write diverging config.
+func resolveFirstRunCheckpointBackend(opts EnableOptions, firstRun bool) string {
+	if opts.CheckpointBackend != "" {
+		return opts.CheckpointBackend
+	}
+	if firstRun {
+		return firstRunCheckpointBackendDefault()
+	}
+	return ""
+}
+
+// firstRunCheckpointBackendDefault is the backend written on first-time
+// setups when --checkpoint-backend wasn't passed: the git-refs store (a
+// storage-topology question is unanswerable during first-time setup). Empty —
+// write nothing — while the ENTIRE_CHECKPOINTS_PRIMARY override is active:
+// the env fully replaces any settings block, so persisting a default here
+// would write config that diverges from the backend actually in use (and
+// break harnesses that pin git-branch via the env).
+func firstRunCheckpointBackendDefault() string {
+	if os.Getenv(settings.EnvCheckpointsPrimary) != "" {
+		return ""
+	}
+	return checkpointBackendRefsAlias
 }
 
 // runEnable flips the enabled flag to true in the scope chosen by the caller
@@ -1863,7 +1928,12 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	opts.applyStrategyOptions(targetSettings)
 
-	// Apply an explicit --checkpoint-backend (no prompt on this non-interactive path).
+	// Checkpoint storage backend: an explicit --checkpoint-backend wins; first
+	// runs otherwise get the git-refs backend written explicitly, matching the
+	// interactive setup path (runEnableInteractive).
+	if opts.CheckpointBackend == "" && firstRun {
+		opts.CheckpointBackend = firstRunCheckpointBackendDefault()
+	}
 	if err := applyCheckpointBackendFlag(targetSettings, opts.CheckpointBackend); err != nil {
 		return err
 	}

@@ -43,34 +43,45 @@ With Entire, you can:
 
 ## Quick Start
 
+### macOS and Linux
+
+Install with Homebrew:
+
 ```bash
-# To use Homebrew, first tap:
 brew tap entireio/tap
 brew trust entireio/tap
+brew install --cask entire            # stable
+# brew install --cask entire@nightly  # or nightly
+```
 
-# Install stable via Homebrew
-brew install --cask entire
+Or with the install script:
 
-# Or install nightly via Homebrew
-brew install --cask entire@nightly
+```bash
+curl -fsSL https://entire.io/install.sh | bash                          # stable
+# curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly  # or nightly
+```
 
-# Or install stable via install.sh
-curl -fsSL https://entire.io/install.sh | bash
+### Windows
 
-# Or install nightly via install.sh
-curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly
+Install with Scoop:
 
-# Or install stable via Scoop (Windows)
+```powershell
 scoop bucket add entire https://github.com/entireio/scoop-bucket.git
 scoop install entire/cli
+```
 
-# Or install via Go (development/manual setup)
+### Go (development/manual setup)
+
+```bash
 go install github.com/entireio/cli/cmd/entire@latest
 
-# Linux: Add Go binaries to PATH (add to ~/.zshrc or ~/.bashrc if not already configured)
+# Add Go binaries to PATH (add to ~/.zshrc or ~/.bashrc if not already configured)
 export PATH="$HOME/go/bin:$PATH"
+```
 
-# Enable in your project
+### Enable in your project
+
+```bash
 cd your-project && entire enable
 
 # Check status
@@ -432,7 +443,8 @@ Entire derives the git URL automatically using the same protocol (SSH or HTTPS) 
 
 - Fetch the checkpoint branch locally if it exists on the remote but not locally (one-time)
 - Push `entire/checkpoints/v1` to the checkpoint repo instead of your default push remote
-- Skip pushing if a fork is detected (push remote owner differs from checkpoint repo owner)
+- Ignore the setting if it looks inherited rather than yours, and push checkpoints to your own push remote instead. `checkpoint_remote` is normally committed in `.entire/settings.json`, so forking a project inherits it — without this, a contributor's session data would be pushed into the upstream project's checkpoint repo. A setting is treated as yours when it lives in the gitignored `.entire/settings.local.json`, or when your `origin` remote is owned by the same account or org as the checkpoint repo
+- If your checkpoint repo is owned by a different account or org than `origin`, configure it in `.entire/settings.local.json` so it is always honored
 - If the remote is unreachable, warn and continue without blocking your main push
 
 #### `ENTIRE_CHECKPOINT_TOKEN`
@@ -477,7 +489,7 @@ Local settings override project settings field-by-field. When you run `entire st
 
 ### Agent-Specific Steps & Limitations
 
-- When enabling Entire for Codex, the command will also create or update `.codex/config.toml` with `hooks = true` to enable Codex hooks. If you configure Codex manually, make sure this flag is set in your `.codex/config.toml`. Or select Codex from the interactive agent picker when running `entire enable`.
+- Codex hooks are enabled by default (codex-cli 0.124.0+), so enabling Entire for Codex only installs `.codex/hooks.json` — no `config.toml` is needed and Entire never creates one. If an older Entire version left a `.codex/config.toml` behind and your repo lives inside `~/.codex/agents`, delete that file to stop Codex's "malformed agent role definition" startup warning.
 - Entire supports Cursor IDE and Cursor Agent CLI tool. Commands (`doctor`, `status` etc.) work the same as all other agents.
 - Entire supports Copilot CLI, but not Copilot in VS Code, in other IDEs, or on github.com.
 - Entire supports Pi coding agent (Preview). Pi uses a TypeScript extension instead of a JSON hook config. Subagent capture is not currently available.
