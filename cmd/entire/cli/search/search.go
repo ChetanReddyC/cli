@@ -379,6 +379,23 @@ func (r *Result) ResultTitle() string {
 	return r.rawString("title", "name", "fullName")
 }
 
+// ResultDescription returns the repo description for raw-payload rows
+// (searcher.RepoResult). Typed rows return "" — rawFields is never populated
+// for them.
+func (r *Result) ResultDescription() string {
+	return r.rawString("description")
+}
+
+// ResultCheckpointCount returns the indexed checkpoint count for raw-payload
+// repo rows (searcher.RepoResult), 0 elsewhere.
+func (r *Result) ResultCheckpointCount() int {
+	var n int
+	if err := json.Unmarshal(r.rawFields["checkpointCount"], &n); err != nil {
+		return 0
+	}
+	return n
+}
+
 // TypeCounts holds per-type result counts.
 type TypeCounts struct {
 	Repos       int `json:"repos"`

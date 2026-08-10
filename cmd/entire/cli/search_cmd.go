@@ -55,7 +55,8 @@ Run without arguments to open an interactive search. Results are
 displayed in an interactive table. Use --json for machine-readable output,
 and add --compact for a trimmed per-result shape suited to agents (implies
 --json): id, type, repo, branch, author, date, files touched, score, match
-snippet, and a truncated title instead of the full prompt. Fetch full detail
+snippet, and a truncated title instead of the full prompt (repo hits add
+description and checkpoint count). Fetch full detail
 for a single result with 'entire checkpoint explain <id>', or add --full to
 that command to pull the checkpoint's entire session transcript.
 
@@ -1012,11 +1013,33 @@ type compactSearchHit struct {
 	Date         string   `json:"date,omitempty"`
 	Title        string   `json:"title"`
 	FilesTouched []string `json:"filesTouched,omitempty"`
-	Score        float64  `json:"score"`
+	// Description and CheckpointCount only appear on repo rows — without them
+	// a repo hit is just {id, repo, title, score}, too thin for the skill's
+	// "summarize from the compact fields alone" instruction.
+	Description     string  `json:"description,omitempty"`
+	CheckpointCount int     `json:"checkpointCount,omitempty"`
+	Score           float64 `json:"score"`
 	// Snippet is the matched text (the title is just the commit subject or
 	// prompt head) — it's what lets an agent pick which hit to explain.
 	Snippet   string `json:"snippet,omitempty"`
 	MatchType string `json:"matchType,omitempty"`
+}
+
+// compactSnippet drops a truncated snippet that duplicates the truncated
+// title. When a checkpoint has no commit subject its title falls back to the
+// prompt, and the backend's snippet for that row is the prompt's first
+// indexed chunk ("Prompt: " + the same text) — the hit would carry the same
+// 200 runes twice (~20% of a typical compact payload). The snippet is a
+// duplicate when, after stripping the indexer's "Prompt: " prefix and either
+// side's truncation ellipsis, it is a prefix of the title; a later-chunk
+// snippet fails that test and is kept, since it shows where the match landed.
+func compactSnippet(title, snippet string) string {
+	s := strings.TrimSuffix(strings.TrimPrefix(snippet, "Prompt: "), "…")
+	t := strings.TrimSuffix(title, "…")
+	if t != "" && strings.HasPrefix(t, s) {
+		return ""
+	}
+	return snippet
 }
 
 // writeSearchCompactJSON writes client-side paginated search results as
@@ -1034,17 +1057,20 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int)
 		if org := r.ResultOrg(); org != "" && repo != "" {
 			repo = org + "/" + repo
 		}
+		title := truncateOneLine(r.ResultTitle(), compactTitleMaxLen)
 		hit := compactSearchHit{
-			ID:        r.ResultID(),
-			Type:      r.Type,
-			Repo:      repo,
-			Branch:    r.ResultBranch(),
-			Author:    r.ResultAuthor(),
-			Date:      r.ResultCreatedAt(),
-			Title:     truncateOneLine(r.ResultTitle(), compactTitleMaxLen),
-			Score:     r.Meta.Score,
-			Snippet:   truncateOneLine(r.Meta.Snippet, compactTitleMaxLen),
-			MatchType: r.Meta.MatchType,
+			ID:              r.ResultID(),
+			Type:            r.Type,
+			Repo:            repo,
+			Branch:          r.ResultBranch(),
+			Author:          r.ResultAuthor(),
+			Date:            r.ResultCreatedAt(),
+			Title:           title,
+			Description:     r.ResultDescription(),
+			CheckpointCount: r.ResultCheckpointCount(),
+			Score:           r.Meta.Score,
+			Snippet:         compactSnippet(title, truncateOneLine(r.Meta.Snippet, compactTitleMaxLen)),
+			MatchType:       r.Meta.MatchType,
 		}
 		if r.Checkpoint != nil {
 			hit.FilesTouched = r.Checkpoint.FilesTouched

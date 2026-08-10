@@ -155,7 +155,7 @@ func TestWriteSearchCompactJSON_RepoAndPRRowsKeepIdentifyingFields(t *testing.T)
 	t.Parallel()
 
 	wire := `{"results":[
-		{"type":"repo","data":{"id":"01JREPO","name":"backend","org":"acme","fullName":"acme/backend"},"searchMeta":{"score":0.9}},
+		{"type":"repo","data":{"id":"01JREPO","name":"backend","org":"acme","fullName":"acme/backend","description":"Backend services","checkpointCount":18},"searchMeta":{"score":0.9}},
 		{"type":"pr","data":{"id":"pr-9","title":"Fix login retry","repo":"backend","userLogin":"alice"},"searchMeta":{"score":0.5}}
 	],"total":2,"page":1}`
 	var resp search.Response
@@ -173,6 +173,8 @@ func TestWriteSearchCompactJSON_RepoAndPRRowsKeepIdentifyingFields(t *testing.T)
 		`"id": "01JREPO"`,
 		`"repo": "acme/backend"`,
 		`"title": "backend"`,
+		`"description": "Backend services"`,
+		`"checkpointCount": 18`,
 		`"id": "pr-9"`,
 		`"title": "Fix login retry"`,
 		`"author": "alice"`,
@@ -184,6 +186,67 @@ func TestWriteSearchCompactJSON_RepoAndPRRowsKeepIdentifyingFields(t *testing.T)
 	// The owner must never be doubled when the payload carries a qualified fullName.
 	if strings.Contains(output, "acme/acme/") {
 		t.Errorf("compact output doubled the repo owner:\n%s", output)
+	}
+}
+
+// A checkpoint with no commit subject titles itself with the prompt, and the
+// backend's snippet for that row is the prompt's first indexed chunk
+// ("Prompt: " + the same text) — emitting both would carry the same 200 runes
+// twice. The duplicate snippet is dropped; a snippet from a later chunk (not
+// a title prefix) survives because it shows where the match landed.
+func TestWriteSearchCompactJSON_DropsSnippetDuplicatingTitle(t *testing.T) {
+	t.Parallel()
+
+	subject := "fix login"
+	longPrompt := strings.TrimSpace(strings.Repeat("word ", 50)) // 249 runes, past the 200-rune cap
+	cases := []struct {
+		name        string
+		checkpoint  *search.CheckpointResult
+		snippet     string
+		wantSnippet bool
+	}{
+		{
+			name:       "prompt-title duplicate dropped",
+			checkpoint: &search.CheckpointResult{ID: "cp1", Prompt: "add rate limiting to the public API", Org: "o", Repo: "r"},
+			snippet:    "Prompt: add rate limiting to the public API",
+		},
+		{
+			name:       "duplicate survives truncation on both sides",
+			checkpoint: &search.CheckpointResult{ID: "cp2", Prompt: longPrompt, Org: "o", Repo: "r"},
+			snippet:    "Prompt: " + longPrompt,
+		},
+		{
+			name:        "later-chunk snippet kept",
+			checkpoint:  &search.CheckpointResult{ID: "cp3", Prompt: "add rate limiting to the public API", Org: "o", Repo: "r"},
+			snippet:     "Prompt: retry the bucket refill when redis is down",
+			wantSnippet: true,
+		},
+		{
+			name:        "snippet extending a commit-subject title kept",
+			checkpoint:  &search.CheckpointResult{ID: "cp4", Prompt: "fix login retries in the auth flow", CommitSubject: &subject, Org: "o", Repo: "r"},
+			snippet:     "Prompt: fix login retries in the auth flow",
+			wantSnippet: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			resp := &search.Response{
+				Results: []search.Result{{
+					Type:       search.TypeCheckpoint,
+					Checkpoint: tc.checkpoint,
+					Meta:       search.Meta{Snippet: tc.snippet, Score: 1},
+				}},
+				Total: 1,
+			}
+			var buf bytes.Buffer
+			if err := writeSearchCompactJSON(&buf, resp, 0, 1); err != nil {
+				t.Fatalf("writeSearchCompactJSON returned error: %v", err)
+			}
+			if got := strings.Contains(buf.String(), `"snippet"`); got != tc.wantSnippet {
+				t.Errorf("snippet present = %v, want %v:\n%s", got, tc.wantSnippet, buf.String())
+			}
+		})
 	}
 }
 
