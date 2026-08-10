@@ -46,6 +46,7 @@ func buildReviewDeps() cliReview.Deps {
 		ReviewerFor:             launchableReviewerFor,
 		PostReviewToTrail:       postReviewToTrail,
 		PrepareTarget:           prepareReviewTarget,
+		RemoveTarget:            removeReviewTarget,
 	}
 }
 

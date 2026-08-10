@@ -21,6 +21,7 @@ entire review --prompt "focus on auth"
 entire review --timeout 15m
 entire review --agent claude-code --model opus
 entire review general --target feature/my-change
+entire review general --target feature/my-change --cleanup-worktree
 entire review general --target https://entire.io/gh/acme/app/trails/42/my-change
 ```
 
@@ -29,6 +30,10 @@ resolves the trail when needed, fetches a remote-only branch, and creates or
 reuses a worktree under `.entire/worktrees`. The review command is then re-run
 inside that worktree, leaving the caller's current checkout unchanged. If the
 branch is already checked out in another worktree, that worktree is reused.
+After a successful interactive review, a newly-created worktree prompts for
+removal. Non-interactive reviews keep it unless `--cleanup-worktree` is passed.
+A reused worktree is never removed by the review command, and failed reviews
+retain newly-created worktrees for inspection.
 
 ## Profiles
 

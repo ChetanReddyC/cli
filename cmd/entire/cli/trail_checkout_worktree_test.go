@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -439,6 +440,30 @@ func TestCheckoutReviewWorktree_CreatesWorktreeWithoutTrail(t *testing.T) {
 	}
 	if got := currentBranchInDir(t, worktreePath); got != "feature/review" {
 		t.Fatalf("worktree branch = %q, want feature/review", got)
+	}
+	if err := removeReviewTarget(context.Background(), worktreePath); err != nil {
+		t.Fatalf("removeReviewTarget: %v", err)
+	}
+	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
+		t.Fatalf("removed worktree stat = %v, want not exist", err)
+	}
+}
+
+func TestRemoveReviewTargetKeepsDirtyWorktree(t *testing.T) {
+	repoDir := newTrailWorktreeTestRepo(t)
+	runGit(t, repoDir, "branch", "feature/dirty-review")
+	t.Chdir(repoDir)
+
+	worktreePath, err := checkoutReviewWorktree(context.Background(), io.Discard, io.Discard, "feature/dirty-review")
+	if err != nil {
+		t.Fatalf("checkoutReviewWorktree: %v", err)
+	}
+	testutil.WriteFile(t, worktreePath, "review-notes.txt", "keep me\n")
+	if err := removeReviewTarget(context.Background(), worktreePath); err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+		t.Fatalf("removeReviewTarget error = %v, want uncommitted changes", err)
+	}
+	if _, err := os.Stat(worktreePath); err != nil {
+		t.Fatalf("dirty worktree was removed: %v", err)
 	}
 }
 

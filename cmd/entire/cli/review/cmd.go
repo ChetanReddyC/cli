@@ -77,10 +77,14 @@ type Deps struct {
 	// PrepareTarget resolves a branch, trail ID, or trail URL and checks its
 	// branch out in a worktree. It returns the worktree in which review should
 	// be re-run. Injected because trail API access lives in the parent package.
-	PrepareTarget func(ctx context.Context, out, errOut io.Writer, selector string) (string, error)
+	PrepareTarget func(ctx context.Context, out, errOut io.Writer, selector string) (TargetWorktree, error)
+
+	// RemoveTarget removes a worktree created specifically for this review.
+	// Reused worktrees are never passed to it.
+	RemoveTarget func(ctx context.Context, worktreeRoot string) error
 
 	// RunInWorktree re-runs the current CLI invocation in worktreeRoot after the
-	// target flag has been removed. nil uses the production subprocess runner.
+	// target flags have been removed. nil uses the production subprocess runner.
 	RunInWorktree func(ctx context.Context, worktreeRoot string, args []string, stdin io.Reader, stdout, stderr io.Writer) error
 }
 
@@ -108,6 +112,7 @@ func NewCommand(deps Deps) *cobra.Command {
 	var setModels []string
 	var setSlots []string
 	var target string
+	var cleanupWorktree bool
 
 	cmd := &cobra.Command{
 		Use: "review",
@@ -157,6 +162,9 @@ Flags:
                  origin/master, main, master.
   --target REF   check out a branch identified by branch name, trail ID, or
                  Entire trail URL in a worktree and run the review there.
+  --cleanup-worktree
+                 remove a newly-created target worktree after a successful
+                 review. Interactive runs ask when this flag is omitted.
 
 To tag an already-finished session as a review, use
 'entire session attach --review <id>'.`,
@@ -173,7 +181,10 @@ To tag an already-finished session as a review, use
 			ctx := cmd.Context()
 			if target != "" {
 				modeSelected := configure || edit || findings || listProfiles || listAgents || listModels
-				return runTargetReview(ctx, cmd, target, modeSelected, deps)
+				return runTargetReview(ctx, cmd, target, cleanupWorktree, modeSelected, deps)
+			}
+			if cleanupWorktree {
+				return errors.New("--cleanup-worktree requires --target")
 			}
 
 			// Discover external agents so review configs that target them
@@ -269,6 +280,7 @@ To tag an already-finished session as a review, use
 	cmd.Flags().StringVar(&perRunPrompt, "prompt", "", "one-off instructions appended to this review run")
 	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
 	cmd.Flags().StringVar(&target, "target", "", "branch, trail ID, or Entire trail URL to check out in a worktree and review")
+	cmd.Flags().BoolVar(&cleanupWorktree, "cleanup-worktree", false, "remove a newly-created target worktree after a successful review (interactive runs ask when omitted)")
 	cmd.Flags().DurationVar(&reviewTimeout, "timeout", 0, "optional hard cap per reviewer (default: none — reviewers run until they finish, like a skill invoked directly in a session). When set, it also bounds the consolidating judge; unset, the judge keeps its own 20m default")
 	// The listing modes and the action modes each select a distinct command
 	// behavior; combining them silently runs one and drops the rest, so reject

@@ -6,20 +6,24 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 )
 
-func prepareReviewTarget(ctx context.Context, out, errOut io.Writer, selector string) (string, error) {
+func prepareReviewTarget(ctx context.Context, out, errOut io.Writer, selector string) (cliReview.TargetWorktree, error) {
 	forge, owner, repo, err := resolveTrailRemote(ctx)
 	if err != nil {
-		return "", err
+		return cliReview.TargetWorktree{}, err
 	}
 
 	normalized, isURL, err := normalizeReviewTargetSelector(selector, forge, owner, repo)
 	if err != nil {
-		return "", err
+		return cliReview.TargetWorktree{}, err
 	}
 	branch := ""
 	if !isURL && reviewTargetBranchExists(ctx, normalized) {
@@ -37,19 +41,64 @@ func prepareReviewTarget(ctx context.Context, out, errOut io.Writer, selector st
 			return nil
 		})
 		if err != nil {
-			return "", err
+			return cliReview.TargetWorktree{}, err
 		}
 	}
 
+	root, err := trailWorktreeBaseRoot(ctx)
+	if err != nil {
+		return cliReview.TargetWorktree{}, fmt.Errorf("resolve review worktree root: %w", err)
+	}
+	_, existed, err := findWorktreeForBranch(ctx, branch, root)
+	if err != nil {
+		return cliReview.TargetWorktree{}, err
+	}
 	worktreeRoot, err := checkoutReviewWorktree(ctx, io.Discard, errOut, branch)
 	if err != nil {
-		return "", err
+		return cliReview.TargetWorktree{}, err
 	}
 	if worktreeRoot == "" {
-		return "", errors.New("review target checkout was cancelled")
+		return cliReview.TargetWorktree{}, errors.New("review target checkout was cancelled")
 	}
 	fmt.Fprintf(out, "Reviewing branch %s in %s.\n", branch, worktreeRoot)
-	return worktreeRoot, nil
+	return cliReview.TargetWorktree{Path: worktreeRoot, Created: !existed}, nil
+}
+
+func removeReviewTarget(ctx context.Context, worktreeRoot string) error {
+	root, err := trailWorktreeBaseRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve managed worktree root: %w", err)
+	}
+	managedRoot := normalizeWorktreePath(filepath.Join(root, filepath.FromSlash(trailWorktreesRelDir)))
+	target := normalizeWorktreePath(worktreeRoot)
+	if target == managedRoot || !strings.HasPrefix(target, managedRoot+string(filepath.Separator)) {
+		return fmt.Errorf("refusing to remove worktree outside %s", managedRoot)
+	}
+	repo, err := gitrepo.OpenPath(worktreeRoot)
+	if err != nil {
+		return fmt.Errorf("open review worktree: %w", err)
+	}
+	status, statusErr := gitrepo.Status(ctx, repo)
+	closeErr := repo.Close()
+	if statusErr != nil {
+		return fmt.Errorf("check review worktree status: %w", statusErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close review worktree: %w", closeErr)
+	}
+	if !status.IsClean() {
+		return errors.New("review worktree has uncommitted changes; keeping it")
+	}
+
+	// --force permits ignored review logs and copied .worktreeinclude files to
+	// be removed after the tracked/untracked status check above proved the
+	// checkout has no user changes.
+	cmd := exec.CommandContext(ctx, "git", "worktree", "remove", "--force", "--", worktreeRoot)
+	cmd.Dir = root
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git worktree remove: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
 }
 
 func reviewTargetBranchExists(ctx context.Context, branch string) bool {
