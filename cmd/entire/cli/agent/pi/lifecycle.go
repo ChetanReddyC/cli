@@ -142,36 +142,6 @@ func piSkillEvents(in []piSkillEventInput) []agent.SkillEvent {
 	return out
 }
 
-// nestedInvocation reports whether a hook payload came from a Pi process that has
-// no session of its own, in which case the payload must not be resolved against
-// the per-repo session-ID cache.
-//
-// Pi has no subagent events; subagents come from an extension (see Pi's
-// `subagent/` example) that spawns `pi --mode json -p --no-session` with cwd set to
-// the project directory. Pi auto-discovers project-local `.pi/extensions/*/index.ts`
-// there, so the child loads Entire's own extension and fires these hooks too. With
-// --no-session it reports no session file, so sessionID is empty — and the cache is
-// a single per-repo file, so falling back to it handed the child its *parent's*
-// session ID. The nested turn then overwrote the parent's last prompt with the
-// subagent's internal task text and opened a new turn mid-flight, so the
-// checkpoint's title and turn-scoped windows described the subagent, not the user.
-//
-// Requiring a session file keeps the legitimate fallback — a session file whose
-// name carries no parseable ID — while making sessionless invocations a clean
-// no-op. Nothing is lost for agent_end either: captureTranscript returns "" without
-// a session file, so such an event could only ever fail downstream with "transcript
-// file not specified".
-//
-// An explicit payload session_id is always honoured; only the cache is distrusted.
-func nestedInvocation(payload piHookPayload, sessionID string) bool {
-	return sessionID == "" && payload.SessionFile == ""
-}
-
-func logNestedInvocationSkip(ctx context.Context, hookName string) {
-	logging.Debug(ctx, "pi: skipping hook for sessionless (nested) Pi invocation",
-		slog.String("hook", hookName))
-}
-
 // ParseHookEvent translates a Pi hook invocation into a normalised lifecycle
 // event. Implements agent.HookSupport.
 func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
@@ -190,14 +160,22 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 
 	now := time.Now()
 
+	// A sessionless payload names no session we can track, and must not be resolved
+	// against the per-repo session-ID cache: doing so handed the caller whichever
+	// session happened to be cached — see docs/architecture/agent-guide.md for how a
+	// nested `pi --no-session` subagent thereby claimed its parent's session.
+	//
+	// session_shutdown is exempt: the extension sends it with no session identity at
+	// all, and it must still clear the cache. Same shape as Copilot CLI's
+	// subordinate-session guard (copilotcli/lifecycle.go).
+	if hookName != HookNameSessionShutdown && sessionID == "" {
+		logging.Debug(ctx, "pi: skipping lifecycle event for sessionless (nested) Pi invocation",
+			slog.String("hook", hookName))
+		return nil, nil //nolint:nilnil // Sessionless/nested Pi — no session to track.
+	}
+
 	switch hookName {
 	case HookNameSessionStart:
-		if sessionID == "" {
-			// Sessionless Pi (`--no-session`) — nothing to track. See
-			// nestedInvocation.
-			logNestedInvocationSkip(ctx, hookName)
-			return nil, nil //nolint:nilnil // no session to track = no lifecycle event
-		}
 		cacheSessionID(ctx, sessionID)
 		return &agent.Event{
 			Type:      agent.SessionStart,
@@ -206,17 +184,7 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		}, nil
 
 	case HookNameBeforeAgentStart:
-		if nestedInvocation(payload, sessionID) {
-			logNestedInvocationSkip(ctx, hookName)
-			return nil, nil //nolint:nilnil // nested/sessionless Pi = no lifecycle event
-		}
-		// Pi emits before_agent_start with a fully-populated session ID, but
-		// we cache it anyway to support the agent_end fallback below.
-		if sessionID == "" {
-			sessionID = readCachedSessionID(ctx)
-		} else {
-			cacheSessionID(ctx, sessionID)
-		}
+		cacheSessionID(ctx, sessionID)
 		// Provide the live Pi session file as SessionRef so state.TranscriptPath
 		// is populated before any mid-turn commits. Without this, the
 		// post-commit hook cannot condense when no shadow branch exists yet.
@@ -230,13 +198,6 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		}, nil
 
 	case HookNameAgentEnd:
-		if nestedInvocation(payload, sessionID) {
-			logNestedInvocationSkip(ctx, hookName)
-			return nil, nil //nolint:nilnil // nested/sessionless Pi = no lifecycle event
-		}
-		if sessionID == "" {
-			sessionID = readCachedSessionID(ctx)
-		}
 		// Capture the Pi JSONL into <repo>/.entire/tmp/pi/<id>.json so the
 		// strategy has a stable transcript reference even if the user later
 		// deletes Pi sessions. The pi/ subdir avoids colliding with paths
@@ -278,11 +239,22 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 
 // --- session ID cache ---
 //
-// Pi's `before_agent_start` event sometimes fires before `session_start` has
-// completed cacheing the session ID (race during early extension load), and
-// `agent_end` may fire after Pi has torn down its session manager. We cache
-// the active session ID at session_start time so subsequent hooks can recover
-// it.
+// This cached the active session ID so a later hook arriving without one could
+// recover it. The sessionless guard in ParseHookEvent removed the only two reads:
+// a payload with no resolvable session ID is now skipped rather than resolved
+// against this file, because the file is a single per-repo slot and handing its
+// contents to an unrelated caller is what let a nested subagent claim its parent's
+// session.
+//
+// The recovery it promised was never reachable anyway — a payload with no session
+// file also has no transcript, so captureTranscript returns "" and the event dies
+// downstream regardless of the ID.
+//
+// What remains is write-only: session_start/before_agent_start write it,
+// session_shutdown clears it, and only tests read it. Removing it outright is
+// deliberately left as a follow-up: the write/clear pair and its test predate this
+// change, and a single-slot per-repo identity store is separately unsound for two
+// concurrent Pi sessions in one worktree, which deserves its own change.
 
 const activeSessionFile = "pi-active-session"
 
