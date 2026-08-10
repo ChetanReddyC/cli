@@ -18,6 +18,20 @@ import (
 // must hold for slow cores, not just erroring ones.
 const cellResolveTimeout = 5 * time.Second
 
+// requiredCellResolveTimeout bounds the control-plane lookups a repo-scoped
+// cell read cannot proceed without (resolveRepoCellPlacement).
+//
+// Deliberately not cellResolveTimeout: that budget bounds *best-effort* lookups
+// whose failure silently degrades to home-jurisdiction routing, so it can be
+// aggressive. Here a timeout is a visible command failure, and the budget has
+// to cover two sequential control-plane round trips (the repo's mirrors, then
+// the cluster catalog), so it is more patient.
+//
+// Some deadline is required: the coreapi HTTP client sets only a dial timeout,
+// so a reachable-but-slow core is otherwise unbounded, and this runs before the
+// command's spinner starts — the user would sit in front of a silent terminal.
+const requiredCellResolveTimeout = 15 * time.Second
+
 // cellCoreClient is the control-plane surface the cell-target resolver needs.
 // An interface (with a swappable constructor) so the resolver is unit-testable
 // against a fake control plane; *coreapi.Client satisfies it.
@@ -117,13 +131,16 @@ type repoCellPlacement struct {
 // among multi-region placements and falls back to the home cell, which is
 // exactly the mismatch to avoid here.
 func resolveRepoCellPlacement(ctx context.Context, owner, repo string) (repoCellPlacement, error) {
+	ctx, cancel := context.WithTimeout(ctx, requiredCellResolveTimeout)
+	defer cancel()
+
 	c, err := newCellCoreClient()
 	if err != nil {
 		return repoCellPlacement{}, fmt.Errorf("control plane unavailable: %w", err)
 	}
 	mirrors, err := listMirrorsForRepo(ctx, c, mirrorCloneProviderGitHub, strings.ToLower(owner), strings.ToLower(repo))
 	if err != nil {
-		return repoCellPlacement{}, fmt.Errorf("list mirrors for %s/%s: %w", owner, repo, err)
+		return repoCellPlacement{}, cellPlacementError(ctx, owner, repo, fmt.Errorf("list mirrors for %s/%s: %w", owner, repo, err))
 	}
 	for i := range mirrors {
 		if !isActiveMirror(mirrors[i]) {
@@ -142,7 +159,23 @@ func resolveRepoCellPlacement(ctx context.Context, owner, repo string) (repoCell
 		}
 		return repoCellPlacement{RepoID: repoID, Target: target}, nil
 	}
-	return repoCellPlacement{}, fmt.Errorf("no reachable Entire mirror for %s/%s", owner, repo)
+	// A deadline that fired mid-loop leaves cellTargetForClusterHost returning
+	// nil for every placement, which would otherwise be reported as "no
+	// reachable mirror" — a wrong diagnosis for a slow control plane.
+	return repoCellPlacement{}, cellPlacementError(ctx, owner, repo,
+		fmt.Errorf("no reachable Entire mirror for %s/%s", owner, repo))
+}
+
+// cellPlacementError reports a timeout as a timeout. The underlying lookups
+// degrade quietly (cellTargetForClusterHost logs and returns nil), so without
+// this a fired deadline surfaces as whichever "not found" message the caller
+// reached, and the user goes looking for a missing mirror instead of a slow
+// control plane.
+func cellPlacementError(ctx context.Context, owner, repo string, fallback error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("resolving the Entire mirror for %s/%s timed out: %w", owner, repo, ctxErr)
+	}
+	return fallback
 }
 
 // resolveRepoClusterHost finds the public cluster host that owns the repo. It
