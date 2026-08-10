@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -11,6 +12,39 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 )
+
+// GeneratedHookFileState reports hook-config drift for agents whose entire
+// Entire integration is one generated file in the repo (Pi's extension,
+// OpenCode's plugin), for use by HookFreshness implementations.
+//
+// The file counts as ours only if it contains marker, and as current only if
+// it byte-matches one of renders — the outputs InstallHooks could have
+// written. Pass both the production and local-dev renders: they differ only in
+// the substituted entire command, and CheckHookConfig cannot know which mode
+// installed the file. Matching on exact content rather than a stamped version
+// keeps this honest for free — any edit to the embedded template makes
+// installed copies read as outdated without anyone remembering to bump
+// anything.
+//
+// A file that exists but lacks marker reads as HooksAbsent, not HooksOutdated:
+// InstallHooks refuses to overwrite a foreign file at our path, so there is no
+// Entire config there for us to call stale.
+func GeneratedHookFileState(path, marker string, renders ...string) HookConfigState {
+	data, err := os.ReadFile(path) //nolint:gosec // path constructed from validated repo root
+	if err != nil {
+		return HooksAbsent
+	}
+	content := string(data)
+	if !strings.Contains(content, marker) {
+		return HooksAbsent
+	}
+	for _, render := range renders {
+		if content == render {
+			return HooksCurrent
+		}
+	}
+	return HooksOutdated
+}
 
 type WarningFormat int
 
