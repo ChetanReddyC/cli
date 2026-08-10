@@ -215,6 +215,35 @@ func TestCheckHookConfig_CommittedExtensionGoesStale(t *testing.T) {
 	}
 }
 
+// TestCheckHookConfig_CRLFCheckoutIsNotDrift guards the Windows false
+// positive. The extension is generated with LF but is typically committed, so
+// a checkout under git's default core.autocrlf=true on Windows hands us CRLF.
+// Byte equality never holds there, and the user cannot clear the warning:
+// InstallHooks writes LF back and the next checkout re-converts it.
+func TestCheckHookConfig_CRLFCheckoutIsNotDrift(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ctx := context.Background()
+	a := &PiAgent{}
+
+	if _, err := a.InstallHooks(ctx, false, false); err != nil {
+		t.Fatalf("InstallHooks: %v", err)
+	}
+	path := filepath.Join(dir, ".pi", "extensions", "entire", "index.ts")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crlf := strings.ReplaceAll(string(data), "\n", "\r\n")
+	if err := os.WriteFile(path, []byte(crlf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := a.CheckHookConfig(ctx); got != agent.HooksCurrent {
+		t.Errorf("CRLF checkout: CheckHookConfig = %v, want HooksCurrent", got)
+	}
+}
+
 // TestCheckHookConfig_LocalDevIsNotDrift guards the false positive that would
 // make this check useless in practice: a developer who enabled with --local-dev
 // has a legitimately different file (the entire command is substituted), and

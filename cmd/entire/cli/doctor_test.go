@@ -507,9 +507,10 @@ trusted_hash = "sha256:ccc"
 	require.Contains(t, out, "Open /hooks inside Codex")
 }
 
-// TestCheckClaudeCodeHookDrift_SilentWhenNotInstalled — doctor prints nothing
-// Claude-Code-related when this repo has no Entire hooks installed.
-func TestCheckClaudeCodeHookDrift_SilentWhenNotInstalled(t *testing.T) {
+// TestCheckHookDrift_SilentWhenNotInstalled — the generalized drift check
+// prints nothing Claude-Code-related when this repo has no Entire hooks
+// installed.
+func TestCheckHookDrift_SilentWhenNotInstalled(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 
@@ -518,9 +519,9 @@ func TestCheckClaudeCodeHookDrift_SilentWhenNotInstalled(t *testing.T) {
 	require.NotContains(t, stdout.String(), "Claude Code hook")
 }
 
-// TestCheckClaudeCodeHookDrift_OKWhenCurrent — a fresh install writes the
-// current matchers, so doctor reports OK.
-func TestCheckClaudeCodeHookDrift_OKWhenCurrent(t *testing.T) {
+// TestCheckHookDrift_ClaudeCodeOKWhenCurrent — a fresh Claude Code install
+// writes the current matchers, so the drift check reports OK.
+func TestCheckHookDrift_ClaudeCodeOKWhenCurrent(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 
@@ -533,10 +534,10 @@ func TestCheckClaudeCodeHookDrift_OKWhenCurrent(t *testing.T) {
 	require.Contains(t, stdout.String(), "✓ Claude Code hook config: OK")
 }
 
-// TestCheckClaudeCodeHookDrift_WarnsWhenOutdated — a config left by an older CLI
-// (hooks under the stale Task/TodoWrite matchers) is reported OUT OF DATE with
-// the --force fix hint.
-func TestCheckClaudeCodeHookDrift_WarnsWhenOutdated(t *testing.T) {
+// TestCheckHookDrift_ClaudeCodeWarnsWhenOutdated — a Claude Code config left by
+// an older CLI (hooks under the stale Task/TodoWrite matchers) is reported OUT
+// OF DATE with the --force fix hint.
+func TestCheckHookDrift_ClaudeCodeWarnsWhenOutdated(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 
