@@ -2,6 +2,9 @@ package gitrepo
 
 import (
 	"context"
+	"os"
+	"path"
+	"path/filepath"
 	"sync"
 
 	"github.com/go-git/go-git/v6"
@@ -51,14 +54,19 @@ func Status(ctx context.Context, repo *git.Repository) (git.Status, error) {
 		return nil, err //nolint:wrapcheck // callers add their own context
 	}
 
-	cache, ok := ctx.Value(statusCacheKey{}).(*statusCache)
-	if !ok {
-		return worktree.Status() //nolint:wrapcheck,forbidigo // the sanctioned call site
-	}
-
 	// Key on the worktree root rather than the repository pointer: callers on
 	// the same hook path open the repository independently.
 	root := worktree.Filesystem().Root()
+
+	cache, ok := ctx.Value(statusCacheKey{}).(*statusCache)
+	if !ok {
+		status, err := worktree.Status() //nolint:forbidigo // the sanctioned call site
+		if err != nil {
+			return nil, err //nolint:wrapcheck // callers add their own context
+		}
+		filterNestedCheckouts(root, status)
+		return status, nil
+	}
 
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -71,7 +79,49 @@ func Status(ctx context.Context, repo *git.Repository) (git.Status, error) {
 	if err != nil {
 		return nil, err //nolint:wrapcheck // callers add their own context
 	}
+	filterNestedCheckouts(root, status)
 	cache.statuses[root] = status
 
 	return status, nil
+}
+
+// filterNestedCheckouts removes untracked entries that live inside a nested
+// git checkout: a directory under the worktree root containing a .git entry
+// (a directory for full clones, a file for linked worktrees). git treats such
+// a directory as a repository boundary and never descends into it; go-git's
+// status walk has no such check, so untracked files from unrelated checkouts
+// (agent worktrees, vendored clones) would otherwise be reported as if they
+// were this repository's files. Tracked entries are kept regardless of
+// location, matching git, which always reports index entries.
+func filterNestedCheckouts(root string, status git.Status) {
+	containsGit := make(map[string]bool)
+	for relPath, fileStatus := range status {
+		if fileStatus.Worktree != git.Untracked {
+			continue
+		}
+		if insideNestedCheckout(root, relPath, containsGit) {
+			delete(status, relPath)
+		}
+	}
+}
+
+// insideNestedCheckout reports whether any ancestor directory of relPath
+// (a forward-slash path relative to root, as go-git status keys are) contains
+// a .git entry. The walk stops before the root itself, so the host repo's own
+// .git never counts. Lstat rather than Stat so a worktree's .git file counts
+// without following it. containsGit memoizes per-directory answers across one
+// status result, where thousands of paths can share a few ancestor directories.
+func insideNestedCheckout(root, relPath string, containsGit map[string]bool) bool {
+	for dir := path.Dir(relPath); dir != "." && dir != "/"; dir = path.Dir(dir) {
+		nested, seen := containsGit[dir]
+		if !seen {
+			_, err := os.Lstat(filepath.Join(root, filepath.FromSlash(dir), ".git"))
+			nested = err == nil
+			containsGit[dir] = nested
+		}
+		if nested {
+			return true
+		}
+	}
+	return false
 }
