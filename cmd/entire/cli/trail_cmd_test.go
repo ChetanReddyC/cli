@@ -1010,6 +1010,45 @@ func TestListTrailResourcesUsesLegacyQueryByDefault(t *testing.T) {
 	}
 }
 
+func TestListTrailResourcesStopsWhenAuthorLimitIsSatisfied(t *testing.T) {
+	t.Parallel()
+	requests := 0
+	login := "alice"
+	next := "should-not-be-requested"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests > 1 {
+			t.Errorf("unexpected extra page request with token %q", r.URL.Query().Get("pageToken"))
+		}
+		trails := make([]api.TrailResource, trailListServerMaxLimit)
+		for i := range trails {
+			trails[i] = api.TrailResource{
+				ID:     "trl_" + strconv.Itoa(i),
+				Number: i + 1,
+				Author: &trail.Author{Login: &login},
+			}
+		}
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+			Trails: trails, NextPageToken: &next, Total: 10_000,
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
+
+	items, total, err := listTrailResources(t.Context(), client, "gh", "acme", "repo", nil, login, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	if len(items) != 5 || total != 5 {
+		t.Fatalf("items=%d total=%d, want 5/5", len(items), total)
+	}
+}
+
 func TestTrailListPageQueryUsesEntireAPIPagination(t *testing.T) {
 	t.Parallel()
 	got := trailListPageQuery([]trail.Status{trail.StatusOpen}, 100, "next page")

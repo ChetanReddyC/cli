@@ -554,6 +554,15 @@ func listTrailResources(ctx context.Context, client *api.Client, forge, owner, r
 			if len(items) < limit {
 				items = append(items, resource)
 			}
+			if author != "" && len(items) >= limit {
+				break
+			}
+		}
+		// entire-api's author filter accepts account IDs while the CLI accepts
+		// logins, so this path filters locally. Stop as soon as --limit is
+		// satisfied rather than walking the repository's complete trail history.
+		if author != "" && len(items) >= limit {
+			break
 		}
 		if author == "" {
 			totalMatched = page.Total
@@ -716,9 +725,9 @@ type trailListDisplayOptions struct {
 	RequestedAuthor string
 	CurrentUser     string
 	StatusFilters   []trail.Status
-	// TotalMatched is the number of trails matching the filters server-side,
-	// before --limit truncation. Counts render as "shown/total" when they
-	// differ so a capped page doesn't read as the total number of matches.
+	// TotalMatched is the best available match count. It is exact when the
+	// backend returns a filtered total; login-filtered entire-api lists stop at
+	// --limit and therefore report only the displayed count.
 	TotalMatched int
 }
 
