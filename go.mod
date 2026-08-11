@@ -13,7 +13,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/creack/pty v1.1.24
 	github.com/denisbrodbeck/machineid v1.0.1
-	github.com/entireio/auth-go v0.5.2
+	github.com/entireio/auth-go v0.5.3-0.20260811043916-c43c075b3c2a
 	github.com/go-faster/errors v0.8.0
 	github.com/go-faster/jx v1.2.0
 	github.com/go-git/go-billy/v6 v6.0.0-alpha.2
@@ -148,5 +148,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
-
-replace github.com/entireio/auth-go => /Users/paul/.claude/worktrees/auth-go/regional-token-endpoint
