@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -92,7 +93,7 @@ func TestResolveTrailReviewTargetRejectsUnsupportedForge(t *testing.T) {
 	}
 }
 
-func TestTrailReviewCommentsPath(t *testing.T) {
+func TestTrailReviewCommentsPathPreservesSharedBFFQueryContract(t *testing.T) {
 	t.Parallel()
 	got := trailReviewCommentsPath("trail id/with slash", trailReviewListOptions{
 		Status:           "open,resolved",
@@ -608,11 +609,51 @@ func TestFetchTrailReviewCommentsAndPatchStatus(t *testing.T) {
 	}
 }
 
+func TestFetchAllTrailReviewCommentsStopsOnRepeatedPage(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.URL.Query().Get("include_dismissed"); got != strconv.FormatBool(true) {
+			t.Errorf("include_dismissed = %q, want true", got)
+		}
+		wantOffset := ""
+		if requests == 2 {
+			wantOffset = strconv.Itoa(defaultTrailReviewLimit)
+		}
+		if got := r.URL.Query().Get("offset"); got != wantOffset {
+			t.Errorf("offset = %q, want %q", got, wantOffset)
+		}
+		encodeTrailReviewTestJSON(t, w, api.TrailReviewCommentsResponse{
+			Comments: []api.TrailReviewComment{{ID: trailReviewTestCommentID}},
+			HasMore:  true,
+		})
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+
+	_, err := fetchAllTrailReviewComments(context.Background(), client, "trl_1", trailReviewSummaryOptions())
+	if err == nil || !strings.Contains(err.Error(), "repeated page") {
+		t.Fatalf("error = %v, want repeated page", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
 func TestFetchTrailReviewStateFollowsCursor(t *testing.T) {
 	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/trails/trl_1/reviews/rvw_1" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if got := r.URL.Query().Get("include_dismissed"); got != strconv.FormatBool(true) {
+			t.Fatalf("include_dismissed = %q, want true", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != strconv.Itoa(defaultTrailReviewLimit) {
+			t.Fatalf("limit = %q, want %d", got, defaultTrailReviewLimit)
+		}
+		if got := r.URL.Query().Get("stale"); got != trailReviewFreshnessAny {
+			t.Fatalf("stale = %q, want %q", got, trailReviewFreshnessAny)
 		}
 		requests++
 		switch r.URL.Query().Get("cursor") {
