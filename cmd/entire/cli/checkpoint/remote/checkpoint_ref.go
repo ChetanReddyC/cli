@@ -42,29 +42,29 @@ func CheckpointFetchTarget(ctx context.Context) string {
 // "origin" fallbacks are non-authoritative: they exist so a fetch can still
 // be attempted, not to certify where checkpoint refs live.
 func checkpointFetchTarget(ctx context.Context) (string, bool) {
-	return checkpointFetchTargetFrom(ctx, nil)
+	return checkpointFetchTargetFrom(ctx, "")
 }
 
-// CheckpointFetchTargetFrom is CheckpointFetchTarget with an explicit ordered
-// read-candidate chain: when no checkpoint_remote is configured the target is
-// derived from the first candidate instead of unconditionally from origin.
-// The dedicated checkpoint_remote derivation is unchanged.
-func CheckpointFetchTargetFrom(ctx context.Context, readRemotes []string) string {
-	target, _ := checkpointFetchTargetFrom(ctx, readRemotes)
+// CheckpointFetchTargetFrom is CheckpointFetchTarget for one checkpoint read
+// candidate: when no checkpoint_remote is configured the target is derived
+// from leadRemote instead of unconditionally from origin. The dedicated
+// checkpoint_remote derivation is unchanged.
+func CheckpointFetchTargetFrom(ctx context.Context, leadRemote string) string {
+	target, _ := checkpointFetchTargetFrom(ctx, leadRemote)
 	return target
 }
 
 // checkpointFetchTargetFrom resolves the fetch target for checkpoint data,
-// honoring an optional read-candidate chain (see FetchURLOptions.ReadRemotes).
+// honoring an optional read candidate (see FetchURLOptions.LeadReadRemote).
 // The bare remote-name fallbacks are non-authoritative: they exist so a fetch
 // can still be attempted, not to certify where checkpoint refs live.
-func checkpointFetchTargetFrom(ctx context.Context, readRemotes []string) (string, bool) {
-	url, authoritative, err := fetchURLAuthoritative(ctx, FetchURLOptions{ReadRemotes: readRemotes})
+func checkpointFetchTargetFrom(ctx context.Context, leadRemote string) (string, bool) {
+	url, authoritative, err := fetchURLAuthoritative(ctx, FetchURLOptions{LeadReadRemote: leadRemote})
 	if err == nil && url != "" {
 		return url, authoritative
 	}
-	if lead := leadReadRemote(readRemotes); lead != "" {
-		return lead, false
+	if leadRemote != "" {
+		return leadRemote, false
 	}
 	return "origin", false
 }
@@ -173,7 +173,7 @@ func FetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, rea
 
 	var firstErr error
 	for i, remoteName := range readRemotes {
-		target, authoritative := checkpointFetchTargetFrom(ctx, readRemotes[i:i+1])
+		target, authoritative := checkpointFetchTargetFrom(ctx, remoteName)
 		err := probeAndFetchCheckpointRef(ctx, ref, target, authoritative)
 		if err == nil {
 			return nil

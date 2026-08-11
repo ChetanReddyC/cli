@@ -31,13 +31,14 @@ type Info = gitremote.Info
 type FetchURLOptions struct {
 	WorktreeRoot string
 
-	// ReadRemotes is the ordered checkpoint read-candidate chain (elected sync
-	// remote first, then the legacy origin tier), supplied by cli/strategy
+	// LeadReadRemote is the checkpoint read candidate the caller wants the
+	// fetch URL derived from (the elected sync remote, or one entry of the
+	// read-candidate chain while iterating it), supplied by cli/strategy
 	// callers — this package cannot resolve the election itself. When set and
 	// NO checkpoint_remote is configured, the base fetch URL is derived from
-	// the first candidate instead of unconditionally from origin. The
-	// dedicated checkpoint_remote derivation path ignores it entirely.
-	ReadRemotes []string
+	// it instead of unconditionally from origin. The dedicated
+	// checkpoint_remote derivation path ignores it entirely.
+	LeadReadRemote string
 }
 
 // FetchURL returns the effective checkpoint fetch URL for the current repository.
@@ -99,10 +100,10 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 
 	config := s.GetCheckpointRemote()
 	if config == nil {
-		// No checkpoint_remote configured: the first read candidate (the
-		// elected checkpoint sync remote, when the caller supplied the chain)
-		// is the checkpoint host; without a chain, origin is.
-		if lead := leadReadRemote(opt.ReadRemotes); lead != "" && lead != originRemote {
+		// No checkpoint_remote configured: the caller-supplied read candidate
+		// (the elected checkpoint sync remote, or the chain entry being
+		// tried) is the checkpoint host; without one, origin is.
+		if lead := opt.LeadReadRemote; lead != "" && lead != originRemote {
 			leadURL, leadErr := getRemoteURL(ctx, lead)
 			if leadErr == nil && leadURL == "" {
 				leadErr = fmt.Errorf("remote %q has an empty URL", lead)
@@ -633,15 +634,6 @@ func logFallback(ctx context.Context, operation, fallbackURL, reason string, err
 	}
 	logAttrs = append(logAttrs, attrs...)
 	logging.Warn(ctx, "checkpoint remote URL resolution fell back to alternate remote URL", logAttrs...)
-}
-
-// leadReadRemote returns the first read-candidate remote name, or "" when the
-// caller supplied no chain.
-func leadReadRemote(readRemotes []string) string {
-	if len(readRemotes) == 0 {
-		return ""
-	}
-	return readRemotes[0]
 }
 
 func resolvePushFallbackURL(ctx context.Context, pushRemoteName, originURL string) (string, error) {

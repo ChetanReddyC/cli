@@ -1243,6 +1243,9 @@ func TestPromoteRemoteTrackingMetadataBranch_FastForwardsStaleLocal(t *testing.T
 	t.Chdir(tmpDir)
 
 	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	// Configure origin so the election elects it — promotion is confined to
+	// the elected remote's tracking ref.
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
 
 	initialHash := readMetadataBranchHash(t, repo)
 	_ = createCheckpointOnMetadataBranch(t, repo, "2025-01-01-test-session-uuid")
@@ -1267,6 +1270,9 @@ func TestResumeFromCurrentBranch_FastForwardsStaleLocalMetadata(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", filepath.Join(tmpDir, "claude-projects"))
 
 	repo, w, _ := setupResumeTestRepo(t, tmpDir, false)
+	// Configure origin so the election elects it — the stale-local promotion
+	// this test pins is confined to the elected remote's tracking ref.
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
 	initialHash := readMetadataBranchHash(t, repo)
 
 	ctx := context.Background()

@@ -15,11 +15,12 @@ import (
 
 // metadataCandidatesFixture builds a local repo with two remotes — "upstream"
 // (elected via checkpoint_push_remote) and "origin" (legacy tier) — each a
-// local bare repo. The metadata branch is pushed to origin at commit A; when
-// alsoUpstream is set it is advanced to commit B and pushed to upstream, so a
-// test can prove which candidate served a fetch. The local metadata branch is
-// deleted afterwards; the working repo is chdir'd into.
-func metadataCandidatesFixture(t *testing.T, alsoUpstream bool) (localDir, originHash, upstreamHash string) {
+// local bare repo. When onOrigin is set the metadata branch is pushed to
+// origin at commit A; when onUpstream is set it is pushed to upstream (at
+// commit B when origin also carries it, so a test can prove which candidate
+// served a fetch). The local metadata branch is deleted afterwards; the
+// working repo is chdir'd into.
+func metadataCandidatesFixture(t *testing.T, onOrigin, onUpstream bool) (localDir, originHash, upstreamHash string) {
 	t.Helper()
 	testutil.IsolateGitConfigEnv(t)
 
@@ -37,20 +38,26 @@ func metadataCandidatesFixture(t *testing.T, alsoUpstream bool) (localDir, origi
 	runGit(t, localDir, "remote", "add", "origin", originBare)
 	runGit(t, localDir, "remote", "add", "upstream", upstreamBare)
 
-	// Metadata branch at commit A → origin (the legacy tier's copy).
+	// Metadata branch at commit A.
 	runGit(t, localDir, "branch", paths.MetadataBranchName)
-	runGit(t, localDir, "push", "--quiet", "origin", paths.MetadataBranchName)
-	originHash = revParse(t, localDir, paths.MetadataBranchName)
+	if onOrigin {
+		// Commit A → origin (the legacy tier's copy).
+		runGit(t, localDir, "push", "--quiet", "origin", paths.MetadataBranchName)
+		originHash = revParse(t, localDir, paths.MetadataBranchName)
+	}
 
-	if alsoUpstream {
-		// Advance to commit B → upstream (the elected remote's copy).
-		runGit(t, localDir, "checkout", "--quiet", paths.MetadataBranchName)
-		testutil.WriteFile(t, localDir, "metadata-b.txt", "checkpoint B")
-		testutil.GitAdd(t, localDir, "metadata-b.txt")
-		testutil.GitCommit(t, localDir, "checkpoint B")
+	if onUpstream {
+		if onOrigin {
+			// Advance to commit B so the elected remote's tip differs from
+			// origin's.
+			runGit(t, localDir, "checkout", "--quiet", paths.MetadataBranchName)
+			testutil.WriteFile(t, localDir, "metadata-b.txt", "checkpoint B")
+			testutil.GitAdd(t, localDir, "metadata-b.txt")
+			testutil.GitCommit(t, localDir, "checkpoint B")
+			runGit(t, localDir, "checkout", "--quiet", "-")
+		}
 		runGit(t, localDir, "push", "--quiet", "upstream", paths.MetadataBranchName)
 		upstreamHash = revParse(t, localDir, paths.MetadataBranchName)
-		runGit(t, localDir, "checkout", "--quiet", "-")
 	}
 
 	// Drop local metadata state so the fetch decides what gets created.
@@ -87,7 +94,7 @@ func refExists(t *testing.T, dir, ref string) bool {
 //
 // Uses t.Chdir — not parallel.
 func TestFetchMetadataTreeOnly_LegacyOriginFetchNeverAdvancesLocal(t *testing.T) {
-	localDir, originHash, _ := metadataCandidatesFixture(t, false)
+	localDir, originHash, _ := metadataCandidatesFixture(t, true, false)
 
 	require.NoError(t, FetchMetadataTreeOnly(context.Background()))
 
@@ -105,7 +112,7 @@ func TestFetchMetadataTreeOnly_LegacyOriginFetchNeverAdvancesLocal(t *testing.T)
 //
 // Uses t.Chdir — not parallel.
 func TestFetchMetadataTreeOnly_ElectedCandidateWinsAndAdvancesLocal(t *testing.T) {
-	localDir, originHash, upstreamHash := metadataCandidatesFixture(t, true)
+	localDir, originHash, upstreamHash := metadataCandidatesFixture(t, true, true)
 
 	require.NoError(t, FetchMetadataTreeOnly(context.Background()))
 

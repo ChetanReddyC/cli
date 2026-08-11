@@ -400,22 +400,20 @@ func FetchMetadataTreeOnly(ctx context.Context) error {
 // successful fetch from the legacy origin tier only updates origin's tracking
 // ref (which the candidate-aware tracking-ref readers consult) and never feeds
 // SafelyAdvanceLocalRef — a stale origin driving the local v1 advance is the
-// #1374-class hazard. The election result is resolved explicitly rather than
-// inferred from the chain's first entry, which can be the fail-open origin.
+// #1374-class hazard. The election result comes from the same resolver call
+// that produced the chain (never inferred from the chain's first entry, which
+// can be the fail-open origin), so chain and election cannot disagree
+// mid-operation.
 func fetchMetadataFromReadRemotes(ctx context.Context, noFilter bool) error {
-	candidates := strategy.CheckpointReadRemotes(ctx)
+	resolution := strategy.CheckpointReadRemotesWithElection(ctx)
+	candidates := resolution.Candidates
 	if len(candidates) == 0 {
 		return errors.New("no git remotes configured to fetch checkpoint metadata from")
 	}
 
-	electedName := ""
-	if elected, electErr := strategy.ResolveCheckpointSyncRemote(ctx); electErr == nil {
-		electedName = elected.Name
-	}
-
 	var firstErr error
 	for i, remoteName := range candidates {
-		err := fetchMetadataFromRemote(ctx, remoteName, noFilter, electedName != "" && remoteName == electedName)
+		err := fetchMetadataFromRemote(ctx, remoteName, noFilter, resolution.ElectedName != "" && remoteName == resolution.ElectedName)
 		if err == nil {
 			return nil
 		}
@@ -681,8 +679,8 @@ func checkpointBlobFetchTargets(ctx context.Context) []string {
 		return []string{resolveCheckpointFetchTarget(ctx)}
 	}
 	targets := make([]string, 0, len(candidates))
-	for i := range candidates {
-		targets = append(targets, remote.CheckpointFetchTargetFrom(ctx, candidates[i:i+1]))
+	for _, name := range candidates {
+		targets = append(targets, remote.CheckpointFetchTargetFrom(ctx, name))
 	}
 	return targets
 }

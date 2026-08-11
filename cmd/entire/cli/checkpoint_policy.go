@@ -136,33 +136,27 @@ func resolveCheckpointPolicyTargets(ctx context.Context) ([]checkpointpolicy.Tar
 		return nil, nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
 
-	electedName := ""
-	var electErr error
-	if elected, resolveErr := strategy.ResolveCheckpointSyncRemote(ctx); resolveErr == nil {
-		electedName = elected.Name
-	} else {
-		electErr = resolveErr
-	}
-
-	candidates := strategy.CheckpointReadRemotes(ctx)
-	if len(candidates) == 0 {
-		if electErr != nil {
-			return nil, nil, fmt.Errorf("no checkpoint policy remote available: %w", electErr)
+	// One resolver call yields both the chain and the election, so the
+	// read-only marking below cannot disagree with the push target.
+	resolution := strategy.CheckpointReadRemotesWithElection(ctx)
+	if len(resolution.Candidates) == 0 {
+		if resolution.ElectionErr != nil {
+			return nil, nil, fmt.Errorf("no checkpoint policy remote available: %w", resolution.ElectionErr)
 		}
 		return nil, nil, errors.New("no git remotes configured to resolve the checkpoint policy from")
 	}
-	readTargets := make([]checkpointpolicy.Target, 0, len(candidates))
-	for _, name := range candidates {
+	readTargets := make([]checkpointpolicy.Target, 0, len(resolution.Candidates))
+	for _, name := range resolution.Candidates {
 		readTargets = append(readTargets, checkpointpolicy.Target{
 			Remote:          name,
 			Dir:             dir,
-			SkipLocalUpdate: name != electedName,
+			SkipLocalUpdate: name != resolution.ElectedName,
 		})
 	}
 
 	var pushTarget *checkpointpolicy.Target
-	if electedName != "" {
-		pushTarget = &checkpointpolicy.Target{Remote: electedName, Dir: dir}
+	if resolution.ElectedName != "" {
+		pushTarget = &checkpointpolicy.Target{Remote: resolution.ElectedName, Dir: dir}
 	}
 	return readTargets, pushTarget, nil
 }

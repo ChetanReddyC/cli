@@ -22,18 +22,51 @@ import (
 // An empty result means no candidates — callers needing the "checkpoint
 // absent" classification must gather their own positive evidence (successful
 // remote listing, readable settings); an empty chain alone is not proof.
+//
+// Deliberately un-memoized: every call re-runs the election (~2 git
+// subprocesses plus a settings.Load). Callers on hot paths (per-turn hooks,
+// checkpoint.Open sites) accept that cost for always-fresh results; revisit
+// with memoization only if profiling shows it matters.
 func CheckpointReadRemotes(ctx context.Context) []string {
-	var candidates []string
+	return CheckpointReadRemotesWithElection(ctx).Candidates
+}
+
+// CheckpointReadResolution is the read-candidate chain bundled with the
+// election result it was derived from.
+type CheckpointReadResolution struct {
+	// Candidates is the ordered read-candidate chain (see
+	// CheckpointReadRemotes).
+	Candidates []string
+	// ElectedName is the elected checkpoint sync remote; "" when the election
+	// failed or elected nothing. Only this remote may seed or advance local
+	// refs.
+	ElectedName string
+	// ElectionErr records a failed election. It is advisory for readers (the
+	// chain fail-opens to ["origin"] when configured); write-adjacent callers
+	// may surface it when they need a push target.
+	ElectionErr error
+}
+
+// CheckpointReadRemotesWithElection returns the read-candidate chain together
+// with the election result it was derived from, so callers that need both —
+// e.g. to confine local-ref advancement to the elected remote while iterating
+// the chain — make ONE election call instead of two that could disagree if
+// settings or remotes change mid-operation. See CheckpointReadRemotes for the
+// read-side fail-open rationale and cost note.
+func CheckpointReadRemotesWithElection(ctx context.Context) CheckpointReadResolution {
+	var res CheckpointReadResolution
 	elected, err := ResolveCheckpointSyncRemote(ctx)
 	switch {
 	case err != nil:
+		res.ElectionErr = err
 		logging.Debug(ctx, "checkpoint reads: election failed, falling back to origin only",
 			slog.String("error", err.Error()))
 	case elected.Name != "":
-		candidates = append(candidates, elected.Name)
+		res.ElectedName = elected.Name
+		res.Candidates = append(res.Candidates, elected.Name)
 	}
-	if isConfiguredRemote(ctx, "origin") && (len(candidates) == 0 || candidates[0] != "origin") {
-		candidates = append(candidates, "origin")
+	if isConfiguredRemote(ctx, "origin") && (len(res.Candidates) == 0 || res.Candidates[0] != "origin") {
+		res.Candidates = append(res.Candidates, "origin")
 	}
-	return candidates
+	return res
 }
