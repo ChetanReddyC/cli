@@ -136,3 +136,25 @@ func TestCheckpointReadRemotes_TrackingConfigDoesNotDecide(t *testing.T) {
 
 	assert.Equal(t, []string{"origin"}, CheckpointReadRemotes(ctx))
 }
+
+// Not parallel: uses t.Chdir()
+//
+// A fail-closed election (checkpoint_push_remote names a missing remote) with
+// NO origin configured yields an EMPTY chain — the fail-open tier only ever
+// substitutes origin, never a non-origin remote such as the sole "upstream".
+func TestCheckpointReadRemotes_FailClosedElectionNoOrigin_EmptyChain(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "f.txt", "init")
+	testutil.GitAdd(t, tmpDir, "f.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+
+	testutil.AddRemote(t, tmpDir, "upstream", "https://example.com/upstream.git")
+	testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "gone")
+
+	t.Chdir(tmpDir)
+
+	assert.Empty(t, CheckpointReadRemotes(context.Background()),
+		"fail-open must never substitute a non-origin remote")
+}

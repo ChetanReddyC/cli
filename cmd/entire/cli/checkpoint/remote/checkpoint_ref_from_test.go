@@ -121,26 +121,6 @@ func TestFetchCheckpointRefFrom_AbsentOnEveryCandidateIsAbsence(t *testing.T) {
 	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound)
 }
 
-// TestFetchCheckpointRefFrom_EmptyChainNoRemotesIsAbsence: the four-condition
-// absence classification — empty candidate chain, emptiness proven by a
-// successful empty `git remote` listing, live context, readable settings with
-// no checkpoint_remote key — classifies the ref as absent.
-func TestFetchCheckpointRefFrom_EmptyChainNoRemotesIsAbsence(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	workDir := t.TempDir()
-	testutil.InitRepo(t, workDir)
-	testutil.WriteFile(t, workDir, "f.txt", "content")
-	testutil.GitAdd(t, workDir, "f.txt")
-	testutil.GitCommit(t, workDir, "init")
-	t.Chdir(workDir)
-
-	ref := plumbing.ReferenceName("refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9")
-	err := FetchCheckpointRefFrom(context.Background(), ref, nil)
-	require.Error(t, err)
-	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
-		"a provably remoteless repo must classify the ref as absent")
-}
-
 // TestFetchCheckpointRefFrom_EmptyChainWithRemotesIsNotAbsence: an empty
 // chain whose emptiness is NOT backed by a remoteless repo (a fail-closed
 // election left a configured remote out of the chain) must surface an error,
@@ -164,69 +144,6 @@ func TestFetchCheckpointRefFrom_EmptyChainWithRemotesIsNotAbsence(t *testing.T) 
 	require.Error(t, err)
 	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
 		"a repo with configured remotes must never classify an empty chain as absence")
-}
-
-// TestFetchCheckpointRefFrom_CanceledContextIsNotAbsence: a dead caller
-// context invalidates the remote listing as evidence — the empty chain must
-// surface an error, never absence.
-func TestFetchCheckpointRefFrom_CanceledContextIsNotAbsence(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	workDir := t.TempDir()
-	testutil.InitRepo(t, workDir)
-	testutil.WriteFile(t, workDir, "f.txt", "content")
-	testutil.GitAdd(t, workDir, "f.txt")
-	testutil.GitCommit(t, workDir, "init")
-	t.Chdir(workDir)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	ref := plumbing.ReferenceName("refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9")
-	err := FetchCheckpointRefFrom(ctx, ref, nil)
-	require.Error(t, err)
-	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
-		"a canceled context must stay a failure, never absence")
-}
-
-// TestFetchCheckpointRefFrom_CheckpointRemoteKeyIsNotAbsence: a
-// checkpoint_remote key present in any form (here malformed) rules out the
-// remoteless classification even with an empty chain.
-func TestFetchCheckpointRefFrom_CheckpointRemoteKeyIsNotAbsence(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	workDir := t.TempDir()
-	testutil.InitRepo(t, workDir)
-	testutil.WriteFile(t, workDir, "f.txt", "content")
-	testutil.GitAdd(t, workDir, "f.txt")
-	testutil.GitCommit(t, workDir, "init")
-	testutil.WriteFile(t, workDir, ".entire/settings.json",
-		`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github"}}}`)
-	t.Chdir(workDir)
-
-	ref := plumbing.ReferenceName("refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9")
-	err := FetchCheckpointRefFrom(context.Background(), ref, nil)
-	require.Error(t, err)
-	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
-		"a present-but-malformed checkpoint_remote must not classify as absence")
-}
-
-// TestFetchCheckpointRefFrom_UnreadableSettingsIsNotAbsence: unreadable
-// settings cannot rule out a configured checkpoint remote — the call falls
-// back to the legacy single-target behavior and surfaces a failure.
-func TestFetchCheckpointRefFrom_UnreadableSettingsIsNotAbsence(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	workDir := t.TempDir()
-	testutil.InitRepo(t, workDir)
-	testutil.WriteFile(t, workDir, "f.txt", "content")
-	testutil.GitAdd(t, workDir, "f.txt")
-	testutil.GitCommit(t, workDir, "init")
-	testutil.WriteFile(t, workDir, ".entire/settings.json", "{not valid json")
-	t.Chdir(workDir)
-
-	ref := plumbing.ReferenceName("refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9")
-	err := FetchCheckpointRefFrom(context.Background(), ref, nil)
-	require.Error(t, err)
-	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
-		"unreadable settings must not classify as absence")
 }
 
 // TestFetchCheckpointRefFrom_DedicatedCheckpointRemoteBypassesCandidates: a

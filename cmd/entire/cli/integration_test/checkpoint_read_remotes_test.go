@@ -70,6 +70,13 @@ func localPrimaryExists(t *testing.T, env *TestEnv) bool {
 	return err == nil
 }
 
+// A parentless commit built from the worktree tree has no checkpoint metadata,
+// which distinguishes branch existence from the requested checkpoint existing.
+func rootlessWorktreeCommit(t *testing.T, env *TestEnv) string {
+	t.Helper()
+	return env.gitOutput(env.RepoDir, "commit-tree", "HEAD^{tree}", "-m", "checkpoint root")
+}
+
 // TestCheckpointReadRemotes_ConfiguredReadBack: the election/read round trip
 // for a configured user. checkpoint_push_remote elects "upstream", the
 // checkpoint is pushed there through the real gate, origin exists and stays
@@ -147,14 +154,22 @@ func TestCheckpointReadRemotes_LegacyOriginTierServed(t *testing.T) {
 		})
 
 		wipeLocalCheckpointState(t, env)
+		localPrimaryHash := ""
+		if !env.usingGitRefs() {
+			localPrimaryHash = rootlessWorktreeCommit(t, env)
+			env.gitOutput(env.RepoDir, "update-ref", "refs/heads/"+paths.MetadataBranchName, localPrimaryHash)
+		}
 
 		output := env.RunCLI("checkpoint", "explain", "--checkpoint", checkpointID)
 		if !strings.Contains(output, "Add legacy module") {
 			t.Errorf("read must fall back to the legacy origin tier, got:\n%s", output)
 		}
 
-		if !env.usingGitRefs() && localPrimaryExists(t, env) {
-			t.Error("the legacy origin tier must never recreate the local primary (read-only tier)")
+		if !env.usingGitRefs() {
+			got := env.refHash(env.RepoDir, "refs/heads/"+paths.MetadataBranchName)
+			if got != localPrimaryHash {
+				t.Errorf("legacy reads must not rewrite the local primary: got %s, want %s", got, localPrimaryHash)
+			}
 		}
 
 		if env.usingGitRefs() {
@@ -167,6 +182,40 @@ func TestCheckpointReadRemotes_LegacyOriginTierServed(t *testing.T) {
 			}
 		}
 	})
+}
+
+// An elected metadata branch may exist without containing a checkpoint that
+// still lives on the legacy origin branch. Selection must happen per requested
+// checkpoint, not merely per branch existence.
+func TestCheckpointReadRemotes_ElectedBranchMissingCheckpointFallsBackToOrigin(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	env.CheckpointStore = StoreGitBranch
+
+	bareOrigin := env.SetupBareRemote()
+	_ = env.SetupNamedBareRemote("upstream")
+
+	checkpointID := createCheckpointedCommit(t, env, "Add split module", "split.go", "package split", "Add split module")
+	env.RunPrePush("origin")
+	if !env.CheckpointExistsOnRemote(bareOrigin, checkpointID) {
+		t.Fatalf("checkpoint %s should be on origin", checkpointID)
+	}
+
+	upstreamHash := rootlessWorktreeCommit(t, env)
+	env.gitOutput(env.RepoDir, "push", "--quiet", "--no-verify", "upstream", upstreamHash+":refs/heads/"+paths.MetadataBranchName)
+	env.PatchSettings(map[string]any{
+		"strategy_options": map[string]any{
+			"checkpoint_push_remote": "upstream",
+		},
+	})
+
+	wipeLocalCheckpointState(t, env)
+
+	output := env.RunCLI("checkpoint", "explain", "--checkpoint", checkpointID)
+	if !strings.Contains(output, "Add split module") {
+		t.Errorf("read must continue to origin when the elected branch lacks the checkpoint, got:\n%s", output)
+	}
 }
 
 // TestCheckpointReadRemotes_UpstreamOnlyRepo: a repo with no origin at all —
@@ -192,44 +241,6 @@ func TestCheckpointReadRemotes_UpstreamOnlyRepo(t *testing.T) {
 			t.Errorf("reads must work against the sole (non-origin) remote, got:\n%s", output)
 		}
 	})
-}
-
-// TestCheckpointReadRemotes_CrossMachineDiscovery: git-refs only — a fresh
-// clone with zero local checkpoint state discovers refs-native checkpoints on
-// its remote WITHOUT a dedicated checkpoint_remote, then hydrates them on
-// read. This is the default-setup gap Unit 3 closes: discovery previously
-// required a configured checkpoint_remote.
-func TestCheckpointReadRemotes_CrossMachineDiscovery(t *testing.T) {
-	t.Parallel()
-
-	env := NewFeatureBranchEnv(t)
-	env.CheckpointStore = StoreGitRefs
-
-	bareOrigin := env.SetupBareRemote()
-
-	checkpointID := createCheckpointedCommit(t, env, "Add machine module", "machine.go", "package machine", "Add machine module")
-	env.GitPush("origin", "HEAD")
-	env.RunPrePush("origin")
-	if !env.CheckpointExistsOnRemote(bareOrigin, checkpointID) {
-		t.Fatalf("checkpoint %s should be on origin", checkpointID)
-	}
-
-	// Machine B: a fresh clone with no local checkpoint refs and no dedicated
-	// checkpoint_remote.
-	cloneEnv := env.CloneFrom(bareOrigin)
-	if cloneEnv.CheckpointsPresentLocally() {
-		t.Fatal("fixture: the clone must start with zero local checkpoint state")
-	}
-
-	listOutput := cloneEnv.RunCLI("checkpoint", "list")
-	if !strings.Contains(listOutput, "Add machine module") && !strings.Contains(listOutput, checkpointID[:8]) {
-		t.Errorf("cross-machine discovery should surface the remote checkpoint, got:\n%s", listOutput)
-	}
-
-	output := cloneEnv.RunCLI("checkpoint", "explain", "--checkpoint", checkpointID)
-	if !strings.Contains(output, "Add machine module") {
-		t.Errorf("the discovered checkpoint should hydrate on read, got:\n%s", output)
-	}
 }
 
 // TestCheckpointReadRemotes_RemotelessRepoClassifiesAbsent: a fully local

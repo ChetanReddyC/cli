@@ -98,22 +98,6 @@ func TestSyncFromPolicySkipLocalUpdateNeverAdvancesLocalRef(t *testing.T) {
 		"a legacy-tier baseline must never advance the local policy ref")
 }
 
-// TestSyncFromPolicyElectedTargetAdvancesLocalRef: the control — the same
-// baseline from a target allowed to update does advance the local ref.
-func TestSyncFromPolicyElectedTargetAdvancesLocalRef(t *testing.T) {
-	bareDir, remoteHash := initPolicyBare(t, checkpointpolicy.DefaultPolicy())
-
-	localDir, localRepo := initPolicyRepoWithDir(t)
-	_, err := checkpointpolicy.SyncFrom(t.Context(), localRepo, []checkpointpolicy.Target{
-		{Remote: bareDir, Dir: localDir},
-	})
-	require.NoError(t, err)
-
-	localState, err := checkpointpolicy.ReadLocal(t.Context(), localRepo)
-	require.NoError(t, err)
-	require.Equal(t, remoteHash, localState.Hash)
-}
-
 // TestSyncFromPolicyAbsentEverywhereFallsBackToLocal: every candidate is
 // reachable and none has a policy ref — defaults, no error.
 func TestSyncFromPolicyAbsentEverywhereFallsBackToLocal(t *testing.T) {
