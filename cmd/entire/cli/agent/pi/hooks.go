@@ -37,6 +37,12 @@ const (
 	// entireCmdPlaceholder is replaced at install time with either `entire`
 	// (production) or a `go run …` path (local-dev).
 	entireCmdPlaceholder = "__ENTIRE_CMD__"
+
+	// piNestedEnvVar marks a Pi process so any Pi it spawns can tell it is nested
+	// and skip forwarding session lifecycle. Set and read only by the embedded
+	// extension — Entire's hook subprocesses inherit it, so no Go code may treat it
+	// as a skip signal.
+	piNestedEnvVar = "ENTIRE_PI_NESTED"
 )
 
 func extensionPath(ctx context.Context) (string, error) {
