@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -160,10 +161,10 @@ func TestCellV4_RouteNotFoundIsErrCellUnavailable(t *testing.T) {
 
 // TestCellV4_RepoUnmatched404IsNotCellUnavailable covers the OTHER 404: the
 // route exists and query-serve answered, but the repo filter matched nothing
-// (typo'd repo, no access, or the owner org isn't feature-flag enabled —
-// entire-search fails closed with a JSON 404 body). That must NOT be
-// classified as "query-serve isn't deployed in this cell", or an org merely
-// missing from the flag reads as a missing region to the user.
+// (not indexed, or the owner org isn't feature-flag enabled — entire-search
+// fails closed with a JSON 404 body). That must NOT be classified as
+// "query-serve isn't deployed in this cell", or an org merely missing from
+// the flag reads as a missing region to the user.
 func TestCellV4_RepoUnmatched404IsNotCellUnavailable(t *testing.T) {
 	t.Parallel()
 
@@ -179,5 +180,32 @@ func TestCellV4_RepoUnmatched404IsNotCellUnavailable(t *testing.T) {
 	}
 	if !errors.Is(err, ErrRepoFilterUnmatched) {
 		t.Fatalf("err = %v, want ErrRepoFilterUnmatched", err)
+	}
+	if !strings.Contains(err.Error(), "None of the requested repos were found") {
+		t.Errorf("err = %v, want the server's own message preserved in the wrap", err)
+	}
+}
+
+// TestCellV4_ProblemJSON404IsCellUnavailable pins the THIRD 404 shape: the
+// gateway's anonymous path writes RFC 7807 problem+json (title/status/detail
+// keys, no "error" key). Nothing in that body marks query-serve as having
+// answered, so it must fall through to ErrCellUnavailable rather than read as
+// a repo-filter miss.
+func TestCellV4_ProblemJSON404IsCellUnavailable(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"title":"Not Found","status":404,"detail":"no route for this path"}`)) //nolint:errcheck // test helper
+	}))
+	defer srv.Close()
+
+	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, []string{"01JREPOA"})
+	if !errors.Is(err, ErrCellUnavailable) {
+		t.Fatalf("err = %v, want ErrCellUnavailable for a problem+json 404", err)
+	}
+	if errors.Is(err, ErrRepoFilterUnmatched) {
+		t.Fatalf("err = %v, want NOT ErrRepoFilterUnmatched for a problem+json 404", err)
 	}
 }

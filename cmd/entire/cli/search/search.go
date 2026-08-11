@@ -33,11 +33,13 @@ const v4ServicePath = "/api/v1/semantic-search/search/v1/search"
 var ErrCellUnavailable = errors.New("semantic search is not available in this cell")
 
 // ErrRepoFilterUnmatched reports that query-serve answered (the route exists)
-// but the explicit repo filter matched nothing the caller can search — a
-// typo'd repo, no access, or an owner org the semantic-search feature flag
-// hasn't enabled (entire-search fails closed with a JSON 404, existence not
-// disclosed). Distinct from ErrCellUnavailable so fan-out callers don't
-// misreport a repo-level miss as a region without query-serve.
+// but the explicit repo filter matched nothing the caller can search — the
+// repo isn't indexed yet, or its owner org isn't enabled on the
+// semantic-search feature flag (entire-search fails closed with a JSON 404,
+// existence not disclosed). A typo'd repo can't produce this from the CLI:
+// the slug was already resolved against the control-plane index before any
+// cell was contacted. Distinct from ErrCellUnavailable so fan-out callers
+// don't misreport a repo-level miss as a region without query-serve.
 var ErrRepoFilterUnmatched = errors.New("no requested repo was found in this cell")
 
 // WildcardQuery is the query string used when only filters are provided (no search terms).
@@ -677,8 +679,8 @@ func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []strin
 	if resp.StatusCode == http.StatusNotFound {
 		// Two distinct 404s share this status. A JSON error body is
 		// query-serve answering through the gateway: the route exists but the
-		// repo filter matched nothing the caller may search (typo, no access,
-		// or the owner org isn't flag-enabled — entire-search fails closed,
+		// repo filter matched nothing the caller may search (not indexed, or
+		// the owner org isn't flag-enabled — entire-search fails closed,
 		// existence not disclosed). A plain "404 page not found" is the
 		// gateway itself: no semantic-search route, query-serve not deployed
 		// in this cell. Deployed cells answer unfiltered searches of unknown
@@ -687,7 +689,9 @@ func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []strin
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return nil, ErrRepoFilterUnmatched
+			// Wrap rather than return the bare sentinel so the server's own
+			// message survives into debug logs; errors.Is still matches.
+			return nil, fmt.Errorf("%w: %s", ErrRepoFilterUnmatched, errResp.Error)
 		}
 		return nil, ErrCellUnavailable
 	}

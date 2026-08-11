@@ -544,10 +544,11 @@ func TestNewSemanticSearcher_RejectsMultipleRepoFilters(t *testing.T) {
 }
 
 // TestMergeSemanticV4Responses_AllCellsRepoUnmatched verifies the error when
-// every queried cell answered but none matched the repo filter (typo, no
-// access, or the owner org isn't flag-enabled). The old behavior lumped this
-// in with undeployed cells and told the user their REGION lacked semantic
-// search — a misdiagnosis that sent a flag-enrollment gap to the wrong team.
+// every queried cell answered but none matched the repo filter (not indexed,
+// or the owner org isn't flag-enabled — a typo can't reach this point, the
+// slug already resolved). The old behavior lumped this in with undeployed
+// cells and told the user their REGION lacked semantic search — a
+// misdiagnosis that sent a flag-enrollment gap to the wrong team.
 func TestMergeSemanticV4Responses_AllCellsRepoUnmatched(t *testing.T) {
 	t.Parallel()
 
