@@ -216,10 +216,10 @@ func TestLogin_DeniedFlow(t *testing.T) {
 
 // TestLogin_BrowserFlow_SavesToken drives the loopback authorization-code
 // flow end to end: ENTIRE_TEST_TTY=1 forces the interactive (browser)
-// default, openBrowser reports failure under test (no usable browser on a
-// headless host) so the flow prints the fallback URL, and the test plays
-// the role of the browser by parsing that URL and GETting the loopback
-// callback with a code + the state from it.
+// default, the test-safe prompt action chooses Enter (continue without
+// opening a real browser), and the test plays the role of the browser by
+// parsing the always-visible URL and GETting the loopback callback with a
+// code + the state from it.
 func TestLogin_BrowserFlow_SavesToken(t *testing.T) {
 	t.Parallel()
 
@@ -378,15 +378,12 @@ func waitForLoginPrompt(t *testing.T, stdout *bufio.Reader) (string, string) {
 	return "", ""
 }
 
-// waitForBrowserPrompt reads login stdout until it finds the
-// "Open this URL in your browser to sign in: <url>" fallback line and
-// returns the URL. Under test openBrowser reports failure (no usable
-// browser on a headless host), so the browser flow always prints this
-// fallback — which is how the test recovers the ephemeral callback URL.
+// waitForBrowserPrompt reads login stdout until it finds the always-visible
+// full browser authorization URL and returns it.
 func waitForBrowserPrompt(t *testing.T, stdout *bufio.Reader) string {
 	t.Helper()
 
-	const prefix = "Open this URL in your browser to sign in: "
+	const prefix = "Login URL:"
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		line, err := stdout.ReadString('\n')
@@ -395,7 +392,7 @@ func waitForBrowserPrompt(t *testing.T, stdout *bufio.Reader) string {
 		}
 		line = strings.TrimSpace(line)
 		if after, ok := strings.CutPrefix(line, prefix); ok {
-			return after
+			return strings.TrimSpace(after)
 		}
 	}
 

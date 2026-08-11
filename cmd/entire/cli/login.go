@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -13,12 +12,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/entireio/auth-go/tokens"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 const (
@@ -40,6 +41,38 @@ const browserLoginTimeout = 5 * time.Minute
 
 // browserOpenFunc is the signature for opening a URL in the user's browser.
 type browserOpenFunc func(ctx context.Context, url string) error
+
+// clipboardWriteFunc is the signature for copying a URL to the system
+// clipboard. Keeping it injectable lets login tests remain parallel and avoids
+// touching the developer's real clipboard.
+type clipboardWriteFunc func(text string) error
+
+type loginURLAction byte
+
+const (
+	loginURLContinue loginURLAction = iota
+	loginURLCopy
+	loginURLOpen
+)
+
+type loginURLActionReadFunc func(ctx context.Context) (loginURLAction, error)
+
+// loginURLInteractor owns the three side effects behind the interactive URL
+// prompt. Production uses the controlling TTY, system clipboard, and default
+// browser; tests provide deterministic functions instead.
+type loginURLInteractor struct {
+	readAction loginURLActionReadFunc
+	copyURL    clipboardWriteFunc
+	openURL    browserOpenFunc
+}
+
+func defaultLoginURLInteractor() loginURLInteractor {
+	return loginURLInteractor{
+		readAction: readLoginURLAction,
+		copyURL:    clipboard.WriteAll,
+		openURL:    openBrowser,
+	}
+}
 
 // chooseApprovalURL prefers verification_uri_complete (RFC 8628 §3.3.1) so the
 // browser lands on a URL with the user_code already in the query string —
@@ -96,7 +129,7 @@ func newLoginCmd() *cobra.Command {
 				return client.StartBrowserAuth(ctx)
 			}
 			return runLoginAuto(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
-				client, startBrowser, openBrowser, loginFlowFacts{
+				client, startBrowser, defaultLoginURLInteractor(), loginFlowFacts{
 					useDevice:  useDevice,
 					canPrompt:  interactive.CanPromptInteractively(),
 					sshSession: isSSHSession(),
@@ -157,7 +190,7 @@ func requireSecureLoginServer(server string, insecureHTTPAuth bool) error {
 	return nil
 }
 
-func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient, openURL browserOpenFunc, canPrompt bool) error {
+func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient, urlInteractor loginURLInteractor, canPrompt bool) error {
 	start, err := client.StartDeviceAuth(ctx)
 	if err != nil {
 		return fmt.Errorf("start login: %w", err)
@@ -168,22 +201,8 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 	approvalURL := chooseApprovalURL(start)
 
 	if canPrompt {
-		// chooseApprovalURL prefers the code-embedded verification_uri_complete,
-		// so opening the URL is usually all the user needs to do. The device
-		// code is printed above regardless, so it's still available to confirm
-		// against the page (RFC 8628 §3.3.1) or to enter on the bare-URI fallback.
-		fmt.Fprintf(outW, "Login URL:   %s\n\n", approvalURL)
-		fmt.Fprintf(outW, "Press Enter to open in browser...")
-
-		// Read from /dev/tty so we get a real keypress and don't consume piped stdin.
-		if err := waitForEnter(ctx); err != nil {
+		if err := promptLoginURL(ctx, outW, errW, approvalURL, urlInteractor); err != nil {
 			return fmt.Errorf("wait for input: %w", err)
-		}
-
-		fmt.Fprintln(outW)
-		if err := openURL(ctx, approvalURL); err != nil {
-			fmt.Fprintf(errW, "Warning: failed to open browser: %v\n", err)
-			fmt.Fprintf(outW, "Open this URL in your browser to approve this login: %s\n", approvalURL)
 		}
 	} else {
 		fmt.Fprintf(outW, "Login URL:   %s\n\n", approvalURL)
@@ -216,7 +235,7 @@ type loginFlowFacts struct {
 // fall back to the device flow with a one-line explanation; the same
 // both-flows-with-fallback shape gh / gcloud / aws sso ship. --device
 // forces the device flow without commentary.
-func runLoginAuto(ctx context.Context, outW, errW io.Writer, deviceClient deviceAuthClient, startBrowser func(context.Context) (browserAuthFlow, error), openURL browserOpenFunc, facts loginFlowFacts) error {
+func runLoginAuto(ctx context.Context, outW, errW io.Writer, deviceClient deviceAuthClient, startBrowser func(context.Context) (browserAuthFlow, error), urlInteractor loginURLInteractor, facts loginFlowFacts) error {
 	if shouldUseBrowserLogin(facts) {
 		flow, err := startBrowser(ctx)
 		if err != nil {
@@ -224,9 +243,9 @@ func runLoginAuto(ctx context.Context, outW, errW io.Writer, deviceClient device
 			// exhausted ports); that shouldn't strand the user — warn and
 			// use the device flow instead.
 			fmt.Fprintf(errW, "Warning: could not start browser sign-in (%v); falling back to the device-code flow.\n", err)
-			return runLogin(ctx, outW, errW, deviceClient, openURL, facts.canPrompt)
+			return runLogin(ctx, outW, errW, deviceClient, urlInteractor, facts.canPrompt)
 		}
-		return runBrowserLogin(ctx, outW, errW, flow, deviceClient.BaseURL(), openURL, browserLoginTimeout)
+		return runBrowserLogin(ctx, outW, errW, flow, deviceClient.BaseURL(), urlInteractor, browserLoginTimeout)
 	}
 	switch {
 	case facts.useDevice:
@@ -236,7 +255,7 @@ func runLoginAuto(ctx context.Context, outW, errW io.Writer, deviceClient device
 	case facts.sshSession:
 		fmt.Fprintln(errW, "SSH session detected; using device-code flow (a browser opened here couldn't reach this machine).")
 	}
-	return runLogin(ctx, outW, errW, deviceClient, openURL, facts.canPrompt)
+	return runLogin(ctx, outW, errW, deviceClient, urlInteractor, facts.canPrompt)
 }
 
 // shouldUseBrowserLogin reports whether `entire login` should use the
@@ -260,43 +279,25 @@ func isSSHSession() bool {
 }
 
 // runBrowserLogin runs the loopback authorization-code flow on an
-// already-started flow: open the authorization URL in the user's browser,
-// wait up to waitTimeout for the redirect back to the local listener, then
-// exchange the code for tokens. Shares the token validation + persistence
-// tail with runLogin via persistLogin.
-func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuthFlow, baseURL string, openURL browserOpenFunc, waitTimeout time.Duration) error {
+// already-started flow: show the authorization URL and explicit actions, wait
+// up to waitTimeout for the redirect back to the local listener, then exchange
+// the code for tokens. Shares the token validation + persistence tail with
+// runLogin via persistLogin.
+func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuthFlow, baseURL string, urlInteractor loginURLInteractor, waitTimeout time.Duration) error {
 	// Wait tears the listener down on return, but Close is idempotent and
 	// covers the error paths before Wait runs.
 	defer func() { _ = flow.Close() }()
 
-	// Mirror the device flow's interactive shape: show the URL, pause on
-	// Enter before opening the browser, then wait on the same line so
-	// persistLogin's "Login complete." reads "Waiting for sign-in...
-	// Login complete." runBrowserLogin is only reached interactively (see
-	// shouldUseBrowserLogin), so the Enter prompt is unconditional here.
 	authURL := flow.AuthorizationURL()
-	// Show the auth host, not the full authorize URL — the PKCE challenge +
-	// loopback redirect make it long and unreadable, and the browser is
-	// opened for the user anyway. The full URL is only printed below as a
-	// fallback when the browser can't be opened.
 	fmt.Fprintf(outW, "Logging in to: %s\n\n", baseURL)
-	fmt.Fprint(outW, "Press Enter to open in browser...")
-
-	// Read from /dev/tty so we get a real keypress and don't consume piped stdin.
-	if err := waitForEnter(ctx); err != nil {
+	if err := promptLoginURL(ctx, outW, errW, authURL, urlInteractor); err != nil {
 		return fmt.Errorf("wait for input: %w", err)
-	}
-	fmt.Fprintln(outW)
-
-	if err := openURL(ctx, authURL); err != nil {
-		fmt.Fprintf(errW, "Warning: failed to open browser: %v\n", err)
-		fmt.Fprintf(outW, "Open this URL in your browser to sign in: %s\n", authURL)
 	}
 
 	fmt.Fprint(outW, "Waiting for sign-in... ")
 
-	// The clock starts here, after the Enter prompt, so time spent reading
-	// the prompt isn't counted against the sign-in itself.
+	// The clock starts after the user explicitly continues or successfully
+	// opens the browser, so time spent choosing or copying isn't counted.
 	waitCtx, cancel := context.WithTimeout(ctx, waitTimeout)
 	defer cancel()
 
@@ -474,37 +475,125 @@ func waitForApproval(ctx context.Context, poller deviceAuthClient, deviceCode st
 	}
 }
 
-// waitForEnter reads a line from /dev/tty, blocking until the user presses Enter.
-// If /dev/tty cannot be opened (e.g. on Windows), it returns immediately.
-// Returns ctx.Err() if the context is cancelled before the user presses Enter.
-func waitForEnter(ctx context.Context) error {
-	// Under test (in-process go test, or a child with ENTIRE_TEST_TTY set)
-	// don't block on a real /dev/tty read — tests that force interactive
-	// mode still need this prompt to return. Mirrors openBrowser's guard.
+const loginURLPrompt = "[Enter] Continue  [c] Copy URL  [o] Open in default browser"
+
+// promptLoginURL displays the exact URL and waits for an explicit user choice.
+// Copy keeps the prompt active so the user can paste into a chosen browser
+// before deciding when the login timeout should begin.
+func promptLoginURL(ctx context.Context, outW, errW io.Writer, loginURL string, interactor loginURLInteractor) error {
+	fmt.Fprintf(outW, "Login URL:   %s\n\n", loginURL)
+
+	for {
+		fmt.Fprint(outW, loginURLPrompt)
+		action, err := interactor.readAction(ctx)
+		fmt.Fprintln(outW)
+		if err != nil {
+			return err
+		}
+
+		switch action {
+		case loginURLContinue:
+			return nil
+		case loginURLCopy:
+			if err := interactor.copyURL(loginURL); err != nil {
+				fmt.Fprintf(errW, "Warning: failed to copy login URL: %v\n", err)
+			} else {
+				fmt.Fprintln(outW, "Copied login URL to clipboard.")
+			}
+		case loginURLOpen:
+			if err := interactor.openURL(ctx, loginURL); err != nil {
+				fmt.Fprintf(errW, "Warning: failed to open default browser: %v\n", err)
+				continue
+			}
+			return nil
+		}
+	}
+}
+
+type loginURLActionResult struct {
+	action loginURLAction
+	err    error
+}
+
+// readLoginURLAction reads a single key from the controlling terminal without
+// consuming piped stdin. Missing TTYs continue without opening anything,
+// preserving the non-blocking fallback of the old Enter prompt.
+func readLoginURLAction(ctx context.Context) (loginURLAction, error) {
+	// In-process and forced-interactive subprocess tests must never touch a
+	// developer's real terminal. Enter/continue is the side-effect-free default.
 	if interactive.UnderTest() {
-		return nil
+		return loginURLContinue, nil
 	}
 
-	tty, err := os.Open("/dev/tty")
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
-		return nil //nolint:nilerr // tty unavailable (e.g. Windows) — skip prompt silently
+		return loginURLContinue, nil //nolint:nilerr // no controlling TTY; continue without side effects
 	}
 
-	done := make(chan error, 1)
+	return readLoginURLActionFromTTY(ctx, tty)
+}
+
+// readLoginURLActionFromTTY takes ownership of tty, temporarily switches it to
+// raw mode so c/o act immediately, and restores the original state before
+// closing it on every success, error, and cancellation path.
+func readLoginURLActionFromTTY(ctx context.Context, tty *os.File) (loginURLAction, error) {
+	fd := int(tty.Fd()) //nolint:gosec // G115: uintptr->int is safe for a file descriptor
+	state, err := term.MakeRaw(fd)
+	if err != nil {
+		_ = tty.Close()
+		return loginURLContinue, fmt.Errorf("enable single-key input: %w", err)
+	}
+
+	resultCh := make(chan loginURLActionResult, 1)
 	go func() {
-		reader := bufio.NewReader(tty)
-		_, err := reader.ReadString('\n')
-		done <- err
+		resultCh <- readLoginURLActionBytes(tty)
 	}()
+
+	finish := func() error {
+		restoreErr := term.Restore(fd, state)
+		closeErr := tty.Close()
+		return errors.Join(restoreErr, closeErr)
+	}
 
 	select {
 	case <-ctx.Done():
-		// Close tty to unblock the reading goroutine.
-		_ = tty.Close()
-		return fmt.Errorf("interrupted: %w", ctx.Err())
-	case <-done:
-		_ = tty.Close()
-		return nil
+		finishErr := finish()
+		return loginURLContinue, errors.Join(fmt.Errorf("interrupted: %w", ctx.Err()), finishErr)
+	case result := <-resultCh:
+		finishErr := finish()
+		if ctx.Err() != nil {
+			return loginURLContinue, errors.Join(fmt.Errorf("interrupted: %w", ctx.Err()), finishErr)
+		}
+		if result.err != nil {
+			return loginURLContinue, errors.Join(result.err, finishErr)
+		}
+		if finishErr != nil {
+			return loginURLContinue, fmt.Errorf("restore terminal input: %w", finishErr)
+		}
+		return result.action, nil
+	}
+}
+
+// readLoginURLActionBytes ignores unsupported keys until it sees one of the
+// advertised choices. Ctrl-C is handled explicitly because raw mode prevents
+// the terminal driver from turning it into SIGINT.
+func readLoginURLActionBytes(r io.Reader) loginURLActionResult {
+	var key [1]byte
+	for {
+		if _, err := io.ReadFull(r, key[:]); err != nil {
+			return loginURLActionResult{err: fmt.Errorf("read login action: %w", err)}
+		}
+
+		switch key[0] {
+		case '\r', '\n':
+			return loginURLActionResult{action: loginURLContinue}
+		case 'c', 'C':
+			return loginURLActionResult{action: loginURLCopy}
+		case 'o', 'O':
+			return loginURLActionResult{action: loginURLOpen}
+		case 0x03:
+			return loginURLActionResult{err: context.Canceled}
+		}
 	}
 }
 
@@ -515,10 +604,7 @@ func openBrowser(ctx context.Context, browserURL string) error {
 	}
 
 	// Under test there's no usable browser, and we must not spawn a real one
-	// on a dev/CI host. Report failure so the caller takes the "here's the
-	// URL" fallback — exactly the path a genuinely headless machine hits, and
-	// what lets an integration test recover the loopback callback URL from
-	// stdout. URL validation above still applies.
+	// on a dev/CI host. URL validation above still applies.
 	if interactive.UnderTest() {
 		return errors.New("browser unavailable under test")
 	}
