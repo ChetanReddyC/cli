@@ -471,17 +471,7 @@ func normalizeTrailEventValue(value any) any {
 				out[key] = child
 				continue
 			}
-			parts := strings.Split(key, "_")
-			for i := 1; i < len(parts); i++ {
-				if parts[i] != "" {
-					parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
-				}
-			}
-			camel := strings.Join(parts, "")
-			if camel == "reviewSessionId" {
-				camel = "reviewId"
-			}
-			out[camel] = normalizeTrailEventValue(child)
+			out[trailEventCamelKey(key)] = normalizeTrailEventValue(child)
 		}
 		return out
 	case []any:
@@ -490,6 +480,20 @@ func normalizeTrailEventValue(value any) any {
 		}
 	}
 	return value
+}
+
+func trailEventCamelKey(key string) string {
+	parts := strings.Split(key, "_")
+	for i := 1; i < len(parts); i++ {
+		if parts[i] != "" {
+			parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
+		}
+	}
+	camel := strings.Join(parts, "")
+	if camel == "reviewSessionId" {
+		return "reviewId"
+	}
+	return camel
 }
 
 func printReviewStreamEvent(w io.Writer, ev reviewStreamEvent) {
@@ -559,6 +563,11 @@ func payloadString(payload map[string]any, key string) string {
 		return ""
 	}
 	v, ok := payload[key]
+	if !ok && strings.ContainsRune(key, '_') {
+		// Historical event payloads used snake_case while entire-api emits
+		// camelCase. Human rendering accepts both during the migration.
+		v, ok = payload[trailEventCamelKey(key)]
+	}
 	if !ok || v == nil {
 		return ""
 	}
