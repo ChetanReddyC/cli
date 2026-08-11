@@ -121,6 +121,33 @@ scoops:
     license: MIT
     skip_upload: auto
 
+  # Transition manifest for the pre-rename package name. Before the "entire"
+  # manifest existed, goreleaser defaulted the name to the project name, so
+  # existing Windows installs are registered as app "cli" and `scoop update`
+  # resolves their updates from cli.json — dropping it orphans those installs
+  # silently (no error, no more updates). Keep publishing it, depending on the
+  # canonical "entire" package so one `scoop update` migrates users without a
+  # forced reinstall, and nudge cleanup via post_install. Drop this entry a few
+  # releases after migration has largely completed.
+  #
+  # Note: both apps ship the same entire.exe shim; scoop lets the most recently
+  # installed app own it, and `scoop uninstall cli` can take the shared shim
+  # with it — hence the `scoop reset entire` step in the message below.
+  - name: cli
+    repository:
+      owner: entireio
+      name: scoop-bucket
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/entireio/cli"
+    description: "CLI for Entire (renamed to 'entire' — install that instead)"
+    license: MIT
+    depends:
+      - entire
+    post_install:
+      - "Write-Host \"This package was renamed to 'entire'. Finish migrating with:\" -ForegroundColor Yellow"
+      - "Write-Host '  scoop uninstall cli; scoop reset entire' -ForegroundColor Yellow"
+    skip_upload: auto
+
 homebrew_casks:
   - name: entire
     repository:
