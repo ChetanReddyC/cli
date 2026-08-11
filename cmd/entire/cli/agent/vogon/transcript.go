@@ -12,6 +12,10 @@ import (
 // Compile-time assertion that vogon can report transcript-derived file lists.
 var _ agent.TranscriptAnalyzer = (*Agent)(nil)
 
+// transcriptTypeToolUse is the entry type the vogon binary writes for file
+// writes. Keep in step with appendToolUse in e2e/vogon/main.go.
+const transcriptTypeToolUse = "tool_use"
+
 // transcriptLine is the subset of the vogon binary's JSONL the analyzer reads.
 // Keep the `files` field in step with e2e/vogon/main.go's transcriptEntry.
 type transcriptLine struct {
@@ -52,6 +56,12 @@ func (v *Agent) ExtractModifiedFilesFromOffset(path string, startOffset int) ([]
 		var entry transcriptLine
 		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
 			continue // a malformed line is not fatal; the real agents skip too
+		}
+		// Only tool-use entries report file writes. Accepting a `files` field on
+		// any line would misattribute files if the transcript format grows another
+		// entry type that happens to carry paths.
+		if entry.Type != transcriptTypeToolUse {
+			continue
 		}
 		for _, f := range entry.Files {
 			if f == "" {

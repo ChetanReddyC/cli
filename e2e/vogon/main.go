@@ -24,7 +24,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -191,9 +190,26 @@ func delegatesToSubagent(prompt string) bool {
 // is the real thing being modelled: a subagent's edits are invisible in the main
 // transcript, which is what made a wrong subagent-transcript path silently fall
 // back to scanning the main one.
+// subagentSeq numbers delegations within this process so each task gets its own
+// tool-use and agent ID.
+//
+// Deriving them from the prompt or action count instead would collide: a vogon
+// process handles every prompt of a session (see the multi-prompt loop in main),
+// and two delegated prompts that happen to produce the same action count — the
+// common case, one file each — would share an agent ID. The framework keys
+// pre-task state on the tool-use ID (pre-task-<id>.json) and the subagent
+// transcript on the agent ID, so a collision silently overwrites the first task's
+// state and transcript, corrupting attribution. A counter keeps vogon
+// deterministic, which a UUID would not.
+var subagentSeq int
+
+func nextSubagentIDs() (toolUseID, agentID string) {
+	subagentSeq++
+	return fmt.Sprintf("toolu_vogon%03d", subagentSeq), fmt.Sprintf("avogon%03d", subagentSeq)
+}
+
 func runSubagentTask(dir, sessionID, transcriptPath, prompt string, actions []action) {
-	toolUseID := "toolu_vogon" + strconv.FormatInt(int64(len(prompt)), 16)
-	agentID := "avogon" + strconv.FormatInt(int64(len(actions)), 16)
+	toolUseID, agentID := nextSubagentIDs()
 
 	fireHook(dir, "pre-task", map[string]string{
 		"session_id":      sessionID,
