@@ -34,6 +34,48 @@ func decodeNormalizedTrailJSON(data []byte, dest any) error {
 	return nil
 }
 
+func legacyTrailRequestBody(body any) (any, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal trail request: %w", err)
+	}
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return nil, fmt.Errorf("decode trail request: %w", err)
+	}
+	return snakeCaseTrailJSONValue(value), nil
+}
+
+func snakeCaseTrailJSONValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			out[lowerCamelToSnake(key)] = snakeCaseTrailJSONValue(child)
+		}
+		return out
+	case []any:
+		for i := range v {
+			v[i] = snakeCaseTrailJSONValue(v[i])
+		}
+	}
+	return value
+}
+
+func lowerCamelToSnake(value string) string {
+	var out strings.Builder
+	for i, r := range value {
+		if unicode.IsUpper(r) {
+			if i > 0 {
+				out.WriteByte('_')
+			}
+			r = unicode.ToLower(r)
+		}
+		out.WriteRune(r)
+	}
+	return out.String()
+}
+
 func normalizeTrailJSONValue(value any) any {
 	switch v := value.(type) {
 	case map[string]any:

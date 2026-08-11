@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -68,16 +69,50 @@ func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool,
 	return auth.NewEntireAPICellClient(ctx, insecureHTTP, target) //nolint:wrapcheck // pass through contextual auth errors
 }
 
-// newTrailAPIClient is the construction seam for trail commands. Trails are
-// repo-scoped data owned by an entire-api cell, so route them exactly like the
-// experts surface instead of through ENTIRE_API_BASE_URL (the BFF origin).
+type trailBackend string
+
+const (
+	trailBackendEnvVar    = "ENTIRE_TRAILS_BACKEND"
+	trailBackendLegacy    = trailBackend("legacy")
+	trailBackendEntireAPI = trailBackend("entire-api")
+)
+
+func configuredTrailBackend() (trailBackend, error) {
+	switch value := strings.ToLower(strings.TrimSpace(os.Getenv(trailBackendEnvVar))); value {
+	case "", string(trailBackendLegacy), "bff":
+		return trailBackendLegacy, nil
+	case string(trailBackendEntireAPI), "native":
+		return trailBackendEntireAPI, nil
+	default:
+		return "", fmt.Errorf("invalid %s value %q: expected legacy or entire-api", trailBackendEnvVar, value)
+	}
+}
+
+func isEntireAPITrailClient(client *api.Client) bool {
+	return client != nil && client.TrailBackend() == string(trailBackendEntireAPI)
+}
+
+// newTrailAPIClient selects the legacy BFF by default. Setting
+// ENTIRE_TRAILS_BACKEND=entire-api opts into direct, owning-cell routing.
 var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
+	backend, err := configuredTrailBackend()
+	if err != nil {
+		return nil, err
+	}
+	if backend == trailBackendLegacy {
+		client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
+		if err != nil {
+			return nil, err
+		}
+		return client.WithTrailBackend(string(backend)), nil
+	}
+
 	client, err := NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, "")
 	if err != nil && strings.Contains(err.Error(), "no auth context for") {
-		// cluster discovery's no-match error predates ErrNotLoggedIn and does not
-		// wrap it. Preserve its detailed host/context hint while restoring the
-		// sentinel trail commands use for the standard login UX.
 		return nil, fmt.Errorf("%w: %w", auth.ErrNotLoggedIn, err)
 	}
-	return client, err
+	if err != nil {
+		return nil, err
+	}
+	return client.WithTrailBackend(string(backend)), nil
 }

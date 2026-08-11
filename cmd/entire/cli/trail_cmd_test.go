@@ -199,7 +199,11 @@ func TestRunTrailCreateBranchlessHappyPath(t *testing.T) {
 	// No t.Parallel: uses t.Chdir plus auth/tokenstore package-level test seams.
 	prevTrailClient := newTrailAPIClient
 	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _ string) (*api.Client, error) {
-		return NewAuthenticatedAPIClient(ctx, insecureHTTP)
+		client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
+		if err != nil {
+			return nil, err
+		}
+		return client.WithTrailBackend("legacy"), nil
 	}
 	t.Cleanup(func() { newTrailAPIClient = prevTrailClient })
 	var gotCreate map[string]any
@@ -786,6 +790,20 @@ func TestDeleteTrailByNumber(t *testing.T) {
 		}
 	})
 
+	t.Run("accepts the legacy ok response", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if err := json.NewEncoder(w).Encode(api.TrailDeleteResponse{OK: true}); err != nil {
+				t.Errorf("encode response: %v", err)
+			}
+		}))
+		defer srv.Close()
+		client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("legacy")
+		if err := deleteTrailByNumber(t.Context(), client, "gh", "acme", "repo", 575); err != nil {
+			t.Fatalf("deleteTrailByNumber: %v", err)
+		}
+	})
+
 	t.Run("surfaces a non-2xx status", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -971,6 +989,27 @@ func TestTrailListQueryWithOffsetIncludesOffset(t *testing.T) {
 	}
 }
 
+func TestListTrailResourcesUsesLegacyQueryByDefault(t *testing.T) {
+	t.Parallel()
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_, _ = fmt.Fprint(w, `{"trails":[{"id":"trl_1","number":1,"branch":"feature/x"}],"total":1}`)
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("legacy")
+	items, total, err := listTrailResources(t.Context(), client, "gh", "acme", "repo", []trail.Status{trail.StatusOpen}, "alice", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || total != 1 {
+		t.Fatalf("items=%d total=%d", len(items), total)
+	}
+	if want := "author=alice&limit=10&status=open"; gotQuery != want {
+		t.Fatalf("query = %q, want %q", gotQuery, want)
+	}
+}
+
 func TestTrailListPageQueryUsesEntireAPIPagination(t *testing.T) {
 	t.Parallel()
 	got := trailListPageQuery([]trail.Status{trail.StatusOpen}, 100, "next page")
@@ -1006,7 +1045,7 @@ func TestFindTrailPaginatesPastServerMax(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
 	found, err := findTrailByBranch(context.Background(), client, "gh", "acme", "repo", "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
@@ -1035,7 +1074,7 @@ func TestFindTrailStopsWhenServerRepeatsUnpaginatedFullPage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
 	found, err := findTrailByBranch(context.Background(), client, "gh", "acme", "repo", "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
@@ -1065,7 +1104,7 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
 	found, err := findTrailByBranch(context.Background(), client, "gh", "acme", "repo", "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)

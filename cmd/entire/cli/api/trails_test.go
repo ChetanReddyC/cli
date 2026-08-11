@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -43,7 +44,7 @@ func TestClient_RewritesResolvedTrailReviewRoute(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClientWithBaseURL("tok", server.URL)
+	c := NewClientWithBaseURL("tok", server.URL).WithTrailBackend("entire-api")
 	c.SetTrailRoute("trl/one", "/api/v1/trails/gh/acme/repo/42")
 	resp, err := c.Get(context.Background(), "/api/v1/trails/trl%2Fone/reviews/comments")
 	if err != nil {
@@ -52,6 +53,88 @@ func TestClient_RewritesResolvedTrailReviewRoute(t *testing.T) {
 	resp.Body.Close()
 	if want := "/api/v1/trails/gh/acme/repo/42/reviews/comments"; got != want {
 		t.Fatalf("path = %q, want %q", got, want)
+	}
+}
+
+func TestClient_LegacyTrailRequestsUseSnakeCase(t *testing.T) {
+	t.Parallel()
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewClientWithBaseURL("tok", server.URL).WithTrailBackend("legacy")
+	resp, err := client.Post(context.Background(), "/api/v1/trails/gh/acme/repo", TrailCreateRequest{
+		Title: "test", BranchName: "feature/test", BranchAction: "link",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got["branch_name"] != "feature/test" || got["branch_action"] != "link" {
+		t.Fatalf("legacy body = %#v", got)
+	}
+	if _, ok := got["branchName"]; ok {
+		t.Fatalf("legacy body contains camelCase: %#v", got)
+	}
+}
+
+func TestClient_LegacyTrailRequestsConvertNestedFields(t *testing.T) {
+	t.Parallel()
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	file := "main.go"
+	client := NewClientWithBaseURL("tok", server.URL).WithTrailBackend("legacy")
+	resp, err := client.Post(context.Background(), "/reviews", TrailReviewCommentBatchRequest{Comments: []TrailReviewCommentInput{{
+		ClientID: "client-1",
+		Location: TrailReviewLocationCreateRequest{Granularity: "file", FilePath: &file},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	comments, ok := got["comments"].([]any)
+	if !ok || len(comments) != 1 {
+		t.Fatalf("legacy comments = %#v", got["comments"])
+	}
+	comment, ok := comments[0].(map[string]any)
+	if !ok {
+		t.Fatalf("legacy comment = %#v", comments[0])
+	}
+	location, ok := comment["location"].(map[string]any)
+	if !ok {
+		t.Fatalf("legacy location = %#v", comment["location"])
+	}
+	if comment["client_id"] != "client-1" || location["file_path"] != file {
+		t.Fatalf("legacy nested body = %#v", got)
+	}
+}
+
+func TestClient_TrailsEnabledLegacyQuery(t *testing.T) {
+	t.Parallel()
+	var query string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client := NewClientWithBaseURL("tok", server.URL).WithTrailBackend("legacy")
+	if _, err := client.TrailsEnabled(context.Background(), "gh", "acme", "repo"); err != nil {
+		t.Fatal(err)
+	}
+	if query != "limit=1" {
+		t.Fatalf("query = %q, want limit=1", query)
 	}
 }
 
