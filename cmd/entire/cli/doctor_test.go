@@ -307,6 +307,31 @@ func TestClassifySession_WorktreeIDInShadowBranch(t *testing.T) {
 	assert.Equal(t, expectedBranch, result.ShadowBranch)
 }
 
+// writeRootlessMetadataCommit stores an empty-tree, parentless commit and
+// returns its hash. Two such commits (with distinct messages) share no common
+// ancestor — exactly the "disconnected metadata" shape the doctor check
+// diagnoses.
+func writeRootlessMetadataCommit(t *testing.T, repo *git.Repository, message string) plumbing.Hash {
+	t.Helper()
+	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
+	treeObj := repo.Storer.NewEncodedObject()
+	require.NoError(t, emptyTree.Encode(treeObj))
+	treeHash, err := repo.Storer.SetEncodedObject(treeObj)
+	require.NoError(t, err)
+
+	commitObj := &object.Commit{
+		Author:    object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
+		Committer: object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
+		Message:   message,
+		TreeHash:  treeHash,
+	}
+	enc := repo.Storer.NewEncodedObject()
+	require.NoError(t, commitObj.Encode(enc))
+	hash, err := repo.Storer.SetEncodedObject(enc)
+	require.NoError(t, err)
+	return hash
+}
+
 // TestRunSessionsFix_MetadataCheckFailure_PropagatesError verifies that when
 // checkDisconnectedMetadata fails, runSessionsFix returns a SilentError so the
 // custom stderr message is not printed twice by main.go.
@@ -319,23 +344,7 @@ func TestRunSessionsFix_MetadataCheckFailure_PropagatesError(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create a real local metadata branch
-	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
-	treeObj := repo.Storer.NewEncodedObject()
-	require.NoError(t, emptyTree.Encode(treeObj))
-	treeHash, err := repo.Storer.SetEncodedObject(treeObj)
-	require.NoError(t, err)
-
-	commitObj := &object.Commit{
-		Author:    object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
-		Committer: object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
-		Message:   "metadata",
-		TreeHash:  treeHash,
-	}
-	enc := repo.Storer.NewEncodedObject()
-	require.NoError(t, commitObj.Encode(enc))
-	localHash, err := repo.Storer.SetEncodedObject(enc)
-	require.NoError(t, err)
-
+	localHash := writeRootlessMetadataCommit(t, repo, "metadata")
 	localRef := plumbing.NewHashReference(
 		plumbing.NewBranchReferenceName(paths.MetadataBranchName), localHash)
 	require.NoError(t, repo.Storer.SetReference(localRef))
@@ -368,6 +377,60 @@ func TestRunSessionsFix_MetadataCheckFailure_PropagatesError(t *testing.T) {
 	require.ErrorAs(t, err, &silentErr)
 	assert.Contains(t, err.Error(), "metadata check failed")
 	assert.Contains(t, stderr.String(), "Error: metadata check failed")
+}
+
+// TestCheckDisconnectedMetadata_NonElectedRemote_ReportOnly pins the repair
+// confinement gate: the disconnected tracking ref belongs to the legacy origin
+// tier while the election picks upstream, so doctor must report the
+// disconnection but never run the repair — ReconcileDisconnectedMetadataRef
+// advances/rewrites the local v1 ref, and a stale non-elected origin driving
+// that is the #1374-class hazard. force=true proves even forced runs stay
+// report-only.
+func TestCheckDisconnectedMetadata_NonElectedRemote_ReportOnly(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir and IsolateGitConfigEnv (t.Setenv)
+	// modify process-global state.
+	testutil.IsolateGitConfigEnv(t)
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Local metadata branch and origin's tracking ref share no common
+	// ancestor — a genuine disconnection on the NON-elected remote.
+	localHash := writeRootlessMetadataCommit(t, repo, "local metadata")
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName(paths.MetadataBranchName), localHash)))
+
+	remoteHash := writeRootlessMetadataCommit(t, repo, "stale origin metadata")
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), remoteHash)))
+
+	// The election picks upstream; origin is only the read-only legacy tier.
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, dir, "upstream", "https://example.com/upstream.git")
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "upstream")
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	require.NoError(t, checkDisconnectedMetadata(cmd, true))
+
+	output := stdout.String()
+	assert.Contains(t, output, "Metadata branches: DISCONNECTED",
+		"the disconnection must still be reported")
+	assert.Contains(t, output, "not the elected checkpoint sync remote",
+		"the gate must explain why the repair is withheld")
+	assert.NotContains(t, output, "Fixed: metadata branches reconciled",
+		"the repair must not run against a non-elected remote")
+
+	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	assert.Equal(t, localHash, localRef.Hash(),
+		"local v1 must be untouched — origin's stale tracking ref never drives a local-ref rewrite")
 }
 
 func TestRunSessionsFix_ForceDiscardOutput_Indented(t *testing.T) {

@@ -87,28 +87,11 @@ func TestFetchCheckpointRefFrom_FirstCandidateWins(t *testing.T) {
 	require.NotEqual(t, originHash, got)
 }
 
-// TestFetchCheckpointRefFrom_LegacyTierServesRefMissingOnElected: the elected
-// candidate lacks the ref (pre-election legacy data lives on origin); the
-// fetch must advance to the legacy origin tier and succeed.
-func TestFetchCheckpointRefFrom_LegacyTierServesRefMissingOnElected(t *testing.T) {
-	workDir, ref, _, originHash := candidatesFixture(t, false, true)
-
-	require.NoError(t, FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}))
-
-	require.Equal(t, originHash, localRefHash(t, workDir, ref))
-}
-
-// TestFetchCheckpointRefFrom_TransportErrorAdvances: a transport-level
-// failure on the first candidate advances to the next candidate.
-func TestFetchCheckpointRefFrom_TransportErrorAdvances(t *testing.T) {
-	workDir, ref, _, originHash := candidatesFixture(t, false, true)
-	out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "set-url", "upstream", workDir+"/nonexistent-remote").CombinedOutput()
-	require.NoError(t, err, "%s", out)
-
-	require.NoError(t, FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}))
-
-	require.Equal(t, originHash, localRefHash(t, workDir, ref))
-}
+// Note: simple advance-on-miss / advance-on-transport-error behavior (a
+// candidate lacking the ref or failing at the transport level moves to the
+// legacy origin tier) is covered end-to-end by the integration matrix
+// (integration_test/checkpoint_read_remotes_test.go: LegacyOriginTierServed,
+// ElectedUnreachableLegacyStillServes) via explain's RefFetcher wiring.
 
 // TestFetchCheckpointRefFrom_AllFailSurfacesFirstCandidateError: when every
 // candidate fails, the FIRST candidate's error is surfaced — here a transport

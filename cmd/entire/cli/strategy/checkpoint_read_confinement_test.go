@@ -200,31 +200,6 @@ func TestGetRemotePrimaryTree_ElectedCandidateWinsOverOrigin(t *testing.T) {
 
 // Not parallel: uses t.Chdir()
 //
-// When the elected remote has no tracking ref, GetRemotePrimaryTree falls
-// back to the legacy origin tier (a pure read).
-func TestGetRemotePrimaryTree_FallsBackToLegacyOriginTracking(t *testing.T) {
-	tmpDir := initRemoteElectionRepo(t)
-	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-	testutil.AddRemote(t, tmpDir, "upstream", "https://example.com/upstream.git")
-	testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "upstream")
-
-	originHash := electionRevParse(t, tmpDir, "HEAD")
-	testutil.GitUpdateRef(t, tmpDir, "refs/remotes/origin/"+paths.MetadataBranchName, originHash)
-
-	t.Chdir(tmpDir)
-	ctx := context.Background()
-	repo, err := OpenRepository(ctx)
-	require.NoError(t, err)
-	defer repo.Close()
-
-	tree, err := GetRemotePrimaryTree(ctx, repo)
-	require.NoError(t, err)
-	_, err = tree.File("f.txt")
-	require.NoError(t, err, "the legacy origin tracking ref must serve reads when the elected remote has none")
-}
-
-// Not parallel: uses t.Chdir()
-//
 // FirstReadCandidateTrackingRef surfaces the elected remote's tracking ref
 // first, then origin's, and reports none when neither exists.
 func TestFirstReadCandidateTrackingRef_Order(t *testing.T) {

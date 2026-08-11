@@ -61,7 +61,9 @@ func TestSyncFromPolicyTransportErrorAdvances(t *testing.T) {
 }
 
 // TestSyncFromPolicyAllFailSurfacesFirstError: when every candidate fails,
-// the first candidate's error surfaces.
+// the FIRST candidate's error surfaces (the elected remote is the primary
+// story). The two failures are distinguishable — ls-remote names the missing
+// path — so this proves first-error, not just any-error.
 func TestSyncFromPolicyAllFailSurfacesFirstError(t *testing.T) {
 	localDir, localRepo := initPolicyRepoWithDir(t)
 	_, err := checkpointpolicy.SyncFrom(t.Context(), localRepo, []checkpointpolicy.Target{
@@ -70,6 +72,10 @@ func TestSyncFromPolicyAllFailSurfacesFirstError(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "check remote checkpoint policy ref")
+	require.Contains(t, err.Error(), "missing-one",
+		"the first candidate's error must be the one surfaced")
+	require.NotContains(t, err.Error(), "missing-two",
+		"the second candidate's error must not mask the first's")
 }
 
 // TestSyncFromPolicySkipLocalUpdateNeverAdvancesLocalRef: a legacy-tier
