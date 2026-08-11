@@ -632,11 +632,13 @@ func suggestCheckpointRefFetchCommand(ctx context.Context, checkpointID id.Check
 	return suggestFetchCommand(ctx, refName.String()+":"+refName.String())
 }
 
-// suggestFetchCommand builds a "git fetch <target> <refspec>" hint. It resolves
-// the target the same way attach's own fetch does (resolveCheckpointFetchTarget:
-// the checkpoint-remote/token URL if any, else origin) so the pasteable command
-// points at the remote the fetch actually used — not a bare "origin" that fails
-// in a token-only environment with an SSH origin.
+// suggestFetchCommand builds a "git fetch <target> <refspec>" hint via
+// resolveCheckpointFetchTarget (the checkpoint-remote/token URL if any, else
+// origin) so the command works in a token-only environment with an SSH origin.
+// Known residual: attach's own fetch iterates the read-candidate chain, so
+// with elected≠origin and no dedicated store this hint can name origin while
+// the data lives on the elected remote — cosmetic only, candidate for a
+// follow-up.
 func suggestFetchCommand(ctx context.Context, refspec string) string {
 	return fmt.Sprintf("git fetch %s %s", resolveCheckpointFetchTarget(ctx), refspec)
 }

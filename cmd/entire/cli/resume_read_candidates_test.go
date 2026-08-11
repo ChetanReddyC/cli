@@ -9,6 +9,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/stretchr/testify/assert"
@@ -110,6 +111,42 @@ func TestPromoteRemoteTrackingPrimary_LegacyOriginNeverPromotes(t *testing.T) {
 
 	assert.False(t, refExists(t, dir, "refs/heads/"+paths.MetadataBranchName),
 		"origin's stale tracking ref must never promote into the local primary when the election picks upstream")
+}
+
+// TestPromoteRemoteTrackingPrimary_FailOpenChainNeverPromotes: when the
+// ELECTION FAILS (checkpoint_push_remote names a missing remote) the read
+// chain fail-opens to ["origin"], but promotion is keyed on the explicit
+// election result — never on candidates[0] — so the fail-open origin's stale
+// tracking ref must NOT promote into the local primary.
+//
+// Uses t.Chdir — not parallel.
+func TestPromoteRemoteTrackingPrimary_FailOpenChainNeverPromotes(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "gone")
+
+	staleHash := revParse(t, dir, "HEAD")
+	testutil.GitUpdateRef(t, dir, "refs/remotes/origin/"+paths.MetadataBranchName, staleHash)
+
+	t.Chdir(dir)
+	ctx := context.Background()
+
+	require.Equal(t, []string{"origin"}, strategy.CheckpointReadRemotes(ctx),
+		"fixture: the chain must have fail-opened to origin")
+
+	repo, err := openRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	promoteRemoteTrackingPrimary(ctx, repo, checkpoint.ResolveRefs(ctx))
+
+	assert.False(t, refExists(t, dir, "refs/heads/"+paths.MetadataBranchName),
+		"a fail-open origin candidate must never promote into the local primary")
 }
 
 // TestPromoteRemoteTrackingPrimary_ElectedRemotePromotes: the control — the

@@ -1293,7 +1293,7 @@ func TestResumeFromCurrentBranch_FastForwardsStaleLocalMetadata(t *testing.T) {
 		t.Fatalf("WriteCommitted: %v", err)
 	}
 
-	_ = makeLocalMetadataBranchStale(t, repo, initialHash)
+	descendantHash := makeLocalMetadataBranchStale(t, repo, initialHash)
 
 	featureFile := filepath.Join(tmpDir, "feature.txt")
 	if err := os.WriteFile(featureFile, []byte("feature content"), 0o644); err != nil {
@@ -1317,6 +1317,12 @@ func TestResumeFromCurrentBranch_FastForwardsStaleLocalMetadata(t *testing.T) {
 	combined := stdout.String() + stderr.String()
 	if strings.Contains(combined, "session log not available") {
 		t.Errorf("resume reported missing log even though origin has the checkpoint metadata:\n%s", combined)
+	}
+	// Positive pin: the stale local ref must actually have been fast-forwarded
+	// to the elected remote's tracking ref — without this the test passes
+	// vacuously when the promotion silently no-ops.
+	if got := readMetadataBranchHash(t, repo); got != descendantHash {
+		t.Errorf("resume should fast-forward the stale local metadata branch: got %s, want %s", got, descendantHash)
 	}
 }
 

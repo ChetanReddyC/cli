@@ -700,9 +700,10 @@ func TestParseCheckpointRefNames_RealLsRemote(t *testing.T) {
 	}, got)
 }
 
-// TestListCheckpointRefsOnRemote_NotConfigured proves the authority gate: with
-// no checkpoint_remote configured, enumeration is a no-op (nil, no error, no
-// network) so List stays local-only. Not parallel: uses t.Chdir.
+// TestListCheckpointRefsOnRemote_NotConfigured: with no checkpoint_remote and
+// no git remotes at all (empty read-candidate chain), enumeration is a no-op
+// (nil, no error, no network) so List stays local-only.
+// Not parallel: uses t.Chdir.
 func TestListCheckpointRefsOnRemote_NotConfigured(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -713,7 +714,84 @@ func TestListCheckpointRefsOnRemote_NotConfigured(t *testing.T) {
 
 	names, err := ListCheckpointRefsOnRemote(context.Background())
 	require.NoError(t, err)
-	assert.Nil(t, names, "no checkpoint_remote configured must leave List local-only (no remote enumeration)")
+	assert.Nil(t, names, "a remoteless repo must leave List local-only (no remote enumeration)")
+}
+
+// TestListCheckpointRefsOnRemote_MergesReadCandidateListings: without a
+// dedicated checkpoint_remote, discovery ls-remotes every read candidate and
+// merges the listings — a union deduped by ref name. Refs are seeded
+// DISJOINTLY (one on the elected upstream, one on legacy origin, one on both)
+// to pin that merging, not first-non-empty, is the semantics.
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_MergesReadCandidateListings(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	originBare := t.TempDir()
+	upstreamBare := t.TempDir()
+	gitRun(t, originBare, "init", "--bare", "-q", originBare)
+	gitRun(t, upstreamBare, "init", "--bare", "-q", upstreamBare)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	gitRun(t, dir, "remote", "add", "origin", originBare)
+	gitRun(t, dir, "remote", "add", "upstream", upstreamBare)
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "upstream")
+
+	upstreamRef := "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN"
+	originRef := "refs/entire/checkpoints/f6/a1b2c3d4e5f6"
+	sharedRef := "refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9"
+	gitRun(t, dir, "push", "-q", "upstream", head+":"+upstreamRef, head+":"+sharedRef)
+	gitRun(t, dir, "push", "-q", "origin", head+":"+originRef, head+":"+sharedRef)
+	t.Chdir(dir)
+
+	names, err := ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err)
+	got := make([]string, len(names))
+	for i, n := range names {
+		got[i] = n.String()
+	}
+	assert.ElementsMatch(t, []string{upstreamRef, originRef, sharedRef}, got,
+		"discovery must union the candidates' listings and dedupe by ref name")
+}
+
+// TestListCheckpointRefsOnRemote_CandidateFailureDoesNotBlockOthers: discovery
+// is best-effort — an unreachable elected remote logs and continues, so the
+// legacy origin tier's refs are still discovered. When EVERY candidate fails,
+// the result is (nil, nil) and List stays local-only.
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_CandidateFailureDoesNotBlockOthers(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	originBare := t.TempDir()
+	gitRun(t, originBare, "init", "--bare", "-q", originBare)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	gitRun(t, dir, "remote", "add", "origin", originBare)
+	gitRun(t, dir, "remote", "add", "upstream", filepath.Join(dir, "nonexistent-remote"))
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "upstream")
+
+	originRef := "refs/entire/checkpoints/f6/a1b2c3d4e5f6"
+	gitRun(t, dir, "push", "-q", "origin", head+":"+originRef)
+	t.Chdir(dir)
+
+	names, err := ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err, "one candidate failing must not fail discovery")
+	require.Len(t, names, 1)
+	assert.Equal(t, originRef, names[0].String())
+
+	// All candidates failing → (nil, nil): best-effort discovery never
+	// surfaces an error, the store falls back to local refs.
+	gitRun(t, dir, "remote", "set-url", "origin", filepath.Join(dir, "also-nonexistent"))
+	names, err = ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, names)
 }
 
 // TestListCheckpointRefsOnRemote_ResolvesFromSubdir proves worktree pinning for

@@ -2497,10 +2497,11 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	strategy.WarnIfMetadataDisconnected()
 
 	// This is a user-facing enumeration (`entire checkpoint list` / the branch
-	// `explain` view), so opt into git-refs remote discovery: when a
-	// checkpoint_remote is configured, List enumerates it (names only) to
-	// surface refs-native checkpoints written on another machine, and the
-	// fetchers hydrate each on read. WithRemoteListDiscovery keeps this off the
+	// `explain` view), so opt into git-refs remote discovery: List enumerates
+	// the dedicated checkpoint_remote when configured, else the checkpoint
+	// read candidates with merged listings (names only), to surface
+	// refs-native checkpoints written on another machine; the fetchers
+	// hydrate each on read. WithRemoteListDiscovery keeps this off the
 	// per-turn hook hot path.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
 		BlobFetcher:     FetchBlobsByHash,

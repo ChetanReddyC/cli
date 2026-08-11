@@ -540,44 +540,87 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 const checkpointRefListTimeout = 5 * time.Second
 
 // ListCheckpointRefsOnRemote enumerates the per-checkpoint refs
-// (refs/entire/checkpoints/<shard>/<id>) present on the checkpoint remote, names
-// only, via a single `git ls-remote refs/entire/checkpoints/*` — no object
+// (refs/entire/checkpoints/<shard>/<id>) present on the checkpoint remote(s),
+// names only, via `git ls-remote refs/entire/checkpoints/*` — no object
 // transfer. The git-refs store's List uses it to discover checkpoints written
 // on another machine that have no local ref yet, then hydrates each lazily on
 // read through FetchCheckpointRef.
 //
-// Scope (deliberately stricter than the on-demand read fetch):
-//   - no checkpoint_remote configured → (nil, nil), List stays local-only
-//     (unlike FetchCheckpointRef / remote.FetchURL, which fall back to origin);
-//   - with checkpoint_remote configured → queries the resolved checkpoint URL
-//     via remote.FetchURL (which can still fall through to origin in edge cases
-//     such as settings-load failure or an underivable checkpoint URL).
+// Scope:
+//   - checkpoint_remote configured → queries the resolved dedicated URL via
+//     remote.FetchURL (which can still fall through to origin in edge cases
+//     such as settings-load failure or an underivable checkpoint URL) —
+//     unchanged single-target behavior;
+//   - otherwise → queries EVERY checkpoint read candidate (elected sync
+//     remote, then the legacy origin tier) and MERGES the listings — a union
+//     deduped by ref name. Merging rather than first-non-empty because
+//     pre-single-remote-sync, per-checkpoint refs landed on whichever remote
+//     the pre-push hook fired for, so disjoint legacy refs on origin
+//     coexisting with new refs on the elected remote are realistic and
+//     first-non-empty would shadow one side. Discovery is best-effort: a
+//     candidate failing logs at debug and doesn't block the others, and when
+//     every candidate fails the result is (nil, nil) so List stays local-only
+//     (the surface-the-first-candidate's-error rule applies to data fetches,
+//     not discovery). No candidates (remoteless repo) → (nil, nil).
 //
+// The single checkpointRefListTimeout budget spans the whole union.
 // Resolution and ls-remote are pinned to the worktree root (not process cwd) so
 // repo-local git config (url.*.insteadOf, credential helpers, remotes) applies.
 func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, error) {
-	if !remote.Configured(ctx) {
-		return nil, nil
-	}
-
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
 
-	url, err := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: worktreeRoot})
-	if err != nil {
-		return nil, fmt.Errorf("resolve checkpoint remote URL: %w", err)
+	if remote.Configured(ctx) {
+		url, err := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: worktreeRoot})
+		if err != nil {
+			return nil, fmt.Errorf("resolve checkpoint remote URL: %w", err)
+		}
+
+		ctx, cancel := context.WithTimeout(ctx, checkpointRefListTimeout)
+		defer cancel()
+
+		output, err := remote.LsRemoteInDir(ctx, worktreeRoot, url, checkpoint.CheckpointRefPrefix+"*")
+		if err != nil {
+			return nil, fmt.Errorf("ls-remote checkpoint refs from %s: %w", remote.RedactURL(url), err)
+		}
+		return parseCheckpointRefNames(output), nil
+	}
+
+	candidates := strategy.CheckpointReadRemotes(ctx)
+	if len(candidates) == 0 {
+		return nil, nil
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, checkpointRefListTimeout)
 	defer cancel()
 
-	output, err := remote.LsRemoteInDir(ctx, worktreeRoot, url, checkpoint.CheckpointRefPrefix+"*")
-	if err != nil {
-		return nil, fmt.Errorf("ls-remote checkpoint refs from %s: %w", remote.RedactURL(url), err)
+	seen := make(map[plumbing.ReferenceName]bool)
+	var names []plumbing.ReferenceName
+	for _, candidate := range candidates {
+		// Prefer the candidate's resolved URL (token-aware, worktree-pinned);
+		// fall back to the bare remote name, which git resolves itself.
+		target := candidate
+		if url, urlErr := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: worktreeRoot, LeadReadRemote: candidate}); urlErr == nil {
+			target = url
+		}
+		output, lsErr := remote.LsRemoteInDir(ctx, worktreeRoot, target, checkpoint.CheckpointRefPrefix+"*")
+		if lsErr != nil {
+			logging.Debug(ctx, "checkpoint ref discovery: read candidate listing failed; continuing with remaining candidates",
+				slog.String("candidate", candidate),
+				slog.String("error", lsErr.Error()))
+			continue
+		}
+		for _, name := range parseCheckpointRefNames(output) {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			names = append(names, name)
+		}
 	}
-	return parseCheckpointRefNames(output), nil
+	return names, nil
 }
 
 // parseCheckpointRefNames extracts the checkpoint ref names from `git ls-remote`

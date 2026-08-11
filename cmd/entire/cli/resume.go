@@ -553,11 +553,11 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 		)
 	}
 
-	// Try the remote-tracking tree directly (the first read candidate's
-	// tracking ref for Primary — pure read, both tiers legal). This tier must
-	// not be dropped: it is the only way origin-only legacy metadata is
-	// served, since candidate fetches never advance the local primary from
-	// the read-only origin tier.
+	// Try the remote-tracking tree directly (the read candidates' tracking
+	// refs for Primary, first hit wins — pure read, both tiers legal). This
+	// tier must not be dropped: it is the only way origin-only legacy
+	// metadata is served, since candidate fetches never advance the local
+	// primary from the read-only origin tier.
 	remoteRepo, repoErr := openRepository(ctx)
 	if repoErr != nil {
 		return nil, nil, fmt.Errorf("failed to open repository: %w", repoErr)
@@ -866,9 +866,10 @@ func checkRemoteMetadata(
 	} else {
 		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but the %s branch is not available locally or on the remote.\n", checkpointID, paths.MetadataBranchName)
 		fmt.Fprintf(errW, "This can happen if the metadata branch was not pushed.\n")
-		// The pasteable hint names the first read candidate (the elected sync
-		// remote — that's where checkpoints sync). A remoteless repo has
-		// nothing to fetch from, so no hint is printed.
+		// The pasteable hint names the first read candidate — the elected
+		// sync remote, or the fail-open origin when the election errored
+		// (then origin is also the only place left to fetch from). A
+		// remoteless repo has nothing to fetch from, so no hint is printed.
 		if candidates := strategy.CheckpointReadRemotes(ctx); len(candidates) > 0 {
 			fmt.Fprintf(errW, "Try:\n  git fetch %s %s:%s\n", candidates[0], paths.MetadataBranchName, paths.MetadataBranchName)
 		}

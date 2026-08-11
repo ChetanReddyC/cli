@@ -53,10 +53,11 @@ type CheckpointSyncRemote struct {
 //
 // The fork setup that motivated the tracking tier — clone the base repo, add
 // your fork, push there, with origin unpushable — is served by setting
-// checkpoint_push_remote explicitly. That is also the only form of it that
-// works end to end: read paths (resume, explain) resolve checkpoints through
-// origin's remote-tracking refs, so a silently elected non-origin remote
-// produces checkpoints that cannot be read back from the same clone.
+// checkpoint_push_remote explicitly. Reads follow the election: the checkpoint
+// read paths (resume, explain, discovery) consult the elected remote first and
+// fall back to origin as a read-only legacy tier (see CheckpointReadRemotes),
+// so an explicitly elected non-origin remote is fully readable from the same
+// clone. The tracking tier stays out for the silent-no-op reason above.
 func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, error) {
 	// Fail closed on an unreadable settings file: election must never
 	// override a checkpoint_push_remote the file may contain but we could

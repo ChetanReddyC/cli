@@ -139,10 +139,12 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 // candidate lacking the ref and a candidate failing at the transport level
 // both advance to the next candidate (transport failures logged at debug);
 // when every candidate fails, the FIRST candidate's error is surfaced (the
-// elected remote is the primary story). The absence-vs-failure contract of
-// FetchCheckpointRef holds: only a genuine "no candidate has the ref" outcome
-// (or a provably remoteless repository, below) wraps
-// plumbing.ErrReferenceNotFound.
+// elected remote is the primary story). Consequence for the absence-vs-failure
+// contract: the surfaced error wraps plumbing.ErrReferenceNotFound when the
+// FIRST candidate reported not-found, even if a later candidate failed at the
+// transport level with its state unknown — callers needing certainty that no
+// candidate holds the ref must not infer it from this error alone. A provably
+// remoteless repository (below) also wraps plumbing.ErrReferenceNotFound.
 //
 // A configured checkpoint_remote is a dedicated store with a single
 // authoritative target, so the chain does not apply and the legacy
