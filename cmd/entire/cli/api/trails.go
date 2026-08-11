@@ -11,9 +11,9 @@ import (
 // TrailsEnabled probes trail availability: 2xx=true, 403/404/410=false,
 // everything else ambiguous.
 func (c *Client) TrailsEnabled(ctx context.Context, forge, owner, repo string) (bool, error) {
-	query := "pageSize=1"
-	if c.TrailBackend() == "legacy" {
-		query = "limit=1"
+	query := "limit=1"
+	if c.TrailBackend() == "entire-api" {
+		query = "pageSize=1"
 	}
 	resp, err := c.Get(ctx, fmt.Sprintf("/api/v1/trails/%s/%s/%s?%s",
 		url.PathEscape(forge), url.PathEscape(owner), url.PathEscape(repo), query))

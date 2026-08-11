@@ -29,7 +29,7 @@ func TestClient_TrailsEnabledEscapesPathComponents(t *testing.T) {
 	if !ok {
 		t.Fatal("enabled = false, want true")
 	}
-	want := "/api/v1/trails/g%2Fh/acme%3Forg/repo%23frag?pageSize=1"
+	want := "/api/v1/trails/g%2Fh/acme%3Forg/repo%23frag?limit=1"
 	if gotURI != want {
 		t.Errorf("request URI = %q, want %q", gotURI, want)
 	}
@@ -121,20 +121,37 @@ func TestClient_LegacyTrailRequestsConvertNestedFields(t *testing.T) {
 	}
 }
 
-func TestClient_TrailsEnabledLegacyQuery(t *testing.T) {
+func TestClient_TrailsEnabledBackendQuery(t *testing.T) {
 	t.Parallel()
-	var query string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		query = r.URL.RawQuery
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-	client := NewClientWithBaseURL("tok", server.URL).WithTrailBackend("legacy")
-	if _, err := client.TrailsEnabled(context.Background(), "gh", "acme", "repo"); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name    string
+		backend string
+		want    string
+	}{
+		{name: "untagged defaults to legacy", want: "limit=1"},
+		{name: "explicit legacy", backend: "legacy", want: "limit=1"},
+		{name: "entire-api", backend: "entire-api", want: "pageSize=1"},
 	}
-	if query != "limit=1" {
-		t.Fatalf("query = %q, want limit=1", query)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var query string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				query = r.URL.RawQuery
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			client := NewClientWithBaseURL("tok", server.URL)
+			if tt.backend != "" {
+				client.WithTrailBackend(tt.backend)
+			}
+			if _, err := client.TrailsEnabled(context.Background(), "gh", "acme", "repo"); err != nil {
+				t.Fatal(err)
+			}
+			if query != tt.want {
+				t.Fatalf("query = %q, want %q", query, tt.want)
+			}
+		})
 	}
 }
 
@@ -184,8 +201,8 @@ func TestClient_TrailsEnabled(t *testing.T) {
 			if gotPath != "/api/v1/trails/gh/acme/repo" {
 				t.Errorf("path = %q, want /api/v1/trails/gh/acme/repo", gotPath)
 			}
-			if gotQuery != "pageSize=1" {
-				t.Errorf("query = %q, want pageSize=1", gotQuery)
+			if gotQuery != "limit=1" {
+				t.Errorf("query = %q, want limit=1", gotQuery)
 			}
 		})
 	}
