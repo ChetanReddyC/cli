@@ -26,15 +26,17 @@ func DefaultV1Refs() PersistentRefs {
 	}
 }
 
-// PrimaryFetchableFromOrigin reports whether Primary has an origin-tracking shadow.
-func (r PersistentRefs) PrimaryFetchableFromOrigin() bool {
+// PrimaryFetchableFromRemote reports whether Primary has a remote-tracking
+// shadow, for a given remote.
+func (r PersistentRefs) PrimaryFetchableFromRemote() bool {
 	return r.Primary.IsBranch() && slices.Contains(r.Push, r.Primary)
 }
 
-// ReadBootstrappableFromOrigin reports whether reads can be bootstrapped from
-// origin: true when reads target Primary and Primary is fetchable from origin.
-func (r PersistentRefs) ReadBootstrappableFromOrigin() bool {
-	return r.Read == r.Primary && r.PrimaryFetchableFromOrigin()
+// ReadBootstrappableFromRemote reports whether reads can be bootstrapped from
+// a given remote: true when reads target Primary and Primary is fetchable
+// from that remote.
+func (r PersistentRefs) ReadBootstrappableFromRemote() bool {
+	return r.Read == r.Primary && r.PrimaryFetchableFromRemote()
 }
 
 // PrimaryAsRead returns a copy of r with Read pinned to Primary.

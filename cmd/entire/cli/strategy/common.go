@@ -546,7 +546,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 	// No checkpoint_remote configured — origin holds the checkpoint store. Origin
 	// only tracks Primary when Primary is in Push.
 	var remoteRef *plumbing.Reference
-	if refs.PrimaryFetchableFromOrigin() {
+	if refs.PrimaryFetchableFromRemote() {
 		var remoteErr error
 		remoteRef, remoteErr = repo.Reference(plumbing.NewRemoteReferenceName("origin", primaryName), true)
 		if remoteErr != nil && !errors.Is(remoteErr, plumbing.ErrReferenceNotFound) {
@@ -1063,7 +1063,7 @@ func ReadAllSessionPromptsFromTree(tree *object.Tree, checkpointPath string, ses
 // the configured Primary. Errors when Primary isn't in Push (no origin shadow).
 func GetRemotePrimaryTree(ctx context.Context, repo *git.Repository) (*object.Tree, error) {
 	refs := checkpoint.ResolveRefs(ctx)
-	if !refs.PrimaryFetchableFromOrigin() {
+	if !refs.PrimaryFetchableFromRemote() {
 		return nil, fmt.Errorf("primary metadata ref %s is not pushed to origin", refs.Primary)
 	}
 	refName := plumbing.NewRemoteReferenceName("origin", refs.Primary.Short())

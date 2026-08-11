@@ -468,7 +468,7 @@ func resolveTrailCheckpointSessions(ctx context.Context, branch string) ([]trail
 	}
 	store := stores.Persistent
 	refs := stores.Refs()
-	if refs.ReadBootstrappableFromOrigin() {
+	if refs.ReadBootstrappableFromRemote() {
 		promoteRemoteTrackingPrimary(ctx, repo, refs)
 	}
 

@@ -218,7 +218,7 @@ func restoreByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID 
 	}
 	store := stores.Persistent
 	refs := stores.Refs()
-	if refs.ReadBootstrappableFromOrigin() {
+	if refs.ReadBootstrappableFromRemote() {
 		promoteRemoteTrackingPrimary(ctx, repo, refs)
 	}
 
@@ -304,7 +304,7 @@ func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName
 	store := stores.Persistent
 
 	refs := stores.Refs()
-	if refs.ReadBootstrappableFromOrigin() {
+	if refs.ReadBootstrappableFromRemote() {
 		promoteRemoteTrackingPrimary(ctx, repo, refs)
 	}
 
@@ -758,7 +758,7 @@ func checkRemoteMetadata(
 ) ([]strategy.RestoredSession, error) {
 	logCtx := logging.WithComponent(ctx, "resume.checkRemoteMetadata")
 
-	if !refs.ReadBootstrappableFromOrigin() {
+	if !refs.ReadBootstrappableFromRemote() {
 		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but metadata is not available in %s.\n", checkpointID, refs.Read)
 		fmt.Fprintf(errW, "This ref is local-only. Try: entire checkpoint explain %s\n", checkpointID)
 		return nil, nil
@@ -867,7 +867,7 @@ func checkRemoteMetadata(
 // ref is *missing*, not when it's behind. No-op when Primary isn't in Push
 // (no remote-tracking ref exists).
 func promoteRemoteTrackingPrimary(ctx context.Context, repo *git.Repository, refs checkpoint.PersistentRefs) {
-	if !refs.PrimaryFetchableFromOrigin() {
+	if !refs.PrimaryFetchableFromRemote() {
 		return
 	}
 	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", refs.Primary.Short()), true)

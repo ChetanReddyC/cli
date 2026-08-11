@@ -2220,12 +2220,12 @@ func (s *GitStore) getFetchingTree(ctx context.Context) (*FetchingTree, error) {
 }
 
 // getSessionsBranchTree returns the tree object at refs.Read. Falls back to
-// origin's remote-tracking ref for Primary when ReadBootstrappableFromOrigin
+// origin's remote-tracking ref for Primary when ReadBootstrappableFromRemote
 // is true.
 func (s *GitStore) getSessionsBranchTree() (*object.Tree, error) {
 	ref, err := s.repo.Reference(s.refs.Read, true)
 	if err != nil {
-		if !s.refs.ReadBootstrappableFromOrigin() {
+		if !s.refs.ReadBootstrappableFromRemote() {
 			return nil, fmt.Errorf("sessions ref %s not found: %w", s.refs.Read, err)
 		}
 		remoteRefName := plumbing.NewRemoteReferenceName("origin", s.refs.Primary.Short())

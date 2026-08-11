@@ -76,7 +76,7 @@ func WarnIfMetadataDisconnected() {
 		}
 		defer repo.Close()
 		refs := checkpoint.ResolveRefs(ctx)
-		if !refs.PrimaryFetchableFromOrigin() {
+		if !refs.PrimaryFetchableFromRemote() {
 			return // origin doesn't track Primary; nothing to disconnect from
 		}
 		disconnected, err := IsMetadataDisconnected(ctx, repo, plumbing.NewRemoteReferenceName("origin", refs.Primary.Short()))

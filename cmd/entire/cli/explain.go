@@ -972,7 +972,7 @@ func loadPrimaryMetadataRootTree(ctx context.Context, repo *git.Repository, refs
 	if tree, err := strategy.GetMetadataRefTree(repo, refs.Primary); err == nil {
 		return tree, nil
 	}
-	if !refs.PrimaryFetchableFromOrigin() {
+	if !refs.PrimaryFetchableFromRemote() {
 		return nil, fmt.Errorf("read primary metadata tree %s: ref not found locally", refs.Primary)
 	}
 	tree, err := strategy.GetRemotePrimaryTree(ctx, repo)

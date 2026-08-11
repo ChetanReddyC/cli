@@ -368,7 +368,7 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	ctx := cmd.Context()
 	refs := checkpoint.ResolveRefs(ctx)
 	w := cmd.OutOrStdout()
-	if !refs.PrimaryFetchableFromOrigin() {
+	if !refs.PrimaryFetchableFromRemote() {
 		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to origin)\n", refs.Primary)
 		return nil
 	}
