@@ -205,7 +205,7 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 			return fmt.Errorf("wait for input: %w", err)
 		}
 	} else {
-		fmt.Fprintf(outW, "Login URL:   %s\n\n", approvalURL)
+		fmt.Fprintf(outW, "Login URL: %s\n\n", approvalURL)
 	}
 
 	fmt.Fprint(outW, "Waiting for approval... ")
@@ -481,7 +481,7 @@ const loginURLPrompt = "[Enter] Continue  [c] Copy URL  [o] Open in default brow
 // Copy keeps the prompt active so the user can paste into a chosen browser
 // before deciding when the login timeout should begin.
 func promptLoginURL(ctx context.Context, outW, errW io.Writer, loginURL string, interactor loginURLInteractor) error {
-	fmt.Fprintf(outW, "Login URL:   %s\n\n", loginURL)
+	fmt.Fprintf(outW, "Login URL: %s\n\n", loginURL)
 
 	for {
 		fmt.Fprint(outW, loginURLPrompt)

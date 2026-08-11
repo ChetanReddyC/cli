@@ -418,7 +418,7 @@ func TestPromptLoginURL_EnterContinuesWithoutSideEffects(t *testing.T) {
 		t.Fatalf("promptLoginURL() error = %v", err)
 	}
 
-	want := "Login URL:   " + loginURL + "\n\n" + loginURLPrompt + "\n"
+	want := "Login URL: " + loginURL + "\n\n" + loginURLPrompt + "\n"
 	if got := out.String(); got != want {
 		t.Errorf("output = %q, want %q", got, want)
 	}
@@ -549,7 +549,7 @@ func TestRunLogin_InteractiveDeviceFlowUsesURLPrompt(t *testing.T) {
 	if copiedURL != approvalURL {
 		t.Errorf("copied URL = %q, want %q", copiedURL, approvalURL)
 	}
-	for _, want := range []string{"Device code: ABCD-EFGH", "Login URL:   " + approvalURL, loginURLPrompt} {
+	for _, want := range []string{"Device code: ABCD-EFGH", "Login URL: " + approvalURL, loginURLPrompt} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}
@@ -698,7 +698,7 @@ func TestRunBrowserLogin_PrintsAuthorizationURLAndEnterDoesNotOpen(t *testing.T)
 	if !strings.Contains(out.String(), "Logging in to:") {
 		t.Errorf("output missing 'Logging in to:' line:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "Login URL:   "+flow.authURL) {
+	if !strings.Contains(out.String(), "Login URL: "+flow.authURL) {
 		t.Errorf("output missing full authorization URL:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), loginURLPrompt) {
