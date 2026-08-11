@@ -111,6 +111,18 @@ type Event struct {
 	// SubagentID identifies the subagent instance (for SubagentEnd events).
 	SubagentID string
 
+	// SubagentTranscriptPath is the agent-declared path to the subagent's own
+	// transcript (SubagentEnd). Set it when the agent's hook payload names the file
+	// — Codex sends agent_transcript_path, Cursor sends the same field.
+	//
+	// When empty the framework falls back to guessing Claude Code's layout
+	// (cli.ResolveAgentTranscriptPath). That guess is right for Claude Code and
+	// wrong for everyone else, and because the fallback silently yields "" the only
+	// symptom is a task checkpoint with no subagent transcript and file extraction
+	// quietly reading the main transcript instead — where a subagent's edits never
+	// appear. Declaring the path here is how an agent avoids that whole class.
+	SubagentTranscriptPath string
+
 	// ToolInput is the raw tool input JSON (for subagent type/description extraction).
 	// Used when both SubagentType and TaskDescription are empty (agents that don't provide
 	// these fields directly parse them from ToolInput).

@@ -54,6 +54,8 @@ const (
 	HookNameStop             = "stop"
 	HookNamePreToolUse       = "pre-tool-use"
 	HookNamePostToolUse      = "post-tool-use"
+	HookNameSubagentStart    = "subagent-start"
+	HookNameSubagentStop     = "subagent-stop"
 )
 
 // HookNames returns the hook verbs Codex supports.
@@ -65,6 +67,8 @@ func (c *CodexAgent) HookNames() []string {
 		HookNameStop,
 		HookNamePreToolUse,
 		HookNamePostToolUse,
+		HookNameSubagentStart,
+		HookNameSubagentStop,
 	}
 }
 
@@ -114,9 +118,65 @@ func (c *CodexAgent) ParseHookEvent(_ context.Context, hookName string, stdin io
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action
 	case HookNamePostToolUse:
 		return c.parsePostToolUse(stdin)
+	case HookNameSubagentStart:
+		return c.parseSubagentStart(stdin)
+	case HookNameSubagentStop:
+		return c.parseSubagentStop(stdin)
 	default:
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action
 	}
+}
+
+// parseSubagentStart maps Codex's SubagentStart. Codex fires it for thread-spawned
+// subagents only; internal/synthetic ones expose no user-configured hooks.
+//
+// Two identity details matter, and they are the opposite of what the field names
+// suggest at a glance:
+//
+//   - session_id is "the identity shared by the root thread and all descendant
+//     threads", i.e. the *user's* session. That is what Entire must attribute the
+//     subagent to, so it maps to SessionID directly.
+//   - agent_id is the child thread's own id, unique per subagent and stable across
+//     start/stop. Codex has no tool_use_id, and Entire keys pre-task state and the
+//     task metadata directory on ToolUseID, so agent_id serves as both: it is the
+//     only value that correlates this start with its stop.
+func (c *CodexAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[subagentStartRaw](stdin)
+	if err != nil {
+		return nil, err
+	}
+	return &agent.Event{
+		Type:         agent.SubagentStart,
+		SessionID:    raw.SessionID,
+		SessionRef:   derefString(raw.TranscriptPath),
+		ToolUseID:    raw.AgentID,
+		SubagentType: raw.AgentType,
+		Model:        raw.Model,
+		Timestamp:    time.Now(),
+	}, nil
+}
+
+// parseSubagentStop maps Codex's SubagentStop.
+//
+// transcript_path here is the *parent* thread's rollout (SessionRef), while
+// agent_transcript_path is the subagent's own — Codex names it, so Entire never has
+// to guess a layout for it (see Event.SubagentTranscriptPath).
+func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[subagentStopRaw](stdin)
+	if err != nil {
+		return nil, err
+	}
+	return &agent.Event{
+		Type:                   agent.SubagentEnd,
+		SessionID:              raw.SessionID,
+		SessionRef:             derefString(raw.TranscriptPath),
+		ToolUseID:              raw.AgentID,
+		SubagentID:             raw.AgentID,
+		SubagentType:           raw.AgentType,
+		SubagentTranscriptPath: derefString(raw.AgentTranscriptPath),
+		Model:                  raw.Model,
+		Timestamp:              time.Now(),
+	}, nil
 }
 
 // parseSessionInfoEvent parses the hooks whose payload is sessionInfoRaw —
