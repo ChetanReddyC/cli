@@ -659,9 +659,11 @@ func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []strin
 
 	q := url.Values{}
 	q.Set("q", cfg.Query)
+	filtered := false
 	for _, id := range repoIDs {
 		if id != "" {
 			q.Add("repo", id)
+			filtered = true
 		}
 	}
 	addCommonSearchParams(q, cfg)
@@ -684,11 +686,14 @@ func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []strin
 		// existence not disclosed). A plain "404 page not found" is the
 		// gateway itself: no semantic-search route, query-serve not deployed
 		// in this cell. Deployed cells answer unfiltered searches of unknown
-		// repos with an empty 200, so the split is unambiguous.
+		// repos with an empty 200, so the split is unambiguous. The
+		// repo-filter-miss reading only holds when a filter was actually sent
+		// — an unfiltered call named no repo to blame, so its JSON 404
+		// (whatever produced it) degrades to the ErrCellUnavailable fail-safe.
 		var errResp struct {
 			Error string `json:"error"`
 		}
-		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+		if filtered && json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
 			// Wrap rather than return the bare sentinel so the server's own
 			// message survives into debug logs; errors.Is still matches.
 			return nil, fmt.Errorf("%w: %s", ErrRepoFilterUnmatched, errResp.Error)

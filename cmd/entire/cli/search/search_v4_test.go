@@ -186,6 +186,28 @@ func TestCellV4_RepoUnmatched404IsNotCellUnavailable(t *testing.T) {
 	}
 }
 
+// TestCellV4_UnfilteredJSON404IsCellUnavailable: a repo-filter miss requires a
+// repo filter. When no repo IDs were sent (the --all-repos path), the same
+// JSON-404 shape must NOT read as ErrRepoFilterUnmatched — the caller named no
+// repo to blame — and instead degrades to the ErrCellUnavailable fail-safe.
+func TestCellV4_UnfilteredJSON404IsCellUnavailable(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		writeTestJSON(w, `{"error": "None of the requested repos were found"}`)
+	}))
+	defer srv.Close()
+
+	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
+	if errors.Is(err, ErrRepoFilterUnmatched) {
+		t.Fatalf("err = %v, want NOT ErrRepoFilterUnmatched when no repo filter was sent", err)
+	}
+	if !errors.Is(err, ErrCellUnavailable) {
+		t.Fatalf("err = %v, want ErrCellUnavailable", err)
+	}
+}
+
 // TestCellV4_ProblemJSON404IsCellUnavailable pins the THIRD 404 shape: the
 // gateway's anonymous path writes RFC 7807 problem+json (title/status/detail
 // keys, no "error" key). Nothing in that body marks query-serve as having
