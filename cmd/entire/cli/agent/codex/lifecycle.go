@@ -127,19 +127,13 @@ func (c *CodexAgent) ParseHookEvent(_ context.Context, hookName string, stdin io
 	}
 }
 
-// parseSubagentStart maps Codex's SubagentStart. Codex fires it for thread-spawned
-// subagents only; internal/synthetic ones expose no user-configured hooks.
+// parseSubagentStart maps Codex's SubagentStart (thread-spawned subagents only;
+// internal/synthetic ones expose no user-configured hooks).
 //
-// Two identity details matter, and they are the opposite of what the field names
-// suggest at a glance:
-//
-//   - session_id is "the identity shared by the root thread and all descendant
-//     threads", i.e. the *user's* session. That is what Entire must attribute the
-//     subagent to, so it maps to SessionID directly.
-//   - agent_id is the child thread's own id, unique per subagent and stable across
-//     start/stop. Codex has no tool_use_id, and Entire keys pre-task state and the
-//     task metadata directory on ToolUseID, so agent_id serves as both: it is the
-//     only value that correlates this start with its stop.
+// session_id is the identity shared by the root thread and all descendants — the
+// user's session — while agent_id is the child thread's own. Codex sends no
+// tool_use_id, so agent_id doubles as ToolUseID, the key Entire correlates
+// start/stop on. See AGENT.md for the full contract.
 func (c *CodexAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[subagentStartRaw](stdin)
 	if err != nil {
@@ -156,11 +150,9 @@ func (c *CodexAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {
 	}, nil
 }
 
-// parseSubagentStop maps Codex's SubagentStop.
-//
-// transcript_path here is the *parent* thread's rollout (SessionRef), while
-// agent_transcript_path is the subagent's own — Codex names it, so Entire never has
-// to guess a layout for it (see Event.SubagentTranscriptPath).
+// parseSubagentStop maps Codex's SubagentStop. Note the two transcripts:
+// transcript_path is the parent thread's rollout, agent_transcript_path the
+// subagent's own (see Event.SubagentTranscriptPath).
 func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[subagentStopRaw](stdin)
 	if err != nil {

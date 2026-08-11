@@ -324,9 +324,9 @@ func TestCodexAgent_ContextInjector(t *testing.T) {
 const testCodexAgentID = "child-thread-9"
 
 // TestParseHookEvent_SubagentStart pins the identity mapping, which is the part a
-// future reader is most likely to get backwards: Codex's session_id is the identity
-// shared by the root thread and all descendants (the user's session), while agent_id
-// is the child thread's own id.
+// future reader is most likely to get backwards: session_id is the identity shared
+// by the root thread and all descendants (the user's session), agent_id the child
+// thread's own. See AGENT.md.
 func TestParseHookEvent_SubagentStart(t *testing.T) {
 	t.Parallel()
 
@@ -334,7 +334,7 @@ func TestParseHookEvent_SubagentStart(t *testing.T) {
 	stdin := strings.NewReader(`{
 		"hook_event_name": "SubagentStart",
 		"session_id": "root-session-1",
-		"agent_id": "child-thread-9",
+		"agent_id": "` + testCodexAgentID + `",
 		"agent_type": "reviewer",
 		"transcript_path": "/rollouts/root-session-1.jsonl",
 		"cwd": "/repo",
@@ -344,44 +344,29 @@ func TestParseHookEvent_SubagentStart(t *testing.T) {
 	}`)
 
 	ev, err := (&CodexAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStart, stdin)
-	if err != nil {
-		t.Fatalf("ParseHookEvent: %v", err)
-	}
-	if ev == nil {
-		t.Fatal("expected a SubagentStart event")
-	}
-	if ev.Type != agent.SubagentStart {
-		t.Errorf("Type = %v, want SubagentStart", ev.Type)
-	}
-	if ev.SessionID != "root-session-1" {
-		t.Errorf("SessionID = %q, want the shared root session id", ev.SessionID)
-	}
-	// Codex sends no tool_use_id; agent_id is the only value that correlates this
-	// start with its stop, and Entire keys pre-task state on ToolUseID.
-	if ev.ToolUseID != testCodexAgentID {
-		t.Errorf("ToolUseID = %q, want the agent id", ev.ToolUseID)
-	}
-	if ev.SubagentType != "reviewer" {
-		t.Errorf("SubagentType = %q, want reviewer", ev.SubagentType)
-	}
-	if ev.SessionRef != "/rollouts/root-session-1.jsonl" {
-		t.Errorf("SessionRef = %q, want the parent rollout", ev.SessionRef)
-	}
+	require.NoError(t, err)
+	require.NotNil(t, ev)
+	require.Equal(t, agent.SubagentStart, ev.Type)
+	require.Equal(t, "root-session-1", ev.SessionID, "the shared root session id, not the child thread")
+	// Codex sends no tool_use_id; agent_id is the only value correlating start with
+	// stop, and Entire keys pre-task state on ToolUseID.
+	require.Equal(t, testCodexAgentID, ev.ToolUseID)
+	require.Equal(t, "reviewer", ev.SubagentType)
+	require.Equal(t, "/rollouts/root-session-1.jsonl", ev.SessionRef, "the parent rollout")
 }
 
 // TestParseHookEvent_SubagentStop covers the two transcripts SubagentStop carries:
 // transcript_path is the parent's rollout, agent_transcript_path the subagent's own.
-// Declaring the latter is what saves Entire from guessing a layout for Codex.
 func TestParseHookEvent_SubagentStop(t *testing.T) {
 	t.Parallel()
 
 	stdin := strings.NewReader(`{
 		"hook_event_name": "SubagentStop",
 		"session_id": "root-session-1",
-		"agent_id": "child-thread-9",
+		"agent_id": "` + testCodexAgentID + `",
 		"agent_type": "reviewer",
 		"transcript_path": "/rollouts/root-session-1.jsonl",
-		"agent_transcript_path": "/rollouts/child-thread-9.jsonl",
+		"agent_transcript_path": "/rollouts/` + testCodexAgentID + `.jsonl",
 		"last_assistant_message": "done",
 		"cwd": "/repo",
 		"model": "gpt-5.4",
@@ -391,27 +376,15 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 	}`)
 
 	ev, err := (&CodexAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStop, stdin)
-	if err != nil {
-		t.Fatalf("ParseHookEvent: %v", err)
-	}
-	if ev == nil {
-		t.Fatal("expected a SubagentEnd event")
-	}
-	if ev.Type != agent.SubagentEnd {
-		t.Errorf("Type = %v, want SubagentEnd", ev.Type)
-	}
-	if ev.SessionID != "root-session-1" {
-		t.Errorf("SessionID = %q, want the shared root session id", ev.SessionID)
-	}
-	if ev.SubagentID != testCodexAgentID || ev.ToolUseID != testCodexAgentID {
-		t.Errorf("SubagentID/ToolUseID = %q/%q, want the agent id for both", ev.SubagentID, ev.ToolUseID)
-	}
-	if ev.SessionRef != "/rollouts/root-session-1.jsonl" {
-		t.Errorf("SessionRef = %q, want the PARENT rollout", ev.SessionRef)
-	}
-	if ev.SubagentTranscriptPath != "/rollouts/child-thread-9.jsonl" {
-		t.Errorf("SubagentTranscriptPath = %q, want the subagent's own rollout", ev.SubagentTranscriptPath)
-	}
+	require.NoError(t, err)
+	require.NotNil(t, ev)
+	require.Equal(t, agent.SubagentEnd, ev.Type)
+	require.Equal(t, "root-session-1", ev.SessionID, "the shared root session id")
+	require.Equal(t, testCodexAgentID, ev.SubagentID)
+	require.Equal(t, testCodexAgentID, ev.ToolUseID, "agent_id doubles as the correlation key")
+	require.Equal(t, "/rollouts/root-session-1.jsonl", ev.SessionRef, "the PARENT rollout")
+	require.Equal(t, "/rollouts/"+testCodexAgentID+".jsonl", ev.SubagentTranscriptPath,
+		"the subagent's own rollout")
 }
 
 // TestParseHookEvent_SubagentStop_NullTranscripts covers the nullable fields: Codex
@@ -422,7 +395,7 @@ func TestParseHookEvent_SubagentStop_NullTranscripts(t *testing.T) {
 	stdin := strings.NewReader(`{
 		"hook_event_name": "SubagentStop",
 		"session_id": "root-session-1",
-		"agent_id": "child-thread-9",
+		"agent_id": "` + testCodexAgentID + `",
 		"agent_type": "default",
 		"transcript_path": null,
 		"agent_transcript_path": null,
@@ -435,14 +408,8 @@ func TestParseHookEvent_SubagentStop_NullTranscripts(t *testing.T) {
 	}`)
 
 	ev, err := (&CodexAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStop, stdin)
-	if err != nil {
-		t.Fatalf("ParseHookEvent: %v", err)
-	}
-	if ev == nil {
-		t.Fatal("expected a SubagentEnd event")
-	}
-	if ev.SessionRef != "" || ev.SubagentTranscriptPath != "" {
-		t.Errorf("null transcripts must decode to empty, got SessionRef=%q SubagentTranscriptPath=%q",
-			ev.SessionRef, ev.SubagentTranscriptPath)
-	}
+	require.NoError(t, err)
+	require.NotNil(t, ev)
+	require.Empty(t, ev.SessionRef, "a null transcript_path must not become \"null\"")
+	require.Empty(t, ev.SubagentTranscriptPath, "a null agent_transcript_path must not become \"null\"")
 }

@@ -1184,10 +1184,8 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 // declaredSubagentTranscript returns the agent-declared subagent transcript path
 // when it names a file that exists, else "".
 //
-// A declared path that is missing is worth a log line rather than silent
-// substitution: it means the agent's contract and its behaviour disagree, which is
-// exactly what nobody noticed while the Claude-shaped guess was quietly returning
-// "" for every other agent.
+// A declared-but-missing path warns rather than falling through silently: it means
+// the agent's contract and its behaviour disagree.
 func declaredSubagentTranscript(ctx context.Context, event *agent.Event) string {
 	declared := strings.TrimSpace(event.SubagentTranscriptPath)
 	if declared == "" {
@@ -1210,10 +1208,7 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		event.SubagentType, event.TaskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
 	}
 
-	// Prefer the path the agent declared; only guess Claude Code's layout when it
-	// didn't. Codex and Cursor name the file in their payloads, so for them the
-	// guess would resolve to nothing and the subagent transcript would be silently
-	// dropped (see Event.SubagentTranscriptPath).
+	// Prefer what the agent declared; see Event.SubagentTranscriptPath.
 	subagentTranscriptPath := declaredSubagentTranscript(logCtx, event)
 	if subagentTranscriptPath == "" {
 		subagentTranscriptPath = ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
