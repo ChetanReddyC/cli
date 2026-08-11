@@ -483,17 +483,7 @@ func normalizeTrailEventValue(value any) any {
 }
 
 func trailEventCamelKey(key string) string {
-	parts := strings.Split(key, "_")
-	for i := 1; i < len(parts); i++ {
-		if parts[i] != "" {
-			parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
-		}
-	}
-	camel := strings.Join(parts, "")
-	if camel == "reviewSessionId" {
-		return "reviewId"
-	}
-	return camel
+	return api.NormalizeTrailJSONKey(key)
 }
 
 func printReviewStreamEvent(w io.Writer, ev reviewStreamEvent) {

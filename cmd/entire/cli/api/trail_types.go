@@ -26,10 +26,6 @@ type TrailListResponse struct {
 }
 
 func (r *TrailListResponse) UnmarshalJSON(data []byte) error {
-	normalized, err := normalizeLegacyTrailJSON(data)
-	if err != nil {
-		return err
-	}
 	var wire struct {
 		Items         []TrailResource `json:"items"`
 		Trails        []TrailResource `json:"trails"`
@@ -37,7 +33,7 @@ func (r *TrailListResponse) UnmarshalJSON(data []byte) error {
 		Total         int             `json:"total"`
 		NextPageToken *string         `json:"nextPageToken"`
 	}
-	if err := json.Unmarshal(normalized, &wire); err != nil {
+	if err := decodeNormalizedTrailJSON(data, &wire); err != nil {
 		return fmt.Errorf("decode trail list: %w", err)
 	}
 	r.Trails = wire.Items
@@ -168,10 +164,6 @@ type TrailApproval struct {
 }
 
 func (a *TrailApproval) UnmarshalJSON(data []byte) error {
-	normalized, err := normalizeLegacyTrailJSON(data)
-	if err != nil {
-		return err
-	}
 	var wire struct {
 		ID        string          `json:"id"`
 		Author    json.RawMessage `json:"author"`
@@ -180,7 +172,7 @@ func (a *TrailApproval) UnmarshalJSON(data []byte) error {
 		CommitSHA string          `json:"commitSha"`
 		CreatedAt time.Time       `json:"createdAt"`
 	}
-	if err := json.Unmarshal(normalized, &wire); err != nil {
+	if err := decodeNormalizedTrailJSON(data, &wire); err != nil {
 		return fmt.Errorf("decode trail approval: %w", err)
 	}
 	a.ID, a.Event, a.CommitSHA, a.CreatedAt = wire.ID, wire.Event, wire.CommitSHA, wire.CreatedAt
