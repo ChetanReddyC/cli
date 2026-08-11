@@ -212,7 +212,7 @@ func restoreByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID 
 	}
 	defer repo.Close()
 
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -297,7 +297,7 @@ func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName
 	checkpointID := result.checkpointIDs[0]
 	var metadata *strategy.CheckpointInfo
 
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -425,7 +425,7 @@ func readCheckpointInfoFromRef(
 	refs checkpoint.PersistentRefs,
 	checkpointID id.CheckpointID,
 ) (*strategy.CheckpointInfo, error) {
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{Refs: &refs, BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{Refs: &refs, BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -994,7 +994,7 @@ func restoreSingleSession(ctx context.Context, w io.Writer, ag agent.Agent, sess
 		return strategy.RestoredSession{}, false, fmt.Errorf("failed to open repository: %w", repoErr)
 	}
 	defer repo.Close()
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return strategy.RestoredSession{}, false, fmt.Errorf("open checkpoint store: %w", err)
 	}

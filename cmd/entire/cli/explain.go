@@ -739,7 +739,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		// layer, so rawTranscript is always false when generate is true; the
 		// direct-to-w write path inside explainTemporaryCheckpoint is not
 		// reachable here and won't leak partial output on error.
-		tempStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{})
+		tempStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 		if openErr != nil {
 			return fmt.Errorf("open checkpoint store: %w", openErr)
 		}
@@ -812,7 +812,8 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		// exists remotely but not locally (written/migrated on another
 		// machine), bounded by the write-probe budget.
 		writeStores, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{
-			RefFetcher: remote.BoundedCheckpointRefFetcher(remote.WriteProbeFetchBudget),
+			RefFetcher:  remote.BoundedCheckpointRefFetcher(remote.WriteProbeFetchBudget),
+			ReadRemotes: strategy.CheckpointReadRemotes(ctx),
 		})
 		if openErr != nil {
 			return fmt.Errorf("open checkpoint store: %w", openErr)
@@ -822,7 +823,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		}
 		// Reload to get the updated summary.
 		stopLoad = startSpinner(errW, fmt.Sprintf("Reloading checkpoint %s", fullCheckpointID))
-		reopened, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+		reopened, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 		if openErr != nil {
 			stopLoad(false)
 			return fmt.Errorf("open checkpoint store: %w", openErr)
@@ -998,7 +999,7 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 	// `git fetch` fails against partial-clone repos with "did not send all
 	// necessary objects"). Falls back to a full metadata-branch fetch if
 	// fetch-pack also can't reach the blobs.
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -2505,6 +2506,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 		BlobFetcher:     FetchBlobsByHash,
 		RefFetcher:      FetchCheckpointRef,
 		RemoteRefLister: ListCheckpointRefsOnRemote,
+		ReadRemotes:     strategy.CheckpointReadRemotes(ctx),
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("open checkpoint store: %w", err)
@@ -2718,7 +2720,7 @@ func hydrateListedBranchCheckpoints(
 // metadata branch but carry no commit trailer, so the commit-driven branch
 // walk never surfaces them. Best-effort: returns nil on read failure.
 func getImportedRewindPoints(ctx context.Context, repo *git.Repository) []strategy.RewindPoint {
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil
 	}

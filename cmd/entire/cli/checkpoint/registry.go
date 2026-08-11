@@ -36,6 +36,9 @@ type OpenEnv struct {
 	RefFetcher      RefFetchFunc
 	RemoteRefLister RemoteRefListFunc
 	Refs            PersistentRefs
+	// ReadRemotes is the ordered checkpoint read-candidate chain; see
+	// OpenOptions.ReadRemotes.
+	ReadRemotes []string
 }
 
 // Factory constructs a persistent store for one backend type. cfg is the
@@ -148,6 +151,7 @@ func gitBranchBackendFactory(_ context.Context, env OpenEnv, _ json.RawMessage) 
 	if env.BlobFetcher != nil {
 		store.SetBlobFetcher(env.BlobFetcher)
 	}
+	store.SetReadRemotes(env.ReadRemotes)
 	return store, nil
 }
 

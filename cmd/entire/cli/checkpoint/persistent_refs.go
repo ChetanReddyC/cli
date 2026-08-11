@@ -27,14 +27,16 @@ func DefaultV1Refs() PersistentRefs {
 }
 
 // PrimaryFetchableFromRemote reports whether Primary has a remote-tracking
-// shadow, for a given remote.
+// shadow on whichever remote carries checkpoint data (the caller supplies the
+// remote-tracking ref).
 func (r PersistentRefs) PrimaryFetchableFromRemote() bool {
 	return r.Primary.IsBranch() && slices.Contains(r.Push, r.Primary)
 }
 
 // ReadBootstrappableFromRemote reports whether reads can be bootstrapped from
-// a given remote: true when reads target Primary and Primary is fetchable
-// from that remote.
+// whichever remote carries checkpoint data (the caller supplies the
+// remote-tracking ref): true when reads target Primary and Primary is
+// fetchable from a remote.
 func (r PersistentRefs) ReadBootstrappableFromRemote() bool {
 	return r.Read == r.Primary && r.PrimaryFetchableFromRemote()
 }

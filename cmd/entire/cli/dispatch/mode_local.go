@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -226,7 +227,7 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 	// repoRoot may be a different repo (--repo/RepoPaths) or the cwd may not be
 	// a repo at all, so scope checkpoint store construction to this repo.
 	repoCtx := settings.WithWorktreeRoot(ctx, repoRoot)
-	stores, err := checkpoint.Open(repoCtx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(repoCtx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(repoCtx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -338,6 +339,10 @@ func TestRunSessionsFix_MetadataCheckFailure_PropagatesError(t *testing.T) {
 	localRef := plumbing.NewHashReference(
 		plumbing.NewBranchReferenceName(paths.MetadataBranchName), localHash)
 	require.NoError(t, repo.Storer.SetReference(localRef))
+
+	// Configure an origin remote so origin is a checkpoint read candidate —
+	// the metadata check only consults tracking refs of configured candidates.
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
 
 	// Create a remote-tracking ref that points to a nonexistent object.
 	// This makes IsMetadataDisconnected call git merge-base with a bad hash,

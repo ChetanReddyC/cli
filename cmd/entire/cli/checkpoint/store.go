@@ -35,6 +35,10 @@ type GitStore struct {
 
 	refs        PersistentRefs
 	blobFetcher BlobFetchFunc
+	// readRemotes is the ordered checkpoint read-candidate chain used by the
+	// committed-read tracking-ref fallback; see OpenOptions.ReadRemotes. nil
+	// means the legacy origin-only fallback.
+	readRemotes []string
 }
 
 // ephemeralStore is the git shadow-branch (temporary) checkpoint store. It is
@@ -70,6 +74,15 @@ func NewGitStore(repo *git.Repository, refs PersistentRefs) *GitStore {
 // on demand when reading from metadata trees.
 func (s *GitStore) SetBlobFetcher(f BlobFetchFunc) {
 	s.blobFetcher = f
+}
+
+// SetReadRemotes configures the ordered checkpoint read-candidate remotes
+// (elected sync remote first, then the legacy origin tier) whose tracking
+// refs committed reads fall back to when refs.Read is missing locally. This
+// fallback is a pure read — the chain never seeds or advances local refs.
+// nil keeps the legacy origin-only fallback.
+func (s *GitStore) SetReadRemotes(remotes []string) {
+	s.readRemotes = remotes
 }
 
 // Repository returns the underlying git repository.

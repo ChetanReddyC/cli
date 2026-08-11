@@ -30,6 +30,14 @@ type Info = gitremote.Info
 // FetchURLOptions configures FetchURL.
 type FetchURLOptions struct {
 	WorktreeRoot string
+
+	// ReadRemotes is the ordered checkpoint read-candidate chain (elected sync
+	// remote first, then the legacy origin tier), supplied by cli/strategy
+	// callers — this package cannot resolve the election itself. When set and
+	// NO checkpoint_remote is configured, the base fetch URL is derived from
+	// the first candidate instead of unconditionally from origin. The
+	// dedicated checkpoint_remote derivation path ignores it entirely.
+	ReadRemotes []string
 }
 
 // FetchURL returns the effective checkpoint fetch URL for the current repository.
@@ -91,10 +99,34 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 
 	config := s.GetCheckpointRemote()
 	if config == nil {
+		// No checkpoint_remote configured: the first read candidate (the
+		// elected checkpoint sync remote, when the caller supplied the chain)
+		// is the checkpoint host; without a chain, origin is.
+		if lead := leadReadRemote(opt.ReadRemotes); lead != "" && lead != originRemote {
+			leadURL, leadErr := getRemoteURL(ctx, lead)
+			if leadErr == nil && leadURL == "" {
+				leadErr = fmt.Errorf("remote %q has an empty URL", lead)
+			}
+			if leadErr == nil {
+				if withToken {
+					if tokenURL, ok := deriveTokenOriginURL(leadURL); ok {
+						leadURL = tokenURL
+					}
+				}
+				return leadURL, true, nil
+			}
+			if originURL != "" {
+				// The lead candidate's URL could not be resolved; fall back to
+				// origin but do not certify it as the checkpoint host.
+				logFallback(ctx, "fetch", originURL, "resolve read candidate remote URL", leadErr,
+					slog.String("read_candidate", lead))
+				return originURL, false, nil
+			}
+			return "", false, fmt.Errorf("no fetch URL found for read candidate %q: %w", lead, leadErr)
+		}
 		if originURL == "" {
 			return "", false, fmt.Errorf("no fetch URL found: %w", originErr)
 		}
-		// No checkpoint_remote configured: origin IS the checkpoint host.
 		return originURL, true, nil
 	}
 
@@ -601,6 +633,15 @@ func logFallback(ctx context.Context, operation, fallbackURL, reason string, err
 	}
 	logAttrs = append(logAttrs, attrs...)
 	logging.Warn(ctx, "checkpoint remote URL resolution fell back to alternate remote URL", logAttrs...)
+}
+
+// leadReadRemote returns the first read-candidate remote name, or "" when the
+// caller supplied no chain.
+func leadReadRemote(readRemotes []string) string {
+	if len(readRemotes) == 0 {
+		return ""
+	}
+	return readRemotes[0]
 }
 
 func resolvePushFallbackURL(ctx context.Context, pushRemoteName, originURL string) (string, error) {

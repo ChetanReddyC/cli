@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
@@ -94,7 +95,7 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 		return ""
 	}
 	defer repo.Close()
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		logging.Debug(ctx, "review checkpoint context: open store", slog.String("error", err.Error()))
 		return ""

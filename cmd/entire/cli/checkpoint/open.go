@@ -34,6 +34,15 @@ type OpenOptions struct {
 	// Refs overrides the default committed-ref topology. A non-nil value wins,
 	// e.g. attach pins reads to Primary via PrimaryAsRead().
 	Refs *PersistentRefs
+
+	// ReadRemotes is the ordered checkpoint read-candidate chain (elected sync
+	// remote first, then the legacy origin tier). The checkpoint package
+	// cannot resolve the election itself, so cli/strategy callers inject it
+	// here (strategy.CheckpointReadRemotes). The git-branch store's committed
+	// reads fall back to these remotes' tracking refs when refs.Read is
+	// missing locally — a pure read; local refs are never written from the
+	// chain. nil keeps the legacy origin-only fallback.
+	ReadRemotes []string
 }
 
 // PrimaryIsRefs reports whether the configured primary backend is the git-refs
@@ -69,7 +78,7 @@ type Stores struct {
 // default git-branch backend with no mirrors, preserving default behavior.
 func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores, error) {
 	refs := resolveOpenRefs(ctx, opts)
-	env := OpenEnv{Repo: repo, BlobFetcher: opts.BlobFetcher, RefFetcher: opts.RefFetcher, RemoteRefLister: opts.RemoteRefLister, Refs: refs}
+	env := OpenEnv{Repo: repo, BlobFetcher: opts.BlobFetcher, RefFetcher: opts.RefFetcher, RemoteRefLister: opts.RemoteRefLister, Refs: refs, ReadRemotes: opts.ReadRemotes}
 
 	cfg, err := settings.LoadCheckpointsConfig(ctx)
 	if err != nil {

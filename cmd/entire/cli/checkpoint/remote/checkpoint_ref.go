@@ -42,9 +42,29 @@ func CheckpointFetchTarget(ctx context.Context) string {
 // "origin" fallbacks are non-authoritative: they exist so a fetch can still
 // be attempted, not to certify where checkpoint refs live.
 func checkpointFetchTarget(ctx context.Context) (string, bool) {
-	url, authoritative, err := fetchURLAuthoritative(ctx)
+	return checkpointFetchTargetFrom(ctx, nil)
+}
+
+// CheckpointFetchTargetFrom is CheckpointFetchTarget with an explicit ordered
+// read-candidate chain: when no checkpoint_remote is configured the target is
+// derived from the first candidate instead of unconditionally from origin.
+// The dedicated checkpoint_remote derivation is unchanged.
+func CheckpointFetchTargetFrom(ctx context.Context, readRemotes []string) string {
+	target, _ := checkpointFetchTargetFrom(ctx, readRemotes)
+	return target
+}
+
+// checkpointFetchTargetFrom resolves the fetch target for checkpoint data,
+// honoring an optional read-candidate chain (see FetchURLOptions.ReadRemotes).
+// The bare remote-name fallbacks are non-authoritative: they exist so a fetch
+// can still be attempted, not to certify where checkpoint refs live.
+func checkpointFetchTargetFrom(ctx context.Context, readRemotes []string) (string, bool) {
+	url, authoritative, err := fetchURLAuthoritative(ctx, FetchURLOptions{ReadRemotes: readRemotes})
 	if err == nil && url != "" {
 		return url, authoritative
+	}
+	if lead := leadReadRemote(readRemotes); lead != "" {
+		return lead, false
 	}
 	return "origin", false
 }
@@ -107,6 +127,74 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 		}
 	}
 
+	return probeAndFetchCheckpointRef(ctx, ref, fetchTarget, authoritative)
+}
+
+// FetchCheckpointRefFrom is FetchCheckpointRef with an explicit ordered chain
+// of checkpoint read-candidate remotes (elected sync remote first, then the
+// legacy origin tier), supplied by cli/strategy callers — this package cannot
+// resolve the election itself.
+//
+// Per-operation candidate semantics: candidates are tried in order; a
+// candidate lacking the ref and a candidate failing at the transport level
+// both advance to the next candidate (transport failures logged at debug);
+// when every candidate fails, the FIRST candidate's error is surfaced (the
+// elected remote is the primary story). The absence-vs-failure contract of
+// FetchCheckpointRef holds: only a genuine "no candidate has the ref" outcome
+// (or a provably remoteless repository, below) wraps
+// plumbing.ErrReferenceNotFound.
+//
+// A configured checkpoint_remote is a dedicated store with a single
+// authoritative target, so the chain does not apply and the legacy
+// single-target behavior is preserved; the same holds when settings cannot be
+// read (a configured checkpoint remote cannot be ruled out).
+//
+// An empty chain classifies the ref as absent only on positive evidence on
+// every axis: a live caller context, readable settings without a
+// checkpoint_remote key in any form, and a successful, empty `git remote`
+// listing. Anything less surfaces an error — never a silent "absent".
+func FetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, readRemotes []string) error {
+	s, loadErr := settings.Load(ctx)
+	if loadErr != nil || s.GetCheckpointRemote() != nil {
+		return FetchCheckpointRef(ctx, ref)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, readFetchTimeout)
+	defer cancel()
+
+	if len(readRemotes) == 0 {
+		if ctx.Err() == nil && !s.HasCheckpointRemoteKey() && repoHasNoRemotes(ctx) {
+			logging.Debug(ctx, "checkpoint probe: repository has no git remotes; classifying ref as absent",
+				slog.String("ref", ref.String()))
+			return fmt.Errorf("checkpoint ref %s: repository has no git remotes to fetch from: %w", ref, plumbing.ErrReferenceNotFound)
+		}
+		return fmt.Errorf("checkpoint ref %s: no checkpoint read candidates available and the repository is not provably remoteless; refusing to treat this as absence", ref)
+	}
+
+	var firstErr error
+	for i, remoteName := range readRemotes {
+		target, authoritative := checkpointFetchTargetFrom(ctx, readRemotes[i:i+1])
+		err := probeAndFetchCheckpointRef(ctx, ref, target, authoritative)
+		if err == nil {
+			return nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		if i+1 < len(readRemotes) {
+			logging.Debug(ctx, "checkpoint ref fetch: read candidate failed; trying next candidate",
+				slog.String("ref", ref.String()),
+				slog.String("candidate", remoteName),
+				slog.String("error", err.Error()))
+		}
+	}
+	return firstErr
+}
+
+// probeAndFetchCheckpointRef runs the ls-remote existence probe and, on a hit,
+// fetches ref from fetchTarget into the local ref of the same name. It carries
+// FetchCheckpointRef's absence-vs-failure contract for a single target.
+func probeAndFetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName, fetchTarget string, authoritative bool) error {
 	out, err := LsRemoteInDir(ctx, "", fetchTarget, ref.String())
 	if err != nil {
 		// Redact: fetchTarget can be a remote URL with embedded credentials
@@ -158,6 +246,10 @@ func repoHasNoRemotes(ctx context.Context) bool {
 // bounded budget plus BatchMode SSH, so a passphrase-protected key can never
 // prompt — or invisibly hang — inside a hook the user's git command is
 // waiting on.
+//
+// Deliberately single-target (FetchCheckpointRef, not FetchCheckpointRefFrom):
+// these are write-side hook probes whose target the push flow already
+// confines, so the read-candidate chain does not apply here.
 func HookCheckpointRefFetcher() func(context.Context, plumbing.ReferenceName) error {
 	bounded := BoundedCheckpointRefFetcher(WriteProbeFetchBudget)
 	return func(ctx context.Context, ref plumbing.ReferenceName) error {

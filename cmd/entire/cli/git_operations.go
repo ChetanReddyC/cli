@@ -361,17 +361,18 @@ func FetchAndCheckoutRemoteBranch(ctx context.Context, branchName string) error 
 // a global unshallow that would also deepen an unrelated shallow source tree.
 const metadataFetchDepth = 1_000_000_000
 
-// FetchMetadataBranch fetches the entire/checkpoints/v1 branch from origin
-// with full blob content. Used as a fallback by resume/explain when the
-// tree-only probe is insufficient (e.g. the metadata.json blob is missing).
+// FetchMetadataBranch fetches the entire/checkpoints/v1 branch from the
+// checkpoint read-candidate remotes with full blob content. Used as a
+// fallback by resume/explain when the tree-only probe is insufficient (e.g.
+// the metadata.json blob is missing).
 func FetchMetadataBranch(ctx context.Context) error {
-	return fetchMetadataFromOrigin(ctx, true /* noFilter */)
+	return fetchMetadataFromReadRemotes(ctx, true /* noFilter */)
 }
 
 // FetchMetadataTreeOnly fetches the entire/checkpoints/v1 commit+tree graph
-// from origin to resolve the latest checkpoint, relying on --filter=blob:none
-// (when filtered fetches are enabled) to skip blob content rather than on a
-// shallow --depth=1 fetch.
+// from the checkpoint read-candidate remotes to resolve the latest
+// checkpoint, relying on --filter=blob:none (when filtered fetches are
+// enabled) to skip blob content rather than on a shallow --depth=1 fetch.
 //
 // It deliberately does NOT use --depth=1. A depth-1 fetch adds the fetched tip
 // to .git/shallow, and any ref pointing at a shallow commit (the durable
@@ -387,10 +388,55 @@ func FetchMetadataBranch(ctx context.Context) error {
 // fetch removes the boundary left by a prior --depth=1 fetch rather than letting
 // it linger forever, without deepening an independently-shallow source tree.
 func FetchMetadataTreeOnly(ctx context.Context) error {
-	return fetchMetadataFromOrigin(ctx, false /* noFilter */)
+	return fetchMetadataFromReadRemotes(ctx, false /* noFilter */)
 }
 
-func fetchMetadataFromOrigin(ctx context.Context, noFilter bool) error {
+// fetchMetadataFromReadRemotes fetches the metadata branch from the checkpoint
+// read-candidate remotes in order: a candidate that fails (transport error, or
+// the branch missing on that remote) advances to the next candidate (logged at
+// debug); when every candidate fails, the FIRST candidate's error is surfaced.
+//
+// Local-ref advancement is confined to the elected checkpoint sync remote: a
+// successful fetch from the legacy origin tier only updates origin's tracking
+// ref (which the candidate-aware tracking-ref readers consult) and never feeds
+// SafelyAdvanceLocalRef — a stale origin driving the local v1 advance is the
+// #1374-class hazard. The election result is resolved explicitly rather than
+// inferred from the chain's first entry, which can be the fail-open origin.
+func fetchMetadataFromReadRemotes(ctx context.Context, noFilter bool) error {
+	candidates := strategy.CheckpointReadRemotes(ctx)
+	if len(candidates) == 0 {
+		return errors.New("no git remotes configured to fetch checkpoint metadata from")
+	}
+
+	electedName := ""
+	if elected, electErr := strategy.ResolveCheckpointSyncRemote(ctx); electErr == nil {
+		electedName = elected.Name
+	}
+
+	var firstErr error
+	for i, remoteName := range candidates {
+		err := fetchMetadataFromRemote(ctx, remoteName, noFilter, electedName != "" && remoteName == electedName)
+		if err == nil {
+			return nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		if i+1 < len(candidates) {
+			logging.Debug(ctx, "metadata branch fetch: read candidate failed; trying next candidate",
+				slog.String("candidate", remoteName),
+				slog.String("error", err.Error()))
+		}
+	}
+	return firstErr
+}
+
+// fetchMetadataFromRemote fetches the metadata branch from one remote into
+// that remote's tracking ref. advanceLocal must be true ONLY for the elected
+// checkpoint sync remote — it gates the SafelyAdvanceLocalRef step, which on
+// divergence replays local commits onto the fetched tip and so must never be
+// driven by the legacy origin tier.
+func fetchMetadataFromRemote(ctx context.Context, remoteName string, noFilter, advanceLocal bool) error {
 	refs := checkpoint.ResolveRefs(ctx)
 	if !refs.Primary.IsBranch() {
 		return fmt.Errorf("primary metadata ref %s is not a branch", refs.Primary)
@@ -400,12 +446,12 @@ func fetchMetadataFromOrigin(ctx context.Context, noFilter bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	fetchTarget, err := remote.ResolveFetchTarget(ctx, "origin")
+	fetchTarget, err := remote.ResolveFetchTarget(ctx, remoteName)
 	if err != nil {
 		return fmt.Errorf("failed to resolve fetch target: %w", err)
 	}
 
-	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
+	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", branchName, remoteName, branchName)
 
 	output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:   fetchTarget,
@@ -433,9 +479,14 @@ func fetchMetadataFromOrigin(ctx context.Context, noFilter bool) error {
 	}
 	defer repo.Close()
 
-	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", branchName), true)
+	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName(remoteName, branchName), true)
 	if err != nil {
-		return fmt.Errorf("branch '%s' not found on origin: %w", branchName, err)
+		return fmt.Errorf("branch '%s' not found on %s: %w", branchName, remoteName, err)
+	}
+	if !advanceLocal {
+		// Legacy read tier: the fetched data is readable through the tracking
+		// ref, but the local primary is never advanced from it.
+		return nil
 	}
 	if err := strategy.SafelyAdvanceLocalRef(ctx, repo, refs.Primary, remoteRef.Hash()); err != nil {
 		return fmt.Errorf("failed to advance local %s branch: %w", branchName, err)
@@ -469,12 +520,18 @@ func resolveCheckpointFetchTarget(ctx context.Context) string {
 }
 
 // FetchCheckpointRef fetches a single per-checkpoint ref from the checkpoint
-// remote. Thin alias for remote.FetchCheckpointRef, kept so existing cli-side
-// call sites and OpenOptions wiring stay unchanged; see that function for the
-// absence-vs-failure contract (remote-lacks-ref wraps
-// plumbing.ErrReferenceNotFound; transport failures surface as-is).
+// read-candidate remotes (elected sync remote first, then the legacy origin
+// tier). It is the single cli-side RefFetchFunc wiring point — every
+// checkpoint.OpenOptions.RefFetcher and direct call in this package routes
+// through here, so all read paths consult the candidate chain via
+// remote.FetchCheckpointRefFrom while keeping the public (ctx, ref)
+// RefFetchFunc shape. See that function for the candidate semantics and the
+// absence-vs-failure contract (no candidate has the ref wraps
+// plumbing.ErrReferenceNotFound; transport failures surface as-is). Write-side
+// hook probes deliberately stay on the single-target
+// remote.HookCheckpointRefFetcher instead.
 func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
-	return remote.FetchCheckpointRef(ctx, ref) //nolint:wrapcheck // thin alias; the remote error carries full context
+	return remote.FetchCheckpointRefFrom(ctx, ref, strategy.CheckpointReadRemotes(ctx)) //nolint:wrapcheck // thin alias; the remote error carries full context
 }
 
 // checkpointRefListTimeout bounds the names-only ls-remote used by user-facing
@@ -553,10 +610,13 @@ func parseCheckpointRefNames(output []byte) []plumbing.ReferenceName {
 // unlike fetch-pack which bypasses them. Requires the server to support
 // uploadpack.allowReachableSHA1InWant (GitHub, GitLab, Bitbucket all do).
 //
-// The fetch target is resolved via resolveCheckpointFetchTarget, which defers to
-// checkpoint/remote.FetchURL for the effective remote URL when available.
+// The fetch targets come from checkpointBlobFetchTargets: the single dedicated
+// checkpoint_remote URL when one is configured, otherwise one target per
+// checkpoint read candidate, tried in order (first success wins; blob fetches
+// land in the object store, never in local refs, so both tiers are legal).
 //
-// If fetching by hash fails, falls back to a full metadata branch fetch.
+// If fetching by hash fails on every target, falls back to a full metadata
+// branch fetch.
 func FetchBlobsByHash(ctx context.Context, hashes []plumbing.Hash) error {
 	if len(hashes) == 0 {
 		return nil
@@ -565,27 +625,64 @@ func FetchBlobsByHash(ctx context.Context, hashes []plumbing.Hash) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	fetchTarget := resolveCheckpointFetchTarget(ctx)
+	targets := checkpointBlobFetchTargets(ctx)
 
 	hashStrs := make([]string, len(hashes))
 	for i, h := range hashes {
 		hashStrs[i] = h.String()
 	}
 
-	if fetchErr := remote.FetchBlobs(ctx, fetchTarget, hashStrs); fetchErr != nil {
-		logging.Debug(ctx, "fetch-by-hash failed, falling back to full metadata fetch",
+	var firstErr error
+	for i, fetchTarget := range targets {
+		fetchErr := remote.FetchBlobs(ctx, fetchTarget, hashStrs)
+		if fetchErr == nil {
+			return nil
+		}
+		if firstErr == nil {
+			firstErr = fetchErr
+		}
+		logging.Debug(ctx, "fetch-by-hash failed on target",
 			slog.Int("blob_count", len(hashes)),
-			slog.String("fetch_target", fetchTarget),
+			slog.String("fetch_target", remote.RedactURLOrPath(fetchTarget)),
+			slog.Int("target_index", i),
 			slog.String("error", fetchErr.Error()),
 		)
-		// Fallback: try checkpoint remote first (if configured), then origin
-		if cpErr := FetchMetadataFromCheckpointRemote(ctx); cpErr != nil {
-			if fallbackErr := FetchMetadataBranch(ctx); fallbackErr != nil {
-				return fmt.Errorf("fetch-by-hash failed: %w; fallback fetch also failed: %w",
-					fetchErr, fallbackErr)
-			}
+	}
+
+	logging.Debug(ctx, "fetch-by-hash failed, falling back to full metadata fetch",
+		slog.Int("blob_count", len(hashes)),
+		slog.String("error", firstErr.Error()),
+	)
+	// Fallback: try checkpoint remote first (if configured), then the
+	// read-candidate chain.
+	if cpErr := FetchMetadataFromCheckpointRemote(ctx); cpErr != nil {
+		if fallbackErr := FetchMetadataBranch(ctx); fallbackErr != nil {
+			return fmt.Errorf("fetch-by-hash failed: %w; fallback fetch also failed: %w",
+				firstErr, fallbackErr)
 		}
 	}
 
 	return nil
+}
+
+// checkpointBlobFetchTargets returns the ordered fetch targets for blob
+// hydration. A configured checkpoint_remote is a dedicated store with a single
+// authoritative target; otherwise each checkpoint read candidate becomes a
+// target (its URL when resolvable — reusing the checkpoint-token URL
+// derivation — else the bare remote name). An empty candidate chain keeps the
+// legacy single-target shape so error reporting matches today's remoteless
+// behavior.
+func checkpointBlobFetchTargets(ctx context.Context) []string {
+	if remote.Configured(ctx) {
+		return []string{resolveCheckpointFetchTarget(ctx)}
+	}
+	candidates := strategy.CheckpointReadRemotes(ctx)
+	if len(candidates) == 0 {
+		return []string{resolveCheckpointFetchTarget(ctx)}
+	}
+	targets := make([]string, 0, len(candidates))
+	for i := range candidates {
+		targets = append(targets, remote.CheckpointFetchTargetFrom(ctx, candidates[i:i+1]))
+	}
+	return targets
 }

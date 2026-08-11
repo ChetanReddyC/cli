@@ -2220,18 +2220,34 @@ func (s *GitStore) getFetchingTree(ctx context.Context) (*FetchingTree, error) {
 }
 
 // getSessionsBranchTree returns the tree object at refs.Read. Falls back to
-// origin's remote-tracking ref for Primary when ReadBootstrappableFromRemote
-// is true.
+// the read-candidate remotes' tracking refs for Primary (first existing wins;
+// legacy origin-only when no chain was injected) when
+// ReadBootstrappableFromRemote is true. The fallback is a pure read — it
+// never writes local refs.
 func (s *GitStore) getSessionsBranchTree() (*object.Tree, error) {
 	ref, err := s.repo.Reference(s.refs.Read, true)
 	if err != nil {
 		if !s.refs.ReadBootstrappableFromRemote() {
 			return nil, fmt.Errorf("sessions ref %s not found: %w", s.refs.Read, err)
 		}
-		remoteRefName := plumbing.NewRemoteReferenceName("origin", s.refs.Primary.Short())
-		ref, err = s.repo.Reference(remoteRefName, true)
-		if err != nil {
-			return nil, fmt.Errorf("sessions branch not found: %w", err)
+		remotes := s.readRemotes
+		if len(remotes) == 0 {
+			remotes = []string{"origin"}
+		}
+		var firstErr error
+		for _, remoteName := range remotes {
+			remoteRefName := plumbing.NewRemoteReferenceName(remoteName, s.refs.Primary.Short())
+			candidateRef, refErr := s.repo.Reference(remoteRefName, true)
+			if refErr == nil {
+				ref = candidateRef
+				break
+			}
+			if firstErr == nil {
+				firstErr = refErr
+			}
+		}
+		if ref == nil {
+			return nil, fmt.Errorf("sessions branch not found: %w", firstErr)
 		}
 	}
 

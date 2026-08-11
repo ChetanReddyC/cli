@@ -335,7 +335,7 @@ func refuseIfImportedCheckpoint(ctx context.Context, errW io.Writer, commitID st
 	}
 	defer repo.Close()
 
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil
 	}
@@ -678,7 +678,7 @@ func restoreSessionTranscriptFromStrategy(ctx context.Context, cpID id.Checkpoin
 	}
 	defer repo.Close()
 
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return "", fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -727,7 +727,7 @@ func restoreSessionTranscriptFromShadow(ctx context.Context, commitHash, metadat
 	}
 
 	// Get transcript from shadow branch commit tree
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return "", fmt.Errorf("open checkpoint store: %w", err)
 	}
