@@ -490,6 +490,16 @@ func TestPromptLoginURL_Cancellation(t *testing.T) {
 	}
 }
 
+func TestPromptLoginURL_UnexpectedActionFails(t *testing.T) {
+	t.Parallel()
+
+	interactor := newTestLoginURLInteractor(loginURLAction(255))
+	err := promptLoginURL(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, "https://auth.test", interactor)
+	if err == nil || !strings.Contains(err.Error(), "unexpected login URL action: 255") {
+		t.Fatalf("error = %v, want unexpected-action error", err)
+	}
+}
+
 func TestReadLoginURLActionEvents(t *testing.T) {
 	t.Parallel()
 

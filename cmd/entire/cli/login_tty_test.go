@@ -75,6 +75,26 @@ func TestReadLoginURLActionFromTTY_CancellationRestoresTerminal(t *testing.T) {
 	assertLoginPromptTTYRestored(t, observer, before)
 }
 
+func TestReadLoginURLActionFromTTY_RawModeFailureContinuesAndCloses(t *testing.T) {
+	t.Parallel()
+
+	notTTY, err := os.CreateTemp(t.TempDir(), "not-a-tty")
+	if err != nil {
+		t.Fatalf("create non-TTY input: %v", err)
+	}
+
+	action, err := readLoginURLActionFromTTY(context.Background(), notTTY)
+	if err != nil {
+		t.Fatalf("readLoginURLActionFromTTY() error = %v", err)
+	}
+	if action != loginURLContinue {
+		t.Errorf("action = %v, want loginURLContinue", action)
+	}
+	if _, err := notTTY.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("terminal was not closed after raw-mode failure: %v", err)
+	}
+}
+
 func openLoginPromptPTY(t *testing.T) (ptmx, tty, observer *os.File, before *term.State) {
 	t.Helper()
 

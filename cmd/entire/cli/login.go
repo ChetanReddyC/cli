@@ -507,6 +507,8 @@ func promptLoginURL(ctx context.Context, outW, errW io.Writer, loginURL string, 
 				continue
 			}
 			return nil
+		default:
+			return fmt.Errorf("unexpected login URL action: %d", action)
 		}
 	}
 }
@@ -534,15 +536,17 @@ func readLoginURLAction(ctx context.Context) (loginURLAction, error) {
 	return readLoginURLActionFromTTY(ctx, tty)
 }
 
-// readLoginURLActionFromTTY takes ownership of tty, temporarily switches it to
-// raw mode so c/o act immediately, and restores the original state before
-// closing it on every success, error, and cancellation path.
+// readLoginURLActionFromTTY takes ownership of tty. It temporarily switches a
+// supported terminal to raw mode so c/o act immediately and restores the
+// original state before closing it on every success, error, and cancellation
+// path. If raw mode is unavailable, it closes the terminal and continues
+// without side effects, matching the missing-TTY fallback above.
 func readLoginURLActionFromTTY(ctx context.Context, tty *os.File) (loginURLAction, error) {
 	fd := int(tty.Fd()) //nolint:gosec // G115: uintptr->int is safe for a file descriptor
 	state, err := term.MakeRaw(fd)
 	if err != nil {
 		_ = tty.Close()
-		return loginURLContinue, fmt.Errorf("enable single-key input: %w", err)
+		return loginURLContinue, nil //nolint:nilerr // raw input unavailable; continue without opening or copying
 	}
 
 	resultCh := make(chan loginURLActionResult, 1)
