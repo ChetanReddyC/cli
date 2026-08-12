@@ -111,8 +111,18 @@ entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
 jurisdiction's cell instead of the caller's home cell and implies `--to cell`
 (cell routing + identity-token exchange live in `auth.NewEntireAPICellClient`
 via `auth.CellTarget`). `{owner}`/`{repo}`/`{repo_id}` in the path are filled
-from the current repo's origin remote. It is visible in `entire help` and
-`entire agent-help`, so agents discover it as the supported way to call the API.
+from the current repo's origin remote.
+
+`api` is an **escape hatch, not a front-line command**, and its help says so.
+It is the right tool in exactly two cases: developing against Entire's own APIs
+and wanting a raw response, or needing something no first-class command covers.
+Otherwise the purpose-built command wins — raw endpoints are internal and can
+change shape without notice, so parsing them is brittle. It is therefore
+deliberately **not** in `agent-help`'s curated listing (`listed: false`), but
+stays visible in `entire help` and named in agent-help's footer index so an
+agent that genuinely needs raw access finds it instead of hand-rolling curl
+with a token — which is the failure this command exists to prevent. Keep both
+halves of that balance in mind when changing its visibility.
 
 `agent-help` renders machine-readable, agent-facing usage live from the Cobra
 command tree (so it always matches the installed binary): bare prints a

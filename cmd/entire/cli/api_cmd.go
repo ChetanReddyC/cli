@@ -47,10 +47,22 @@ func newAPICmd() *cobra.Command {
 	f := &apiFlags{}
 	cmd := &cobra.Command{
 		Use:   "api <path>",
-		Short: "Make an authenticated request to an Entire API and print the response",
+		Short: "Escape hatch: authenticated raw request to an Entire API",
 		Long: "Make an authenticated HTTP request to an Entire API and print the JSON response.\n\n" +
-			"The CLI attaches the right bearer token and dials the right host for the\n" +
-			"chosen backend, so you don't have to plumb auth yourself:\n\n" +
+			"THIS IS A LAST RESORT. It is the right tool in two cases:\n" +
+			"  - you are developing against Entire's own APIs and want to inspect a\n" +
+			"    raw response, or\n" +
+			"  - no first-class command covers what you need.\n\n" +
+			"Otherwise prefer the command built for the job — `entire checkpoint`,\n" +
+			"`entire session`, `entire trail`, `entire status`, `entire repo`, and so on.\n" +
+			"They return stable, documented output; raw endpoints are internal and can\n" +
+			"change shape without notice, so parsing them is brittle. If you find\n" +
+			"yourself reaching for `entire api` during ordinary work in a repo that has\n" +
+			"Entire enabled, check `entire agent-help` first — there is probably a\n" +
+			"command for it.\n\n" +
+			"When you do need it, use this rather than hand-rolling curl: the CLI\n" +
+			"attaches the right bearer token and dials the right host for the chosen\n" +
+			"backend, so you don't have to plumb auth yourself:\n\n" +
 			"  --to core   the control plane (default): orgs, repos, mirrors, clusters, /me\n" +
 			"  --to cell   your home entire-api cell: /me/* activity, repo aggregates\n\n" +
 			"Use --jurisdiction <slug> (e.g. us, eu) to reach a specific jurisdiction's\n" +

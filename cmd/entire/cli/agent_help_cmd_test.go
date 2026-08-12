@@ -619,7 +619,7 @@ func TestRenderAgentHelpTop_ListsCuratedSubsetWithInlineAudience(t *testing.T) {
 
 	// Listed commands appear with their audience.
 	for _, want := range []string{
-		"status", "trail", "checkpoint", "session", "why", "search", "api",
+		"status", "trail", "checkpoint", "session", "why", "search",
 		"read-only except: policy",                      // checkpoint, one line
 		"read-only except: adopt, attach, resume, stop", // session, one line
 		"read-only: approvals, list, show, watch",       // trail: minority side named
@@ -630,7 +630,7 @@ func TestRenderAgentHelpTop_ListsCuratedSubsetWithInlineAudience(t *testing.T) {
 	}
 
 	// Unlisted commands are named in the footer index, not given entries.
-	for _, name := range []string{"enable", "review", "investigate", "org"} {
+	for _, name := range []string{"enable", "review", "investigate", "org", "api"} {
 		if !strings.Contains(out, name) {
 			t.Errorf("unlisted command %q should still be named in the footer:\n%s", name, out)
 		}
@@ -638,8 +638,22 @@ func TestRenderAgentHelpTop_ListsCuratedSubsetWithInlineAudience(t *testing.T) {
 			t.Errorf("unlisted command %q should not get a full listing entry:\n%s", name, out)
 		}
 	}
-	if !strings.Contains(out, "don't run them uninvited") {
-		t.Errorf("footer must carry the do-not-run rule:\n%s", out)
+	// The footer is split by audience on purpose: one bucket would have to
+	// caption itself with the most restrictive rule, telling an agent not to run
+	// `activity` or `blame` uninvited when the table says they are safe.
+	if !strings.Contains(out, "the user's — suggest, don't run:") {
+		t.Errorf("footer must carry the do-not-run rule for user-owned commands:\n%s", out)
+	}
+	readOnlyIdx := strings.Index(out, "read-only, safe to run:")
+	userOwnedIdx := strings.Index(out, "the user's — suggest, don't run:")
+	if readOnlyIdx < 0 || userOwnedIdx < 0 {
+		t.Fatalf("footer is missing an audience bucket:\n%s", out)
+	}
+	for _, safe := range []string{"activity", "blame", "experts"} {
+		idx := strings.Index(out, safe)
+		if idx < readOnlyIdx || idx > userOwnedIdx {
+			t.Errorf("read-only command %q must not sit under the do-not-run caption:\n%s", safe, out)
+		}
 	}
 
 	// Length is the whole point of the curation: guard it directly.
@@ -749,6 +763,40 @@ func TestWrapIndented_WrapsAndIndents(t *testing.T) {
 	for _, name := range []string{"alpha", "beta", "gamma", "delta"} {
 		if !strings.Contains(out, name) {
 			t.Errorf("wrapping dropped %q:\n%s", name, out)
+		}
+	}
+}
+
+// `entire api` is an escape hatch, not a front-line command: it is the right
+// tool when developing against Entire's own APIs or when no first-class command
+// covers the need, and the wrong tool during ordinary work in a repo that has
+// Entire enabled. It stays discoverable (footer index, `entire help`) so an
+// agent that genuinely needs raw access finds it instead of hand-rolling curl
+// with a token, which is the failure the command exists to prevent.
+func TestAgentHelpAPI_IsUnlistedAndFramedAsLastResort(t *testing.T) {
+	t.Parallel()
+
+	if agentHelpFactsFor("api").listed {
+		t.Error("api must not be in the curated listing; it is an escape hatch")
+	}
+
+	root := NewRootCmd()
+	child := agentHelpFindChild(root, "api")
+	if child == nil {
+		t.Fatal("api command not found")
+	}
+	if !isAgentHelpAdvertised(child, true) {
+		t.Error("api must stay advertised so agents can drill into it")
+	}
+
+	out := renderAgentHelpCommand(child, agentHelpTestRepo, true)
+	for _, want := range []string{
+		"LAST RESORT",
+		"no first-class command covers",
+		"rather than hand-rolling curl",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("api help missing %q:\n%s", want, out)
 		}
 	}
 }

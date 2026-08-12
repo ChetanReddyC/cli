@@ -99,7 +99,6 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"status": {agentHelpAudienceReadOnly, true},
 	"why":    {agentHelpAudienceReadOnly, true},
 	"search": {agentHelpAudienceReadOnly, true},
-	"api":    {agentHelpAudienceTaskDriven, true},
 
 	"checkpoint":         {agentHelpAudienceTaskDriven, true},
 	"checkpoint explain": {agentHelpAudienceReadOnly, false},
@@ -147,6 +146,14 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	// rather than assumed, so a future mutating child cannot inherit the claim.
 	"tokens profile": {agentHelpAudienceReadOnly, false},
 
+	// api is deliberately UNLISTED. It is an escape hatch: the right tool when
+	// you are developing against Entire's own APIs, or when no first-class
+	// command covers what you need — not during ordinary work in a repo that has
+	// Entire enabled, which is what the listing is for. It stays named in the
+	// footer index and visible in `entire help`, so an agent that genuinely needs
+	// raw access still finds it rather than hand-rolling curl with a token, which
+	// is the failure this command exists to prevent.
+	"api":      {agentHelpAudienceTaskDriven, false},
 	"dispatch": {agentHelpAudienceTaskDriven, false},
 	"doctor":   {agentHelpAudienceTaskDriven, false},
 	"import":   {agentHelpAudienceTaskDriven, false},
@@ -595,11 +602,12 @@ func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled b
 	b.WriteString(agentHelpRepoBlock(repoLine))
 
 	var listed []*cobra.Command
-	var rest []string
+	rest := map[agentHelpAudience][]string{}
 	width := 10
 	for _, sub := range agentHelpCommands(rootCmd, trailsEnabled) {
-		if !agentHelpFactsFor(agentHelpPath(sub)).listed {
-			rest = append(rest, sub.Name())
+		facts := agentHelpFactsFor(agentHelpPath(sub))
+		if !facts.listed {
+			rest[facts.audience] = append(rest[facts.audience], sub.Name())
 			continue
 		}
 		listed = append(listed, sub)
@@ -616,13 +624,29 @@ func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled b
 			fmt.Fprintf(&b, "  %-*s    %s\n", width, "", agentHelpAudienceNote(sub, facts, trailsEnabled))
 		}
 	}
+	// Names only, no Short help: enough for an agent to connect a user's request
+	// ("run a review") to a command, at a fraction of the lines full entries
+	// cost. Still split by audience — a single bucket would have to caption
+	// itself with the most restrictive rule, which would tell an agent not to run
+	// `activity` or `blame` uninvited when the table says they are safe.
+	footer := []struct {
+		audience agentHelpAudience
+		label    string
+	}{
+		{agentHelpAudienceReadOnly, "read-only, safe to run:"},
+		{agentHelpAudienceTaskDriven, "when the task needs them:"},
+		{agentHelpAudienceUserOwned, "the user's — suggest, don't run:"},
+	}
 	if len(rest) > 0 {
-		// Names only, no Short help: enough for an agent to connect a user's
-		// request ("run a review") to a command, at a fraction of the lines full
-		// entries cost.
-		b.WriteString("\nAlso available — setup, admin, and commands to run only when asked:\n")
-		b.WriteString(wrapIndented(strings.Join(rest, " · "), "  ", 76))
-		b.WriteString("  Suggest these; don't run them uninvited.\n")
+		b.WriteString("\nAlso available (entire agent-help <command> for any of these):\n")
+		for _, section := range footer {
+			names := rest[section.audience]
+			if len(names) == 0 {
+				continue
+			}
+			fmt.Fprintf(&b, "  %s\n", section.label)
+			b.WriteString(wrapIndented(strings.Join(names, " · "), "    ", 76))
+		}
 	}
 	// Use an example command that is actually advertised here (trail is gated on
 	// trails being enabled), so we never point at a command the agent can't use.
