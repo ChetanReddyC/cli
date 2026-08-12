@@ -125,14 +125,17 @@ scoops:
   # manifest existed, goreleaser defaulted the name to the project name, so
   # existing Windows installs are registered as app "cli" and `scoop update`
   # resolves their updates from cli.json — dropping it orphans those installs
-  # silently (no error, no more updates). Keep publishing it, depending on the
-  # canonical "entire" package so one `scoop update` migrates users without a
-  # forced reinstall, and nudge cleanup via post_install. Drop this entry a few
-  # releases after migration has largely completed.
+  # silently (no error, no more updates). Keep publishing it so `scoop update
+  # cli` still delivers the latest binary. That binary carries the in-CLI
+  # migration: when it detects it is running from the `cli` app dir it points
+  # the user at the Scoop commands to move onto the renamed `entire` package
+  # (see cmd/entire/cli/versioncheck). The post_install prints the same nudge.
   #
-  # Note: both apps ship the same entire.exe shim; scoop lets the most recently
-  # installed app own it, and `scoop uninstall cli` can take the shared shim
-  # with it — hence the `scoop reset entire` step in the message below.
+  # No `depends: [entire]`: pulling in the `entire` package automatically would
+  # fight the CLI-driven migration and the shared-shim ownership between the two
+  # apps. The renamed `entire` package is installed only when the user runs the
+  # migration commands. Drop this entry a few releases after migration has
+  # largely completed.
   - name: cli
     repository:
       owner: entireio
@@ -141,11 +144,9 @@ scoops:
     homepage: "https://github.com/entireio/cli"
     description: "CLI for Entire (renamed to 'entire' — install that instead)"
     license: MIT
-    depends:
-      - entire
     post_install:
-      - "Write-Host \"This package was renamed to 'entire'. Finish migrating with:\" -ForegroundColor Yellow"
-      - "Write-Host '  scoop uninstall cli; scoop reset entire' -ForegroundColor Yellow"
+      - "Write-Host \"This package was renamed to 'entire'. Migrate with (run when entire is not running):\" -ForegroundColor Yellow"
+      - "Write-Host '  scoop install entire/entire; scoop uninstall entire/cli; scoop reset entire' -ForegroundColor Yellow"
     skip_upload: auto
 
 homebrew_casks:
