@@ -19,6 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testCheckpointRefZN = "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN"
+
 // gitCheckout uses git CLI instead of go-git to work around go-git v5 bug
 // where Checkout deletes untracked files (see https://github.com/go-git/go-git/issues/970).
 func gitCheckout(t *testing.T, dir, ref string) {
@@ -647,7 +649,7 @@ func TestParseCheckpointRefNames(t *testing.T) {
 	output := []byte(strings.Join([]string{
 		sha + "\tHEAD",
 		sha + "\trefs/heads/main",
-		sha + "\trefs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN",
+		sha + "\t" + testCheckpointRefZN,
 		sha + "\trefs/entire/checkpoints/f6/a1b2c3d4e5f6",
 		sha + "\trefs/tags/v1.0.0",
 		sha + "\trefs/tags/v1.0.0^{}",
@@ -660,7 +662,7 @@ func TestParseCheckpointRefNames(t *testing.T) {
 		got[i] = n.String()
 	}
 	assert.ElementsMatch(t, []string{
-		"refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN",
+		testCheckpointRefZN,
 		"refs/entire/checkpoints/f6/a1b2c3d4e5f6",
 	}, got)
 }
@@ -681,7 +683,7 @@ func TestParseCheckpointRefNames_RealLsRemote(t *testing.T) {
 	testutil.GitAdd(t, workDir, "f.txt")
 	testutil.GitCommit(t, workDir, "init")
 	head := gitOutput(t, workDir, "rev-parse", "HEAD")
-	gitRun(t, workDir, "update-ref", "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN", head)
+	gitRun(t, workDir, "update-ref", testCheckpointRefZN, head)
 	gitRun(t, workDir, "update-ref", "refs/entire/checkpoints/f6/a1b2c3d4e5f6", head)
 	gitRun(t, workDir, "remote", "add", "origin", bareDir)
 	gitRun(t, workDir, "push", "-q", "origin", "refs/entire/checkpoints/*:refs/entire/checkpoints/*")
@@ -695,7 +697,7 @@ func TestParseCheckpointRefNames_RealLsRemote(t *testing.T) {
 		got[i] = n.String()
 	}
 	assert.ElementsMatch(t, []string{
-		"refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN",
+		testCheckpointRefZN,
 		"refs/entire/checkpoints/f6/a1b2c3d4e5f6",
 	}, got)
 }
@@ -715,6 +717,19 @@ func TestListCheckpointRefsOnRemote_NotConfigured(t *testing.T) {
 	names, err := ListCheckpointRefsOnRemote(context.Background())
 	require.NoError(t, err)
 	assert.Nil(t, names, "a remoteless repo must leave List local-only (no remote enumeration)")
+
+	bareDir := t.TempDir()
+	gitRun(t, bareDir, "init", "--bare", "-q", bareDir)
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	ref := testCheckpointRefZN
+	gitRun(t, dir, "remote", "add", "origin", bareDir)
+	gitRun(t, dir, "push", "-q", "origin", head+":"+ref)
+	testutil.WriteFile(t, dir, ".entire/settings.json",
+		`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github"}}}`)
+
+	names, err = ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, names, "a malformed checkpoint_remote must not activate candidate discovery")
 }
 
 // TestListCheckpointRefsOnRemote_MergesReadCandidateListings: without a
@@ -740,7 +755,7 @@ func TestListCheckpointRefsOnRemote_MergesReadCandidateListings(t *testing.T) {
 	gitRun(t, dir, "remote", "add", "upstream", upstreamBare)
 	testutil.WriteCheckpointPushRemoteSetting(t, dir, "upstream")
 
-	upstreamRef := "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN"
+	upstreamRef := testCheckpointRefZN
 	originRef := "refs/entire/checkpoints/f6/a1b2c3d4e5f6"
 	sharedRef := "refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9"
 	gitRun(t, dir, "push", "-q", "upstream", head+":"+upstreamRef, head+":"+sharedRef)
@@ -809,7 +824,7 @@ func TestListCheckpointRefsOnRemote_ResolvesFromSubdir(t *testing.T) {
 	testutil.GitAdd(t, dir, "f.txt")
 	testutil.GitCommit(t, dir, "init")
 	head := gitOutput(t, dir, "rev-parse", "HEAD")
-	ref := "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN"
+	ref := testCheckpointRefZN
 	gitRun(t, dir, "update-ref", ref, head)
 	gitRun(t, dir, "remote", "add", "origin", bareDir)
 	gitRun(t, dir, "push", "-q", "origin", ref+":"+ref)

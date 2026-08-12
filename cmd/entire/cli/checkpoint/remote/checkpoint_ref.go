@@ -3,6 +3,7 @@ package remote
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -118,12 +119,14 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 }
 
 // FetchCheckpointRefFrom fetches a checkpoint ref from an ordered read chain.
-// Candidates advance on both absence and transport failure; if all fail, the
-// first candidate's error is returned. A configured checkpoint_remote keeps
-// the existing single-target behavior.
+// Candidates advance only after positive absence. A transport failure stops
+// the chain because hydrating a legacy ref into the canonical local ref while
+// the elected remote is unavailable could make stale data shadow the elected
+// copy. A configured checkpoint_remote keeps the existing single-target
+// behavior.
 func FetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, readRemotes []string) error {
 	s, loadErr := settings.Load(ctx)
-	if loadErr != nil || s.GetCheckpointRemote() != nil {
+	if loadErr != nil || s.HasCheckpointRemoteKey() {
 		return FetchCheckpointRef(ctx, ref)
 	}
 
@@ -149,6 +152,9 @@ func FetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, rea
 		}
 		if firstErr == nil {
 			firstErr = err
+		}
+		if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+			return err
 		}
 		if i+1 < len(readRemotes) {
 			logging.Debug(ctx, "checkpoint ref fetch: read candidate failed; trying next candidate",

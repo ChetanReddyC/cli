@@ -95,6 +95,37 @@ func TestFetchCheckpointRef_UnreachableRemoteIsFailure(t *testing.T) {
 		"a transport failure must stay distinguishable from absence")
 }
 
+func TestFetchCheckpointRefFrom_FailureSemantics(t *testing.T) {
+	t.Run("later transport failure prevents false absence", func(t *testing.T) {
+		workDir, ref := checkpointRefFixture(t, false)
+
+		bareUpstream := t.TempDir()
+		out, err := exec.CommandContext(t.Context(), "git", "init", "--bare", bareUpstream).CombinedOutput()
+		require.NoError(t, err, "git init --bare: %s", out)
+		out, err = exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "add", "upstream", bareUpstream).CombinedOutput()
+		require.NoError(t, err, "git remote add upstream: %s", out)
+		out, err = exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "set-url", "origin", workDir+"/nonexistent-remote").CombinedOutput()
+		require.NoError(t, err, "git remote set-url origin: %s", out)
+
+		err = FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"})
+		require.Error(t, err)
+		require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+			"absence is not proven when any read candidate fails")
+	})
+
+	t.Run("elected transport failure cannot seed from legacy origin", func(t *testing.T) {
+		workDir, ref := checkpointRefFixture(t, true)
+		out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "add", "upstream", workDir+"/nonexistent-remote").CombinedOutput()
+		require.NoError(t, err, "git remote add upstream: %s", out)
+
+		err = FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"})
+		require.Error(t, err)
+		require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+		out, err = exec.CommandContext(t.Context(), "git", "-C", workDir, "show-ref", "--verify", ref.String()).CombinedOutput()
+		require.Error(t, err, "legacy origin must not seed the canonical ref after an elected transport failure: %s", out)
+	})
+}
+
 // TestFetchCheckpointRef_NoRemoteAtAllIsAbsence: a fully local repository —
 // no origin remote and no checkpoint_remote configured — has no remote that
 // could host checkpoint refs, so the ref's local absence is the final
