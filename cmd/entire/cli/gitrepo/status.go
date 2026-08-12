@@ -38,20 +38,22 @@ func Status(_ context.Context, repo *git.Repository) (git.Status, error) {
 	return status, nil
 }
 
-// statusWalkBudget bounds the wall-clock time of one worktree status walk on
-// the agent-hook capture paths (StatusWithBudget). Agents time out their hooks
-// at roughly 60s (Claude Code's default), but a timed-out hook PROCESS is not
-// killed — an unbounded walk over a pathological worktree (e.g. a stray
-// `git init` in $HOME with no .gitignore) has been observed grinding for hours
-// at gigabytes of RSS after the agent gave up. 20s is chosen as far beyond any
-// healthy repository (a warm walk over a large working set finishes in
-// seconds) while leaving the remaining ~40s of the agent's timeout for the
-// rest of the capture path — transcript copy, tree building, state writes —
-// so the hook still degrades gracefully and exits instead of being orphaned.
-const statusWalkBudget = 20 * time.Second
+// StatusWalkBudget bounds the wall-clock time of one worktree status read on
+// the agent-hook capture paths — the go-git walk in StatusWithBudget and the
+// first-checkpoint `git status` subprocess in the checkpoint store. Agents
+// time out their hooks at roughly 60s (Claude Code's default), but a
+// timed-out hook PROCESS is not killed — an unbounded walk over a
+// pathological worktree (e.g. a stray `git init` in $HOME with no .gitignore)
+// has been observed grinding for hours at gigabytes of RSS after the agent
+// gave up. 20s is chosen as far beyond any healthy repository (a warm walk
+// over a large working set finishes in seconds) while leaving the remaining
+// ~40s of the agent's timeout for the rest of the capture path — transcript
+// copy, tree building, state writes — so the hook still degrades gracefully
+// and exits instead of being orphaned.
+const StatusWalkBudget = 20 * time.Second
 
 // ErrStatusBudgetExceeded reports that a worktree status walk was abandoned
-// because it exceeded statusWalkBudget. Capture is fail-open: hook-path
+// because it exceeded StatusWalkBudget. Capture is fail-open: hook-path
 // callers must treat this like any other status failure — warn and continue
 // with transcript-derived data — never fail the hook.
 var ErrStatusBudgetExceeded = errors.New("worktree status walk exceeded time budget")
@@ -70,7 +72,7 @@ func SetStatusBudgetBreachedForTesting(breached bool) {
 	statusBudgetBreached.Store(breached)
 }
 
-// StatusWithBudget is Status bounded by statusWalkBudget, for agent-hook
+// StatusWithBudget is Status bounded by StatusWalkBudget, for agent-hook
 // capture paths. go-git's Worktree.Status is not context-cancellable, so on
 // breach the walk goroutine is abandoned — it dies with the short-lived hook
 // process, which is the point — and the returned error wraps
@@ -82,7 +84,7 @@ func StatusWithBudget(ctx context.Context, repo *git.Repository) (git.Status, er
 	if err != nil {
 		return nil, err //nolint:wrapcheck // callers add their own context
 	}
-	return statusWithBudget(ctx, worktree.Filesystem().Root(), statusWalkBudget, func() (git.Status, error) {
+	return statusWithBudget(ctx, worktree.Filesystem().Root(), StatusWalkBudget, func() (git.Status, error) {
 		return Status(ctx, repo)
 	})
 }

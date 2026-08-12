@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
@@ -984,6 +985,19 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 
 	if err := strat.SaveStep(ctx, stepCtx); err != nil {
+		if errors.Is(err, gitrepo.ErrStatusBudgetExceeded) {
+			// The first-checkpoint status read inside the save breached its
+			// budget. Hooks must never fail on status cost — skip this turn's
+			// checkpoint, run the normal turn-end bookkeeping, and exit 0.
+			logging.Warn(logCtx, "checkpoint skipped: status budget exceeded during save; capture degraded this turn",
+				slog.String("error", err.Error()))
+			transitionSessionTurnEnd(ctx, sessionID, event)
+			if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
+				logging.Warn(logCtx, "failed to cleanup pre-prompt state",
+					slog.String("error", cleanupErr.Error()))
+			}
+			return nil
+		}
 		return fmt.Errorf("failed to save step: %w", err)
 	}
 
@@ -1249,6 +1263,14 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	}
 
 	if err := strat.SaveTaskStep(ctx, taskStepCtx); err != nil {
+		if errors.Is(err, gitrepo.ErrStatusBudgetExceeded) {
+			// Same posture as turn-end: a status budget breach inside the save
+			// skips this task's checkpoint instead of failing the hook.
+			logging.Warn(logCtx, "task checkpoint skipped: status budget exceeded during save",
+				slog.String("error", err.Error()))
+			_ = CleanupPreTaskState(ctx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+			return nil
+		}
 		return fmt.Errorf("failed to save task step: %w", err)
 	}
 

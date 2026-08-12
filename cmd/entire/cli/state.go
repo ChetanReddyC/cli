@@ -274,14 +274,31 @@ func shouldIgnoreSessionTrackingPath(relPath string) bool {
 // Modified includes both worktree and staging modified/added files.
 // Deleted includes both staged and unstaged deletions.
 // All results exclude .entire/ directory.
+//
+// The status walk is budget-bounded (gitrepo.StatusWithBudget) because every
+// caller but one is an agent-hook capture path. User-attended commands use
+// detectFileChangesUnbounded instead.
 func DetectFileChanges(ctx context.Context, previouslyUntracked []string) (*FileChanges, error) {
+	return detectFileChanges(ctx, previouslyUntracked, gitrepo.StatusWithBudget)
+}
+
+// detectFileChangesUnbounded is DetectFileChanges without the status-walk
+// budget, for user-attended commands (`entire session adopt`) where a
+// slow-but-healthy repo (NFS, cold cache) should finish rather than error at
+// the budget — the user is watching and can Ctrl-C, so there is no orphaned
+// process to prevent. Hook paths must never use this.
+func detectFileChangesUnbounded(ctx context.Context) (*FileChanges, error) {
+	return detectFileChanges(ctx, nil, gitrepo.Status)
+}
+
+func detectFileChanges(ctx context.Context, previouslyUntracked []string, statusFn func(context.Context, *git.Repository) (git.Status, error)) (*FileChanges, error) {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
 	defer repo.Close()
 
-	status, err := gitrepo.StatusWithBudget(ctx, repo)
+	status, err := statusFn(ctx, repo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get status: %w", err)
 	}
@@ -437,10 +454,15 @@ func resolveTmpDir(ctx context.Context) string {
 }
 
 // untrackedFilesOrSkip runs the pre-prompt/pre-task untracked scan, degrading
-// instead of failing: on any error (including a status-walk budget breach) it
-// warns and reports the scan as skipped so the paired end-hook disables
-// new-file detection for the turn. Hook paths must never fail on status
-// errors — capture is fail-open.
+// instead of failing. Deliberately wider than the status-budget feature that
+// introduced it: EVERY scan error fails open — budget breach, repo-open
+// failure, corrupted .git, anything — because these captures run inside
+// TurnStart/SubagentStart hooks, and any error propagated from here used to
+// fail the hook and break the agent's turn. That fail-hook behavior was the
+// bug, not a safety property: the scan only feeds new-file detection, so the
+// correct degrade is to warn, mark the scan skipped (the paired end-hook then
+// disables new-file detection for the turn), and let capture proceed with
+// transcript-derived data.
 func untrackedFilesOrSkip(ctx context.Context) (untrackedFiles []string, scanSkipped bool) {
 	untrackedFiles, err := getUntrackedFilesForState(ctx)
 	if err != nil {
