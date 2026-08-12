@@ -74,15 +74,14 @@ scoop install entire/entire
 #### Migrating an old `cli` Scoop install (package rename)
 
 The Scoop package was renamed from `cli` to `entire`. If your install is still
-registered as the old `cli` package, install the new one first, then remove the
-old one (`scoop reset` re-links the shared `entire.exe` shim). Run these in a
-shell where `entire` is **not** running — a live `entire.exe` locks its own
-shim, so Scoop can't relink or uninstall it mid-run:
+registered as the old `cli` package, run the migration below. It installs the
+new package before removing the old one, and only continues when each command
+succeeds (`scoop reset` re-links the shared `entire.exe` shim). Run it where
+`entire` is **not** running — a live `entire.exe` locks its own shim, so Scoop
+can't relink or uninstall it mid-run:
 
 ```powershell
-scoop install entire/entire
-scoop uninstall entire/cli
-scoop reset entire
+cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"
 ```
 
 ### Go (development/manual setup)

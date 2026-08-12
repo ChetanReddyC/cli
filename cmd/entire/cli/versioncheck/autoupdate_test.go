@@ -110,9 +110,7 @@ func assertManualHint(t *testing.T, out, wantCmd string) {
 	if !strings.Contains(out, "To update, run:") {
 		t.Errorf("missing manual-update hint: %q", out)
 	}
-	// The hint prints each command line indented, so match the indented form
-	// (this also covers multi-line commands like the Scoop package rename).
-	if !strings.Contains(out, indentCommand(wantCmd)) {
+	if !strings.Contains(out, "  "+wantCmd) {
 		t.Errorf("manual hint missing installer command %q: %q", wantCmd, out)
 	}
 }
@@ -231,8 +229,8 @@ func TestMaybeAutoUpdate_WindowsNeverAutoRuns(t *testing.T) {
 	if !strings.Contains(out, "when entire is not running") {
 		t.Errorf("missing Windows manual-run hint: %q", out)
 	}
-	wantScoopCmd := "scoop install entire/entire\nscoop uninstall entire/cli\nscoop reset entire"
-	if !strings.Contains(out, indentCommand(wantScoopCmd)) {
+	wantScoopCmd := `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`
+	if !strings.Contains(out, "  "+wantScoopCmd) {
 		t.Errorf("manual hint missing migration commands %q: %q", wantScoopCmd, out)
 	}
 }

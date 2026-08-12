@@ -146,7 +146,7 @@ scoops:
     license: MIT
     post_install:
       - "Write-Host \"This package was renamed to 'entire'. Migrate with (run when entire is not running):\" -ForegroundColor Yellow"
-      - "Write-Host '  scoop install entire/entire; scoop uninstall entire/cli; scoop reset entire' -ForegroundColor Yellow"
+      - "Write-Host '  cmd.exe /D /C \"scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire\"' -ForegroundColor Yellow"
     skip_upload: auto
 
 homebrew_casks:

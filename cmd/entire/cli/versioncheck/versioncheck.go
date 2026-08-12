@@ -433,18 +433,17 @@ func updateCommand(currentVersion string) string {
 		// `entire` package, remove the old `cli` package, then reset the shared
 		// `entire.exe` shim (which uninstalling `cli` can take with it).
 		//
-		// These are three separate one-command lines, NOT a shell one-liner.
-		// The string is both auto-run and printed for the user to paste into an
-		// unknown shell (cmd, PowerShell, git-bash, WSL), so it must carry no
-		// `;`/`&&`/conditional. realRunInstaller runs each line as its own
-		// process and stops on the first failure, so the uninstall only runs
-		// once the install has succeeded — a stale bucket or transient failure
-		// never leaves the user without a working CLI. `scoop install` also
+		// The Windows updater is print-only, so return a self-contained command
+		// users can paste into either cmd or PowerShell. Explicitly invoking
+		// cmd.exe makes `&&` portable across those shells and ensures uninstall
+		// only runs after install succeeds; reset likewise requires a successful
+		// uninstall. A stale bucket or transient failure therefore never removes
+		// the working CLI. `scoop install` also
 		// auto-refreshes the bucket when >3h stale (is_scoop_outdated), so the
 		// new manifest lands without an explicit refresh. Binaries already on
 		// the `entire` app just update in place.
 		if scoopAppName() == "cli" {
-			return "scoop install entire/entire\nscoop uninstall entire/cli\nscoop reset entire"
+			return `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`
 		}
 		return "scoop update entire/entire"
 	}

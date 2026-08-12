@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"strings"
 
 	"charm.land/huh/v2"
 
@@ -78,7 +77,7 @@ func MaybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVer
 	// entire has exited.
 	if goos == goosWindows {
 		printNotification(w, currentVersion, latestVersion)
-		fmt.Fprintf(w, "To update, run the following when entire is not running:\n%s\n", indentCommand(cmdStr))
+		fmt.Fprintf(w, "To update, run the following when entire is not running:\n  %s\n", cmdStr)
 		return autoUpdateActionSkip
 	}
 
@@ -135,14 +134,6 @@ func realChooseUpdate(ctx context.Context, currentVersion, latestVersion, cmdStr
 		return autoUpdateActionSkip, fmt.Errorf("update prompt: %w", err)
 	}
 	return action, nil
-}
-
-// indentCommand indents each line of a multi-line installer command so it reads
-// as a block under a "run:" heading. Only the Windows Scoop package-rename
-// migration is multi-line; every other installer is a single command printed
-// inline, so this is used only on the Windows print-only path.
-func indentCommand(cmdStr string) string {
-	return "  " + strings.ReplaceAll(cmdStr, "\n", "\n  ")
 }
 
 // realRunInstaller shells out to the installer command, streaming stdin/stdout/stderr
