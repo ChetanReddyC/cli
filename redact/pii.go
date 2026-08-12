@@ -182,7 +182,10 @@ func compilePIIPatterns(cfg *PIIConfig) []piiPattern {
 	for label, pattern := range cfg.CustomPatterns {
 		compiled, err := regexp.Compile(pattern)
 		if err != nil {
-			slog.Warn("skipping invalid custom PII pattern", slog.String("label", label), slog.String("error", err.Error()))
+			logWarn("skipping invalid custom PII pattern",
+				componentAttr,
+				slog.String("label", label),
+				slog.String("error", err.Error()))
 			continue
 		}
 		patterns = append(patterns, piiPattern{regex: compiled, label: strings.ToUpper(label)})

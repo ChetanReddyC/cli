@@ -11,7 +11,7 @@ import (
 // CustomRulesConfig configures inline custom_redactions and parsed rule packs.
 type CustomRulesConfig struct {
 	// Inline maps a label (used only in logs/diagnostics) to a Go RE2 regex
-	// string. Failed compilations are logged via slog.Warn and dropped.
+	// string. Failed compilations are logged (see SetWarnFunc) and dropped.
 	Inline map[string]string
 
 	// Packs are pre-parsed rule packs (see LoadPacks). Per-rule regex
@@ -42,35 +42,50 @@ var (
 // (`logging.WithComponent(ctx, "redaction")`).
 var componentAttr = slog.String("component", "redaction")
 
-// pkgLogger is the destination for this package's diagnostics (pack load
-// failures, rule compile errors, sample mismatches, OPF runtime failures).
-// nil means the process-default slog logger, which preserves the standalone
-// behavior for library consumers and tests.
-var pkgLogger atomic.Pointer[slog.Logger]
+// WarnFunc receives this package's diagnostics (pack load failures, rule
+// compile errors, sample mismatches, OPF runtime failures).
+type WarnFunc func(ctx context.Context, msg string, attrs ...any)
 
-// SetLogger routes this package's diagnostics to l. The CLI wires this to
-// its .entire/logs/ logger during redaction bootstrap; without it, warnings
-// go to the process-default slog logger (stderr), which hook contexts
-// swallow — that silence is exactly what made a customer's broken-looking
-// redaction setup undiagnosable. Pass nil to restore the default.
-func SetLogger(l *slog.Logger) {
-	pkgLogger.Store(l)
+// warnFunc holds the configured sink. nil means the process-default slog
+// logger, resolved at emit time, which preserves standalone behavior for
+// library consumers and tests.
+var warnFunc atomic.Pointer[WarnFunc]
+
+// SetWarnFunc routes this package's diagnostics through f. The CLI wires
+// this to its logging package so warnings reach .entire/logs/ instead of
+// the process-default stderr logger, which hook contexts swallow. A func
+// (not a logger snapshot) so the sink resolves the live logger on every
+// call and survives logging re-Init/Close. Pass nil to restore the default.
+func SetWarnFunc(f WarnFunc) {
+	if f == nil {
+		warnFunc.Store(nil)
+		return
+	}
+	warnFunc.Store(&f)
 }
 
 func logWarn(msg string, attrs ...any) {
-	if l := pkgLogger.Load(); l != nil {
-		l.Warn(msg, attrs...)
-		return
-	}
-	slog.Warn(msg, attrs...)
+	logWarnContext(context.Background(), msg, attrs...)
 }
 
 func logWarnContext(ctx context.Context, msg string, attrs ...any) {
-	if l := pkgLogger.Load(); l != nil {
-		l.WarnContext(ctx, msg, attrs...)
+	if f := warnFunc.Load(); f != nil {
+		(*f)(ctx, msg, attrs...)
 		return
 	}
 	slog.WarnContext(ctx, msg, attrs...)
+}
+
+// ActiveCustomRules reports how many user-defined rules (inline + pack)
+// actually compiled and are live in the detection pipeline — as opposed to
+// how many were configured, which silently diverges when a regex fails to
+// compile.
+func ActiveCustomRules() int {
+	cfg := getCustomRulesConfig()
+	if cfg == nil {
+		return 0
+	}
+	return len(cfg.rules)
 }
 
 // ConfigureCustomRules compiles user-defined redaction rules and stores the

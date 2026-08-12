@@ -156,10 +156,12 @@ func writeTestSessionStateForLogging(t *testing.T, repoDir, sessionID string) {
 // nothing at all. After the fix, a hook invocation must land two things in
 // .entire/logs/entire.log:
 //
-//  1. a component=redaction warning for a broken rule (here: an inline
-//     custom_redactions pattern that does not compile), and
-//  2. a load-time "redaction configured" summary line with rule counts,
-//     so "are my rules active?" is answerable from the log alone.
+//  1. component=redaction warnings for broken rules — an inline
+//     custom_redactions pattern and a PII custom_pattern that do not
+//     compile (the PII one was a second unrouted slog.Warn call site), and
+//  2. a load-time "redaction configured" summary line whose counts expose
+//     configured-vs-compiled drift, so "are my rules active?" is answerable
+//     from the log alone and a broken rule cannot read as an all-clear.
 func TestRedactionDiagnostics_ReachEntireLog(t *testing.T) {
 	t.Parallel()
 
@@ -171,21 +173,20 @@ func TestRedactionDiagnostics_ReachEntireLog(t *testing.T) {
 				"good-rule":   "GOODRULE_[A-Z0-9]{4}",
 				"broken-rule": "BROKEN_[unclosed",
 			},
+			"pii": map[string]any{
+				"enabled": true,
+				"custom_patterns": map[string]any{
+					"bad-pii": "PII_[unclosed",
+				},
+			},
 		},
 	})
-	redactorsDir := filepath.Join(env.RepoDir, ".entire", "redactors")
-	if err := os.MkdirAll(redactorsDir, 0o755); err != nil {
-		t.Fatalf("mkdir redactors: %v", err)
-	}
-	packYAML := `name: acme
+	env.WriteFile(filepath.Join(".entire", "redactors", "acme.yaml"), `name: acme
 version: 1.0.0
 rules:
   - id: acme-token
     regex: 'ACME_[A-Z0-9]{6}'
-`
-	if err := os.WriteFile(filepath.Join(redactorsDir, "acme.yaml"), []byte(packYAML), 0o644); err != nil {
-		t.Fatalf("write pack: %v", err)
-	}
+`)
 
 	// Any hook invocation initializes logging and configures redaction.
 	session := env.NewSession()
@@ -203,24 +204,43 @@ rules:
 	// Assert per-line so the component tag is proven on the diagnostic lines
 	// themselves — a log-wide substring check would let the summary line's
 	// component tag mask an untagged warning.
-	warnLine, summaryLine := "", ""
-	for _, line := range strings.Split(log, "\n") {
-		if strings.Contains(line, "skipping invalid custom_redactions pattern") {
-			warnLine = line
+	findLine := func(marker string) string {
+		for _, line := range strings.Split(log, "\n") {
+			if strings.Contains(line, marker) {
+				return line
+			}
 		}
-		if strings.Contains(line, "redaction configured") {
-			summaryLine = line
+		return ""
+	}
+	for _, marker := range []string{
+		"skipping invalid custom_redactions pattern",
+		"skipping invalid custom PII pattern",
+	} {
+		line := findLine(marker)
+		if line == "" {
+			t.Errorf("entire.log missing compile-failure warning %q", marker)
+		} else if !strings.Contains(line, `"component":"redaction"`) {
+			t.Errorf("warning line is not tagged component=redaction: %s", line)
 		}
 	}
-	if warnLine == "" {
-		t.Errorf("entire.log missing the compile-failure warning for the broken inline pattern")
-	} else if !strings.Contains(warnLine, `"component":"redaction"`) {
-		t.Errorf("compile-failure warning line is not tagged component=redaction: %s", warnLine)
-	}
+	summaryLine := findLine("redaction configured")
 	if summaryLine == "" {
 		t.Errorf("entire.log missing the load-time 'redaction configured' summary line")
-	} else if !strings.Contains(summaryLine, `"component":"redaction"`) {
-		t.Errorf("summary line is not tagged component=redaction: %s", summaryLine)
+	} else {
+		// The counts must reflect the fixture: 2 inline configured but only
+		// 1 compiled (+1 pack rule) — a summary claiming everything is
+		// active while a rule is broken would be a false all-clear.
+		for _, want := range []string{
+			`"component":"redaction"`,
+			`"packs":1`,
+			`"pack_rules":1`,
+			`"inline_patterns":2`,
+			`"active_rules":2`,
+		} {
+			if !strings.Contains(summaryLine, want) {
+				t.Errorf("summary line missing %s: %s", want, summaryLine)
+			}
+		}
 	}
 	if t.Failed() {
 		t.Logf("entire.log contents:\n%s", log)
