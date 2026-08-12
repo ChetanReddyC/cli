@@ -156,17 +156,20 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 // checkpoint_remote key in any form, and a successful, empty `git remote`
 // listing. Anything less surfaces an error — never a silent "absent".
 func FetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, readRemotes []string) error {
+	return fetchCheckpointRefFrom(ctx, ref, readRemotes, readFetchTimeout)
+}
+
+func fetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, readRemotes []string, fetchTimeout time.Duration) error {
 	s, loadErr := settings.Load(ctx)
 	if loadErr != nil || s.GetCheckpointRemote() != nil {
 		return FetchCheckpointRef(ctx, ref)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, readFetchTimeout)
-	defer cancel()
-
 	if len(readRemotes) == 0 {
-		if ctx.Err() == nil && !s.HasCheckpointRemoteKey() && repoHasNoRemotes(ctx) {
-			logging.Debug(ctx, "checkpoint probe: repository has no git remotes; classifying ref as absent",
+		probeCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+		defer cancel()
+		if probeCtx.Err() == nil && !s.HasCheckpointRemoteKey() && repoHasNoRemotes(probeCtx) {
+			logging.Debug(probeCtx, "checkpoint probe: repository has no git remotes; classifying ref as absent",
 				slog.String("ref", ref.String()))
 			return fmt.Errorf("checkpoint ref %s: repository has no git remotes to fetch from: %w", ref, plumbing.ErrReferenceNotFound)
 		}
@@ -175,8 +178,10 @@ func FetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, rea
 
 	var firstErr error
 	for i, remoteName := range readRemotes {
-		target, authoritative := checkpointFetchTargetFrom(ctx, remoteName)
-		err := probeAndFetchCheckpointRef(ctx, ref, target, authoritative)
+		candidateCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+		target, authoritative := checkpointFetchTargetFrom(candidateCtx, remoteName)
+		err := probeAndFetchCheckpointRef(candidateCtx, ref, target, authoritative)
+		cancel()
 		if err == nil {
 			return nil
 		}

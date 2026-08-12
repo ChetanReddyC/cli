@@ -2,9 +2,12 @@ package remote
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/require"
@@ -85,6 +88,20 @@ func TestFetchCheckpointRefFrom_FirstCandidateWins(t *testing.T) {
 	got := localRefHash(t, workDir, ref)
 	require.Equal(t, upstreamHash, got, "the first candidate must serve the fetch")
 	require.NotEqual(t, originHash, got)
+}
+
+func TestFetchCheckpointRefFrom_EachCandidateGetsItsOwnTimeout(t *testing.T) {
+	workDir, ref, _, originHash := candidatesFixture(t, false, true)
+
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+	out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "set-url", "upstream", server.URL+"/repo.git").CombinedOutput()
+	require.NoError(t, err, "%s", out)
+
+	require.NoError(t, fetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, time.Second))
+	require.Equal(t, originHash, localRefHash(t, workDir, ref))
 }
 
 // Note: simple advance-on-miss / advance-on-transport-error behavior (a
