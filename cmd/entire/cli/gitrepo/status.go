@@ -10,13 +10,11 @@ import (
 // Status is the single entry point for reading go-git worktree status; the
 // forbidigo rule in .golangci.yaml keeps callers off worktree.Status directly.
 //
-// go-git's Worktree.Status() is expensive: it walks the whole worktree twice
-// (once collecting .gitignore patterns, once diffing), and gitignore.ReadPatterns
-// does not thread a parent directory's patterns into its recursive walk, so it
-// only prunes an ignored directory when the matching pattern was declared by
-// that directory's own parent .gitignore. A rule one level too deep leaves the
-// whole subtree walked: a single call cost 5.25s in this repo before e2e's
-// artifacts rule moved into e2e/.gitignore.
+// Worktree.Status() is the most expensive git read on the hook paths — it walks
+// the worktree, so its cost scales with working-set size rather than with the
+// size of the change being inspected. Routing every read through here is what
+// makes WithStatusCache possible: two callers on the same hook path share one
+// walk instead of each paying for their own.
 
 type statusCacheKey struct{}
 
