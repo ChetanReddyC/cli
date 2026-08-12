@@ -111,83 +111,38 @@ entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
 jurisdiction's cell instead of the caller's home cell and implies `--to cell`
 (cell routing + identity-token exchange live in `auth.NewEntireAPICellClient`
 via `auth.CellTarget`). `{owner}`/`{repo}`/`{repo_id}` in the path are filled
-from the current repo's origin remote.
-
-`api` is an **escape hatch, not a front-line command**: it is right when
-developing against Entire's own APIs and wanting a raw response, or when no
-first-class command covers the need — not during ordinary work in a repo with
-Entire enabled. It is therefore deliberately **not** in `agent-help`'s curated
-listing (`listed: false`), but stays visible in `entire help` and named in
-agent-help's footer index, so an agent that genuinely needs raw access finds it
-instead of hand-rolling curl with a token — the failure this command exists to
-prevent. Keep both halves of that balance in mind when changing its visibility.
-
-**Where that steer lives matters.** "This is a last resort" is agent guidance,
-not human help: someone who typed `entire api --help` chose the command on
-purpose, and telling them to reconsider is noise. So it lives in
-`agentHelpGuidance` (keyed by command path, rendered only by `agent-help` as a
-"When to use this:" block and as a `guidance` field in `--json`), never in
-cobra's `Long`. The split rule, which applies to any command that needs it:
-
-- true for **both** audiences → `Long` (e.g. "these endpoints are internal and
-  can change shape without notice")
-- useful only to an agent choosing from a surface it doesn't know →
-  `agentHelpGuidance`
-
-`TestAgentHelpGuidance_NeverLeaksIntoCobraHelp` fails CI if guidance text is
-pasted into a command's `Short`/`Long`.
+from the current repo's origin remote. It is an escape hatch, so it is absent
+from `agent-help`'s curated listing but stays in `entire help` and agent-help's
+footer — an agent that needs raw access must find it rather than hand-roll curl
+with a token.
 
 `agent-help` renders machine-readable, agent-facing usage live from the Cobra
-command tree (so it always matches the installed binary): bare prints a
-"when to use entire / which subcommand" map; `agent-help <command>` drills into
-one command's current flags; `--json` emits structured output. It is the single
-source of truth the first-turn context injection and the `--agent-help-skill`
-skill point agents at, instead of enumerating a surface that goes stale.
+command tree (so it always matches the installed binary): bare prints a curated
+"when to use entire" map; `agent-help <command>` drills into one command's
+current flags; `--json` emits structured output. It is the single source of
+truth the first-turn context injection and the `--agent-help-skill` skill point
+agents at, instead of enumerating a surface that goes stale.
 
-The bare listing shows a **curated subset**, not the whole tree. An exhaustive
-listing answers "what exists?", which is not the question an agent mid-task has,
-and past a certain length it stops being read at all — an earlier revision that
-listed everything grouped by audience reached 45 lines. Omitted commands stay
-reachable (`agent-help <command>` resolves them, and the footer names them in a
-compact index), so curation trades default visibility, never availability.
+#### Where agent-facing text goes
 
-`agentHelpClassification` in `agent_help_cmd.go` is the one reviewable table,
-keyed by command path (`status`, `checkpoint list`). Each entry carries two
-**independent** facts — fusing them into a single axis is what forced the
-listing to spend a line per (command × audience) cell:
+| What you have | Where it goes |
+| --- | --- |
+| A new command | `agentHelpClassification` in `agent_help_cmd.go` — one entry, keyed by command path, carrying `audience` and `listed` |
+| "When to use this at all" advice for agents | `agentHelpGuidance` — **never** cobra `Short`/`Long` |
+| A fact humans need too (e.g. "this output is not stable") | cobra `Long`. Human help is a reference, not a lecture: whoever typed `--help` already chose the command |
+| A per-task command recommendation | `agent-help`, which is pulled on demand. **Never** the first-turn injection, which carries only invariants true on every turn |
 
-- `audience` — may an agent run this unprompted? read-only · task-driven
-  (writes data or spends tokens) · user-owned (setup, auth, admin, destructive,
-  or expensive enough that starting one uninvited is the user's call — `review`
-  and `investigate` spawn paid multi-agent runs and live here). Applies at every
-  depth; mirrored into `--json` as `audience`.
-- `listed` — does it appear in the bare listing? Top-level commands only.
+**Flag it; don't decide it.** Whether a command is `listed`, and whether it is
+read-only / task-driven / user-owned, are product judgment calls — they change
+what agents do unprompted in every user's repo. Take the safe default
+(unlisted, user-owned), then say in the PR what you picked and why so a human
+can move it. Never quietly promote a command into the listing or into
+read-only.
 
-Rules when editing it:
-
-- A group's audience is a claim about **all** its subcommands, so a read-only
-  group may not contain one that writes. `checkpoint` and `session` read as
-  read-only but are not (`checkpoint policy` updates policy; `session` carries
-  adopt/attach/resume/stop), so both are task-driven.
-- A mixed group states its exceptions **on one line**, naming only the minority
-  side (`read-only except: policy`, or `read-only: show, list, … — others
-  write`). That is what keeps a group at one line however many subcommands it
-  grows. Both the text drill-down and `--json` carry this, so neither mode hides
-  which subcommands write.
-- An unclassified command defaults to user-owned and unlisted.
-  `TestAgentHelpClassification_CoversEveryAdvertisedCommand` fails CI so neither
-  a new top-level command nor a new child of a *listed* group can ship
-  unclassified — an unclassified child would be silently dropped from its
-  group's exception note. `--json` omits `audience` where the table makes no
-  claim rather than emitting the default.
-
-Keep per-task command recommendations OUT of the first-turn injection and in
-`agent-help`, which is pulled on demand. A census of 963 agent transcripts found
-zero invocations of the `entire why` / `entire checkpoint search` pair the
-injection used to recommend "before large edits", against 25 calls to the
-agent-help pointer in the same corpus — the recommendation only cost first-turn
-tokens, and framed a sometimes-appropriate query as an always-do step. The
-injection carries only invariants that hold on every turn.
+CI enforces the mechanical parts, so trust these rather than re-deriving them:
+every advertised top-level command and every child of a listed group is
+classified; a read-only group contains no writing subcommand; guidance text
+never appears in a command's `Short`/`Long`.
 
 Hidden commands opt into being advertised here by setting
 `Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`). Because `agent-help`
