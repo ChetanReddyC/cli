@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -359,11 +358,6 @@ func completeRepoFlag(cmd *cobra.Command, _ []string, _ string) ([]string, cobra
 	return suggestions, cobra.ShellCompDirectiveNoFileComp
 }
 
-// codeSearchEnabled reports whether the code search feature is gated on.
-func codeSearchEnabled() bool {
-	return os.Getenv("ENTIRE_CODE_SEARCH") == "1"
-}
-
 type codeSearchOpts struct {
 	query           string
 	repoFilters     []string
@@ -421,14 +415,10 @@ func filterRepoWildcards(repos []string) []string {
 	return out
 }
 
-// buildCodeSearchOpts returns a *codeSearchOpts pre-populated with repo filters
-// when ENTIRE_CODE_SEARCH=1 is set, or nil when the feature is off. It honors
-// --repo, --all-repos, and inline repo: filters from the command line; when none
-// are specified, it falls back to the current git origin slug.
+// buildCodeSearchOpts returns a *codeSearchOpts pre-populated with repo filters.
+// It honors --repo, --all-repos, and inline repo: filters from the command line;
+// when none are specified, it falls back to the current git origin slug.
 func buildCodeSearchOpts(ctx context.Context, owner, repoName string, repos []string, allRepos, insecureHTTP bool) *codeSearchOpts {
-	if !codeSearchEnabled() {
-		return nil
-	}
 	var repoFilters []string
 	switch {
 	case allRepos:
@@ -462,10 +452,6 @@ const codeSearchCellTimeout = 30 * time.Second
 // (mirroring the BFF's /api/v1/stream endpoint): list repos from the control
 // plane, group by cell/jurisdiction, search each cell in parallel, merge.
 func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts) error {
-	if !codeSearchEnabled() {
-		return errors.New("code search is not yet available")
-	}
-
 	if opts.query == "" {
 		return errors.New("query required for code search. Usage: entire search --code <query>")
 	}

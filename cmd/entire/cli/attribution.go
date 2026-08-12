@@ -178,9 +178,9 @@ func newWhyCmd() *cobra.Command {
 		// Hidden from `entire help` while the feature is still maturing —
 		// advertised under `entire labs`, and `entire why` / `entire why
 		// --help` keep working normally. The agent-help annotation keeps
-		// `entire agent-help why` resolving in stable builds: the first-turn
-		// injection names `entire why` as a query anchor, so the help surface
-		// it points agents at must know the command exists.
+		// `entire agent-help why` resolving in stable builds: agents that
+		// learn of `why` (labs, docs, a user's prompt) verify commands
+		// against agent-help, so it must know the command exists.
 		Annotations: map[string]string{agentHelpAnnotation: agentHelpAnnotationEnabled},
 		Hidden:      true,
 		Short:       "Show why a line exists",
