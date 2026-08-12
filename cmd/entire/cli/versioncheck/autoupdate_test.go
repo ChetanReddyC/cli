@@ -225,9 +225,8 @@ func TestMaybeAutoUpdate_WindowsScoopStillAutoRuns(t *testing.T) {
 	if f.installCalls != 1 {
 		t.Fatalf("scoop install should auto-run on Windows; calls=%d", f.installCalls)
 	}
-	wantScoopCmd := "scoop install entire/entire; if ($?) { scoop uninstall entire/cli; scoop reset entire }"
-	if f.lastCommand != wantScoopCmd {
-		t.Errorf("got %q, want %q", f.lastCommand, wantScoopCmd)
+	if f.lastCommand != "scoop install entire/entire" {
+		t.Errorf("got %q, want scoop install entire/entire", f.lastCommand)
 	}
 }
 
@@ -304,7 +303,7 @@ func nonWindowsAutoInstallers() []installerCase {
 	return []installerCase{
 		{name: "brew", setup: useBrewExecutable, wantCmd: brewUpgradeCmd},
 		{name: "mise", setup: useMiseExecutable, wantCmd: "mise upgrade entire"},
-		{name: "scoop", setup: useScoopExecutable, wantCmd: "scoop install entire/entire; if ($?) { scoop uninstall entire/cli; scoop reset entire }"},
+		{name: "scoop", setup: useScoopExecutable, wantCmd: "scoop install entire/entire"},
 		{name: "unknown_curl_bash", setup: useUnknownExecutable, wantCmd: "curl -fsSL https://entire.io/install.sh | bash"},
 	}
 }

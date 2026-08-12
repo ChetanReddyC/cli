@@ -130,10 +130,7 @@ func realChooseUpdate(ctx context.Context, currentVersion, latestVersion, cmdStr
 func realRunInstaller(ctx context.Context, cmdStr string) error {
 	var c *exec.Cmd
 	if runtime.GOOS == goosWindows {
-		// PowerShell, not cmd.exe: the Scoop install manager is a PowerShell
-		// tool and the update commands use `;` as the statement separator,
-		// which cmd.exe does not recognize.
-		c = exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", cmdStr)
+		c = exec.CommandContext(ctx, "cmd", "/C", cmdStr)
 	} else {
 		c = exec.CommandContext(ctx, "sh", "-c", cmdStr)
 	}

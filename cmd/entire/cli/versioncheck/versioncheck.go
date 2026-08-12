@@ -429,18 +429,19 @@ func updateCommand(currentVersion string) string {
 	case installManagerScoop:
 		// The Scoop package was renamed from `cli` to `entire`. A binary still
 		// running from the old `cli` app dir can never cross the rename with a
-		// plain `scoop update entire/cli`, so route it through the rename.
-		// Install the new `entire` package FIRST — `scoop install`
-		// auto-refreshes the bucket when it is >3h stale (is_scoop_outdated),
-		// so the new manifest lands without an explicit refresh — and only on
-		// its success ($?) remove the old `cli` package. Sequencing install
-		// before uninstall means a stale bucket or transient failure never
-		// leaves the user without a working CLI. `scoop reset entire` re-links
-		// the shared `entire.exe` shim, which `uninstall cli` can take with it.
-		// Runs under PowerShell (see realRunInstaller). Binaries already on the
-		// `entire` app just update in place.
+		// plain `scoop update entire/cli`, so install the new `entire` package.
+		// `scoop install` auto-refreshes the bucket when it is >3h stale
+		// (is_scoop_outdated), so the new manifest lands without an explicit
+		// refresh, and the most-recent install owns the shared `entire.exe`
+		// shim — so this single command migrates the user. It is deliberately
+		// one shell-agnostic command (no `;`/`&&`/conditionals): the string is
+		// both auto-run and printed for the user to paste into any shell, and
+		// installing without removing the old package can never leave them
+		// without a working CLI. Cleanup of the leftover `cli` app is handled
+		// by the transition manifest's post_install nudge on `scoop update`.
+		// Binaries already on the `entire` app just update in place.
 		if scoopAppName() == "cli" {
-			return "scoop install entire/entire; if ($?) { scoop uninstall entire/cli; scoop reset entire }"
+			return "scoop install entire/entire"
 		}
 		return "scoop update entire/entire"
 	}

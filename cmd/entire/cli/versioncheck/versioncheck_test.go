@@ -400,7 +400,7 @@ func TestUpdateCommand(t *testing.T) {
 			name:           "scoop cli app routes through package rename regardless of version",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return scoopExecutablePath, nil },
-			want:           "scoop install entire/entire; if ($?) { scoop uninstall entire/cli; scoop reset entire }",
+			want:           "scoop install entire/entire",
 		},
 		{
 			name:           "unknown path stable falls back to stable curl command",
