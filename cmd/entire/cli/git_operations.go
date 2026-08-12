@@ -468,13 +468,12 @@ func resolveCheckpointFetchTarget(ctx context.Context) string {
 	return remote.CheckpointFetchTarget(ctx)
 }
 
-// FetchCheckpointRef fetches a single per-checkpoint ref from the checkpoint
-// remote. Thin alias for remote.FetchCheckpointRef, kept so existing cli-side
-// call sites and OpenOptions wiring stay unchanged; see that function for the
-// absence-vs-failure contract (remote-lacks-ref wraps
-// plumbing.ErrReferenceNotFound; transport failures surface as-is).
+// FetchCheckpointRef fetches a single per-checkpoint ref from the ordered
+// checkpoint read candidates. This is the CLI-side RefFetchFunc wiring point;
+// write-hook probes use remote.HookCheckpointRefFetcher directly and remain
+// confined to their selected target.
 func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
-	return remote.FetchCheckpointRef(ctx, ref) //nolint:wrapcheck // thin alias; the remote error carries full context
+	return remote.FetchCheckpointRefFrom(ctx, ref, strategy.CheckpointReadRemotes(ctx)) //nolint:wrapcheck // thin alias; the remote error carries full context
 }
 
 // checkpointRefListTimeout bounds the names-only ls-remote used by user-facing
