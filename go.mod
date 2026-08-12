@@ -16,6 +16,9 @@ require (
 	github.com/go-faster/errors v0.8.0
 	github.com/go-faster/jx v1.2.0
 	github.com/go-git/go-billy/v6 v6.0.0-alpha.2
+	// Floor, not just a bump: go-git#2309 (per-directory ignore Scope). The
+	// root-level e2e/artifacts/ rule only prunes the status walk from this
+	// commit onward. Move to a plain tag once alpha.6 ships.
 	github.com/go-git/go-git/v6 v6.0.0-alpha.5.0.20260812095450-22b9459b2be0
 	github.com/go-git/x/plugin/objectsigner/auto v0.1.1-0.20260624122410-382b2905c041
 	github.com/go-git/x/plugin/objectsigner/program v0.0.0-20260624122410-382b2905c041

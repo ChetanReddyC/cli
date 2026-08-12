@@ -558,11 +558,9 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		}
 	}
 
-	// Strategy setup runs before the first worktree-status read below.
-	// EnsureEntireGitignore can append entries to .entire/.gitignore, which is
-	// tracked, so running it first means the pre-prompt snapshot describes the
-	// tree the agent actually starts from rather than one setup is about to
-	// change underneath it.
+	// EnsureEntireGitignore can append to the tracked .entire/.gitignore, so run
+	// it before CapturePrePromptState: the snapshot should describe the tree the
+	// agent starts from, not one setup is about to change.
 	_, setupSpan := perf.Start(ctx, "ensure_setup")
 	if err := strategy.EnsureSetup(ctx); err != nil {
 		logging.Warn(logCtx, "failed to ensure strategy setup",

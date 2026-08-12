@@ -514,14 +514,13 @@ reftable and sha256 repositories. Reviewers should flag any new
 this, and `gitrepo/status.go` is the only sanctioned call site.
 
 `Worktree.Status()` walks the worktree, so its cost scales with working-set size
-rather than with the size of the change being inspected — measured at ~12ms on a
-1.5k-file tree and ~120ms on a 20k-file one. It is the most expensive git read on
-the hook paths, so read it once per hook and pass the result down rather than
-calling `gitrepo.Status` again. There is deliberately no memoization: a
-context-scoped cache previously saved one walk per TurnStart hook (~28% of that
-hook on a 20k-file repo), but it had to be kept out of any window that writes
-tracked files or stages anything, and that standing staleness hazard was not
-judged worth the latency.
+rather than with the size of the change being inspected, which makes it the most
+expensive git read on the hook paths. Avoid calling it more than once per hook.
+Do not memoize it either: a context-scoped cache was tried and removed, because
+the write-free window it required cost more to maintain than the walk saved (see
+`git log` on `gitrepo/status.go` for the measurements). The turn-start hook
+currently walks twice — `CapturePrePromptState` and the strategy's prompt
+attribution each read their own status.
 
 #### go-git v5 Bugs - Use CLI Instead
 
