@@ -3,6 +3,7 @@ package remote
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -152,13 +153,11 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 // Per-operation candidate semantics: candidates are tried in order; a
 // candidate lacking the ref and a candidate failing at the transport level
 // both advance to the next candidate (transport failures logged at debug);
-// when every candidate fails, the FIRST candidate's error is surfaced (the
-// elected remote is the primary story). Consequence for the absence-vs-failure
-// contract: the surfaced error wraps plumbing.ErrReferenceNotFound when the
-// FIRST candidate reported not-found, even if a later candidate failed at the
-// transport level with its state unknown — callers needing certainty that no
-// candidate holds the ref must not infer it from this error alone. A provably
-// remoteless repository (below) also wraps plumbing.ErrReferenceNotFound.
+// when every candidate fails, the first non-absence error is surfaced so a
+// transport failure cannot be masked by another candidate's not-found result.
+// Only positive absence from every candidate wraps
+// plumbing.ErrReferenceNotFound. A provably remoteless repository (below) also
+// wraps plumbing.ErrReferenceNotFound.
 //
 // A configured checkpoint_remote is a dedicated store with a single
 // authoritative target, so the chain does not apply and the legacy
@@ -191,6 +190,7 @@ func fetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, rea
 	}
 
 	var firstErr error
+	var firstUncertainErr error
 	for i, remoteName := range readRemotes {
 		candidateCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 		target, authoritative := checkpointFetchTargetFrom(candidateCtx, remoteName)
@@ -202,12 +202,18 @@ func fetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, rea
 		if firstErr == nil {
 			firstErr = err
 		}
+		if firstUncertainErr == nil && !errors.Is(err, plumbing.ErrReferenceNotFound) {
+			firstUncertainErr = err
+		}
 		if i+1 < len(readRemotes) {
 			logging.Debug(ctx, "checkpoint ref fetch: read candidate failed; trying next candidate",
 				slog.String("ref", ref.String()),
 				slog.String("candidate", remoteName),
 				slog.String("error", err.Error()))
 		}
+	}
+	if firstUncertainErr != nil {
+		return firstUncertainErr
 	}
 	return firstErr
 }

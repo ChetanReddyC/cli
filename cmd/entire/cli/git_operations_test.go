@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
@@ -549,9 +550,8 @@ func setupRepoWithBlobOnMetadataBranch(t *testing.T) (string, plumbing.Hash) {
 }
 
 // Not parallel: uses t.Chdir()
-// Tests basic FetchBlobsByHash mechanics: when the resolved fetch target has
-// the blob, the function brings it into the local object store.
-// Target selection is tested separately in TestResolveCheckpointFetchTarget_*.
+// Tests blob hydration from the normal target and from the legacy tier after a
+// slow elected target exhausts only its own budget.
 func TestFetchBlobsByHash_FetchesMissingBlob(t *testing.T) {
 	ctx := context.Background()
 
@@ -580,6 +580,34 @@ func TestFetchBlobsByHash_FetchesMissingBlob(t *testing.T) {
 	freshRepo, err := git.PlainOpen(localDir)
 	require.NoError(t, err)
 	require.NoError(t, freshRepo.Storer.HasEncodedObject(blobHash), "blob should exist locally after fetch")
+
+	upstreamDir := t.TempDir()
+	testutil.InitRepo(t, upstreamDir)
+	originDir := t.TempDir()
+	testutil.InitRepo(t, originDir)
+
+	fallbackDir := t.TempDir()
+	testutil.InitRepo(t, fallbackDir)
+	testutil.WriteFile(t, fallbackDir, "f.txt", "init")
+	testutil.GitAdd(t, fallbackDir, "f.txt")
+	testutil.GitCommit(t, fallbackDir, "init")
+	gitRun(t, fallbackDir, "remote", "add", "upstream", upstreamDir)
+	gitRun(t, fallbackDir, "remote", "add", "origin", originDir)
+	testutil.WriteCheckpointPushRemoteSetting(t, fallbackDir, "upstream")
+	t.Chdir(fallbackDir)
+	require.Equal(t, []string{upstreamDir, originDir}, checkpointBlobFetchTargets(ctx))
+
+	var attempted []string
+	fetch := func(candidateCtx context.Context, target string, _ []string) error {
+		attempted = append(attempted, target)
+		if target == upstreamDir {
+			<-candidateCtx.Done()
+			return candidateCtx.Err()
+		}
+		return candidateCtx.Err()
+	}
+	require.NoError(t, fetchBlobsByHash(ctx, []plumbing.Hash{blobHash}, 10*time.Millisecond, fetch))
+	require.Equal(t, []string{upstreamDir, originDir}, attempted)
 }
 
 // Not parallel: uses t.Chdir()

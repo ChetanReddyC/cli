@@ -675,12 +675,18 @@ func parseCheckpointRefNames(output []byte) []plumbing.ReferenceName {
 // If fetching by hash fails on every target, falls back to a full metadata
 // branch fetch.
 func FetchBlobsByHash(ctx context.Context, hashes []plumbing.Hash) error {
+	return fetchBlobsByHash(ctx, hashes, 2*time.Minute, remote.FetchBlobs)
+}
+
+func fetchBlobsByHash(
+	ctx context.Context,
+	hashes []plumbing.Hash,
+	fetchTimeout time.Duration,
+	fetchBlobs func(context.Context, string, []string) error,
+) error {
 	if len(hashes) == 0 {
 		return nil
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
 
 	targets := checkpointBlobFetchTargets(ctx)
 
@@ -691,7 +697,9 @@ func FetchBlobsByHash(ctx context.Context, hashes []plumbing.Hash) error {
 
 	var firstErr error
 	for i, fetchTarget := range targets {
-		fetchErr := remote.FetchBlobs(ctx, fetchTarget, hashStrs)
+		candidateCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+		fetchErr := fetchBlobs(candidateCtx, fetchTarget, hashStrs)
+		cancel()
 		if fetchErr == nil {
 			return nil
 		}

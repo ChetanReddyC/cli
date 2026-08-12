@@ -110,21 +110,29 @@ func TestFetchCheckpointRefFrom_EachCandidateGetsItsOwnTimeout(t *testing.T) {
 // (integration_test/checkpoint_read_remotes_test.go: LegacyOriginTierServed,
 // ElectedUnreachableLegacyStillServes) via explain's RefFetcher wiring.
 
-// TestFetchCheckpointRefFrom_AllFailSurfacesFirstCandidateError: when every
-// candidate fails, the FIRST candidate's error is surfaced — here a transport
-// failure on the elected remote, which must NOT be masked by the second
-// candidate's "ref not found" (that would misclassify a possibly-existing
-// checkpoint as absent).
-func TestFetchCheckpointRefFrom_AllFailSurfacesFirstCandidateError(t *testing.T) {
-	workDir, ref, _, _ := candidatesFixture(t, false, false)
-	out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "set-url", "upstream", workDir+"/nonexistent-remote").CombinedOutput()
-	require.NoError(t, err, "%s", out)
+// Any unresolved transport failure makes aggregate absence uncertain,
+// regardless of which candidate failed first.
+func TestFetchCheckpointRefFrom_AllFailSurfacesTransportError(t *testing.T) {
+	tests := []struct {
+		name         string
+		brokenRemote string
+	}{
+		{name: "first candidate transport failure", brokenRemote: "upstream"},
+		{name: "later candidate transport failure", brokenRemote: "origin"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir, ref, _, _ := candidatesFixture(t, false, false)
+			out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "set-url", tt.brokenRemote, workDir+"/nonexistent-remote").CombinedOutput()
+			require.NoError(t, err, "%s", out)
 
-	err = FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"})
-	require.Error(t, err)
-	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
-		"the first candidate's transport error must be surfaced, not the legacy tier's absence")
-	require.Contains(t, err.Error(), "probe checkpoint ref")
+			err = FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"})
+			require.Error(t, err)
+			require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+				"a transport failure must not be masked by another candidate's absence")
+			require.Contains(t, err.Error(), "probe checkpoint ref")
+		})
+	}
 }
 
 // TestFetchCheckpointRefFrom_AbsentOnEveryCandidateIsAbsence: every candidate
