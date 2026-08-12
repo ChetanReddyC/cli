@@ -429,14 +429,18 @@ func updateCommand(currentVersion string) string {
 	case installManagerScoop:
 		// The Scoop package was renamed from `cli` to `entire`. A binary still
 		// running from the old `cli` app dir can never cross the rename with a
-		// plain `scoop update entire/cli`, so route it through the rename: drop
-		// the old `cli` package and install the new `entire` package. `scoop
-		// install` auto-refreshes the bucket when it is >3h stale
-		// (is_scoop_outdated), so the new `entire` manifest lands without an
-		// explicit refresh step. Binaries already on the `entire` app just
-		// update in place.
+		// plain `scoop update entire/cli`, so route it through the rename.
+		// Install the new `entire` package FIRST — `scoop install`
+		// auto-refreshes the bucket when it is >3h stale (is_scoop_outdated),
+		// so the new manifest lands without an explicit refresh — and only on
+		// its success ($?) remove the old `cli` package. Sequencing install
+		// before uninstall means a stale bucket or transient failure never
+		// leaves the user without a working CLI. `scoop reset entire` re-links
+		// the shared `entire.exe` shim, which `uninstall cli` can take with it.
+		// Runs under PowerShell (see realRunInstaller). Binaries already on the
+		// `entire` app just update in place.
 		if scoopAppName() == "cli" {
-			return "scoop uninstall entire/cli; scoop install entire/entire"
+			return "scoop install entire/entire; if ($?) { scoop uninstall entire/cli; scoop reset entire }"
 		}
 		return "scoop update entire/entire"
 	}

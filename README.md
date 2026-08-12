@@ -71,14 +71,16 @@ scoop bucket add entire https://github.com/entireio/scoop-bucket.git
 scoop install entire/entire
 ```
 
-#### Upgrading to v0.9 (Scoop package rename)
+#### Migrating an old `cli` Scoop install (package rename)
 
-The Scoop package was renamed from `cli` to `entire` in v0.9. If you installed a
-v0.8.x build (`entire/cli`), remove the old package and install the new one:
+The Scoop package was renamed from `cli` to `entire`. If your install is still
+registered as the old `cli` package, install the new one first, then remove the
+old one (`scoop reset` re-links the shared `entire.exe` shim):
 
 ```powershell
-scoop uninstall entire/cli
 scoop install entire/entire
+scoop uninstall entire/cli
+scoop reset entire
 ```
 
 ### Go (development/manual setup)
