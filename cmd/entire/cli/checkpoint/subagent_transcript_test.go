@@ -56,3 +56,25 @@ func TestPrepareSubagentTranscript_LeavesOtherAgentsAlone(t *testing.T) {
 	require.False(t, tooLarge)
 	require.Equal(t, strings.TrimSpace(claude), strings.TrimSpace(string(got)))
 }
+
+// TestPrepareSubagentTranscript_MeasuresSanitizedSize is the guard's ordering
+// contract: a Codex rollout that is over the cap only because of encrypted_content
+// must still be stored, because that payload is stripped before anything is written.
+// Measuring the raw bytes instead would throw away a transcript that fits.
+func TestPrepareSubagentTranscript_MeasuresSanitizedSize(t *testing.T) {
+	t.Parallel()
+
+	// One reasoning line whose ciphertext alone pushes the raw file past the cap.
+	ciphertext := strings.Repeat("A", agent.MaxChunkSize+1024)
+	rollout := `{"type":"session_meta","payload":{"id":"abc"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"reasoning","encrypted_content":"` + ciphertext + `"}}` + "\n"
+	require.Greater(t, len(rollout), agent.MaxChunkSize, "fixture must be oversized before sanitizing")
+
+	got, tooLarge := prepareSubagentTranscript(context.Background(), agent.AgentTypeCodex, "/rollouts/big.jsonl", []byte(rollout))
+
+	require.False(t, tooLarge,
+		"a rollout that fits once encrypted_content is stripped must not be dropped")
+	require.LessOrEqual(t, len(got), agent.MaxChunkSize)
+	require.NotContains(t, string(got), "encrypted_content")
+	require.Contains(t, string(got), "session_meta", "the rest of the rollout must survive")
+}

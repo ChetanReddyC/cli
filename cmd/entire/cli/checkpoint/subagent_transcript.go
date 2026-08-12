@@ -23,20 +23,29 @@ import (
 //
 // The size guard exists because this blob, unlike the session transcript, is neither
 // chunked nor capped: redaction runs at roughly 220ms/MB, so an oversized rollout
-// would sit in the subagent-stop hook for seconds. Skipping is the honest outcome —
-// there is no chunked form to fall back to — so it warns rather than failing the
-// checkpoint, which still records the subagent's files and metadata.
+// would sit in the subagent-stop hook for seconds. It measures the sanitized size,
+// not the raw one — see below. Skipping is the honest outcome when even that is too
+// large (there is no chunked form to fall back to), so it warns rather than failing
+// the checkpoint, which still records the subagent's files and metadata.
 //
 // The agent type must be passed in, not detected: DetectAgentTypeFromContent only
 // recognizes Gemini, so content-based detection would silently make this a no-op for
 // Codex — the one agent that actually needs sanitizing.
 func prepareSubagentTranscript(ctx context.Context, agentType types.AgentType, path string, content []byte) (prepared []byte, tooLarge bool) {
-	if len(content) > agent.MaxChunkSize {
+	// Sanitize first, then measure. The size that matters is what would be stored,
+	// and sanitizing strips the bulk: Codex encrypted_content runs to ~20% of a
+	// rollout's bytes. Measuring the raw input would drop a rollout that is oversized
+	// only because of payloads about to be discarded. Sanitizing is cheap next to the
+	// redaction this guard protects (~8ms/MB against ~220ms/MB), so paying it before
+	// the decision costs little even when the answer is "skip".
+	sanitized := SanitizeTranscriptForAgentType(agentType, content)
+	if len(sanitized) > agent.MaxChunkSize {
 		logging.Warn(ctx, "subagent transcript exceeds the blob size cap, storing checkpoint without it",
 			slog.String("path", path),
-			slog.Int("bytes", len(content)),
+			slog.Int("raw_bytes", len(content)),
+			slog.Int("sanitized_bytes", len(sanitized)),
 			slog.Int("cap", agent.MaxChunkSize))
 		return nil, true
 	}
-	return SanitizeTranscriptForAgentType(agentType, content), false
+	return sanitized, false
 }
