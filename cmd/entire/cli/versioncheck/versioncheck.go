@@ -343,15 +343,30 @@ func releaseChannel(version string) string {
 	return installChannelStable
 }
 
-// isPreRenameScoopVersion reports whether currentVersion predates the v0.9
-// Scoop package rename. Those builds are installed as the `cli` package and
-// must be routed across the rename to `entire`; v0.9+ is already on `entire`.
-func isPreRenameScoopVersion(currentVersion string) bool {
-	v := currentVersion
-	if !strings.HasPrefix(v, "v") {
-		v = "v" + v
+// scoopAppName returns the Scoop app directory the running binary lives under
+// — the path segment after `/scoop/apps/` (e.g. "cli" or "entire") — or ""
+// when the binary is not a Scoop install. This is the durable signal for the
+// pre-rename package: a binary running from the `cli` app dir must migrate to
+// `entire` regardless of its version (the fix ships in a final `cli` release,
+// so the migrating binary's version is already past the rename).
+func scoopAppName() string {
+	execPath, err := executablePath()
+	if err != nil {
+		return ""
 	}
-	return semver.IsValid(v) && semver.Compare(v, "v0.9.0") < 0
+	realPath, err := filepath.EvalSymlinks(execPath)
+	if err != nil {
+		realPath = execPath
+	}
+	normalized := strings.ReplaceAll(filepath.ToSlash(realPath), "\\", "/")
+	_, rest, ok := strings.Cut(normalized, "/scoop/apps/")
+	if !ok {
+		return ""
+	}
+	if app, _, ok := strings.Cut(rest, "/"); ok {
+		return app
+	}
+	return rest
 }
 
 func installManagerForCurrentBinary() string {
@@ -412,14 +427,15 @@ func updateCommand(currentVersion string) string {
 	case installManagerMise:
 		return "mise upgrade entire"
 	case installManagerScoop:
-		// The Scoop package was renamed from `cli` to `entire` in v0.9.
-		// Pre-rename builds are installed as `entire/cli`, so a plain `scoop
-		// update entire/cli` can never cross the rename. Route those users
-		// through the rename: drop the old `cli` package and install the new
-		// `entire` package. `scoop install` auto-refreshes the bucket when it
-		// is >3h stale (is_scoop_outdated), so the new `entire` manifest lands
-		// without an explicit refresh step. v0.9+ is already on `entire`.
-		if isPreRenameScoopVersion(currentVersion) {
+		// The Scoop package was renamed from `cli` to `entire`. A binary still
+		// running from the old `cli` app dir can never cross the rename with a
+		// plain `scoop update entire/cli`, so route it through the rename: drop
+		// the old `cli` package and install the new `entire` package. `scoop
+		// install` auto-refreshes the bucket when it is >3h stale
+		// (is_scoop_outdated), so the new `entire` manifest lands without an
+		// explicit refresh step. Binaries already on the `entire` app just
+		// update in place.
+		if scoopAppName() == "cli" {
 			return "scoop uninstall entire/cli; scoop install entire/entire"
 		}
 		return "scoop update entire/entire"

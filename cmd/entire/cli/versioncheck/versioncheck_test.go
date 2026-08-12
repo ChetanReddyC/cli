@@ -346,7 +346,11 @@ func TestParseGitHubRelease(t *testing.T) {
 // it without tripping goconst on repeated string literals.
 const brewUpgradeCmd = "brew upgrade --yes entire"
 
+// scoopExecutablePath is the pre-rename `cli` app dir; scoopEntireExecutablePath
+// is the renamed `entire` app dir. The Scoop update command is chosen by which
+// app dir the binary runs from, not by version.
 const scoopExecutablePath = `C:\Users\test\scoop\apps\cli\current\entire.exe`
+const scoopEntireExecutablePath = `C:\Users\test\scoop\apps\entire\current\entire.exe`
 
 func TestUpdateCommand(t *testing.T) {
 	const plainBinPath = "/usr/local/bin/entire"
@@ -387,14 +391,14 @@ func TestUpdateCommand(t *testing.T) {
 			want:           "mise upgrade entire",
 		},
 		{
-			name:           "scoop path post-rename",
+			name:           "scoop entire app updates in place",
 			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return scoopExecutablePath, nil },
+			execPath:       func() (string, error) { return scoopEntireExecutablePath, nil },
 			want:           "scoop update entire/entire",
 		},
 		{
-			name:           "scoop path pre-rename routes through package rename",
-			currentVersion: "0.8.4",
+			name:           "scoop cli app routes through package rename regardless of version",
+			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return scoopExecutablePath, nil },
 			want:           "scoop uninstall entire/cli; scoop install entire/entire",
 		},
@@ -443,7 +447,7 @@ func TestUpdateCommandForCurrentBinary(t *testing.T) {
 			name:           "known installer returns command",
 			currentVersion: "1.2.3",
 			goos:           goosWindows,
-			execPath:       func() (string, error) { return scoopExecutablePath, nil },
+			execPath:       func() (string, error) { return scoopEntireExecutablePath, nil },
 			want:           "scoop update entire/entire",
 		},
 		{
