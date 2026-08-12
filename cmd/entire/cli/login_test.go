@@ -4,12 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"strings"
 	"testing"
-	"testing/iotest"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
 
@@ -500,62 +499,49 @@ func TestPromptLoginURL_UnexpectedActionFails(t *testing.T) {
 	}
 }
 
-func TestReadLoginURLActionEvents(t *testing.T) {
+func TestLoginURLActionModel(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		input   string
-		want    loginURLAction
-		wantErr error
+		name         string
+		msg          tea.Msg
+		wantSelected bool
+		wantAction   loginURLAction
+		wantErr      error
 	}{
-		{name: "enter CR", input: "\r", want: loginURLContinue},
-		{name: "enter LF", input: "\n", want: loginURLContinue},
-		{name: "lowercase copy", input: "c", want: loginURLCopy},
-		{name: "uppercase copy after invalid key", input: "xC", want: loginURLCopy},
-		{name: "lowercase open", input: "o", want: loginURLOpen},
-		{name: "uppercase open", input: "O", want: loginURLOpen},
-		{name: "control c", input: "\x03", wantErr: context.Canceled},
-		{name: "right arrow ignored", input: "\x1b[C\r", want: loginURLContinue},
-		{name: "F1 ignored", input: "\x1bOP\r", want: loginURLContinue},
-		{name: "application right arrow ignored", input: "\x1bOC\r", want: loginURLContinue},
-		{name: "alt copy key ignored", input: "\x1bc\r", want: loginURLContinue},
+		{name: "enter", msg: tea.KeyPressMsg{Code: tea.KeyEnter}, wantSelected: true, wantAction: loginURLContinue},
+		{name: "control j", msg: tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl}, wantSelected: true, wantAction: loginURLContinue},
+		{name: "lowercase copy", msg: tea.KeyPressMsg{Code: 'c', Text: "c"}, wantSelected: true, wantAction: loginURLCopy},
+		{name: "uppercase copy", msg: tea.KeyPressMsg{Code: 'C', Text: "C"}, wantSelected: true, wantAction: loginURLCopy},
+		{name: "lowercase open", msg: tea.KeyPressMsg{Code: 'o', Text: "o"}, wantSelected: true, wantAction: loginURLOpen},
+		{name: "uppercase open", msg: tea.KeyPressMsg{Code: 'O', Text: "O"}, wantSelected: true, wantAction: loginURLOpen},
+		{name: "control c", msg: tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}, wantSelected: true, wantErr: context.Canceled},
+		{name: "right arrow ignored", msg: tea.KeyPressMsg{Code: tea.KeyRight}},
+		{name: "F1 ignored", msg: tea.KeyPressMsg{Code: tea.KeyF1}},
+		{name: "alt copy ignored", msg: tea.KeyPressMsg{Code: 'c', Mod: tea.ModAlt}},
+		{name: "non-key ignored", msg: tea.WindowSizeMsg{Width: 80, Height: 24}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			input := iotest.OneByteReader(strings.NewReader(tt.input))
-			result := readLoginURLActionEvents(context.Background(), input)
+			updated, cmd := (loginURLActionModel{}).Update(tt.msg)
+			result, ok := updated.(loginURLActionModel)
+			if !ok {
+				t.Fatalf("updated model type = %T, want loginURLActionModel", updated)
+			}
+			if result.selected != tt.wantSelected {
+				t.Errorf("selected = %v, want %v", result.selected, tt.wantSelected)
+			}
+			if result.action != tt.wantAction {
+				t.Errorf("action = %v, want %v", result.action, tt.wantAction)
+			}
 			if !errors.Is(result.err, tt.wantErr) {
-				t.Fatalf("error = %v, want %v", result.err, tt.wantErr)
+				t.Errorf("error = %v, want %v", result.err, tt.wantErr)
 			}
-			if result.action != tt.want {
-				t.Errorf("action = %v, want %v", result.action, tt.want)
-			}
-		})
-	}
-}
-
-func TestReadLoginURLActionEvents_EscapeSequencesContainNoActions(t *testing.T) {
-	t.Parallel()
-
-	for _, tt := range []struct {
-		name  string
-		input string
-	}{
-		{name: "right arrow", input: "\x1b[C"},
-		{name: "F1", input: "\x1bOP"},
-		{name: "application right arrow", input: "\x1bOC"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			input := iotest.OneByteReader(strings.NewReader(tt.input))
-			result := readLoginURLActionEvents(context.Background(), input)
-			if !errors.Is(result.err, io.EOF) {
-				t.Fatalf("error = %v, want EOF without an action", result.err)
+			if gotQuit := cmd != nil; gotQuit != tt.wantSelected {
+				t.Errorf("quit command present = %v, want %v", gotQuit, tt.wantSelected)
 			}
 		})
 	}

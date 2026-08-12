@@ -12,15 +12,14 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/atotto/clipboard"
-	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/entireio/auth-go/tokens"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 const (
@@ -513,11 +512,6 @@ func promptLoginURL(ctx context.Context, outW, errW io.Writer, loginURL string, 
 	}
 }
 
-type loginURLActionResult struct {
-	action loginURLAction
-	err    error
-}
-
 // readLoginURLAction reads a single key from the controlling terminal without
 // consuming piped stdin. Missing TTYs continue without opening anything,
 // preserving the non-blocking fallback of the old Enter prompt.
@@ -536,99 +530,69 @@ func readLoginURLAction(ctx context.Context) (loginURLAction, error) {
 	return readLoginURLActionFromTTY(ctx, tty)
 }
 
-// readLoginURLActionFromTTY takes ownership of tty. It temporarily switches a
-// supported terminal to raw mode so c/o act immediately and restores the
-// original state before closing it on every success, error, and cancellation
-// path. If raw mode is unavailable, it closes the terminal and continues
-// without side effects, matching the missing-TTY fallback above.
+// readLoginURLActionFromTTY takes ownership of tty. Bubble Tea handles raw mode,
+// escape-sequence decoding, cancellation, and terminal restoration. If the
+// terminal cannot provide single-key input, continue without side effects.
 func readLoginURLActionFromTTY(ctx context.Context, tty *os.File) (loginURLAction, error) {
-	fd := int(tty.Fd()) //nolint:gosec // G115: uintptr->int is safe for a file descriptor
-	state, err := term.MakeRaw(fd)
+	defer tty.Close()
+	if !interactive.IsTerminalReader(tty) {
+		return loginURLContinue, nil
+	}
+
+	model := loginURLActionModel{}
+	finalModel, err := tea.NewProgram(
+		model,
+		tea.WithContext(ctx),
+		tea.WithInput(tty),
+		tea.WithOutput(io.Discard),
+		tea.WithoutSignalHandler(),
+	).Run()
+	if ctx.Err() != nil {
+		return loginURLContinue, fmt.Errorf("interrupted: %w", ctx.Err())
+	}
 	if err != nil {
-		_ = tty.Close()
-		return loginURLContinue, nil //nolint:nilerr // raw input unavailable; continue without opening or copying
+		return loginURLContinue, nil
 	}
 
-	resultCh := make(chan loginURLActionResult, 1)
-	go func() {
-		resultCh <- readLoginURLActionEvents(ctx, tty)
-	}()
-
-	finish := func() error {
-		restoreErr := term.Restore(fd, state)
-		closeErr := tty.Close()
-		return errors.Join(restoreErr, closeErr)
+	result, ok := finalModel.(loginURLActionModel)
+	if !ok || !result.selected {
+		return loginURLContinue, errors.New("login URL prompt exited without an action")
 	}
-
-	select {
-	case <-ctx.Done():
-		finishErr := finish()
-		return loginURLContinue, errors.Join(fmt.Errorf("interrupted: %w", ctx.Err()), finishErr)
-	case result := <-resultCh:
-		finishErr := finish()
-		if ctx.Err() != nil {
-			return loginURLContinue, errors.Join(fmt.Errorf("interrupted: %w", ctx.Err()), finishErr)
-		}
-		if result.err != nil {
-			return loginURLContinue, errors.Join(result.err, finishErr)
-		}
-		if finishErr != nil {
-			return loginURLContinue, fmt.Errorf("restore terminal input: %w", finishErr)
-		}
-		return result.action, nil
-	}
+	return result.action, result.err
 }
 
-// readLoginURLActionEvents decodes complete terminal events so bytes inside an
-// escape sequence cannot trigger an advertised action. Ctrl-C is handled
-// explicitly because raw mode prevents the terminal driver from turning it
-// into SIGINT.
-func readLoginURLActionEvents(ctx context.Context, r io.Reader) loginURLActionResult {
-	readerCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// TerminalReader reads at most 4096 bytes at a time. Matching that capacity
-	// lets it finish emitting the current batch when an early action returns.
-	events := make(chan uv.Event, 4096)
-	streamDone := make(chan error, 1)
-	terminalReader := uv.NewTerminalReader(r, os.Getenv("TERM"))
-	go func() {
-		streamDone <- terminalReader.StreamEvents(readerCtx, events)
-		close(events)
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return loginURLActionResult{err: ctx.Err()}
-		case event, ok := <-events:
-			if !ok {
-				if ctx.Err() != nil {
-					return loginURLActionResult{err: ctx.Err()}
-				}
-				if err := <-streamDone; err != nil {
-					return loginURLActionResult{err: fmt.Errorf("read login action: %w", err)}
-				}
-				return loginURLActionResult{err: fmt.Errorf("read login action: %w", io.EOF)}
-			}
-
-			key, ok := event.(uv.KeyPressEvent)
-			if !ok {
-				continue
-			}
-			switch {
-			case key.MatchString("enter", "ctrl+j"):
-				return loginURLActionResult{action: loginURLContinue}
-			case key.MatchString("c", "C"):
-				return loginURLActionResult{action: loginURLCopy}
-			case key.MatchString("o", "O"):
-				return loginURLActionResult{action: loginURLOpen}
-			case key.MatchString("ctrl+c"):
-				return loginURLActionResult{err: context.Canceled}
-			}
-		}
-	}
+type loginURLActionModel struct {
+	action   loginURLAction
+	selected bool
+	err      error
 }
+
+func (loginURLActionModel) Init() tea.Cmd { return nil }
+
+func (m loginURLActionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	key, ok := msg.(tea.KeyPressMsg)
+	if !ok {
+		return m, nil
+	}
+
+	switch key.String() {
+	case "enter", "ctrl+j":
+		m.action = loginURLContinue
+	case "c", "C":
+		m.action = loginURLCopy
+	case "o", "O":
+		m.action = loginURLOpen
+	case "ctrl+c":
+		m.err = context.Canceled
+	default:
+		return m, nil
+	}
+
+	m.selected = true
+	return m, tea.Quit
+}
+
+func (loginURLActionModel) View() tea.View { return tea.NewView("") }
 
 func openBrowser(ctx context.Context, browserURL string) error {
 	u, err := url.Parse(browserURL)

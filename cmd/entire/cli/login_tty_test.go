@@ -15,6 +15,11 @@ import (
 	"golang.org/x/term"
 )
 
+type loginURLActionTestResult struct {
+	action loginURLAction
+	err    error
+}
+
 func TestReadLoginURLActionFromTTY_SingleKeyAndRestoresTerminal(t *testing.T) {
 	t.Parallel()
 
@@ -22,14 +27,16 @@ func TestReadLoginURLActionFromTTY_SingleKeyAndRestoresTerminal(t *testing.T) {
 	defer ptmx.Close()
 	defer observer.Close()
 
-	resultCh := make(chan loginURLActionResult, 1)
+	resultCh := make(chan loginURLActionTestResult, 1)
 	go func() {
 		action, err := readLoginURLActionFromTTY(context.Background(), tty)
-		resultCh <- loginURLActionResult{action: action, err: err}
+		resultCh <- loginURLActionTestResult{action: action, err: err}
 	}()
+	waitForLoginPromptTTYRaw(t, observer, before)
 
-	// No newline: c must be handled as soon as the single byte arrives.
-	if _, err := ptmx.WriteString("c"); err != nil {
+	// Alt+c and the arrow sequence must be ignored, while o acts immediately
+	// without a newline. Bubble Tea owns decoding and raw-mode restoration.
+	if _, err := ptmx.WriteString("\x1bc\x1b[Co"); err != nil {
 		t.Fatalf("write key to pty: %v", err)
 	}
 
@@ -38,8 +45,8 @@ func TestReadLoginURLActionFromTTY_SingleKeyAndRestoresTerminal(t *testing.T) {
 		if result.err != nil {
 			t.Fatalf("readLoginURLActionFromTTY() error = %v", result.err)
 		}
-		if result.action != loginURLCopy {
-			t.Errorf("action = %v, want loginURLCopy", result.action)
+		if result.action != loginURLOpen {
+			t.Errorf("action = %v, want loginURLOpen", result.action)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("single-key input blocked waiting for a newline")
@@ -48,34 +55,24 @@ func TestReadLoginURLActionFromTTY_SingleKeyAndRestoresTerminal(t *testing.T) {
 	assertLoginPromptTTYRestored(t, observer, before)
 }
 
-func TestReadLoginURLActionFromTTY_CancellationRestoresTerminal(t *testing.T) {
-	t.Parallel()
+func waitForLoginPromptTTYRaw(t *testing.T, tty *os.File, before *term.State) {
+	t.Helper()
 
-	ptmx, tty, observer, before := openLoginPromptPTY(t)
-	defer ptmx.Close()
-	defer observer.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	resultCh := make(chan loginURLActionResult, 1)
-	go func() {
-		action, err := readLoginURLActionFromTTY(ctx, tty)
-		resultCh <- loginURLActionResult{action: action, err: err}
-	}()
-	cancel()
-
-	select {
-	case result := <-resultCh:
-		if !errors.Is(result.err, context.Canceled) {
-			t.Fatalf("error = %v, want context.Canceled", result.err)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		state, err := term.GetState(int(tty.Fd()))
+		if err != nil {
+			t.Fatalf("read terminal state: %v", err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("canceled single-key input did not return")
+		if !reflect.DeepEqual(state, before) {
+			return
+		}
+		time.Sleep(time.Millisecond)
 	}
-
-	assertLoginPromptTTYRestored(t, observer, before)
+	t.Fatal("terminal did not enter raw mode")
 }
 
-func TestReadLoginURLActionFromTTY_RawModeFailureContinuesAndCloses(t *testing.T) {
+func TestReadLoginURLActionFromTTY_UnavailableInputContinuesAndCloses(t *testing.T) {
 	t.Parallel()
 
 	notTTY, err := os.CreateTemp(t.TempDir(), "not-a-tty")
@@ -91,7 +88,7 @@ func TestReadLoginURLActionFromTTY_RawModeFailureContinuesAndCloses(t *testing.T
 		t.Errorf("action = %v, want loginURLContinue", action)
 	}
 	if _, err := notTTY.Stat(); !errors.Is(err, os.ErrClosed) {
-		t.Errorf("terminal was not closed after raw-mode failure: %v", err)
+		t.Errorf("input was not closed after fallback: %v", err)
 	}
 }
 
