@@ -12,6 +12,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
 
+const testLoginComplete = "complete"
+
 // mockClient implements deviceAuthClient for unit tests.
 type mockClient struct {
 	start     *auth.DeviceAuthStart
@@ -313,6 +315,7 @@ type fakeBrowserFlow struct {
 	waitCode      string
 	waitErr       error
 	waitUntilDone bool // Wait blocks until ctx is done and returns ctx.Err()
+	waitRelease   <-chan struct{}
 	exchAccess    string
 	exchRefresh   string
 	exchErr       error
@@ -327,6 +330,13 @@ func (f *fakeBrowserFlow) Wait(ctx context.Context) (string, error) {
 	if f.waitUntilDone {
 		<-ctx.Done()
 		return "", ctx.Err()
+	}
+	if f.waitRelease != nil {
+		select {
+		case <-f.waitRelease:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 	return f.waitCode, f.waitErr
 }
@@ -387,9 +397,10 @@ func noopCopyURL(string) error { return nil }
 func newTestLoginURLInteractor(actions ...loginURLAction) loginURLInteractor {
 	next := 0
 	return loginURLInteractor{
-		readAction: func(context.Context) (loginURLAction, error) {
+		readAction: func(ctx context.Context) (loginURLAction, error) {
 			if next >= len(actions) {
-				return loginURLContinue, errors.New("unexpected login URL prompt")
+				<-ctx.Done()
+				return loginURLNone, ctx.Err()
 			}
 			action := actions[next]
 			next++
@@ -400,100 +411,191 @@ func newTestLoginURLInteractor(actions ...loginURLAction) loginURLInteractor {
 	}
 }
 
-func TestPromptLoginURL_EnterContinuesWithoutSideEffects(t *testing.T) {
+func TestWaitForLoginURLResult_CompletesWithoutActionAndJoinsReader(t *testing.T) {
 	t.Parallel()
 
-	const loginURL = "https://auth.test/authorize?state=full-url"
-	interactor := newTestLoginURLInteractor(loginURLContinue)
-	interactor.copyURL = func(string) error {
-		t.Error("Enter must not copy the URL")
-		return nil
+	readerStopped := make(chan struct{})
+	interactor := newTestLoginURLInteractor()
+	interactor.readAction = func(ctx context.Context) (loginURLAction, error) {
+		<-ctx.Done()
+		close(readerStopped)
+		return loginURLNone, ctx.Err()
 	}
-	interactor.openURL = func(context.Context, string) error {
-		t.Error("Enter must not open the browser")
+
+	got, err := waitForLoginURLResult(
+		context.Background(), &bytes.Buffer{}, &bytes.Buffer{},
+		"https://auth.test/authorize", "Waiting... ", interactor,
+		func(context.Context) (string, error) { return testLoginComplete, nil },
+	)
+	if err != nil {
+		t.Fatalf("waitForLoginURLResult() error = %v", err)
+	}
+	if got != testLoginComplete {
+		t.Errorf("result = %q, want complete", got)
+	}
+	select {
+	case <-readerStopped:
+	default:
+		t.Fatal("input reader was not joined before returning")
+	}
+}
+
+func TestWaitForLoginURLResult_EnterOpensThenWaits(t *testing.T) {
+	t.Parallel()
+
+	const loginURL = "https://auth.test/authorize?state=open-me"
+	completed := make(chan struct{})
+	interactor := newTestLoginURLInteractor(loginURLOpen)
+	var openedURL string
+	interactor.openURL = func(_ context.Context, value string) error {
+		openedURL = value
+		close(completed)
 		return nil
 	}
 
 	var out bytes.Buffer
-	if err := promptLoginURL(context.Background(), &out, &bytes.Buffer{}, browserLoginURLLabel, loginURL, interactor); err != nil {
-		t.Fatalf("promptLoginURL() error = %v", err)
+	got, err := waitForLoginURLResult(
+		context.Background(), &out, &bytes.Buffer{}, loginURL, "Waiting... ", interactor,
+		func(ctx context.Context) (string, error) {
+			select {
+			case <-completed:
+				return testLoginComplete, nil
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		},
+	)
+	if err != nil {
+		t.Fatalf("waitForLoginURLResult() error = %v", err)
 	}
-
-	want := "Login URL: " + loginURL + "\n\n" + loginURLPrompt + "\n"
-	if got := out.String(); got != want {
-		t.Errorf("output = %q, want %q", got, want)
+	if openedURL != loginURL {
+		t.Errorf("opened URL = %q, want %q", openedURL, loginURL)
+	}
+	if got != testLoginComplete {
+		t.Errorf("result = %q, want complete", got)
+	}
+	if !strings.Contains(out.String(), "✓ Opened browser.") {
+		t.Errorf("output missing browser confirmation:\n%s", out.String())
 	}
 }
 
-func TestPromptLoginURL_CopyStaysAtPrompt(t *testing.T) {
+func TestWaitForLoginURLResult_CopyKeepsWaiting(t *testing.T) {
 	t.Parallel()
 
 	const loginURL = "https://auth.test/authorize?state=copy-me"
-	interactor := newTestLoginURLInteractor(loginURLCopy, loginURLContinue)
+	completed := make(chan struct{})
+	interactor := newTestLoginURLInteractor(loginURLCopy)
 	var copiedURL string
 	interactor.copyURL = func(value string) error {
 		copiedURL = value
+		close(completed)
 		return nil
 	}
 
-	var out bytes.Buffer
-	if err := promptLoginURL(context.Background(), &out, &bytes.Buffer{}, browserLoginURLLabel, loginURL, interactor); err != nil {
-		t.Fatalf("promptLoginURL() error = %v", err)
+	var out, errW bytes.Buffer
+	_, err := waitForLoginURLResult(
+		context.Background(), &out, &errW, loginURL, "Waiting... ", interactor,
+		func(ctx context.Context) (struct{}, error) {
+			select {
+			case <-completed:
+				return struct{}{}, nil
+			case <-ctx.Done():
+				return struct{}{}, ctx.Err()
+			}
+		},
+	)
+	if err != nil {
+		t.Fatalf("waitForLoginURLResult() error = %v", err)
 	}
-
 	if copiedURL != loginURL {
 		t.Errorf("copied URL = %q, want %q", copiedURL, loginURL)
 	}
-	if !strings.Contains(out.String(), "Copied login URL to clipboard.") {
+	if !strings.Contains(out.String(), "✓ Copied to clipboard.") {
 		t.Errorf("output missing copy confirmation:\n%s", out.String())
 	}
-	if got := strings.Count(out.String(), loginURLPrompt); got != 2 {
-		t.Errorf("prompt count = %d, want 2 after copy:\n%s", got, out.String())
+	if got := strings.Count(out.String(), loginURLPrompt); got != 1 {
+		t.Errorf("prompt count = %d, want 1 after copy:\n%s", got, out.String())
+	}
+	if got := strings.Count(out.String(), "Waiting... "); got != 1 {
+		t.Errorf("waiting message count = %d, want 1 after copy:\n%s", got, out.String())
 	}
 }
 
-func TestPromptLoginURL_FailuresStayAtPrompt(t *testing.T) {
+func TestWaitForLoginURLResult_FailuresKeepActionsAvailable(t *testing.T) {
 	t.Parallel()
 
-	const loginURL = "https://auth.test/authorize"
-	interactor := newTestLoginURLInteractor(loginURLCopy, loginURLOpen, loginURLContinue)
+	completed := make(chan struct{})
+	interactor := newTestLoginURLInteractor(loginURLCopy, loginURLOpen, loginURLOpen)
 	interactor.copyURL = func(string) error { return errors.New("clipboard unavailable") }
-	interactor.openURL = func(context.Context, string) error { return errors.New("browser unavailable") }
-
-	var out, errW bytes.Buffer
-	if err := promptLoginURL(context.Background(), &out, &errW, browserLoginURLLabel, loginURL, interactor); err != nil {
-		t.Fatalf("promptLoginURL() error = %v", err)
+	openCalls := 0
+	interactor.openURL = func(context.Context, string) error {
+		openCalls++
+		if openCalls == 1 {
+			return errors.New("browser unavailable")
+		}
+		close(completed)
+		return nil
 	}
 
+	var out, errW bytes.Buffer
+	_, err := waitForLoginURLResult(
+		context.Background(), &out, &errW, "https://auth.test", "Waiting... ", interactor,
+		func(ctx context.Context) (struct{}, error) {
+			select {
+			case <-completed:
+				return struct{}{}, nil
+			case <-ctx.Done():
+				return struct{}{}, ctx.Err()
+			}
+		},
+	)
+	if err != nil {
+		t.Fatalf("waitForLoginURLResult() error = %v", err)
+	}
 	for _, want := range []string{"failed to copy login URL", "failed to open default browser"} {
 		if !strings.Contains(errW.String(), want) {
 			t.Errorf("stderr missing %q:\n%s", want, errW.String())
 		}
 	}
-	if got := strings.Count(out.String(), loginURLPrompt); got != 3 {
-		t.Errorf("prompt count = %d, want 3 after two failures:\n%s", got, out.String())
+	if got := strings.Count(out.String(), loginURLPrompt); got != 1 {
+		t.Errorf("prompt count = %d, want 1 after two failures:\n%s", got, out.String())
+	}
+	if got := strings.Count(out.String(), "Waiting... "); got != 1 {
+		t.Errorf("waiting message count = %d, want 1 after actions:\n%s", got, out.String())
 	}
 }
 
-func TestPromptLoginURL_Cancellation(t *testing.T) {
+func TestWaitForLoginURLResult_Cancellation(t *testing.T) {
 	t.Parallel()
 
-	interactor := newTestLoginURLInteractor(loginURLContinue)
+	interactor := newTestLoginURLInteractor()
 	interactor.readAction = func(context.Context) (loginURLAction, error) {
-		return loginURLContinue, context.Canceled
+		return loginURLNone, context.Canceled
 	}
 
-	err := promptLoginURL(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, browserLoginURLLabel, "https://auth.test", interactor)
+	_, err := waitForLoginURLResult(
+		context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, "https://auth.test", "Waiting... ", interactor,
+		func(ctx context.Context) (struct{}, error) {
+			<-ctx.Done()
+			return struct{}{}, ctx.Err()
+		},
+	)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
 }
 
-func TestPromptLoginURL_UnexpectedActionFails(t *testing.T) {
+func TestWaitForLoginURLResult_UnexpectedActionFails(t *testing.T) {
 	t.Parallel()
 
 	interactor := newTestLoginURLInteractor(loginURLAction(255))
-	err := promptLoginURL(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, browserLoginURLLabel, "https://auth.test", interactor)
+	_, err := waitForLoginURLResult(
+		context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, "https://auth.test", "Waiting... ", interactor,
+		func(ctx context.Context) (struct{}, error) {
+			<-ctx.Done()
+			return struct{}{}, ctx.Err()
+		},
+	)
 	if err == nil || !strings.Contains(err.Error(), "unexpected login URL action: 255") {
 		t.Fatalf("error = %v, want unexpected-action error", err)
 	}
@@ -509,12 +611,12 @@ func TestLoginURLActionModel(t *testing.T) {
 		wantAction   loginURLAction
 		wantErr      error
 	}{
-		{name: "enter", msg: tea.KeyPressMsg{Code: tea.KeyEnter}, wantSelected: true, wantAction: loginURLContinue},
-		{name: "control j", msg: tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl}, wantSelected: true, wantAction: loginURLContinue},
+		{name: "enter", msg: tea.KeyPressMsg{Code: tea.KeyEnter}, wantSelected: true, wantAction: loginURLOpen},
+		{name: "control j", msg: tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl}, wantSelected: true, wantAction: loginURLOpen},
 		{name: "lowercase copy", msg: tea.KeyPressMsg{Code: 'c', Text: "c"}, wantSelected: true, wantAction: loginURLCopy},
 		{name: "uppercase copy", msg: tea.KeyPressMsg{Code: 'C', Text: "C"}, wantSelected: true, wantAction: loginURLCopy},
-		{name: "lowercase open", msg: tea.KeyPressMsg{Code: 'o', Text: "o"}, wantSelected: true, wantAction: loginURLOpen},
-		{name: "uppercase open", msg: tea.KeyPressMsg{Code: 'O', Text: "O"}, wantSelected: true, wantAction: loginURLOpen},
+		{name: "lowercase o ignored", msg: tea.KeyPressMsg{Code: 'o', Text: "o"}},
+		{name: "uppercase o ignored", msg: tea.KeyPressMsg{Code: 'O', Text: "O"}},
 		{name: "control c", msg: tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}, wantSelected: true, wantErr: context.Canceled},
 		{name: "right arrow ignored", msg: tea.KeyPressMsg{Code: tea.KeyRight}},
 		{name: "F1 ignored", msg: tea.KeyPressMsg{Code: tea.KeyF1}},
@@ -547,7 +649,7 @@ func TestLoginURLActionModel(t *testing.T) {
 	}
 }
 
-func TestRunLogin_InteractiveDeviceFlowUsesURLPrompt(t *testing.T) {
+func TestRunLogin_InteractiveDeviceFlowAutoStartsPolling(t *testing.T) {
 	t.Parallel()
 
 	const approvalURL = "https://auth.test/device?code=ABCD-EFGH"
@@ -560,34 +662,40 @@ func TestRunLogin_InteractiveDeviceFlowUsesURLPrompt(t *testing.T) {
 		},
 		responses: []pollResponse{{result: &auth.DeviceAuthPoll{Error: "access_denied"}}},
 	}
-	interactor := newTestLoginURLInteractor(loginURLCopy, loginURLContinue)
-	var copiedURL string
-	interactor.copyURL = func(value string) error {
-		copiedURL = value
-		return nil
-	}
-
 	var out bytes.Buffer
-	err := runLogin(context.Background(), &out, &bytes.Buffer{}, client, interactor, true)
+	err := runLogin(context.Background(), &out, &bytes.Buffer{}, client, newTestLoginURLInteractor(), true)
 	if err == nil || !strings.Contains(err.Error(), "device authorization denied") {
 		t.Fatalf("error = %v, want device authorization denied", err)
 	}
-	if copiedURL != approvalURL {
-		t.Errorf("copied URL = %q, want %q", copiedURL, approvalURL)
-	}
-	for _, want := range []string{"Device code: ABCD-EFGH", deviceLoginURLLabel + " " + approvalURL, loginURLPrompt} {
+	for _, want := range []string{"Device code: ABCD-EFGH", deviceLoginURLLabel + "\n  " + approvalURL, loginURLPrompt} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}
 	}
 }
 
-func TestDeviceLoginURLLabel_AlignsWithDeviceCode(t *testing.T) {
+func TestRenderLoginURL(t *testing.T) {
 	t.Parallel()
 
-	const deviceCodeLabel = "Device code:"
-	if got, want := len(deviceLoginURLLabel), len(deviceCodeLabel); got != want {
-		t.Errorf("device login URL label width = %d, want %d to align both value columns", got, want)
+	const loginURL = "https://auth.test/authorize?state=visible"
+	if got := renderLoginURL(loginURL, false); got != loginURL {
+		t.Errorf("plain URL = %q, want %q", got, loginURL)
+	}
+
+	linked := renderLoginURL(loginURL, true)
+	if !strings.Contains(linked, "\x1b]8;") || !strings.Contains(linked, loginURL) {
+		t.Errorf("linked URL missing OSC 8 target or literal text: %q", linked)
+	}
+	if got := renderLoginURL("file:///tmp/not-http", true); got != "file:///tmp/not-http" {
+		t.Errorf("non-HTTP URL should remain plain, got %q", got)
+	}
+}
+
+func TestDeviceLoginURLLabel_MatchesBrowserFlow(t *testing.T) {
+	t.Parallel()
+
+	if deviceLoginURLLabel != browserLoginURLLabel {
+		t.Errorf("device login URL label = %q, want %q", deviceLoginURLLabel, browserLoginURLLabel)
 	}
 }
 
@@ -607,7 +715,7 @@ func TestRunLoginAuto_Interactive_UsesBrowserFlow(t *testing.T) {
 	var browserCalls int
 
 	err := runLoginAuto(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, &mockClient{},
-		startBrowserStub(&browserCalls, flow, nil), newTestLoginURLInteractor(loginURLContinue),
+		startBrowserStub(&browserCalls, flow, nil), newTestLoginURLInteractor(),
 		loginFlowFacts{canPrompt: true})
 
 	if browserCalls != 1 {
@@ -626,7 +734,7 @@ func TestRunLoginAuto_SSHSession_FallsBackToDevice(t *testing.T) {
 
 	var errW bytes.Buffer
 	err := runLoginAuto(context.Background(), &bytes.Buffer{}, &errW, &mockClient{},
-		startBrowserStub(&browserCalls, nil, nil), newTestLoginURLInteractor(loginURLContinue),
+		startBrowserStub(&browserCalls, nil, nil), newTestLoginURLInteractor(),
 		loginFlowFacts{canPrompt: true, sshSession: true})
 
 	if browserCalls != 0 {
@@ -648,7 +756,7 @@ func TestRunLoginAuto_Headless_FallsBackToDevice(t *testing.T) {
 
 	var errW bytes.Buffer
 	err := runLoginAuto(context.Background(), &bytes.Buffer{}, &errW, &mockClient{},
-		startBrowserStub(&browserCalls, nil, nil), newTestLoginURLInteractor(loginURLContinue),
+		startBrowserStub(&browserCalls, nil, nil), newTestLoginURLInteractor(),
 		loginFlowFacts{})
 
 	if browserCalls != 0 {
@@ -669,7 +777,7 @@ func TestRunLoginAuto_BrowserStartFails_FallsBackToDevice(t *testing.T) {
 
 	var errW bytes.Buffer
 	err := runLoginAuto(context.Background(), &bytes.Buffer{}, &errW, &mockClient{},
-		startBrowserStub(&browserCalls, nil, errors.New("listen tcp 127.0.0.1:0: operation not permitted")), newTestLoginURLInteractor(loginURLContinue),
+		startBrowserStub(&browserCalls, nil, errors.New("listen tcp 127.0.0.1:0: operation not permitted")), newTestLoginURLInteractor(),
 		loginFlowFacts{canPrompt: true})
 
 	if browserCalls != 1 {
@@ -691,7 +799,7 @@ func TestRunLoginAuto_DeviceFlag_NoExplanation(t *testing.T) {
 
 	var errW bytes.Buffer
 	err := runLoginAuto(context.Background(), &bytes.Buffer{}, &errW, &mockClient{},
-		startBrowserStub(&browserCalls, nil, nil), newTestLoginURLInteractor(loginURLContinue),
+		startBrowserStub(&browserCalls, nil, nil), newTestLoginURLInteractor(),
 		loginFlowFacts{useDevice: true, canPrompt: true})
 
 	if browserCalls != 0 {
@@ -706,7 +814,7 @@ func TestRunLoginAuto_DeviceFlag_NoExplanation(t *testing.T) {
 	}
 }
 
-func TestRunBrowserLogin_PrintsAuthorizationURLAndEnterDoesNotOpen(t *testing.T) {
+func TestRunBrowserLogin_AutoWaitsWithoutOpeningBrowser(t *testing.T) {
 	t.Parallel()
 
 	flow := &fakeBrowserFlow{authURL: "https://auth.test/authorize?x=1", waitErr: errors.New("stop")}
@@ -716,7 +824,7 @@ func TestRunBrowserLogin_PrintsAuthorizationURLAndEnterDoesNotOpen(t *testing.T)
 		opened = true
 		return nil
 	}
-	interactor := newTestLoginURLInteractor(loginURLContinue)
+	interactor := newTestLoginURLInteractor()
 	interactor.openURL = openURL
 
 	var out bytes.Buffer
@@ -728,12 +836,12 @@ func TestRunBrowserLogin_PrintsAuthorizationURLAndEnterDoesNotOpen(t *testing.T)
 	}
 
 	if opened {
-		t.Error("Enter must not open the browser")
+		t.Error("auto-started wait must not open the browser")
 	}
-	if !strings.Contains(out.String(), "Logging in to:") {
-		t.Errorf("output missing 'Logging in to:' line:\n%s", out.String())
+	if !strings.Contains(out.String(), "Logging in to https://auth.test") {
+		t.Errorf("output missing login destination line:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "Login URL: "+flow.authURL) {
+	if !strings.Contains(out.String(), "Login URL:\n  "+flow.authURL) {
 		t.Errorf("output missing full authorization URL:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), loginURLPrompt) {
@@ -747,12 +855,18 @@ func TestRunBrowserLogin_PrintsAuthorizationURLAndEnterDoesNotOpen(t *testing.T)
 func TestRunBrowserLogin_OpenActionOpensAuthorizationURL(t *testing.T) {
 	t.Parallel()
 
-	flow := &fakeBrowserFlow{authURL: "https://auth.test/authorize?x=1", waitErr: errors.New("stop")}
+	release := make(chan struct{})
+	flow := &fakeBrowserFlow{
+		authURL:     "https://auth.test/authorize?x=1",
+		waitErr:     errors.New("stop"),
+		waitRelease: release,
+	}
 
 	var openedURL string
 	interactor := newTestLoginURLInteractor(loginURLOpen)
 	interactor.openURL = func(_ context.Context, u string) error {
 		openedURL = u
+		close(release)
 		return nil
 	}
 
@@ -771,10 +885,22 @@ func TestRunBrowserLogin_OpenActionOpensAuthorizationURL(t *testing.T) {
 func TestRunBrowserLogin_OpenBrowserFallback(t *testing.T) {
 	t.Parallel()
 
-	flow := &fakeBrowserFlow{authURL: "https://auth.test/authorize", waitErr: errors.New("stop")}
-	failOpen := func(context.Context, string) error { return errors.New("no browser") }
-	interactor := newTestLoginURLInteractor(loginURLOpen, loginURLContinue)
-	interactor.openURL = failOpen
+	release := make(chan struct{})
+	flow := &fakeBrowserFlow{
+		authURL:     "https://auth.test/authorize",
+		waitErr:     errors.New("stop"),
+		waitRelease: release,
+	}
+	interactor := newTestLoginURLInteractor(loginURLOpen, loginURLOpen)
+	openCalls := 0
+	interactor.openURL = func(context.Context, string) error {
+		openCalls++
+		if openCalls == 1 {
+			return errors.New("no browser")
+		}
+		close(release)
+		return nil
+	}
 
 	var out, errW bytes.Buffer
 	if err := runBrowserLogin(context.Background(), &out, &errW, flow, "https://auth.test", interactor, browserLoginTimeout); err == nil {
@@ -787,8 +913,8 @@ func TestRunBrowserLogin_OpenBrowserFallback(t *testing.T) {
 	if !strings.Contains(out.String(), flow.authURL) {
 		t.Errorf("stdout missing authorization URL:\n%s", out.String())
 	}
-	if got := strings.Count(out.String(), loginURLPrompt); got != 2 {
-		t.Errorf("prompt count = %d, want 2 after failed open:\n%s", got, out.String())
+	if got := strings.Count(out.String(), loginURLPrompt); got != 1 {
+		t.Errorf("prompt count = %d, want 1 after failed open:\n%s", got, out.String())
 	}
 }
 
@@ -798,7 +924,7 @@ func TestRunBrowserLogin_WaitError(t *testing.T) {
 	denied := errors.New("access_denied")
 	flow := &fakeBrowserFlow{authURL: "https://auth.test/authorize", waitErr: denied}
 
-	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", newTestLoginURLInteractor(loginURLContinue), browserLoginTimeout)
+	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", newTestLoginURLInteractor(), browserLoginTimeout)
 	if !errors.Is(err, denied) {
 		t.Fatalf("err = %v, want wrapped %v", err, denied)
 	}
@@ -813,7 +939,7 @@ func TestRunBrowserLogin_ExchangeError(t *testing.T) {
 		exchErr:  errors.New("invalid_grant"),
 	}
 
-	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", newTestLoginURLInteractor(loginURLContinue), browserLoginTimeout)
+	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", newTestLoginURLInteractor(), browserLoginTimeout)
 	if err == nil || !strings.Contains(err.Error(), "complete login") {
 		t.Fatalf("err = %v, want complete login error", err)
 	}
@@ -829,7 +955,7 @@ func TestRunBrowserLogin_WaitTimeout(t *testing.T) {
 	// come from runBrowserLogin's own timeout, or this test would hang.
 	flow := &fakeBrowserFlow{authURL: "https://auth.test/authorize", waitUntilDone: true}
 
-	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", newTestLoginURLInteractor(loginURLContinue), 50*time.Millisecond)
+	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", newTestLoginURLInteractor(), 50*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "timed out waiting for sign-in") {
 		t.Fatalf("err = %v, want sign-in timeout", err)
 	}
@@ -849,7 +975,7 @@ func TestRunBrowserLogin_ParentCancelNotReportedAsTimeout(t *testing.T) {
 
 	flow := &fakeBrowserFlow{authURL: "https://auth.test/authorize", waitUntilDone: true}
 
-	err := runBrowserLogin(ctx, &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", newTestLoginURLInteractor(loginURLContinue), time.Minute)
+	err := runBrowserLogin(ctx, &bytes.Buffer{}, &bytes.Buffer{}, flow, "https://auth.test", newTestLoginURLInteractor(), time.Minute)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want wrapped context.Canceled", err)
 	}

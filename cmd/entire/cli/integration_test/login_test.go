@@ -82,7 +82,9 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 	}))
 	defer server.Close()
 
-	proc := runLoginProcess(t, server.URL)
+	// Force the interactive device flow. The subprocess cannot read a real TTY
+	// under test, so successful completion proves polling began without a key.
+	proc := startLoginProcess(t, server.URL, []string{"ENTIRE_TEST_TTY=1"}, "login", "--device", "--insecure-http-auth")
 
 	approvalURL, deviceCode := waitForLoginPrompt(t, proc.stdout)
 	if deviceCode != "ABCD-EFGH" {
@@ -109,7 +111,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 		t.Fatalf("login command failed: %v\nOutput:\n%s", waitErr, output)
 	}
 
-	if !strings.Contains(output, "Waiting for approval...") {
+	if !strings.Contains(output, "Waiting for approval…") {
 		t.Fatalf("output missing wait message:\n%s", output)
 	}
 
@@ -215,11 +217,9 @@ func TestLogin_DeniedFlow(t *testing.T) {
 }
 
 // TestLogin_BrowserFlow_SavesToken drives the loopback authorization-code
-// flow end to end: ENTIRE_TEST_TTY=1 forces the interactive (browser)
-// default, the test-safe prompt action chooses Enter (continue without
-// opening a real browser), and the test plays the role of the browser by
-// parsing the always-visible URL and GETting the loopback callback with a
-// code + the state from it.
+// flow end to end: ENTIRE_TEST_TTY=1 forces the interactive browser default,
+// terminal actions are disabled under test, and the test completes sign-in
+// solely through the always-visible URL and loopback callback.
 func TestLogin_BrowserFlow_SavesToken(t *testing.T) {
 	t.Parallel()
 
@@ -354,6 +354,7 @@ func waitForLoginPrompt(t *testing.T, stdout *bufio.Reader) (string, string) {
 	deadline := time.Now().Add(10 * time.Second)
 	var approvalURL string
 	var deviceCode string
+	wantURL := false
 
 	for time.Now().Before(deadline) {
 		line, err := stdout.ReadString('\n')
@@ -365,8 +366,11 @@ func waitForLoginPrompt(t *testing.T, stdout *bufio.Reader) (string, string) {
 		switch {
 		case strings.HasPrefix(line, "Device code: "):
 			deviceCode = strings.TrimPrefix(line, "Device code: ")
-		case strings.HasPrefix(line, "Login URL:"):
-			approvalURL = strings.TrimSpace(strings.TrimPrefix(line, "Login URL:"))
+		case line == "Login URL:":
+			wantURL = true
+		case wantURL && line != "":
+			approvalURL = line
+			wantURL = false
 		}
 
 		if approvalURL != "" && deviceCode != "" {
@@ -383,16 +387,20 @@ func waitForLoginPrompt(t *testing.T, stdout *bufio.Reader) (string, string) {
 func waitForBrowserPrompt(t *testing.T, stdout *bufio.Reader) string {
 	t.Helper()
 
-	const prefix = "Login URL:"
 	deadline := time.Now().Add(10 * time.Second)
+	wantURL := false
 	for time.Now().Before(deadline) {
 		line, err := stdout.ReadString('\n')
 		if err != nil {
 			t.Fatalf("read login output: %v", err)
 		}
 		line = strings.TrimSpace(line)
-		if after, ok := strings.CutPrefix(line, prefix); ok {
-			return strings.TrimSpace(after)
+		if line == "Login URL:" {
+			wantURL = true
+			continue
+		}
+		if wantURL && line != "" {
+			return line
 		}
 	}
 

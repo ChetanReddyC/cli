@@ -34,9 +34,10 @@ func TestReadLoginURLActionFromTTY_SingleKeyAndRestoresTerminal(t *testing.T) {
 	}()
 	waitForLoginPromptTTYRaw(t, observer, before)
 
-	// Alt+c and the arrow sequence must be ignored, while o acts immediately
-	// without a newline. Bubble Tea owns decoding and raw-mode restoration.
-	if _, err := ptmx.WriteString("\x1bc\x1b[Co"); err != nil {
+	// Alt+c, the arrow sequence, and the obsolete o action must be ignored,
+	// while Enter opens immediately. Bubble Tea owns decoding and raw-mode
+	// restoration.
+	if _, err := ptmx.WriteString("\x1bc\x1b[Co\r"); err != nil {
 		t.Fatalf("write key to pty: %v", err)
 	}
 
@@ -84,8 +85,8 @@ func TestReadLoginURLActionFromTTY_UnavailableInputContinuesAndCloses(t *testing
 	if err != nil {
 		t.Fatalf("readLoginURLActionFromTTY() error = %v", err)
 	}
-	if action != loginURLContinue {
-		t.Errorf("action = %v, want loginURLContinue", action)
+	if action != loginURLNone {
+		t.Errorf("action = %v, want loginURLNone", action)
 	}
 	if _, err := notTTY.Stat(); !errors.Is(err, os.ErrClosed) {
 		t.Errorf("input was not closed after fallback: %v", err)

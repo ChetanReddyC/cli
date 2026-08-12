@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
 	"github.com/entireio/auth-go/tokens"
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -50,7 +51,7 @@ type clipboardWriteFunc func(text string) error
 type loginURLAction byte
 
 const (
-	loginURLContinue loginURLAction = iota
+	loginURLNone loginURLAction = iota
 	loginURLCopy
 	loginURLOpen
 )
@@ -196,26 +197,39 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 		return fmt.Errorf("start login: %w", err)
 	}
 
-	fmt.Fprintf(outW, "Device code: %s\n", start.UserCode)
-
 	approvalURL := chooseApprovalURL(start)
+	fmt.Fprintf(outW, "Device code: %s\n", start.UserCode)
+	printLoginURL(outW, deviceLoginURLLabel, approvalURL)
 
-	if canPrompt {
-		if err := promptLoginURL(ctx, outW, errW, deviceLoginURLLabel, approvalURL, urlInteractor); err != nil {
-			return fmt.Errorf("wait for input: %w", err)
-		}
-	} else {
-		fmt.Fprintf(outW, "%s %s\n\n", deviceLoginURLLabel, approvalURL)
+	wait := func(waitCtx context.Context) (loginTokens, error) {
+		accessToken, refreshToken, waitErr := waitForApproval(
+			waitCtx,
+			client,
+			start.DeviceCode,
+			start.ExpiresIn,
+			time.Duration(start.Interval)*time.Second,
+			defaultSlowDownBackoff,
+		)
+		return loginTokens{accessToken: accessToken, refreshToken: refreshToken}, waitErr
 	}
 
-	fmt.Fprint(outW, "Waiting for approval... ")
-
-	token, refreshToken, err := waitForApproval(ctx, client, start.DeviceCode, start.ExpiresIn, time.Duration(start.Interval)*time.Second, defaultSlowDownBackoff)
+	var result loginTokens
+	if canPrompt {
+		result, err = waitForLoginURLResult(ctx, outW, errW, approvalURL, "Waiting for approval… ", urlInteractor, wait)
+	} else {
+		fmt.Fprint(outW, "Waiting for approval… ")
+		result, err = wait(ctx)
+	}
 	if err != nil {
 		return fmt.Errorf("complete login: %w", err)
 	}
 
-	return persistLogin(outW, client.BaseURL(), token, refreshToken)
+	return persistLogin(outW, client.BaseURL(), result.accessToken, result.refreshToken)
+}
+
+type loginTokens struct {
+	accessToken  string
+	refreshToken string
 }
 
 // loginFlowFacts carries the environment facts that pick between the
@@ -289,19 +303,24 @@ func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuth
 	defer func() { _ = flow.Close() }()
 
 	authURL := flow.AuthorizationURL()
-	fmt.Fprintf(outW, "Logging in to: %s\n\n", baseURL)
-	if err := promptLoginURL(ctx, outW, errW, browserLoginURLLabel, authURL, urlInteractor); err != nil {
-		return fmt.Errorf("wait for input: %w", err)
-	}
+	fmt.Fprintf(outW, "Logging in to %s\n\n", baseURL)
+	printLoginURL(outW, browserLoginURLLabel, authURL)
 
-	fmt.Fprint(outW, "Waiting for sign-in... ")
-
-	// The clock starts after the user explicitly continues or successfully
-	// opens the browser, so time spent choosing or copying isn't counted.
+	// Start the deadline as soon as the URL is visible. Waiting for the
+	// loopback redirect and reading URL actions then proceed concurrently, so
+	// clicking or pasting the URL can complete login without a terminal key.
 	waitCtx, cancel := context.WithTimeout(ctx, waitTimeout)
 	defer cancel()
 
-	code, err := flow.Wait(waitCtx)
+	code, err := waitForLoginURLResult(
+		waitCtx,
+		outW,
+		errW,
+		authURL,
+		"Waiting for sign-in… ",
+		urlInteractor,
+		flow.Wait,
+	)
 	if err != nil {
 		if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
 			return fmt.Errorf("timed out waiting for sign-in after %v; run `entire login` again, or use `entire login --device`", waitTimeout)
@@ -475,62 +494,175 @@ func waitForApproval(ctx context.Context, poller deviceAuthClient, deviceCode st
 	}
 }
 
-const loginURLPrompt = "[Enter] Continue  [c] Copy URL  [o] Open in default browser"
+const loginURLPrompt = "[Enter] Open browser  [c] Copy URL"
 
 const (
 	browserLoginURLLabel = "Login URL:"
-	// Padded so the device flow's URL column lines up under "Device code: ".
-	deviceLoginURLLabel = "Login URL:  "
+	deviceLoginURLLabel  = browserLoginURLLabel
 )
 
-// promptLoginURL displays the exact URL and waits for an explicit user choice.
-// Copy keeps the prompt active so the user can paste into a chosen browser
-// before deciding when the login timeout should begin.
-func promptLoginURL(ctx context.Context, outW, errW io.Writer, urlLabel, loginURL string, interactor loginURLInteractor) error {
-	fmt.Fprintf(outW, "%s %s\n\n", urlLabel, loginURL)
+// printLoginURL always leaves the literal URL visible. On a styled terminal it
+// also wraps that same text and target in OSC 8, giving capable terminals an
+// explicit hyperlink without taking away the plain-text fallback.
+func printLoginURL(outW io.Writer, urlLabel, loginURL string) {
+	fmt.Fprintf(outW, "%s\n  %s\n\n", urlLabel, renderLoginURL(loginURL, interactive.ShouldStyle(outW)))
+}
+
+func renderLoginURL(loginURL string, hyperlink bool) string {
+	if !hyperlink {
+		return loginURL
+	}
+
+	u, err := url.Parse(loginURL)
+	if err != nil || (u.Scheme != schemeHTTPS && u.Scheme != schemeHTTP) {
+		return loginURL
+	}
+
+	return lipgloss.NewStyle().Hyperlink(loginURL).Render(loginURL)
+}
+
+type loginURLActionResult struct {
+	action loginURLAction
+	err    error
+}
+
+type loginURLWaitResult[T any] struct {
+	value T
+	err   error
+}
+
+// waitForLoginURLResult runs authentication and terminal input concurrently.
+// A completed authentication cancels and joins the input reader before
+// returning, which guarantees Bubble Tea restores the terminal from raw mode.
+// Copy leaves both actions available; a successful browser open stops reading
+// keys and waits only for authentication to finish.
+func waitForLoginURLResult[T any](
+	ctx context.Context,
+	outW, errW io.Writer,
+	loginURL, waitingMessage string,
+	interactor loginURLInteractor,
+	wait func(context.Context) (T, error),
+) (T, error) {
+	flowCtx, cancelFlow := context.WithCancel(ctx)
+	defer cancelFlow()
+
+	actionCtx, cancelAction := context.WithCancel(flowCtx)
+	defer cancelAction()
+
+	waitCh := make(chan loginURLWaitResult[T], 1)
+	go func() {
+		value, err := wait(flowCtx)
+		waitCh <- loginURLWaitResult[T]{value: value, err: err}
+	}()
+
+	actionCh := make(chan loginURLActionResult, 1)
+	actionActive := false
+	startActionRead := func() {
+		actionActive = true
+		go func() {
+			action, err := interactor.readAction(actionCtx)
+			actionCh <- loginURLActionResult{action: action, err: err}
+		}()
+	}
+	finishActionRead := func() {
+		cancelAction()
+		if actionActive {
+			<-actionCh
+			actionActive = false
+		}
+	}
+
+	statusLineOpen := false
+	renderInitialPrompt := func() {
+		fmt.Fprintln(outW, loginURLPrompt)
+		fmt.Fprint(outW, waitingMessage)
+		statusLineOpen = true
+	}
+	finishStatusLine := func() {
+		if statusLineOpen {
+			fmt.Fprintln(outW)
+			statusLineOpen = false
+		}
+	}
+	renderInitialPrompt()
+	startActionRead()
 
 	for {
-		fmt.Fprint(outW, loginURLPrompt)
-		action, err := interactor.readAction(ctx)
-		fmt.Fprintln(outW)
-		if err != nil {
-			return err
-		}
+		select {
+		case result := <-waitCh:
+			finishActionRead()
+			finishStatusLine()
+			return result.value, result.err
+		case result := <-actionCh:
+			actionActive = false
+			finishStatusLine()
 
-		switch action {
-		case loginURLContinue:
-			return nil
-		case loginURLCopy:
-			if err := interactor.copyURL(loginURL); err != nil {
-				fmt.Fprintf(errW, "Warning: failed to copy login URL: %v\n", err)
-			} else {
-				fmt.Fprintln(outW, "Copied login URL to clipboard.")
+			// Authentication may have completed at the same time as the key
+			// arrived. Prefer that result over launching a stale side effect.
+			select {
+			case waitResult := <-waitCh:
+				cancelAction()
+				return waitResult.value, waitResult.err
+			default:
 			}
-		case loginURLOpen:
-			if err := interactor.openURL(ctx, loginURL); err != nil {
-				fmt.Fprintf(errW, "Warning: failed to open default browser: %v\n", err)
-				continue
+
+			if result.err != nil {
+				cancelFlow()
+				<-waitCh
+				var zero T
+				return zero, result.err
 			}
-			return nil
-		default:
-			return fmt.Errorf("unexpected login URL action: %d", action)
+
+			switch result.action {
+			case loginURLNone:
+				// A controlling TTY disappeared between prompt detection and
+				// use (or tests disabled real terminal input). Authentication
+				// still runs and can complete through the visible URL.
+				cancelAction()
+				result := <-waitCh
+				return result.value, result.err
+			case loginURLCopy:
+				if err := interactor.copyURL(loginURL); err != nil {
+					fmt.Fprintf(errW, "Warning: failed to copy login URL: %v\n", err)
+				} else {
+					fmt.Fprintln(outW, "✓ Copied to clipboard.")
+				}
+				startActionRead()
+			case loginURLOpen:
+				if err := interactor.openURL(flowCtx, loginURL); err != nil {
+					fmt.Fprintf(errW, "Warning: failed to open default browser: %v\n", err)
+					startActionRead()
+					continue
+				}
+
+				cancelAction()
+				fmt.Fprintln(outW, "✓ Opened browser.")
+				result := <-waitCh
+				finishStatusLine()
+				return result.value, result.err
+			default:
+				cancelFlow()
+				<-waitCh
+				var zero T
+				return zero, fmt.Errorf("unexpected login URL action: %d", result.action)
+			}
 		}
 	}
 }
 
 // readLoginURLAction reads a single key from the controlling terminal without
-// consuming piped stdin. Missing TTYs continue without opening anything,
-// preserving the non-blocking fallback of the old Enter prompt.
+// consuming piped stdin. Missing TTYs disable key actions while authentication
+// continues through the always-visible URL.
 func readLoginURLAction(ctx context.Context) (loginURLAction, error) {
 	// In-process and forced-interactive subprocess tests must never touch a
-	// developer's real terminal. Enter/continue is the side-effect-free default.
+	// developer's real terminal. Authentication itself continues concurrently.
 	if interactive.UnderTest() {
-		return loginURLContinue, nil
+		return loginURLNone, nil
 	}
 
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
-		return loginURLContinue, nil //nolint:nilerr // no controlling TTY; continue without side effects
+		return loginURLNone, nil //nolint:nilerr // no controlling TTY; continue without key actions
 	}
 
 	return readLoginURLActionFromTTY(ctx, tty)
@@ -538,11 +670,11 @@ func readLoginURLAction(ctx context.Context) (loginURLAction, error) {
 
 // readLoginURLActionFromTTY takes ownership of tty. Bubble Tea handles raw mode,
 // escape-sequence decoding, cancellation, and terminal restoration. If the
-// terminal cannot provide single-key input, continue without side effects.
+// terminal cannot provide single-key input, disable key actions.
 func readLoginURLActionFromTTY(ctx context.Context, tty *os.File) (loginURLAction, error) {
 	defer tty.Close()
 	if !interactive.IsTerminalReader(tty) {
-		return loginURLContinue, nil
+		return loginURLNone, nil
 	}
 
 	model := loginURLActionModel{}
@@ -554,15 +686,15 @@ func readLoginURLActionFromTTY(ctx context.Context, tty *os.File) (loginURLActio
 		tea.WithoutSignalHandler(),
 	).Run()
 	if ctx.Err() != nil {
-		return loginURLContinue, fmt.Errorf("interrupted: %w", ctx.Err())
+		return loginURLNone, fmt.Errorf("interrupted: %w", ctx.Err())
 	}
 	if err != nil {
-		return loginURLContinue, nil
+		return loginURLNone, nil
 	}
 
 	result, ok := finalModel.(loginURLActionModel)
 	if !ok || !result.selected {
-		return loginURLContinue, errors.New("login URL prompt exited without an action")
+		return loginURLNone, errors.New("login URL prompt exited without an action")
 	}
 	return result.action, result.err
 }
@@ -583,11 +715,9 @@ func (m loginURLActionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch key.String() {
 	case "enter", "ctrl+j":
-		m.action = loginURLContinue
+		m.action = loginURLOpen
 	case "c", "C":
 		m.action = loginURLCopy
-	case "o", "O":
-		m.action = loginURLOpen
 	case "ctrl+c":
 		m.err = context.Canceled
 	default:
