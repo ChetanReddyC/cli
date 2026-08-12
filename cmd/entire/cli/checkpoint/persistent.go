@@ -741,6 +741,19 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		filePaths.Prompt = "/" + promptPath
 	}
 
+	// The write boundary dedupes as a last line of defense, but duplicates
+	// reaching it mean an upstream producer skipped mergeFilesTouched — warn
+	// so that producer can be found rather than silently masked.
+	filesTouched := NormalizeFilesTouched(opts.FilesTouched)
+	if len(filesTouched) < len(opts.FilesTouched) {
+		logging.Warn(logging.WithComponent(ctx, "checkpoint"),
+			"files_touched reached the write boundary with duplicates",
+			slog.String("session_id", opts.SessionID),
+			slog.Int("reported", len(opts.FilesTouched)),
+			slog.Int("unique", len(filesTouched)),
+		)
+	}
+
 	// Write session-level metadata.json (Metadata with all fields including initial_attribution)
 	sessionMetadata := Metadata{
 		CheckpointID:                opts.CheckpointID,
@@ -751,7 +764,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		CommitSHA:                   opts.CommitSHA,
 		CheckpointsCount:            opts.CheckpointsCount,
 		SaveStepCount:               opts.SaveStepCount,
-		FilesTouched:                NormalizeFilesTouched(opts.FilesTouched),
+		FilesTouched:                filesTouched,
 		Agent:                       opts.Agent,
 		Model:                       opts.Model,
 		TurnID:                      opts.TurnID,
