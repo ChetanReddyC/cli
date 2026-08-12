@@ -387,14 +387,14 @@ func TestUpdateCommand(t *testing.T) {
 			want:           "mise upgrade entire",
 		},
 		{
-			name:           "scoop path",
+			name:           "scoop path post-rename",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return scoopExecutablePath, nil },
-			want:           "scoop update entire/cli",
+			want:           "scoop update entire/entire",
 		},
 		{
-			name:           "scoop path v8 routes through package rename",
-			currentVersion: "8.4.1",
+			name:           "scoop path pre-rename routes through package rename",
+			currentVersion: "0.8.4",
 			execPath:       func() (string, error) { return scoopExecutablePath, nil },
 			want:           "scoop uninstall entire/cli && scoop install entire/entire",
 		},
@@ -444,7 +444,7 @@ func TestUpdateCommandForCurrentBinary(t *testing.T) {
 			currentVersion: "1.2.3",
 			goos:           goosWindows,
 			execPath:       func() (string, error) { return scoopExecutablePath, nil },
-			want:           "scoop update entire/cli",
+			want:           "scoop update entire/entire",
 		},
 		{
 			name:           "windows unknown installer returns releases URL",

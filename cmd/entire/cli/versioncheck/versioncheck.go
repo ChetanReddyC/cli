@@ -343,14 +343,15 @@ func releaseChannel(version string) string {
 	return installChannelStable
 }
 
-// isMajorV8 reports whether currentVersion is a v8.x release. Used to route
-// Scoop users through the v9 package rename (`cli` -> `entire`) on upgrade.
-func isMajorV8(currentVersion string) bool {
+// isPreRenameScoopVersion reports whether currentVersion predates the v0.9
+// Scoop package rename. Those builds are installed as the `cli` package and
+// must be routed across the rename to `entire`; v0.9+ is already on `entire`.
+func isPreRenameScoopVersion(currentVersion string) bool {
 	v := currentVersion
 	if !strings.HasPrefix(v, "v") {
 		v = "v" + v
 	}
-	return semver.IsValid(v) && semver.Major(v) == "v8"
+	return semver.IsValid(v) && semver.Compare(v, "v0.9.0") < 0
 }
 
 func installManagerForCurrentBinary() string {
@@ -411,17 +412,17 @@ func updateCommand(currentVersion string) string {
 	case installManagerMise:
 		return "mise upgrade entire"
 	case installManagerScoop:
-		// The Scoop package was renamed from `cli` to `entire` in v9. A v8
-		// binary is installed as `entire/cli`, so a plain `scoop update
-		// entire/cli` can never cross the rename. Route v8 Scoop users through
-		// the rename: drop the old `cli` package and install the new `entire`
-		// package. `scoop install` auto-refreshes the bucket when it is >3h
-		// stale (is_scoop_outdated), so the new `entire` manifest lands without
-		// an explicit refresh step.
-		if isMajorV8(currentVersion) {
+		// The Scoop package was renamed from `cli` to `entire` in v0.9.
+		// Pre-rename builds are installed as `entire/cli`, so a plain `scoop
+		// update entire/cli` can never cross the rename. Route those users
+		// through the rename: drop the old `cli` package and install the new
+		// `entire` package. `scoop install` auto-refreshes the bucket when it
+		// is >3h stale (is_scoop_outdated), so the new `entire` manifest lands
+		// without an explicit refresh step. v0.9+ is already on `entire`.
+		if isPreRenameScoopVersion(currentVersion) {
 			return "scoop uninstall entire/cli && scoop install entire/entire"
 		}
-		return "scoop update entire/cli"
+		return "scoop update entire/entire"
 	}
 
 	if releaseChannel(currentVersion) == installChannelNightly {
