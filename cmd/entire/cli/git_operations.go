@@ -391,10 +391,12 @@ func FetchMetadataTreeOnly(ctx context.Context) error {
 	return fetchMetadataFromReadRemotes(ctx, false /* noFilter */)
 }
 
-// fetchMetadataFromReadRemotes fetches the metadata branch from the checkpoint
-// read-candidate remotes in order: a candidate that fails (transport error, or
-// the branch missing on that remote) advances to the next candidate (logged at
-// debug); when every candidate fails, the FIRST candidate's error is surfaced.
+// fetchMetadataFromReadRemotes fetches the metadata branch from every checkpoint
+// read candidate. A successful branch fetch does not prove that branch contains
+// the checkpoint a caller will request, so stopping at the first existing branch
+// would let partial elected-remote history hide legacy origin data. Candidate
+// failures are logged; the operation succeeds when any candidate was fetched,
+// and surfaces the first error only when every candidate fails.
 //
 // Local-ref advancement is confined to the elected checkpoint sync remote: a
 // successful fetch from the legacy origin tier only updates origin's tracking
@@ -412,19 +414,23 @@ func fetchMetadataFromReadRemotes(ctx context.Context, noFilter bool) error {
 	}
 
 	var firstErr error
+	fetched := false
 	for i, remoteName := range candidates {
 		err := fetchMetadataFromRemote(ctx, remoteName, noFilter, resolution.ElectedName != "" && remoteName == resolution.ElectedName)
 		if err == nil {
-			return nil
+			fetched = true
+			continue
 		}
 		if firstErr == nil {
 			firstErr = err
 		}
-		if i+1 < len(candidates) {
-			logging.Debug(ctx, "metadata branch fetch: read candidate failed; trying next candidate",
-				slog.String("candidate", remoteName),
-				slog.String("error", err.Error()))
-		}
+		logging.Debug(ctx, "metadata branch fetch: read candidate failed",
+			slog.String("candidate", remoteName),
+			slog.Int("candidate_index", i),
+			slog.String("error", err.Error()))
+	}
+	if fetched {
+		return nil
 	}
 	return firstErr
 }

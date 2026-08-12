@@ -1353,13 +1353,7 @@ func (s *GitStore) Read(ctx context.Context, checkpointID id.CheckpointID) (*Che
 		return nil, err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	ft, err := s.getFetchingTree(ctx)
-	if err != nil {
-		return nil, nil //nolint:nilnil,nilerr // No sessions branch means no checkpoint exists
-	}
-
-	checkpointPath := checkpointID.Path()
-	checkpointTree, err := ft.Tree(checkpointPath)
+	checkpointTree, err := s.getCheckpointFetchingTree(ctx, checkpointID)
 	if err != nil {
 		return nil, nil //nolint:nilnil,nilerr // Checkpoint directory not found
 	}
@@ -1401,12 +1395,7 @@ func (s *GitStore) getSessionTree(ctx context.Context, checkpointID id.Checkpoin
 		return nil, err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	ft, err := s.getFetchingTree(ctx)
-	if err != nil {
-		return nil, ErrCheckpointNotFound
-	}
-
-	checkpointTree, err := ft.Tree(checkpointID.Path())
+	checkpointTree, err := s.getCheckpointFetchingTree(ctx, checkpointID)
 	if err != nil {
 		return nil, ErrCheckpointNotFound
 	}
@@ -1596,23 +1585,30 @@ func (s *GitStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		return nil, err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	tree, err := s.getSessionsBranchTree()
+	trees, err := s.getSessionsBranchTrees()
 	if err != nil {
 		return []CheckpointInfo{}, nil //nolint:nilerr // No sessions branch means empty list
 	}
 
 	var checkpoints []CheckpointInfo
+	seen := make(map[id.CheckpointID]struct{})
 
 	// Scan sharded structure: <2-char-prefix>/<remaining-id>/metadata.json
-	_ = WalkCheckpointShards(ctx, s.repo, tree, func(checkpointID id.CheckpointID, cpTreeHash plumbing.Hash) error { //nolint:errcheck // callback never returns errors
-		checkpointTree, cpTreeErr := s.repo.TreeObject(cpTreeHash)
-		if cpTreeErr != nil {
-			return nil //nolint:nilerr // skip unreadable entries, continue walking
-		}
+	for _, tree := range trees {
+		_ = WalkCheckpointShards(ctx, s.repo, tree, func(checkpointID id.CheckpointID, cpTreeHash plumbing.Hash) error { //nolint:errcheck // callback never returns errors
+			if _, ok := seen[checkpointID]; ok {
+				return nil
+			}
+			checkpointTree, cpTreeErr := s.repo.TreeObject(cpTreeHash)
+			if cpTreeErr != nil {
+				return nil //nolint:nilerr // skip unreadable entries, continue walking
+			}
 
-		checkpoints = append(checkpoints, readCommittedInfoFromCheckpointTree(checkpointID, checkpointTree))
-		return nil
-	})
+			seen[checkpointID] = struct{}{}
+			checkpoints = append(checkpoints, readCommittedInfoFromCheckpointTree(checkpointID, checkpointTree))
+			return nil
+		})
+	}
 
 	sortCheckpointInfosByRecency(checkpoints) // most recent first
 
@@ -2184,15 +2180,23 @@ func (s *GitStore) maybeMergeVercelConfig(ctx context.Context, rootTreeHash plum
 	return mergedTreeHash, nil
 }
 
-// getFetchingTree returns a FetchingTree for the metadata branch.
-// If a blob fetcher is configured on the store, File() calls on the returned
-// tree will automatically fetch missing blobs from the remote.
-func (s *GitStore) getFetchingTree(ctx context.Context) (*FetchingTree, error) {
-	tree, err := s.getSessionsBranchTree()
+// getCheckpointFetchingTree resolves a checkpoint against each available
+// metadata tree in precedence order. Selecting by checkpoint path—not merely
+// by ref existence—lets a local orphan or partial elected-remote history fall
+// through to a legacy remote that still contains the requested checkpoint.
+func (s *GitStore) getCheckpointFetchingTree(ctx context.Context, checkpointID id.CheckpointID) (*FetchingTree, error) {
+	trees, err := s.getSessionsBranchTrees()
 	if err != nil {
 		return nil, err
 	}
-	return NewFetchingTree(ctx, tree, s.repo.Storer, s.blobFetcher), nil
+	for _, tree := range trees {
+		fetchingTree := NewFetchingTree(ctx, tree, s.repo.Storer, s.blobFetcher)
+		checkpointTree, treeErr := fetchingTree.Tree(checkpointID.Path())
+		if treeErr == nil {
+			return checkpointTree, nil
+		}
+	}
+	return nil, ErrCheckpointNotFound
 }
 
 // getSessionsBranchTree returns the tree object at refs.Read. Falls back to
@@ -2201,43 +2205,66 @@ func (s *GitStore) getFetchingTree(ctx context.Context) (*FetchingTree, error) {
 // ReadBootstrappableFromRemote is true. The fallback is a pure read — it
 // never writes local refs.
 func (s *GitStore) getSessionsBranchTree() (*object.Tree, error) {
-	ref, err := s.repo.Reference(s.refs.Read, true)
+	trees, err := s.getSessionsBranchTrees()
 	if err != nil {
-		if !s.refs.ReadBootstrappableFromRemote() {
-			return nil, fmt.Errorf("sessions ref %s not found: %w", s.refs.Read, err)
-		}
+		return nil, err
+	}
+	return trees[0], nil
+}
+
+// getSessionsBranchTrees returns every available committed metadata tree in
+// read precedence: local first, then the configured remote candidates. Trees
+// pointing at the same commit are deduplicated.
+func (s *GitStore) getSessionsBranchTrees() ([]*object.Tree, error) {
+	refNames := []plumbing.ReferenceName{s.refs.Read}
+	if s.refs.ReadBootstrappableFromRemote() {
 		remotes := s.readRemotes
 		if len(remotes) == 0 {
 			remotes = []string{"origin"}
 		}
-		var firstErr error
 		for _, remoteName := range remotes {
-			remoteRefName := plumbing.NewRemoteReferenceName(remoteName, s.refs.Primary.Short())
-			candidateRef, refErr := s.repo.Reference(remoteRefName, true)
-			if refErr == nil {
-				ref = candidateRef
-				break
-			}
+			refNames = append(refNames, plumbing.NewRemoteReferenceName(remoteName, s.refs.Primary.Short()))
+		}
+	}
+
+	trees := make([]*object.Tree, 0, len(refNames))
+	seen := make(map[plumbing.Hash]struct{}, len(refNames))
+	var firstErr error
+	for _, refName := range refNames {
+		ref, err := s.repo.Reference(refName, true)
+		if err != nil {
 			if firstErr == nil {
-				firstErr = refErr
+				firstErr = err
 			}
+			continue
 		}
-		if ref == nil {
-			return nil, fmt.Errorf("sessions branch not found: %w", firstErr)
+		if _, ok := seen[ref.Hash()]; ok {
+			continue
 		}
+		commit, err := s.repo.CommitObject(ref.Hash())
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to get commit object for %s: %w", refName, err)
+			}
+			continue
+		}
+		tree, err := commit.Tree()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to get commit tree for %s: %w", refName, err)
+			}
+			continue
+		}
+		seen[ref.Hash()] = struct{}{}
+		trees = append(trees, tree)
 	}
-
-	commit, err := s.repo.CommitObject(ref.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit object: %w", err)
+	if len(trees) == 0 {
+		if !s.refs.ReadBootstrappableFromRemote() {
+			return nil, fmt.Errorf("sessions ref %s not found: %w", s.refs.Read, firstErr)
+		}
+		return nil, fmt.Errorf("sessions branch not found: %w", firstErr)
 	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit tree: %w", err)
-	}
-
-	return tree, nil
+	return trees, nil
 }
 
 // CreateBlobFromContent creates a blob object from in-memory content.

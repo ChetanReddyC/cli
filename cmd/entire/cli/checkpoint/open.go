@@ -39,9 +39,10 @@ type OpenOptions struct {
 	// remote first, then the legacy origin tier). The checkpoint package
 	// cannot resolve the election itself, so cli/strategy callers inject it
 	// here (strategy.CheckpointReadRemotes). The git-branch store's committed
-	// reads fall back to these remotes' tracking refs when refs.Read is
-	// missing locally — a pure read; local refs are never written from the
-	// chain. nil keeps the legacy origin-only fallback.
+	// reads consult these remotes' tracking refs after the local tree, selecting
+	// by requested checkpoint rather than branch existence. This is a pure read;
+	// local refs are never written from the chain. nil keeps the legacy
+	// origin-only fallback.
 	ReadRemotes []string
 }
 

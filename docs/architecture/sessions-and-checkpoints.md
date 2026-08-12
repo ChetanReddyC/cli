@@ -278,9 +278,11 @@ callers that need both) resolves the chain, failing *open* to `[origin]` when
 the election fails — failing reads closed would only prevent *finding* data.
 Every checkpoint-data read iterates the chain per operation (metadata-branch
 fetches, tracking-ref readers, per-checkpoint ref fetches, blob hydration,
-checkpoint-policy reads): candidates are tried in order, a candidate lacking
-the data and a transport failure both advance to the next, and when all fail
-the first candidate's error is surfaced. Local-ref advancement stays
+checkpoint-policy reads). Metadata-branch fetches refresh every candidate's
+tracking ref because branch existence alone does not prove that branch contains
+the requested checkpoint; they succeed when any candidate fetch succeeds.
+Other reads try candidates in order, advancing on missing data or transport
+failure and surfacing the first candidate's error when all fail. Local-ref advancement stays
 **elected-remote-only** — `EnsurePrimaryRef`, the metadata-fetch advance step,
 `promoteRemoteTrackingPrimary`, and the local checkpoint-policy ref update
 never act on the legacy tier, keyed on the explicit election result rather
