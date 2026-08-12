@@ -121,32 +121,42 @@ one command's current flags; `--json` emits structured output. It is the single
 source of truth the first-turn context injection and the `--agent-help-skill`
 skill point agents at, instead of enumerating a surface that goes stale.
 
-The bare listing is grouped by **who should initiate the command**, not
-alphabetically, because the question an agent has when reading it is "may I run
-this unprompted?" — read-only (safe on its own) · task-driven (writes data or
-spends tokens) · user-owned (setup, auth, admin, destructive, or expensive
-enough that starting one uninvited is the user's call — `review` and
-`investigate` spawn paid multi-agent runs and live here). The classification
-lives in one reviewable table, `agentHelpAudiences` in `agent_help_cmd.go`, keyed
-by command path (`status`, `checkpoint list`), and is mirrored into `--json` as an
-`audience` field so structured consumers get the same guidance.
+The bare listing shows a **curated subset**, not the whole tree. An exhaustive
+listing answers "what exists?", which is not the question an agent mid-task has,
+and past a certain length it stops being read at all — an earlier revision that
+listed everything grouped by audience reached 45 lines. Omitted commands stay
+reachable (`agent-help <command>` resolves them, and the footer names them in a
+compact index), so curation trades default visibility, never availability.
 
-Three rules matter when editing it:
+`agentHelpClassification` in `agent_help_cmd.go` is the one reviewable table,
+keyed by command path (`status`, `checkpoint list`). Each entry carries two
+**independent** facts — fusing them into a single axis is what forced the
+listing to spend a line per (command × audience) cell:
 
-- A group counts as read-only **only if every advertised subcommand is**.
-  `checkpoint` and `session` read as read-only but are not (`checkpoint policy`
-  updates policy; `session` carries adopt/attach/resume/stop), so both are
-  task-driven.
-- Because demoting those groups would hide the inspection commands agents most
-  want, their read-only subcommands are classified individually and listed
-  under read-only (`checkpoint list`, `session list`, …). The groups that do
-  this are declared in `agentHelpBreakoutGroups` rather than inferred, and must
-  classify **every** child.
-- An unclassified command defaults to user-owned, and
-  `TestAgentHelpAudiences_CoverEveryAdvertisedCommand` fails CI so neither a new
-  top-level command nor a new subcommand of a breakout group can ship
-  unclassified. `--json` omits `audience` where the table makes no claim rather
-  than emitting that default.
+- `audience` — may an agent run this unprompted? read-only · task-driven
+  (writes data or spends tokens) · user-owned (setup, auth, admin, destructive,
+  or expensive enough that starting one uninvited is the user's call — `review`
+  and `investigate` spawn paid multi-agent runs and live here). Applies at every
+  depth; mirrored into `--json` as `audience`.
+- `listed` — does it appear in the bare listing? Top-level commands only.
+
+Rules when editing it:
+
+- A group's audience is a claim about **all** its subcommands, so a read-only
+  group may not contain one that writes. `checkpoint` and `session` read as
+  read-only but are not (`checkpoint policy` updates policy; `session` carries
+  adopt/attach/resume/stop), so both are task-driven.
+- A mixed group states its exceptions **on one line**, naming only the minority
+  side (`read-only except: policy`, or `read-only: show, list, … — others
+  write`). That is what keeps a group at one line however many subcommands it
+  grows. Both the text drill-down and `--json` carry this, so neither mode hides
+  which subcommands write.
+- An unclassified command defaults to user-owned and unlisted.
+  `TestAgentHelpClassification_CoversEveryAdvertisedCommand` fails CI so neither
+  a new top-level command nor a new child of a *listed* group can ship
+  unclassified — an unclassified child would be silently dropped from its
+  group's exception note. `--json` omits `audience` where the table makes no
+  claim rather than emitting the default.
 
 Keep per-task command recommendations OUT of the first-turn injection and in
 `agent-help`, which is pulled on demand. A census of 963 agent transcripts found
