@@ -14,12 +14,12 @@ func TestEntireTrailContextInjection_PointsAtAgentHelpWithRepo(t *testing.T) {
 
 	got := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme", Repo: "app"})
 
-	for _, want := range []string{"entire agent-help", "gh/acme/app", "never ask"} {
+	for _, want := range []string{"entire agent-help", "`entire search`", "gh/acme/app", "never ask"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("injection missing %q:\n%s", want, got)
 		}
 	}
-	for _, unwanted := range []string{"--repo", "view, create, update, or watch"} {
+	for _, unwanted := range []string{"--repo", "checkpoint search", "view, create, update, or watch"} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("injection should not enumerate the command surface (%q):\n%s", unwanted, got)
 		}

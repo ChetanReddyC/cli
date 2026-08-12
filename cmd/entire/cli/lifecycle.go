@@ -420,7 +420,7 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 // the full flag/subcommand surface — fetched on demand so that surface never goes
 // stale here as it grows — and adds only a small, stable behavioral invariant an
 // agent must know even if it never drills in: commits auto-capture checkpoints,
-// the two stable query anchors (`why`, `checkpoint search`) for recovering intent
+// the two stable query anchors (`why`, `search`) for recovering intent
 // before edits, and that setup/destructive commands belong to the user. It also
 // names the auto-detected repo (from the already-loaded session scope, no IO) and
 // the standing rule that the agent is inside the repo and must never ask the user
@@ -433,7 +433,7 @@ func entireTrailContextInjection(scope trailEnablementScope) string {
 	}
 	var b strings.Builder
 	b.WriteString("Entire is enabled for this repo. Run `entire agent-help` to see what entire does and which subcommand to use, then `entire agent-help <command>` for that command's exact, current flags. ")
-	b.WriteString("Commits automatically capture the AI session as a checkpoint, so never create checkpoints by hand — just commit normally. Before large edits, `entire why <file>:<line>` and `entire checkpoint search` recover the intent behind existing code. Leave setup and destructive commands (enable, disable, clean, rewind, auth) to the user. ")
+	b.WriteString("Commits automatically capture the AI session as a checkpoint, so never create checkpoints by hand — just commit normally. Before large edits, `entire why <file>:<line>` and `entire search` recover the intent behind existing code. Leave setup and destructive commands (enable, disable, clean, rewind, auth) to the user. ")
 	// Mirror agentHelpRepoBlock's defense-in-depth: this string is injected raw
 	// into the agent's model context (no escaping), so a repo key carrying control
 	// characters (e.g. an <sessionID>.trail-scope.json cache written by a pre-fix
