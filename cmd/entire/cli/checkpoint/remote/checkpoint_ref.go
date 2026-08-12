@@ -39,11 +39,25 @@ func CheckpointFetchTarget(ctx context.Context) string {
 }
 
 // checkpointFetchTarget is CheckpointFetchTarget plus whether the target is
-// authoritative for checkpoint refs (see fetchURLAuthoritative). The bare
-// "origin" fallbacks are non-authoritative: they exist so a fetch can still
-// be attempted, not to certify where checkpoint refs live.
+// authoritative for checkpoint refs (see fetchURLAuthoritative). A resolved
+// origin is also non-authoritative when checkpoint_push_remote elects another
+// remote: it may still be probed as a fallback, but cannot certify absence.
 func checkpointFetchTarget(ctx context.Context) (string, bool) {
-	return checkpointFetchTargetFrom(ctx, "")
+	target, authoritative := checkpointFetchTargetFrom(ctx, "")
+	if !authoritative {
+		return target, false
+	}
+
+	s, err := settings.Load(ctx)
+	if err != nil {
+		return target, false
+	}
+	if s.HasCheckpointRemoteKey() {
+		return target, s.GetCheckpointRemote() != nil
+	}
+
+	pushRemote := s.GetCheckpointPushRemote()
+	return target, pushRemote == "" || pushRemote == originRemote
 }
 
 func checkpointFetchTargetFrom(ctx context.Context, leadRemote string) (string, bool) {
