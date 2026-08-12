@@ -84,7 +84,7 @@ func MaybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVer
 
 	if os.Getenv(envKillSwitch) != "" || !interactive.CanPromptInteractively() || !isTerminalOut(w) {
 		printNotification(w, currentVersion, latestVersion)
-		fmt.Fprintf(w, "To update, run:\n%s\n", indentCommand(cmdStr))
+		fmt.Fprintf(w, "To update, run:\n  %s\n", cmdStr)
 		return autoUpdateActionSkip
 	}
 
@@ -96,9 +96,9 @@ func MaybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVer
 
 	switch action {
 	case autoUpdateActionUpdate:
-		fmt.Fprintf(w, "\nUpdating Entire CLI:\n%s\n", indentCommand(cmdStr))
+		fmt.Fprintf(w, "\nUpdating Entire CLI: %s\n", cmdStr)
 		if err := runInstaller(ctx, cmdStr); err != nil {
-			fmt.Fprintf(w, "Update failed: %v\nTry again later running:\n%s\n", err, indentCommand(cmdStr))
+			fmt.Fprintf(w, "Update failed: %v\nTry again later running:\n  %s\n", err, cmdStr)
 			return autoUpdateActionUpdate
 		}
 		fmt.Fprintln(w, "Update complete. Re-run entire to use the new version.")
@@ -137,8 +137,10 @@ func realChooseUpdate(ctx context.Context, currentVersion, latestVersion, cmdStr
 	return action, nil
 }
 
-// indentCommand indents each line of a (possibly multi-line) installer command
-// so it reads as a block under a "run:" heading.
+// indentCommand indents each line of a multi-line installer command so it reads
+// as a block under a "run:" heading. Only the Windows Scoop package-rename
+// migration is multi-line; every other installer is a single command printed
+// inline, so this is used only on the Windows print-only path.
 func indentCommand(cmdStr string) string {
 	return "  " + strings.ReplaceAll(cmdStr, "\n", "\n  ")
 }

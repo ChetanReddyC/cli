@@ -307,10 +307,13 @@ type installerCase struct {
 }
 
 func nonWindowsAutoInstallers() []installerCase {
+	// Scoop is intentionally absent: it is a Windows-only installer, and on
+	// Windows the update is print-only (never auto-run). Its command building is
+	// covered by TestUpdateCommand and its print-only path by
+	// TestMaybeAutoUpdate_WindowsNeverAutoRuns.
 	return []installerCase{
 		{name: "brew", setup: useBrewExecutable, wantCmd: brewUpgradeCmd},
 		{name: "mise", setup: useMiseExecutable, wantCmd: "mise upgrade entire"},
-		{name: "scoop", setup: useScoopExecutable, wantCmd: "scoop install entire/entire\nscoop uninstall entire/cli\nscoop reset entire"},
 		{name: "unknown_curl_bash", setup: useUnknownExecutable, wantCmd: "curl -fsSL https://entire.io/install.sh | bash"},
 	}
 }
