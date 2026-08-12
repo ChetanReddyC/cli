@@ -396,7 +396,7 @@ func TestUpdateCommand(t *testing.T) {
 			name:           "scoop path pre-rename routes through package rename",
 			currentVersion: "0.8.4",
 			execPath:       func() (string, error) { return scoopExecutablePath, nil },
-			want:           "scoop uninstall entire/cli && scoop install entire/entire",
+			want:           "scoop uninstall entire/cli; scoop install entire/entire",
 		},
 		{
 			name:           "unknown path stable falls back to stable curl command",

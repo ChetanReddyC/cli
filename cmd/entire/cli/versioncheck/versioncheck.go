@@ -420,7 +420,7 @@ func updateCommand(currentVersion string) string {
 		// is >3h stale (is_scoop_outdated), so the new `entire` manifest lands
 		// without an explicit refresh step. v0.9+ is already on `entire`.
 		if isPreRenameScoopVersion(currentVersion) {
-			return "scoop uninstall entire/cli && scoop install entire/entire"
+			return "scoop uninstall entire/cli; scoop install entire/entire"
 		}
 		return "scoop update entire/entire"
 	}
