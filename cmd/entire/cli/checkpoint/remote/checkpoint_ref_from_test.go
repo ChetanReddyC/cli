@@ -177,12 +177,17 @@ func TestFetchCheckpointRefFrom_EmptyChainWithRemotesIsNotAbsence(t *testing.T) 
 // ONLY on the first candidate (upstream): if the chain were consulted the
 // fetch would succeed, so the surfaced refusal error proves the bypass.
 func TestFetchCheckpointRefFrom_DedicatedCheckpointRemoteBypassesCandidates(t *testing.T) {
-	workDir, ref, _, _ := candidatesFixture(t, true, false)
-	testutil.WriteFile(t, workDir, ".entire/settings.json",
-		`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "bogusforge", "repo": "acme/checkpoints"}}}`)
+	settings := []string{
+		`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "bogusforge", "repo": "acme/checkpoints"}}}`,
+		`{"enabled": true, "strategy_options": {"checkpoint_remote": null}}`,
+	}
+	for _, contents := range settings {
+		workDir, ref, _, _ := candidatesFixture(t, true, false)
+		testutil.WriteFile(t, workDir, ".entire/settings.json", contents)
 
-	err := FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"})
-	require.Error(t, err)
-	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
-		"a dedicated checkpoint_remote must keep the single-target semantics")
+		err := FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"})
+		require.Error(t, err)
+		require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+			"a dedicated checkpoint_remote key must keep the single-target semantics even when malformed")
+	}
 }

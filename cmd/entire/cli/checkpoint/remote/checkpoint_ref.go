@@ -174,7 +174,7 @@ func FetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, rea
 
 func fetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, readRemotes []string, fetchTimeout time.Duration) error {
 	s, loadErr := settings.Load(ctx)
-	if loadErr != nil || s.GetCheckpointRemote() != nil {
+	if loadErr != nil || s.HasCheckpointRemoteKey() {
 		return FetchCheckpointRef(ctx, ref)
 	}
 
