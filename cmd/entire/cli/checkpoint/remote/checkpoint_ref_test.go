@@ -113,17 +113,27 @@ func TestFetchCheckpointRefFrom_FailureSemantics(t *testing.T) {
 			"absence is not proven when any read candidate fails")
 	})
 
-	t.Run("elected transport failure cannot seed from legacy origin", func(t *testing.T) {
-		workDir, ref := checkpointRefFixture(t, true)
-		out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "add", "upstream", workDir+"/nonexistent-remote").CombinedOutput()
-		require.NoError(t, err, "git remote add upstream: %s", out)
+	for _, tc := range []struct {
+		name              string
+		addBrokenUpstream bool
+	}{
+		{name: "elected transport failure cannot seed from legacy origin", addBrokenUpstream: true},
+		{name: "elected resolution failure cannot substitute legacy origin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir, ref := checkpointRefFixture(t, true)
+			if tc.addBrokenUpstream {
+				out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "add", "upstream", workDir+"/nonexistent-remote").CombinedOutput()
+				require.NoError(t, err, "git remote add upstream: %s", out)
+			}
 
-		err = FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"})
-		require.Error(t, err)
-		require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
-		out, err = exec.CommandContext(t.Context(), "git", "-C", workDir, "show-ref", "--verify", ref.String()).CombinedOutput()
-		require.Error(t, err, "legacy origin must not seed the canonical ref after an elected transport failure: %s", out)
-	})
+			err := FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"})
+			require.Error(t, err)
+			require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+			out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "show-ref", "--verify", ref.String()).CombinedOutput()
+			require.Error(t, err, "legacy origin must not seed the canonical ref after an elected remote failure: %s", out)
+		})
+	}
 }
 
 // TestFetchCheckpointRef_NoRemoteAtAllIsAbsence: a fully local repository —

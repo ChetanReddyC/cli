@@ -145,7 +145,12 @@ func FetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, rea
 	for i, remoteName := range readRemotes {
 		candidateCtx, cancel := context.WithTimeout(ctx, readFetchTimeout)
 		target, authoritative := checkpointFetchTargetFrom(candidateCtx, remoteName)
-		err := probeAndFetchCheckpointRef(candidateCtx, ref, target, authoritative)
+		var err error
+		if !authoritative {
+			err = fmt.Errorf("resolve checkpoint read candidate %q: resolved target %s is not authoritative", remoteName, RedactURL(target))
+		} else {
+			err = probeAndFetchCheckpointRef(candidateCtx, ref, target, true)
+		}
 		cancel()
 		if err == nil {
 			return nil
