@@ -518,6 +518,8 @@ func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, 
 
 	s, settingsErr := settings.Load(settings.WithWorktreeRoot(ctx, worktreeRoot))
 	if settingsErr != nil {
+		logging.Warn(ctx, "checkpoint ref discovery: settings unavailable; leaving list local-only",
+			slog.String("error", settingsErr.Error()))
 		return nil, nil
 	}
 	if s.GetCheckpointRemote() != nil {
