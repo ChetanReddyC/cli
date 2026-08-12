@@ -71,6 +71,17 @@ func MaybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVer
 
 	cmdStr := updateCommand(currentVersion)
 
+	// Windows can't replace a running executable: the live entire.exe holds its
+	// own shim open, so scoop can't relink or uninstall it mid-run (install
+	// leaves the shim on the old package, and uninstall fails with "still
+	// running"). Never auto-run on Windows — print the command(s) to run once
+	// entire has exited.
+	if goos == goosWindows {
+		printNotification(w, currentVersion, latestVersion)
+		fmt.Fprintf(w, "To update, run the following when entire is not running:\n%s\n", indentCommand(cmdStr))
+		return autoUpdateActionSkip
+	}
+
 	if os.Getenv(envKillSwitch) != "" || !interactive.CanPromptInteractively() || !isTerminalOut(w) {
 		printNotification(w, currentVersion, latestVersion)
 		fmt.Fprintf(w, "To update, run:\n%s\n", indentCommand(cmdStr))
@@ -133,32 +144,22 @@ func indentCommand(cmdStr string) string {
 }
 
 // realRunInstaller shells out to the installer command, streaming stdin/stdout/stderr
-// so password prompts and progress output reach the user.
-//
-// cmdStr may hold several newline-separated commands (e.g. the Scoop package
-// rename: install, uninstall, reset). Each line is run as its own process and
-// a failure stops the sequence, so a later step never runs after an earlier one
-// failed (the uninstall must not run if the install did not succeed). Keeping
-// the steps as separate lines — rather than a `;`/`&&` shell one-liner — lets
-// the same string be pasted into any shell the user happens to be in.
+// so password prompts and progress output reach the user. Only ever runs
+// single-command installers (brew, mise, curl): the multi-line Scoop rename is
+// Windows-only and Windows is print-only (see MaybeAutoUpdate), so it never
+// reaches the runner.
 func realRunInstaller(ctx context.Context, cmdStr string) error {
-	for line := range strings.SplitSeq(cmdStr, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var c *exec.Cmd
-		if runtime.GOOS == goosWindows {
-			c = exec.CommandContext(ctx, "cmd", "/C", line)
-		} else {
-			c = exec.CommandContext(ctx, "sh", "-c", line)
-		}
-		c.Stdin = os.Stdin
-		c.Stdout = os.Stdout
-		c.Stderr = os.Stderr
-		if err := c.Run(); err != nil {
-			return fmt.Errorf("installer exited: %w", err)
-		}
+	var c *exec.Cmd
+	if runtime.GOOS == goosWindows {
+		c = exec.CommandContext(ctx, "cmd", "/C", cmdStr)
+	} else {
+		c = exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	}
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("installer exited: %w", err)
 	}
 	return nil
 }

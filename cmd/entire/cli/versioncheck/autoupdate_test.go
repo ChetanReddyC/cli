@@ -5,9 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -213,10 +210,10 @@ func TestMaybeAutoUpdate_WindowsUnknownInstallerNoAutoRun(t *testing.T) {
 	}
 }
 
-// TestMaybeAutoUpdate_WindowsScoopStillAutoRuns verifies that a Windows
-// scoop install still takes the interactive path — only unknown install
-// managers are blocked on Windows.
-func TestMaybeAutoUpdate_WindowsScoopStillAutoRuns(t *testing.T) {
+// TestMaybeAutoUpdate_WindowsNeverAutoRuns verifies that on Windows the update
+// is never auto-run — a running entire.exe can't replace its own shim — so the
+// migration commands are printed for the user to run once entire has exited.
+func TestMaybeAutoUpdate_WindowsNeverAutoRuns(t *testing.T) {
 	f := newAutoUpdateFixture(t)
 	useScoopExecutable(t)
 
@@ -227,12 +224,16 @@ func TestMaybeAutoUpdate_WindowsScoopStillAutoRuns(t *testing.T) {
 	var buf bytes.Buffer
 	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
-	if f.installCalls != 1 {
-		t.Fatalf("scoop install should auto-run on Windows; calls=%d", f.installCalls)
+	if f.installCalls != 0 {
+		t.Fatalf("installer must not auto-run on Windows; calls=%d", f.installCalls)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "when entire is not running") {
+		t.Errorf("missing Windows manual-run hint: %q", out)
 	}
 	wantScoopCmd := "scoop install entire/entire\nscoop uninstall entire/cli\nscoop reset entire"
-	if f.lastCommand != wantScoopCmd {
-		t.Errorf("got %q, want %q", f.lastCommand, wantScoopCmd)
+	if !strings.Contains(out, indentCommand(wantScoopCmd)) {
+		t.Errorf("manual hint missing migration commands %q: %q", wantScoopCmd, out)
 	}
 }
 
@@ -406,37 +407,5 @@ func TestMaybeAutoUpdate_AllInstallers_UserSkips(t *testing.T) {
 				t.Errorf("action = %q, want %q", action, autoUpdateActionSkip)
 			}
 		})
-	}
-}
-
-// TestRealRunInstaller_SequentialStopsOnFailure verifies the multi-line
-// installer command (e.g. the Scoop package rename) runs each line as its own
-// process and stops at the first failure — so a later step never runs after an
-// earlier one failed.
-func TestRealRunInstaller_SequentialStopsOnFailure(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == goosWindows {
-		t.Skip("uses sh; POSIX only")
-	}
-	dir := t.TempDir()
-
-	// First line fails; the second must not run, so its marker must not exist.
-	marker := filepath.Join(dir, "should-not-exist")
-	if err := realRunInstaller(context.Background(), "false\ntouch "+marker); err == nil {
-		t.Fatal("expected error when the first command fails")
-	}
-	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("second command ran after the first failed")
-	}
-
-	// All lines succeed in order; every marker exists afterward.
-	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
-	if err := realRunInstaller(context.Background(), "touch "+a+"\ntouch "+b); err != nil {
-		t.Fatalf("sequential success returned error: %v", err)
-	}
-	for _, f := range []string{a, b} {
-		if _, err := os.Stat(f); err != nil {
-			t.Errorf("expected %q to be created", f)
-		}
 	}
 }
