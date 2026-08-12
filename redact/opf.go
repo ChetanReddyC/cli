@@ -260,7 +260,7 @@ func handleOPFFailure(ctx context.Context, cfg *OPFConfig, err error) {
 	if !opfBreakerTripped.CompareAndSwap(false, true) {
 		return
 	}
-	slog.WarnContext(ctx, "OpenAI Privacy Filter call failed; disabling for the rest of this process",
+	logWarnContext(ctx, "OpenAI Privacy Filter call failed; disabling for the rest of this process",
 		slog.String("component", "redaction"),
 		slog.String("command", cfg.Command),
 		slog.String("error", err.Error()),

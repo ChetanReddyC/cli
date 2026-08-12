@@ -147,3 +147,69 @@ func writeTestSessionStateForLogging(t *testing.T, repoDir, sessionID string) {
 		t.Fatalf("failed to write session state file: %v", err)
 	}
 }
+
+// TestRedactionDiagnostics_ReachEntireLog is the regression test for the
+// support report where a user could not tell whether their custom redaction
+// rules were loaded: the redact package logged through the process-default
+// slog logger (bare stderr — swallowed in hook contexts) because nothing
+// wires it to the CLI's .entire/logs/ logger, and the happy path logged
+// nothing at all. After the fix, a hook invocation must land two things in
+// .entire/logs/entire.log:
+//
+//  1. a component=redaction warning for a broken rule (here: an inline
+//     custom_redactions pattern that does not compile), and
+//  2. a load-time "redaction configured" summary line with rule counts,
+//     so "are my rules active?" is answerable from the log alone.
+func TestRedactionDiagnostics_ReachEntireLog(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+
+	env.PatchSettings(map[string]any{
+		"redaction": map[string]any{
+			"custom_redactions": map[string]any{
+				"good-rule":   "GOODRULE_[A-Z0-9]{4}",
+				"broken-rule": "BROKEN_[unclosed",
+			},
+		},
+	})
+	redactorsDir := filepath.Join(env.RepoDir, ".entire", "redactors")
+	if err := os.MkdirAll(redactorsDir, 0o755); err != nil {
+		t.Fatalf("mkdir redactors: %v", err)
+	}
+	packYAML := `name: acme
+version: 1.0.0
+rules:
+  - id: acme-token
+    regex: 'ACME_[A-Z0-9]{6}'
+`
+	if err := os.WriteFile(filepath.Join(redactorsDir, "acme.yaml"), []byte(packYAML), 0o644); err != nil {
+		t.Fatalf("write pack: %v", err)
+	}
+
+	// Any hook invocation initializes logging and configures redaction.
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("UserPromptSubmit: %v", err)
+	}
+
+	logPath := filepath.Join(env.RepoDir, ".entire", "logs", "entire.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read entire.log: %v", err)
+	}
+	log := string(data)
+
+	if !strings.Contains(log, "skipping invalid custom_redactions pattern") {
+		t.Errorf("entire.log missing the compile-failure warning for the broken inline pattern")
+	}
+	if !strings.Contains(log, `"component":"redaction"`) {
+		t.Errorf("entire.log has no component=redaction lines")
+	}
+	if !strings.Contains(log, "redaction configured") {
+		t.Errorf("entire.log missing the load-time 'redaction configured' summary line")
+	}
+	if t.Failed() {
+		t.Logf("entire.log contents:\n%s", log)
+	}
+}

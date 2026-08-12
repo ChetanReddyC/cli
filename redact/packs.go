@@ -191,7 +191,7 @@ func LoadPacks(dir string) ([]*Pack, error) {
 				}
 				return fmt.Errorf("read redactors dir %s: %w", dir, err)
 			}
-			slog.Warn("skipping unreadable redactor pack path",
+			logWarn("skipping unreadable redactor pack path",
 				componentAttr,
 				slog.String("path", path),
 				slog.String("error", err.Error()))
@@ -201,7 +201,7 @@ func LoadPacks(dir string) ([]*Pack, error) {
 			return fmt.Errorf("redactors path %s is not a directory", dir)
 		}
 		if d.Type()&fs.ModeSymlink != 0 {
-			slog.Warn("skipping symlinked redactor pack path",
+			logWarn("skipping symlinked redactor pack path",
 				componentAttr,
 				slog.String("path", path))
 			return nil
@@ -216,7 +216,7 @@ func LoadPacks(dir string) ([]*Pack, error) {
 		}
 
 		if len(packs) >= maxPackFiles {
-			slog.Warn("skipping redactor pack: file cap reached",
+			logWarn("skipping redactor pack: file cap reached",
 				componentAttr,
 				slog.String("path", path),
 				slog.Int("max_files", maxPackFiles))
@@ -225,14 +225,14 @@ func LoadPacks(dir string) ([]*Pack, error) {
 
 		info, statErr := d.Info()
 		if statErr != nil {
-			slog.Warn("skipping redactor pack: stat failed",
+			logWarn("skipping redactor pack: stat failed",
 				componentAttr,
 				slog.String("path", path),
 				slog.String("error", statErr.Error()))
 			return nil
 		}
 		if info.Size() > maxPackFileBytes {
-			slog.Warn("skipping redactor pack: file exceeds size cap",
+			logWarn("skipping redactor pack: file exceeds size cap",
 				componentAttr,
 				slog.String("path", path),
 				slog.Int64("size_bytes", info.Size()),
@@ -242,7 +242,7 @@ func LoadPacks(dir string) ([]*Pack, error) {
 
 		data, err := os.ReadFile(path) //nolint:gosec // path comes from WalkDir under a configured dir
 		if err != nil {
-			slog.Warn("skipping unreadable redactor pack",
+			logWarn("skipping unreadable redactor pack",
 				componentAttr,
 				slog.String("path", path),
 				slog.String("error", err.Error()))
@@ -250,7 +250,7 @@ func LoadPacks(dir string) ([]*Pack, error) {
 		}
 		pack, err := ParsePack(data, path)
 		if err != nil {
-			slog.Warn("skipping invalid redactor pack",
+			logWarn("skipping invalid redactor pack",
 				componentAttr,
 				slog.String("path", path),
 				slog.String("error", err.Error()))

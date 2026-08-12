@@ -139,6 +139,20 @@ func Init(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// Logger returns the active *slog.Logger so packages that cannot take a
+// context (e.g. redact) can be pointed at the same .entire/logs/ sink.
+// Falls back to slog.Default() when Init has not run (or fell back to
+// stderr), so callers always get a usable logger. Snapshot semantics:
+// call after Init.
+func Logger() *slog.Logger {
+	mu.RLock()
+	defer mu.RUnlock()
+	if logger == nil {
+		return slog.Default()
+	}
+	return logger
+}
+
 // Close closes the log file if one is open.
 // Flushes any buffered data before closing.
 // Safe to call multiple times.

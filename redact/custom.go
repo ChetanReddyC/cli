@@ -1,9 +1,11 @@
 package redact
 
 import (
+	"context"
 	"log/slog"
 	"regexp"
 	"sync"
+	"sync/atomic"
 )
 
 // CustomRulesConfig configures inline custom_redactions and parsed rule packs.
@@ -39,6 +41,37 @@ var (
 // can filter redaction failures with the same key the CLI uses elsewhere
 // (`logging.WithComponent(ctx, "redaction")`).
 var componentAttr = slog.String("component", "redaction")
+
+// pkgLogger is the destination for this package's diagnostics (pack load
+// failures, rule compile errors, sample mismatches, OPF runtime failures).
+// nil means the process-default slog logger, which preserves the standalone
+// behavior for library consumers and tests.
+var pkgLogger atomic.Pointer[slog.Logger]
+
+// SetLogger routes this package's diagnostics to l. The CLI wires this to
+// its .entire/logs/ logger during redaction bootstrap; without it, warnings
+// go to the process-default slog logger (stderr), which hook contexts
+// swallow — that silence is exactly what made a customer's broken-looking
+// redaction setup undiagnosable. Pass nil to restore the default.
+func SetLogger(l *slog.Logger) {
+	pkgLogger.Store(l)
+}
+
+func logWarn(msg string, attrs ...any) {
+	if l := pkgLogger.Load(); l != nil {
+		l.Warn(msg, attrs...)
+		return
+	}
+	slog.Warn(msg, attrs...)
+}
+
+func logWarnContext(ctx context.Context, msg string, attrs ...any) {
+	if l := pkgLogger.Load(); l != nil {
+		l.WarnContext(ctx, msg, attrs...)
+		return
+	}
+	slog.WarnContext(ctx, msg, attrs...)
+}
 
 // ConfigureCustomRules compiles user-defined redaction rules and stores the
 // result for use by redact.String(). Sample-validation runs here too, so
@@ -88,7 +121,7 @@ func compileCustomRule(label, pattern, warning string, attrs ...any) (compiledCu
 		all = append(all, componentAttr)
 		all = append(all, attrs...)
 		all = append(all, slog.String("error", err.Error()))
-		slog.Warn(warning, all...)
+		logWarn(warning, all...)
 		return compiledCustomRule{}, false
 	}
 	return compiledCustomRule{label: label, regex: compiled}, true
@@ -101,7 +134,7 @@ func runRuleSamples(pack *Pack, rule Rule, compiled *regexp.Regexp) {
 	for i, s := range rule.Samples {
 		got := compiled.MatchString(s.Input)
 		if got != s.Redacted {
-			slog.Warn("redactor pack sample mismatch",
+			logWarn("redactor pack sample mismatch",
 				componentAttr,
 				slog.String("pack", pack.sourcePath),
 				slog.String("rule", rule.ID),

@@ -383,6 +383,13 @@ var initRedactionOnce sync.Once
 func EnsureRedactionConfigured() {
 	initRedactionOnce.Do(func() {
 		ctx := context.Background()
+
+		// Route the redact package's diagnostics (pack load failures, rule
+		// compile errors, sample mismatches) into .entire/logs/ before any
+		// rule loading below can emit them. Without this they go to the
+		// process-default stderr logger, which hook contexts swallow.
+		redact.SetLogger(logging.Logger())
+
 		s, err := settings.Load(ctx)
 		if err != nil {
 			logCtx := logging.WithComponent(ctx, "redaction")
@@ -435,6 +442,7 @@ func EnsureRedactionConfigured() {
 		}
 
 		// OpenAI Privacy Filter (opt-in 9th layer).
+		opfEnabled := false
 		if s.Redaction != nil && s.Redaction.OpenAIPrivacyFilter != nil {
 			opf := s.Redaction.OpenAIPrivacyFilter
 			redact.ConfigurePrivacyFilter(redact.OPFConfig{
@@ -443,7 +451,24 @@ func EnsureRedactionConfigured() {
 				Command:    opf.Command,
 				Timeout:    opf.TimeoutSeconds,
 			})
+			opfEnabled = opf.Enabled
 		}
+
+		// Load-time summary so "are my rules active?" is answerable from the
+		// log alone — a customer spent days unable to tell whether their
+		// packs were loading. One line per process (this runs under a Once).
+		packRules := 0
+		for _, p := range packs {
+			packRules += len(p.Rules)
+		}
+		piiEnabled := s.Redaction != nil && s.Redaction.PII != nil && s.Redaction.PII.Enabled
+		logging.Info(logging.WithComponent(ctx, "redaction"), "redaction configured",
+			slog.Int("packs", len(packs)),
+			slog.Int("pack_rules", packRules),
+			slog.Int("inline_patterns", len(inline)),
+			slog.Bool("pii", piiEnabled),
+			slog.Bool("opf", opfEnabled),
+		)
 	})
 }
 
