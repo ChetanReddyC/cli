@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/entireio/cli/internal/procsignal"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
@@ -91,6 +92,46 @@ func TestReadLoginURLActionFromTTY_UnavailableInputContinuesAndCloses(t *testing
 	if _, err := notTTY.Stat(); !errors.Is(err, os.ErrClosed) {
 		t.Errorf("input was not closed after fallback: %v", err)
 	}
+}
+
+// Ctrl-C is delivered as a keypress while Bubble Tea owns the raw TTY, rather
+// than as SIGINT. The reader must record the equivalent process signal so the
+// top-level command preserves its normal quiet SIGINT/130 exit semantics.
+func TestReadLoginURLActionFromTTY_ControlCRecordsInterrupt(t *testing.T) {
+	procsignal.Reset()
+	t.Cleanup(procsignal.Reset)
+
+	ptmx, tty, observer, before := openLoginPromptPTY(t)
+	defer ptmx.Close()
+	defer observer.Close()
+
+	resultCh := make(chan loginURLActionTestResult, 1)
+	go func() {
+		action, err := readLoginURLActionFromTTY(context.Background(), tty)
+		resultCh <- loginURLActionTestResult{action: action, err: err}
+	}()
+	waitForLoginPromptTTYRaw(t, observer, before)
+
+	if _, err := ptmx.Write([]byte{3}); err != nil {
+		t.Fatalf("write Ctrl-C to pty: %v", err)
+	}
+
+	select {
+	case result := <-resultCh:
+		if !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("readLoginURLActionFromTTY() error = %v, want context.Canceled", result.err)
+		}
+		if result.action != loginURLNone {
+			t.Errorf("action = %v, want loginURLNone", result.action)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Ctrl-C did not stop the login URL reader")
+	}
+
+	if got := procsignal.Load(); got != os.Interrupt {
+		t.Errorf("procsignal.Load() = %v, want SIGINT", got)
+	}
+	assertLoginPromptTTYRestored(t, observer, before)
 }
 
 func openLoginPromptPTY(t *testing.T) (ptmx, tty, observer *os.File, before *term.State) {

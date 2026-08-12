@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
+	"github.com/entireio/cli/internal/procsignal"
 	"github.com/spf13/cobra"
 )
 
@@ -695,6 +696,13 @@ func readLoginURLActionFromTTY(ctx context.Context, tty *os.File) (loginURLActio
 	result, ok := finalModel.(loginURLActionModel)
 	if !ok || !result.selected {
 		return loginURLNone, errors.New("login URL prompt exited without an action")
+	}
+	// Bubble Tea puts the TTY in raw mode, so Ctrl-C arrives as a keypress
+	// instead of SIGINT. Record the equivalent process signal before returning
+	// context.Canceled so main preserves the CLI's normal quiet SIGINT/130 exit
+	// semantics (including breaking an enclosing shell loop).
+	if errors.Is(result.err, context.Canceled) {
+		procsignal.Store(os.Interrupt)
 	}
 	return result.action, result.err
 }
