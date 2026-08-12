@@ -474,7 +474,8 @@ func resolveCheckpointFetchTarget(ctx context.Context) string {
 // write-hook probes use remote.HookCheckpointRefFetcher directly and remain
 // confined to their selected target.
 func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
-	return remote.FetchCheckpointRefFrom(ctx, ref, strategy.CheckpointReadRemotes(ctx)) //nolint:wrapcheck // thin alias; the remote error carries full context
+	resolution := strategy.CheckpointReadRemotesWithElection(ctx)
+	return remote.FetchCheckpointRefFrom(ctx, ref, resolution.Candidates, resolution.ElectionErr) //nolint:wrapcheck // thin alias; the remote error carries full context
 }
 
 // checkpointRefListTimeout bounds the names-only ls-remote used by user-facing
@@ -503,14 +504,19 @@ const checkpointRefListTimeout = 5 * time.Second
 //     for, so disjoint legacy refs on origin coexisting with new refs on the
 //     elected remote are realistic and first-non-empty would shadow one side.
 //     Discovery is best-effort: a candidate failing logs at debug and doesn't
-//     block the others, and when every candidate fails the result is
-//     (nil, nil) so List stays local-only. No candidates (remoteless repo) →
-//     (nil, nil).
+//     block the others. When every candidate fails, the first error is returned
+//     so the store warns before showing local-only results. No candidates
+//     (remoteless repo) → (nil, nil).
 //
-// The single checkpointRefListTimeout budget spans the whole union.
+// Each candidate gets its own checkpointRefListTimeout budget so a hung elected
+// remote cannot starve the legacy origin tier.
 // Resolution and ls-remote are pinned to the worktree root (not process cwd) so
 // repo-local git config (url.*.insteadOf, credential helpers, remotes) applies.
 func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, error) {
+	return listCheckpointRefsOnRemote(ctx, checkpointRefListTimeout)
+}
+
+func listCheckpointRefsOnRemote(ctx context.Context, candidateTimeout time.Duration) ([]plumbing.ReferenceName, error) {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
@@ -528,7 +534,7 @@ func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, 
 			return nil, fmt.Errorf("resolve checkpoint remote URL: %w", err)
 		}
 
-		ctx, cancel := context.WithTimeout(ctx, checkpointRefListTimeout)
+		ctx, cancel := context.WithTimeout(ctx, candidateTimeout)
 		defer cancel()
 
 		output, err := remote.LsRemoteInDir(ctx, worktreeRoot, url, checkpoint.CheckpointRefPrefix+"*")
@@ -546,25 +552,30 @@ func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, 
 		return nil, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, checkpointRefListTimeout)
-	defer cancel()
-
 	seen := make(map[plumbing.ReferenceName]bool)
 	var names []plumbing.ReferenceName
+	var firstErr error
+	succeeded := false
 	for _, candidate := range candidates {
+		candidateCtx, cancel := context.WithTimeout(ctx, candidateTimeout)
 		// Prefer the candidate's resolved URL (token-aware, worktree-pinned);
 		// fall back to the bare remote name, which git resolves itself.
 		target := candidate
-		if url, urlErr := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: worktreeRoot, LeadReadRemote: candidate}); urlErr == nil {
+		if url, urlErr := remote.FetchURL(candidateCtx, remote.FetchURLOptions{WorktreeRoot: worktreeRoot, LeadReadRemote: candidate}); urlErr == nil {
 			target = url
 		}
-		output, lsErr := remote.LsRemoteInDir(ctx, worktreeRoot, target, checkpoint.CheckpointRefPrefix+"*")
+		output, lsErr := remote.LsRemoteInDir(candidateCtx, worktreeRoot, target, checkpoint.CheckpointRefPrefix+"*")
+		cancel()
 		if lsErr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("ls-remote checkpoint refs from %s: %w", remote.RedactURLOrPath(target), lsErr)
+			}
 			logging.Debug(ctx, "checkpoint ref discovery: read candidate listing failed; continuing with remaining candidates",
 				slog.String("candidate", candidate),
 				slog.String("error", lsErr.Error()))
 			continue
 		}
+		succeeded = true
 		for _, name := range parseCheckpointRefNames(output) {
 			if seen[name] {
 				continue
@@ -572,6 +583,9 @@ func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, 
 			seen[name] = true
 			names = append(names, name)
 		}
+	}
+	if !succeeded {
+		return nil, firstErr
 	}
 	return names, nil
 }

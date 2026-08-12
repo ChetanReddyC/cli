@@ -110,6 +110,8 @@ func TestFetchCheckpointRef_UnreachableRemoteIsFailure(t *testing.T) {
 	require.Error(t, err)
 	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
 		"a transport failure must stay distinguishable from absence")
+	require.Contains(t, err.Error(), workDir+"/nonexistent-remote")
+	require.NotContains(t, err.Error(), ":///", "local paths must not be mangled as URLs")
 }
 
 func TestFetchCheckpointRefFrom_FailureSemantics(t *testing.T) {
@@ -124,7 +126,7 @@ func TestFetchCheckpointRefFrom_FailureSemantics(t *testing.T) {
 		out, err = exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "set-url", "origin", workDir+"/nonexistent-remote").CombinedOutput()
 		require.NoError(t, err, "git remote set-url origin: %s", out)
 
-		err = FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"})
+		err = FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, nil)
 		require.Error(t, err)
 		require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
 			"absence is not proven when any read candidate fails")
@@ -144,9 +146,13 @@ func TestFetchCheckpointRefFrom_FailureSemantics(t *testing.T) {
 				require.NoError(t, err, "git remote add upstream: %s", out)
 			}
 
-			err := FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"})
+			err := FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, nil)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+			if !tc.addBrokenUpstream {
+				require.Contains(t, err.Error(), "upstream")
+				require.NotContains(t, err.Error(), "://upstream", "remote names must not be mangled as URLs")
+			}
 			out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "show-ref", "--verify", ref.String()).CombinedOutput()
 			require.Error(t, err, "legacy origin must not seed the canonical ref after an elected remote failure: %s", out)
 		})
