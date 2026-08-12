@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +23,26 @@ import (
 )
 
 const testCheckpointRefZN = "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN"
+
+func TestFetchCheckpointRef_ElectionFailureCannotCertifyAbsence(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	originBare := t.TempDir()
+	gitRun(t, originBare, "init", "--bare", "-q", originBare)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	gitRun(t, dir, "remote", "add", "origin", originBare)
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "gone")
+	t.Chdir(dir)
+
+	err := FetchCheckpointRef(context.Background(), plumbing.ReferenceName(testCheckpointRefZN))
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"fail-open origin cannot prove absence when checkpoint remote election failed")
+}
 
 // gitCheckout uses git CLI instead of go-git to work around go-git v5 bug
 // where Checkout deletes untracked files (see https://github.com/go-git/go-git/issues/970).
@@ -803,7 +825,7 @@ func TestListCheckpointRefsOnRemote_MergesReadCandidateListings(t *testing.T) {
 // TestListCheckpointRefsOnRemote_CandidateFailureDoesNotBlockOthers: discovery
 // is best-effort — an unreachable elected remote logs and continues, so the
 // legacy origin tier's refs are still discovered. When EVERY candidate fails,
-// the result is (nil, nil) and List stays local-only.
+// an error restores the store's local-only warning.
 // Not parallel: uses t.Chdir.
 func TestListCheckpointRefsOnRemote_CandidateFailureDoesNotBlockOthers(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
@@ -829,11 +851,21 @@ func TestListCheckpointRefsOnRemote_CandidateFailureDoesNotBlockOthers(t *testin
 	require.Len(t, names, 1)
 	assert.Equal(t, originRef, names[0].String())
 
-	// All candidates failing → (nil, nil): best-effort discovery never
-	// surfaces an error, the store falls back to local refs.
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+	gitRun(t, dir, "remote", "set-url", "upstream", server.URL+"/repo.git")
+
+	names, err = listCheckpointRefsOnRemote(context.Background(), time.Second)
+	require.NoError(t, err, "a slow candidate must not consume origin's discovery budget")
+	require.Len(t, names, 1)
+	assert.Equal(t, originRef, names[0].String())
+
+	gitRun(t, dir, "remote", "set-url", "upstream", filepath.Join(dir, "nonexistent-remote"))
 	gitRun(t, dir, "remote", "set-url", "origin", filepath.Join(dir, "also-nonexistent"))
 	names, err = ListCheckpointRefsOnRemote(context.Background())
-	require.NoError(t, err)
+	require.Error(t, err, "all candidates failing must trigger the store's local-only warning")
 	assert.Nil(t, names)
 }
 

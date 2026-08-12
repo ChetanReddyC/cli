@@ -24,8 +24,7 @@ import (
 // pays a dead network once, briefly.
 const WriteProbeFetchBudget = 15 * time.Second
 
-// readFetchTimeout bounds the interactive read-path fetch (unchanged from
-// the historical FetchCheckpointRef behavior).
+// readFetchTimeout bounds each interactive read-candidate attempt.
 const readFetchTimeout = 2 * time.Minute
 
 // CheckpointFetchTarget returns the git remote (URL or name) that checkpoint
@@ -167,18 +166,29 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 // An empty chain classifies the ref as absent only on positive evidence on
 // every axis: a live caller context, readable settings without a
 // checkpoint_remote key in any form, and a successful, empty `git remote`
-// listing. Anything less surfaces an error — never a silent "absent".
-func FetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, readRemotes []string) error {
-	return fetchCheckpointRefFrom(ctx, ref, readRemotes, readFetchTimeout)
+// listing. Anything less surfaces an error — never a silent "absent". When
+// electionErr is non-nil, the fail-open origin candidate may still satisfy a
+// read, but its emptiness cannot certify global absence.
+func FetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, readRemotes []string, electionErr error) error {
+	return fetchCheckpointRefFrom(ctx, ref, readRemotes, readFetchTimeout, electionErr)
 }
 
-func fetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, readRemotes []string, fetchTimeout time.Duration) error {
+func fetchCheckpointRefFrom(
+	ctx context.Context,
+	ref plumbing.ReferenceName,
+	readRemotes []string,
+	fetchTimeout time.Duration,
+	electionErr error,
+) error {
 	s, loadErr := settings.Load(ctx)
 	if loadErr != nil || s.HasCheckpointRemoteKey() {
 		return FetchCheckpointRef(ctx, ref)
 	}
 
 	if len(readRemotes) == 0 {
+		if electionErr != nil {
+			return fmt.Errorf("checkpoint ref %s: checkpoint remote election failed; no authoritative read candidate is available: %w", ref, electionErr)
+		}
 		probeCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 		defer cancel()
 		if probeCtx.Err() == nil && !s.HasCheckpointRemoteKey() && repoHasNoRemotes(probeCtx) {
@@ -215,6 +225,9 @@ func fetchCheckpointRefFrom(ctx context.Context, ref plumbing.ReferenceName, rea
 	if firstUncertainErr != nil {
 		return firstUncertainErr
 	}
+	if electionErr != nil && errors.Is(firstErr, plumbing.ErrReferenceNotFound) {
+		return fmt.Errorf("checkpoint ref %s: checkpoint remote election failed; origin fallback cannot certify absence: %w", ref, electionErr)
+	}
 	return firstErr
 }
 
@@ -226,7 +239,7 @@ func probeAndFetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName,
 	if err != nil {
 		// Redact: fetchTarget can be a remote URL with embedded credentials
 		// (CI origin URLs), and this error is logged and shown to users.
-		return fmt.Errorf("probe checkpoint ref %s on %s: %w", ref, RedactURL(fetchTarget), err)
+		return fmt.Errorf("probe checkpoint ref %s on %s: %w", ref, RedactURLOrPath(fetchTarget), err)
 	}
 	if len(bytes.TrimSpace(out)) == 0 {
 		if !authoritative {
@@ -235,9 +248,9 @@ func probeAndFetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName,
 			// host the configured checkpoint refs. Emptiness there proves
 			// nothing; classifying it as absence would silently drop backfills
 			// for checkpoints that exist on the real checkpoint remote.
-			return fmt.Errorf("checkpoint ref %s not visible on fallback remote %s, and the configured checkpoint remote could not be resolved; refusing to treat this as absence", ref, RedactURL(fetchTarget))
+			return fmt.Errorf("checkpoint ref %s not visible on fallback remote %s, and the configured checkpoint remote could not be resolved; refusing to treat this as absence", ref, RedactURLOrPath(fetchTarget))
 		}
-		return fmt.Errorf("checkpoint ref %s not found on %s: %w", ref, RedactURL(fetchTarget), plumbing.ErrReferenceNotFound)
+		return fmt.Errorf("checkpoint ref %s not found on %s: %w", ref, RedactURLOrPath(fetchTarget), plumbing.ErrReferenceNotFound)
 	}
 
 	refSpec := "+" + ref.String() + ":" + ref.String()
@@ -249,11 +262,12 @@ func probeAndFetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName,
 		// Fold git's own output into the error (redacted): a bare
 		// "exit status 128" is undebuggable in hook Warn logs.
 		msg := strings.TrimSpace(string(fetchOut))
-		msg = strings.ReplaceAll(msg, fetchTarget, RedactURL(fetchTarget))
+		safeTarget := RedactURLOrPath(fetchTarget)
+		msg = strings.ReplaceAll(msg, fetchTarget, safeTarget)
 		if msg != "" {
-			return fmt.Errorf("fetch checkpoint ref %s from %s: %s: %w", ref, RedactURL(fetchTarget), msg, err)
+			return fmt.Errorf("fetch checkpoint ref %s from %s: %s: %w", ref, safeTarget, msg, err)
 		}
-		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, RedactURL(fetchTarget), err)
+		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, safeTarget, err)
 	}
 	return nil
 }

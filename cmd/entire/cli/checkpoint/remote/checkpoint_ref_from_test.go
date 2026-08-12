@@ -83,7 +83,7 @@ func localRefHash(t *testing.T, dir string, ref plumbing.ReferenceName) string {
 func TestFetchCheckpointRefFrom_FirstCandidateWins(t *testing.T) {
 	workDir, ref, upstreamHash, originHash := candidatesFixture(t, true, true)
 
-	require.NoError(t, FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}))
+	require.NoError(t, FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, nil))
 
 	got := localRefHash(t, workDir, ref)
 	require.Equal(t, upstreamHash, got, "the first candidate must serve the fetch")
@@ -100,7 +100,7 @@ func TestFetchCheckpointRefFrom_EachCandidateGetsItsOwnTimeout(t *testing.T) {
 	out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "set-url", "upstream", server.URL+"/repo.git").CombinedOutput()
 	require.NoError(t, err, "%s", out)
 
-	require.NoError(t, fetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, time.Second))
+	require.NoError(t, fetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, time.Second, nil))
 	require.Equal(t, originHash, localRefHash(t, workDir, ref))
 }
 
@@ -126,7 +126,7 @@ func TestFetchCheckpointRefFrom_AllFailSurfacesTransportError(t *testing.T) {
 			out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "set-url", tt.brokenRemote, workDir+"/nonexistent-remote").CombinedOutput()
 			require.NoError(t, err, "%s", out)
 
-			err = FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"})
+			err = FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, nil)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
 				"a transport failure must not be masked by another candidate's absence")
@@ -141,7 +141,7 @@ func TestFetchCheckpointRefFrom_AllFailSurfacesTransportError(t *testing.T) {
 func TestFetchCheckpointRefFrom_AbsentOnEveryCandidateIsAbsence(t *testing.T) {
 	_, ref, _, _ := candidatesFixture(t, false, false)
 
-	err := FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"})
+	err := FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound)
 }
@@ -165,7 +165,7 @@ func TestFetchCheckpointRefFrom_EmptyChainWithRemotesIsNotAbsence(t *testing.T) 
 	t.Chdir(workDir)
 
 	ref := plumbing.ReferenceName("refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9")
-	err = FetchCheckpointRefFrom(context.Background(), ref, nil)
+	err = FetchCheckpointRefFrom(context.Background(), ref, nil, nil)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
 		"a repo with configured remotes must never classify an empty chain as absence")
@@ -185,7 +185,7 @@ func TestFetchCheckpointRefFrom_DedicatedCheckpointRemoteBypassesCandidates(t *t
 		workDir, ref, _, _ := candidatesFixture(t, true, false)
 		testutil.WriteFile(t, workDir, ".entire/settings.json", contents)
 
-		err := FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"})
+		err := FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, nil)
 		require.Error(t, err)
 		require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
 			"a dedicated checkpoint_remote key must keep the single-target semantics even when malformed")
