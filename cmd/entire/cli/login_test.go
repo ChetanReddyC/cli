@@ -415,7 +415,7 @@ func TestPromptLoginURL_EnterContinuesWithoutSideEffects(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := promptLoginURL(context.Background(), &out, &bytes.Buffer{}, loginURL, interactor); err != nil {
+	if err := promptLoginURL(context.Background(), &out, &bytes.Buffer{}, browserLoginURLLabel, loginURL, interactor); err != nil {
 		t.Fatalf("promptLoginURL() error = %v", err)
 	}
 
@@ -437,7 +437,7 @@ func TestPromptLoginURL_CopyStaysAtPrompt(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := promptLoginURL(context.Background(), &out, &bytes.Buffer{}, loginURL, interactor); err != nil {
+	if err := promptLoginURL(context.Background(), &out, &bytes.Buffer{}, browserLoginURLLabel, loginURL, interactor); err != nil {
 		t.Fatalf("promptLoginURL() error = %v", err)
 	}
 
@@ -461,7 +461,7 @@ func TestPromptLoginURL_FailuresStayAtPrompt(t *testing.T) {
 	interactor.openURL = func(context.Context, string) error { return errors.New("browser unavailable") }
 
 	var out, errW bytes.Buffer
-	if err := promptLoginURL(context.Background(), &out, &errW, loginURL, interactor); err != nil {
+	if err := promptLoginURL(context.Background(), &out, &errW, browserLoginURLLabel, loginURL, interactor); err != nil {
 		t.Fatalf("promptLoginURL() error = %v", err)
 	}
 
@@ -483,7 +483,7 @@ func TestPromptLoginURL_Cancellation(t *testing.T) {
 		return loginURLContinue, context.Canceled
 	}
 
-	err := promptLoginURL(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, "https://auth.test", interactor)
+	err := promptLoginURL(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, browserLoginURLLabel, "https://auth.test", interactor)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
@@ -493,7 +493,7 @@ func TestPromptLoginURL_UnexpectedActionFails(t *testing.T) {
 	t.Parallel()
 
 	interactor := newTestLoginURLInteractor(loginURLAction(255))
-	err := promptLoginURL(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, "https://auth.test", interactor)
+	err := promptLoginURL(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, browserLoginURLLabel, "https://auth.test", interactor)
 	if err == nil || !strings.Contains(err.Error(), "unexpected login URL action: 255") {
 		t.Fatalf("error = %v, want unexpected-action error", err)
 	}
@@ -575,10 +575,19 @@ func TestRunLogin_InteractiveDeviceFlowUsesURLPrompt(t *testing.T) {
 	if copiedURL != approvalURL {
 		t.Errorf("copied URL = %q, want %q", copiedURL, approvalURL)
 	}
-	for _, want := range []string{"Device code: ABCD-EFGH", "Login URL: " + approvalURL, loginURLPrompt} {
+	for _, want := range []string{"Device code: ABCD-EFGH", deviceLoginURLLabel + " " + approvalURL, loginURLPrompt} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}
+	}
+}
+
+func TestDeviceLoginURLLabel_AlignsWithDeviceCode(t *testing.T) {
+	t.Parallel()
+
+	const deviceCodeLabel = "Device code:"
+	if got, want := len(deviceLoginURLLabel), len(deviceCodeLabel); got != want {
+		t.Errorf("device login URL label width = %d, want %d to align both value columns", got, want)
 	}
 }
 
