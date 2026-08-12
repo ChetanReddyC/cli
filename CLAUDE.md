@@ -514,25 +514,14 @@ reftable and sha256 repositories. Reviewers should flag any new
 this, and `gitrepo/status.go` is the only sanctioned call site.
 
 `Worktree.Status()` walks the worktree, so its cost scales with working-set size
-rather than with the size of the change being inspected. It is the most expensive
-git read on the hook paths, which is why it has a single entry point that can
-memoize it.
-
-`gitrepo.WithStatusCache(ctx)` memoizes the walk for callers that read status
-more than once. Install it **only** across a window that neither writes tracked
-files nor stages anything: the TurnStart hook qualifies (it runs before the agent
-acts and writes only session metadata under `.entire/` and refs under `.git/`),
-post-agent hooks such as TurnEnd do not — `DetectFileChanges` there must observe
-the agent's edits.
-
-Staging counts as invalidation even though `.git/index` sits inside `.git/`: the
-index feeds the status diff, so an index write makes a cached result stale. Entire
-performs no index writes today — there are no `SetIndex` calls, the single
-`Storer.Index()` use (`strategy/content_overlap.go`) is a read, and the git
-subcommands on the hook paths are all index-read-only. **If you add an
-index-mutating operation, check whether it lands inside a status-cache window.**
-The cache is context-scoped to one short-lived hook process, so it cannot go
-stale across turns.
+rather than with the size of the change being inspected — measured at ~12ms on a
+1.5k-file tree and ~120ms on a 20k-file one. It is the most expensive git read on
+the hook paths, so read it once per hook and pass the result down rather than
+calling `gitrepo.Status` again. There is deliberately no memoization: a
+context-scoped cache previously saved one walk per TurnStart hook (~28% of that
+hook on a 20k-file repo), but it had to be kept out of any window that writes
+tracked files or stages anything, and that standing staleness hazard was not
+judged worth the latency.
 
 #### go-git v5 Bugs - Use CLI Instead
 
