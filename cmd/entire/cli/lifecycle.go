@@ -420,7 +420,9 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 // the full flag/subcommand surface — fetched on demand so that surface never goes
 // stale here as it grows — and adds only a small, stable behavioral invariant an
 // agent must know even if it never drills in: commits auto-capture checkpoints,
-// the two stable query anchors (`why`, `search`) for recovering intent
+// the two query anchors (`why`, `search`) for recovering intent — `search` is
+// stable; `why` is still experimental but opts into agent-help advertising
+// (agentHelpAnnotation) so the surface this injection points at can resolve it —
 // before edits, and that setup/destructive commands belong to the user. It also
 // names the auto-detected repo (from the already-loaded session scope, no IO) and
 // the standing rule that the agent is inside the repo and must never ask the user

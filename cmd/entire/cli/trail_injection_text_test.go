@@ -19,10 +19,13 @@ func TestEntireTrailContextInjection_PointsAtAgentHelpWithRepo(t *testing.T) {
 			t.Fatalf("injection missing %q:\n%s", want, got)
 		}
 	}
-	for _, unwanted := range []string{"--repo", "checkpoint search", "view, create, update, or watch"} {
+	for _, unwanted := range []string{"--repo", "view, create, update, or watch"} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("injection should not enumerate the command surface (%q):\n%s", unwanted, got)
 		}
+	}
+	if strings.Contains(got, "checkpoint search") {
+		t.Errorf("injection must teach the canonical `entire search` spelling, not `checkpoint search`:\n%s", got)
 	}
 }
 
