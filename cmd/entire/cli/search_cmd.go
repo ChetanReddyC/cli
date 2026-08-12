@@ -58,13 +58,15 @@ and add --compact for a trimmed per-result shape suited to agents (implies
 snippet, and a truncated title instead of the full prompt (repo hits add
 description and checkpoint count). Fetch full detail
 for a single result with 'entire checkpoint explain <id>', or add --full to
-that command to pull the checkpoint's entire session transcript.
+that command to pull the checkpoint's entire session transcript. For a
+checkpoint hit from another GitHub repo, add --repo <owner/name> to
+'entire checkpoint explain' (requires the full checkpoint ID; unrelated to
+this command's --repo filter below).
 
 CLI queries also support inline filters like author:<name>, date:<week|month>,
 branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 		Example: "  entire search \"retry backoff\" --json\n  entire search \"retry backoff\" --json --compact\n  entire search \"auth timeout author:alice date:week\"\n  entire search --code \"parseToken\"",
 		Args:    cobra.ArbitraryArgs,
-		Hidden:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			query := strings.Join(args, " ")

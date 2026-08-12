@@ -24,6 +24,16 @@ func TestEntireTrailContextInjection_PointsAtAgentHelpWithRepo(t *testing.T) {
 			t.Errorf("injection should not enumerate the command surface (%q):\n%s", unwanted, got)
 		}
 	}
+	// This branch originally required the injection to name `entire search`, to
+	// pin the canonical spelling. Main has since dropped per-task command
+	// recommendations from the injection entirely (see
+	// TestEntireTrailContextInjection_OmitsPerTaskCommandRecommendations), so
+	// there is no search mention left to spell either way. The spelling is still
+	// pinned everywhere it does appear — see the surfaces asserted in
+	// root_test.go and setup_search_skill.
+	if strings.Contains(got, "checkpoint search") {
+		t.Errorf("injection must not use the old `checkpoint search` spelling:\n%s", got)
+	}
 }
 
 // The injection carries invariants that hold on EVERY turn, not per-task command

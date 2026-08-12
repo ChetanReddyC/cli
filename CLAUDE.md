@@ -92,13 +92,14 @@ the commands are always runnable in every build.
 Experimental commands (gated by the build-time visibility flag above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
 in stable releases, always runnable): `tokens`, `import`, `review`,
-`investigate`, `blame`, `why`, the top-level `search` shortcut, `experts`,
-`runner`, and `checkpoint policy`. `tokens` is also advertised through `entire
-labs`. The canonical `checkpoint search` is not gated and stays visible.
+`investigate`, `blame`, `why`, `experts`, `runner`, and `checkpoint policy`.
+`tokens` is also advertised through `entire labs`.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
-`configure`, `agent-help`, `api`.
+`configure`, `agent-help`, `api`, `search`. `search` is the canonical
+spelling (visible in every build, grouped with Sessions & Checkpoints);
+`checkpoint search` stays a working alias of the same command.
 
 `api` is an authenticated passthrough to Entire's HTTP APIs (gh-style): it
 attaches the right bearer and dials the right host so callers don't plumb auth
@@ -157,9 +158,7 @@ Enabling a no-channel agent with `--agent-help-skill` reports the skill
 unsupported and points the agent at this passive path instead.
 
 Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
-`checkpoint`. The `search` top-level is experimental (see the visibility gate
-above), so it follows the build-dependent visibility rather than being
-unconditionally hidden.
+`checkpoint`.
 
 Hidden infrastructure commands: `hooks`, `trail`,
 `curl-bash-post-install`, `__send_analytics`, `mcp` (MCP stdio server for
