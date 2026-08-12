@@ -25,6 +25,8 @@ import (
 // 3. Continue working after commit (new shadow branch)
 // 4. User commits again (second condensation)
 // 5. Verify final state
+//
+//nolint:maintidx // End-to-end workflow across 5 sequential phases; the shadow-branch assertions that replaced the rewind observations pushed it over the threshold, and the phases share so much accumulated state that splitting them would obscure the flow this test exists to document.
 func TestShadow_FullWorkflow(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
@@ -687,7 +689,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 	}
 
 	// First prompt: create file A
-	fileAContent := "package main\n\nfunc A() {}\n"
+	fileAContent := pkgFuncA
 	env.WriteFile("a.go", fileAContent)
 
 	// Build transcript with first prompt
@@ -701,7 +703,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 	if err := env.SimulateUserPromptSubmitWithPrompt(session1.ID, "Now create function B in b.go"); err != nil {
 		t.Fatalf("SimulateUserPromptSubmitWithPrompt (second prompt) failed: %v", err)
 	}
-	fileBContent := "package main\n\nfunc B() {}\n"
+	fileBContent := pkgFuncB
 	env.WriteFile("b.go", fileBContent)
 
 	session1.TranscriptBuilder.AddUserMessage("Now create function B in b.go")
@@ -840,7 +842,7 @@ func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
 	}
 
 	// First prompt: create file A
-	fileAContent := "package main\n\nfunc A() {}\n"
+	fileAContent := pkgFuncA
 	env.WriteFile("a.go", fileAContent)
 
 	session.TranscriptBuilder.AddUserMessage("Create function A in a.go")
@@ -893,7 +895,7 @@ func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
 	}
 
-	fileBContent := "package main\n\nfunc B() {}\n"
+	fileBContent := pkgFuncB
 	env.WriteFile("b.go", fileBContent)
 
 	session.TranscriptBuilder.AddUserMessage("Create function B in b.go")
@@ -968,7 +970,7 @@ func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) 
 	}
 
 	// First prompt
-	fileAContent := "package main\n\nfunc A() {}\n"
+	fileAContent := pkgFuncA
 	env.WriteFile("a.go", fileAContent)
 
 	session.TranscriptBuilder.AddUserMessage("Create function A")
@@ -980,7 +982,7 @@ func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) 
 	if err := env.SimulateUserPromptSubmitWithPrompt(session.ID, "Create function B"); err != nil {
 		t.Fatalf("SimulateUserPromptSubmitWithPrompt (second prompt) failed: %v", err)
 	}
-	fileBContent := "package main\n\nfunc B() {}\n"
+	fileBContent := pkgFuncB
 	env.WriteFile("b.go", fileBContent)
 
 	session.TranscriptBuilder.AddUserMessage("Create function B")
@@ -1095,7 +1097,7 @@ func TestShadow_TrailerRemovalSkipsCondensation(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
 	}
 
-	fileAContent := "package main\n\nfunc A() {}\n"
+	fileAContent := pkgFuncA
 	env.WriteFile("a.go", fileAContent)
 
 	session.TranscriptBuilder.AddUserMessage("Create function A")
@@ -1146,7 +1148,7 @@ func TestShadow_TrailerRemovalSkipsCondensation(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
 	}
 
-	fileBContent := "package main\n\nfunc B() {}\n"
+	fileBContent := pkgFuncB
 	env.WriteFile("b.go", fileBContent)
 
 	session.TranscriptBuilder.AddUserMessage("Create function B")

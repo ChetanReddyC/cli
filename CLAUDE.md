@@ -648,6 +648,18 @@ The `Strategy` interface provides:
 - `GetRewindPoints()` / `Rewind()` - List and restore to checkpoints
 - `GetSessionLog()` / `GetSessionInfo()` - Retrieve session data
 
+`Rewind()` has **no CLI surface**. The `rewind` commands were removed, so
+nothing outside tests calls it; `GetRewindPoints()` is still live, feeding
+`checkpoint list --pending`. Treat the restore path as machinery pending
+removal rather than as a supported entry point — do not build on it, and do not
+re-expose it without deciding whether the removal was meant to be permanent.
+Mind the split in its test coverage: `PreviewRewind` tests cover which untracked
+files are *planned* for deletion, while
+`TestShadowStrategy_Rewind_PreservesIgnoredFiles` covers what survives an actual
+execution — that ignored paths such as `.entire/` are still there afterwards.
+The second half is where the go-git hazard lives, so keep it covered for as long
+as the restore path exists.
+
 #### How It Works
 
 The manual-commit strategy (`manual_commit*.go`) does not modify the active branch - no commits are created on the working branch. Instead it:
