@@ -154,13 +154,16 @@ type TrailDeleteResponse struct {
 	OK bool `json:"ok"`
 }
 
+// TrailApproval is a single approval decision on a trail. Author is exposed as
+// a login string while UnmarshalJSON accepts both the BFF's string and
+// entire-api's {id,login} object.
 type TrailApproval struct {
-	ID        string        `json:"id"`
-	Author    *trail.Author `json:"author"`
-	Event     string        `json:"event"`
-	Body      string        `json:"body,omitempty"`
-	CommitSHA string        `json:"commitSha,omitempty"`
-	CreatedAt time.Time     `json:"createdAt"`
+	ID        string    `json:"id"`
+	Author    string    `json:"author"`
+	Event     string    `json:"event"`
+	Body      string    `json:"body,omitempty"`
+	CommitSHA string    `json:"commitSha,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 func (a *TrailApproval) UnmarshalJSON(data []byte) error {
@@ -179,17 +182,18 @@ func (a *TrailApproval) UnmarshalJSON(data []byte) error {
 	if wire.Body != nil {
 		a.Body = *wire.Body
 	}
-	if len(wire.Author) > 0 && string(wire.Author) != "null" {
-		var obj trail.Author
-		if err := json.Unmarshal(wire.Author, &obj); err == nil {
-			a.Author = &obj
-		} else {
-			var login string
-			if err := json.Unmarshal(wire.Author, &login); err != nil {
-				return fmt.Errorf("decode trail approval author: %w", err)
-			}
-			a.Author = &trail.Author{Login: &login}
-		}
+	if len(wire.Author) == 0 || string(wire.Author) == "null" {
+		return nil
+	}
+	if err := json.Unmarshal(wire.Author, &a.Author); err == nil {
+		return nil
+	}
+	var author trail.Author
+	if err := json.Unmarshal(wire.Author, &author); err != nil {
+		return fmt.Errorf("decode trail approval author: %w", err)
+	}
+	if author.Login != nil {
+		a.Author = *author.Login
 	}
 	return nil
 }
