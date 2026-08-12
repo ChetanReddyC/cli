@@ -141,9 +141,9 @@ func Init(ctx context.Context, sessionID string) error {
 
 // Logger returns the active *slog.Logger so packages that cannot take a
 // context (e.g. redact) can be pointed at the same .entire/logs/ sink.
-// Falls back to slog.Default() when Init has not run (or fell back to
-// stderr), so callers always get a usable logger. Snapshot semantics:
-// call after Init.
+// Returns slog.Default() only when Init has never run; Init's own stderr
+// fallback still sets the package logger, so callers get that JSON logger
+// rather than the default. Snapshot semantics: call after Init.
 func Logger() *slog.Logger {
 	mu.RLock()
 	defer mu.RUnlock()
@@ -151,6 +151,16 @@ func Logger() *slog.Logger {
 		return slog.Default()
 	}
 	return logger
+}
+
+// IsInitialized reports whether Init has set up a logger (including its
+// stderr fallback). Lets callers skip log lines that would otherwise fall
+// through to the process-default stderr logger and surface as terminal
+// noise in commands that never call Init.
+func IsInitialized() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	return logger != nil
 }
 
 // Close closes the log file if one is open.

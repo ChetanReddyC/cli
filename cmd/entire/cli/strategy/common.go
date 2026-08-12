@@ -457,6 +457,13 @@ func EnsureRedactionConfigured() {
 		// Load-time summary so "are my rules active?" is answerable from the
 		// log alone — a customer spent days unable to tell whether their
 		// packs were loading. One line per process (this runs under a Once).
+		// Only when the file logger is up: without Init (e.g. `entire
+		// doctor`, which never initializes logging) logging.Info falls
+		// through to the process-default stderr logger and this line would
+		// surface as terminal noise instead of landing in .entire/logs/.
+		if !logging.IsInitialized() {
+			return
+		}
 		packRules := 0
 		for _, p := range packs {
 			packRules += len(p.Rules)

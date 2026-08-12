@@ -200,14 +200,27 @@ rules:
 	}
 	log := string(data)
 
-	if !strings.Contains(log, "skipping invalid custom_redactions pattern") {
+	// Assert per-line so the component tag is proven on the diagnostic lines
+	// themselves — a log-wide substring check would let the summary line's
+	// component tag mask an untagged warning.
+	warnLine, summaryLine := "", ""
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, "skipping invalid custom_redactions pattern") {
+			warnLine = line
+		}
+		if strings.Contains(line, "redaction configured") {
+			summaryLine = line
+		}
+	}
+	if warnLine == "" {
 		t.Errorf("entire.log missing the compile-failure warning for the broken inline pattern")
+	} else if !strings.Contains(warnLine, `"component":"redaction"`) {
+		t.Errorf("compile-failure warning line is not tagged component=redaction: %s", warnLine)
 	}
-	if !strings.Contains(log, `"component":"redaction"`) {
-		t.Errorf("entire.log has no component=redaction lines")
-	}
-	if !strings.Contains(log, "redaction configured") {
+	if summaryLine == "" {
 		t.Errorf("entire.log missing the load-time 'redaction configured' summary line")
+	} else if !strings.Contains(summaryLine, `"component":"redaction"`) {
+		t.Errorf("summary line is not tagged component=redaction: %s", summaryLine)
 	}
 	if t.Failed() {
 		t.Logf("entire.log contents:\n%s", log)
