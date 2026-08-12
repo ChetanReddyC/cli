@@ -26,6 +26,42 @@ func TestEntireTrailContextInjection_PointsAtAgentHelpWithRepo(t *testing.T) {
 	}
 }
 
+// The injection carries invariants that hold on EVERY turn, not per-task command
+// recommendations. An earlier revision urged `entire why <file>:<line>` and
+// `entire checkpoint search` "before large edits"; a census of 963 agent
+// transcripts found zero invocations of either against 25 calls to the
+// agent-help pointer, so it only ever cost first-turn tokens while framing a
+// sometimes-appropriate query as an always-do step. Which command suits a task
+// is agent-help's job, where it is pulled on demand and grouped by audience.
+func TestEntireTrailContextInjection_OmitsPerTaskCommandRecommendations(t *testing.T) {
+	t.Parallel()
+
+	got := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme", Repo: "app"})
+
+	for _, unwanted := range []string{
+		"entire why",
+		"checkpoint search",
+		"Before large edits",
+		"recover the intent",
+	} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("injection must not recommend per-task commands (%q):\n%s", unwanted, got)
+		}
+	}
+
+	// The invariants that DO belong stay: they change what an agent does on every
+	// turn, and no drill-down is required to act on them.
+	for _, want := range []string{
+		"entire agent-help",  // the pointer that measurably converts
+		"never create check", // commits auto-capture; don't hand-roll
+		"Leave setup and destructive commands",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("injection lost a standing invariant (%q):\n%s", want, got)
+		}
+	}
+}
+
 // When the repo can't be determined, the pointer still points at agent-help and
 // keeps the no-ask rule, without emitting a malformed repo line.
 func TestEntireTrailContextInjection_NoRepo(t *testing.T) {

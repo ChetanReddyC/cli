@@ -120,6 +120,42 @@ command tree (so it always matches the installed binary): bare prints a
 one command's current flags; `--json` emits structured output. It is the single
 source of truth the first-turn context injection and the `--agent-help-skill`
 skill point agents at, instead of enumerating a surface that goes stale.
+
+The bare listing is grouped by **who should initiate the command**, not
+alphabetically, because the question an agent has when reading it is "may I run
+this unprompted?" — read-only (safe on its own) · task-driven (writes data or
+spends tokens) · user-owned (setup, auth, admin, destructive, or expensive
+enough that starting one uninvited is the user's call — `review` and
+`investigate` spawn paid multi-agent runs and live here). The classification
+lives in one reviewable table, `agentHelpAudiences` in `agent_help_cmd.go`, keyed
+by command path (`status`, `checkpoint list`), and is mirrored into `--json` as an
+`audience` field so structured consumers get the same guidance.
+
+Three rules matter when editing it:
+
+- A group counts as read-only **only if every advertised subcommand is**.
+  `checkpoint` and `session` read as read-only but are not (`checkpoint policy`
+  updates policy; `session` carries adopt/attach/resume/stop), so both are
+  task-driven.
+- Because demoting those groups would hide the inspection commands agents most
+  want, their read-only subcommands are classified individually and listed
+  under read-only (`checkpoint list`, `session list`, …). The groups that do
+  this are declared in `agentHelpBreakoutGroups` rather than inferred, and must
+  classify **every** child.
+- An unclassified command defaults to user-owned, and
+  `TestAgentHelpAudiences_CoverEveryAdvertisedCommand` fails CI so neither a new
+  top-level command nor a new subcommand of a breakout group can ship
+  unclassified. `--json` omits `audience` where the table makes no claim rather
+  than emitting that default.
+
+Keep per-task command recommendations OUT of the first-turn injection and in
+`agent-help`, which is pulled on demand. A census of 963 agent transcripts found
+zero invocations of the `entire why` / `entire checkpoint search` pair the
+injection used to recommend "before large edits", against 25 calls to the
+agent-help pointer in the same corpus — the recommendation only cost first-turn
+tokens, and framed a sometimes-appropriate query as an always-do step. The
+injection carries only invariants that hold on every turn.
+
 Hidden commands opt into being advertised here by setting
 `Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`). Because `agent-help`
 renders live and lists non-hidden commands, the experimental commands appear in

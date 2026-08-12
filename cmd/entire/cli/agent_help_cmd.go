@@ -38,6 +38,201 @@ subcommands — read them from this command. You are already inside the repo:
 entire auto-detects it from the git origin remote, so never ask the user for the
 repo name. Pass --repo only to target a DIFFERENT repo.`
 
+// agentHelpAudience answers the question an agent actually has when it reads this
+// listing: may I run this without being asked? A flat alphabetical dump of every
+// command cannot answer it, so an agent either runs nothing or runs something it
+// should have left alone (`entire enable`, `entire review`, `entire org create`).
+// Grouping by initiator puts that judgment in the CLI, where it is maintained
+// once, rather than in each agent's guesswork or in the first-turn injection,
+// which pays for it on every session.
+type agentHelpAudience int
+
+const (
+	// agentHelpAudienceReadOnly: inspection only. Safe to run unprompted whenever
+	// it would inform the work; cannot change repo, account, or Entire state.
+	agentHelpAudienceReadOnly agentHelpAudience = iota
+	// agentHelpAudienceTaskDriven: part of doing the work, but it writes data or
+	// spends tokens. Run when the task calls for it, not speculatively.
+	agentHelpAudienceTaskDriven
+	// agentHelpAudienceUserOwned: setup, auth, account/admin, or destructive. The
+	// agent may suggest these but must not run them on its own initiative.
+	agentHelpAudienceUserOwned
+)
+
+// agentHelpAudiences classifies commands by space-separated path relative to the
+// root ("status", "checkpoint list"). It is a single table rather than a
+// per-command Annotations field so the whole policy is reviewable in one place —
+// the classification is a judgment call and reads as one only when the commands
+// sit side by side.
+//
+// A GROUP is read-only only if every advertised subcommand is, so `checkpoint`
+// and `session` are task-driven even though their Short help reads as pure
+// inspection: `checkpoint policy` updates policy, and `session` carries
+// adopt/attach/resume/stop. Demoting the whole group would have hidden the
+// inspection commands an agent most wants (`checkpoint list`, `session list`),
+// so their read-only subcommands are classified individually and the listing
+// breaks them out — see agentHelpEntries. The mutating siblings are classified
+// too; they stay collapsed under the group in the listing but carry an accurate
+// audience in `agent-help <group> --json`.
+//
+// Unlisted commands fall back to agentHelpAudienceUserOwned (see
+// agentHelpAudienceFor): the fail-safe direction is an agent declining to run
+// something it could have, never running something it should not have.
+// TestAgentHelpAudiences_CoverEveryAdvertisedCommand fails CI when a new
+// top-level command lands unclassified, so the fallback is a backstop and not
+// the normal path.
+var agentHelpAudiences = map[string]agentHelpAudience{
+	// Read-only inspection, every subcommand.
+	"activity": agentHelpAudienceReadOnly,
+	"blame":    agentHelpAudienceReadOnly,
+	"experts":  agentHelpAudienceReadOnly,
+	"labs":     agentHelpAudienceReadOnly,
+	"recap":    agentHelpAudienceReadOnly,
+	"search":   agentHelpAudienceReadOnly,
+	"status":   agentHelpAudienceReadOnly,
+	"tokens":   agentHelpAudienceReadOnly,
+	"version":  agentHelpAudienceReadOnly,
+	"why":      agentHelpAudienceReadOnly,
+
+	// Task-driven groups whose read-only subcommands are broken out below.
+	"checkpoint":         agentHelpAudienceTaskDriven,
+	"checkpoint explain": agentHelpAudienceReadOnly,
+	"checkpoint list":    agentHelpAudienceReadOnly,
+	"checkpoint search":  agentHelpAudienceReadOnly,
+	"checkpoint tokens":  agentHelpAudienceReadOnly,
+	"checkpoint policy":  agentHelpAudienceTaskDriven, // "Inspect and update"
+	"session":            agentHelpAudienceTaskDriven,
+	"session current":    agentHelpAudienceReadOnly,
+	"session info":       agentHelpAudienceReadOnly,
+	"session list":       agentHelpAudienceReadOnly,
+	"session tokens":     agentHelpAudienceReadOnly,
+	"session adopt":      agentHelpAudienceTaskDriven,
+	"session attach":     agentHelpAudienceTaskDriven,
+	"session resume":     agentHelpAudienceTaskDriven, // switches branch
+	"session stop":       agentHelpAudienceTaskDriven,
+
+	// Task-driven: at least one subcommand writes data or spends tokens.
+	"api":      agentHelpAudienceTaskDriven,
+	"dispatch": agentHelpAudienceTaskDriven,
+	"doctor":   agentHelpAudienceTaskDriven,
+	"import":   agentHelpAudienceTaskDriven,
+	"runner":   agentHelpAudienceTaskDriven,
+	"trail":    agentHelpAudienceTaskDriven,
+
+	// The user's: setup, auth, account/admin, destructive, or expensive enough
+	// that starting one uninvited is the user's call. review and investigate spawn
+	// multi-agent runs that spend real money, so they are opt-in like setup is.
+	"agent":       agentHelpAudienceUserOwned,
+	"auth":        agentHelpAudienceUserOwned,
+	"clean":       agentHelpAudienceUserOwned,
+	"configure":   agentHelpAudienceUserOwned,
+	"disable":     agentHelpAudienceUserOwned,
+	"enable":      agentHelpAudienceUserOwned,
+	"grant":       agentHelpAudienceUserOwned,
+	"investigate": agentHelpAudienceUserOwned,
+	"login":       agentHelpAudienceUserOwned,
+	"logout":      agentHelpAudienceUserOwned,
+	"org":         agentHelpAudienceUserOwned,
+	"plugin":      agentHelpAudienceUserOwned,
+	"project":     agentHelpAudienceUserOwned,
+	"repo":        agentHelpAudienceUserOwned,
+	"review":      agentHelpAudienceUserOwned,
+}
+
+// agentHelpBreakoutGroups are the task-driven groups whose read-only
+// subcommands are listed individually in the top-level listing. Membership is
+// declared rather than inferred from "has classified children" so adding a
+// classification to some unrelated subcommand cannot silently change what the
+// listing shows, and so
+// TestAgentHelpAudiences_CoverEveryAdvertisedCommand knows which groups must
+// classify every child.
+var agentHelpBreakoutGroups = map[string]struct{}{
+	"checkpoint": {},
+	"session":    {},
+}
+
+// agentHelpAudienceSections renders in this order: what an agent may do on its
+// own first, what it must not do last.
+var agentHelpAudienceSections = []struct {
+	audience agentHelpAudience
+	heading  string
+	slug     string
+}{
+	{agentHelpAudienceReadOnly, "Safe to run on your own — read-only, changes nothing:", "read-only"},
+	{agentHelpAudienceTaskDriven, "Run when the task calls for it — some subcommands write data or spend tokens:", "task-driven"},
+	{agentHelpAudienceUserOwned, "The user's to run — suggest it, don't run it (setup, auth, admin, destructive):", "user-owned"},
+}
+
+// agentHelpAudienceFor classifies one command path, defaulting unlisted commands
+// to user-owned so an unclassified addition is under- rather than
+// over-advertised.
+func agentHelpAudienceFor(path string) agentHelpAudience {
+	if a, ok := agentHelpAudiences[path]; ok {
+		return a
+	}
+	return agentHelpAudienceUserOwned
+}
+
+// agentHelpClassified reports an explicit classification only. The --json path
+// uses it so an unclassified subcommand omits the field rather than asserting a
+// user-owned default the table never actually made.
+func agentHelpClassified(path string) (agentHelpAudience, bool) {
+	a, ok := agentHelpAudiences[path]
+	return a, ok
+}
+
+// agentHelpPath is a command's path relative to the root, the key shape used by
+// agentHelpAudiences ("status", "checkpoint list").
+func agentHelpPath(cmd *cobra.Command) string {
+	return strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" ")
+}
+
+// agentHelpEntry is one line of the top-level listing: a command path, its Short
+// help, and the bucket it belongs in.
+type agentHelpEntry struct {
+	path     string
+	short    string
+	audience agentHelpAudience
+}
+
+// agentHelpEntries builds the top-level listing. Every advertised top-level
+// command appears; additionally, a read-only subcommand of a task-driven group is
+// broken out as its own entry so the safe-unprompted inspection commands inside
+// `checkpoint` and `session` are visible without drilling in. Mutating
+// subcommands stay collapsed under their group — the listing exists to answer
+// "what may I run on my own?", and enumerating what an agent must NOT run adds
+// lines without adding an answer.
+func agentHelpEntries(rootCmd *cobra.Command, trailsEnabled bool) []agentHelpEntry {
+	var out []agentHelpEntry
+	for _, sub := range agentHelpCommands(rootCmd, trailsEnabled) {
+		path := agentHelpPath(sub)
+		audience := agentHelpAudienceFor(path)
+		out = append(out, agentHelpEntry{path: path, short: sub.Short, audience: audience})
+		if _, ok := agentHelpBreakoutGroups[path]; !ok {
+			continue
+		}
+		for _, child := range agentHelpCommands(sub, trailsEnabled) {
+			childPath := agentHelpPath(child)
+			if a, ok := agentHelpClassified(childPath); ok && a == agentHelpAudienceReadOnly {
+				out = append(out, agentHelpEntry{path: childPath, short: child.Short, audience: a})
+			}
+		}
+	}
+	return out
+}
+
+// agentHelpAudienceSlug is the stable machine-readable form emitted in --json,
+// so an agent parsing the structured output gets the same guidance as one
+// reading the text (the repo's agent-safe-fallback rule).
+func agentHelpAudienceSlug(a agentHelpAudience) string {
+	for _, s := range agentHelpAudienceSections {
+		if s.audience == a {
+			return s.slug
+		}
+	}
+	return "user-owned"
+}
+
 // newAgentHelpCmd builds the `entire agent-help` command. It is visible in
 // `entire help` (so agents on transports without context injection can still
 // find it) and renders agent-facing usage live from rootCmd's command tree.
@@ -198,6 +393,10 @@ type agentHelpFlagJSON struct {
 type agentHelpSubcommandJSON struct {
 	Name  string `json:"name"`
 	Short string `json:"short"`
+	// Audience mirrors the text renderer's grouping so a --json consumer gets the
+	// same "may I run this unprompted?" answer as a text reader. Omitted when the
+	// table makes no explicit claim, rather than asserting the user-owned default.
+	Audience string `json:"audience,omitempty"`
 }
 
 type agentHelpJSON struct {
@@ -238,7 +437,11 @@ func renderAgentHelpJSON(rootCmd, target *cobra.Command, repoLine string, trails
 		collect(target.InheritedFlags())
 	}
 	for _, sub := range agentHelpCommands(target, trailsEnabled) {
-		doc.Subcommands = append(doc.Subcommands, agentHelpSubcommandJSON{Name: sub.Name(), Short: sub.Short})
+		entry := agentHelpSubcommandJSON{Name: sub.Name(), Short: sub.Short}
+		if a, ok := agentHelpClassified(agentHelpPath(sub)); ok {
+			entry.Audience = agentHelpAudienceSlug(a)
+		}
+		doc.Subcommands = append(doc.Subcommands, entry)
 	}
 	b, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -340,9 +543,33 @@ func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled b
 	b.WriteString(agentHelpOverview)
 	b.WriteString("\n\n")
 	b.WriteString(agentHelpRepoBlock(repoLine))
+
+	// Group by initiator rather than listing alphabetically: the agent's question
+	// is "may I run this unprompted?", and only the grouping answers it.
+	entries := agentHelpEntries(rootCmd, trailsEnabled)
+	byAudience := map[agentHelpAudience][]agentHelpEntry{}
+	width := 12
+	for _, e := range entries {
+		byAudience[e.audience] = append(byAudience[e.audience], e)
+		// Broken-out subcommand paths are longer than bare names, so size the
+		// column to the content instead of truncating into the Short help.
+		if len(e.path) > width {
+			width = len(e.path)
+		}
+	}
 	b.WriteString("\nWhen to use entire:\n")
-	for _, sub := range agentHelpCommands(rootCmd, trailsEnabled) {
-		fmt.Fprintf(&b, "  %-12s %s\n", sub.Name(), sub.Short)
+	for _, section := range agentHelpAudienceSections {
+		bucket := byAudience[section.audience]
+		if len(bucket) == 0 {
+			// Experimental commands are absent from stable builds, so a whole
+			// section can legitimately be empty — skip it rather than print a
+			// heading over nothing.
+			continue
+		}
+		fmt.Fprintf(&b, "\n  %s\n", section.heading)
+		for _, e := range bucket {
+			fmt.Fprintf(&b, "    %-*s %s\n", width, e.path, e.short)
+		}
 	}
 	// Use an example command that is actually advertised here (trail is gated on
 	// trails being enabled), so we never point at a command the agent can't use.

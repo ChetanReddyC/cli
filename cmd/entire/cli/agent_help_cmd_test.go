@@ -541,3 +541,178 @@ func TestAgentHelpCmd_Execute(t *testing.T) {
 		t.Errorf("json command = %q, want %q", parsed.Command, "entire status")
 	}
 }
+
+// Every advertised top-level command must be classified in agentHelpAudiences.
+// agentHelpAudienceFor defaults an unlisted command to user-owned, which is the
+// safe direction but the wrong answer for a new read-only command — this guard
+// makes "I added a command and forgot to classify it" a CI failure rather than a
+// silently under-advertised command. Both trails states are checked because the
+// gate changes which commands are advertised.
+func TestAgentHelpAudiences_CoverEveryAdvertisedCommand(t *testing.T) {
+	t.Parallel()
+
+	for _, trailsEnabled := range []bool{true, false} {
+		for _, sub := range agentHelpCommands(NewRootCmd(), trailsEnabled) {
+			path := agentHelpPath(sub)
+			if _, ok := agentHelpClassified(path); !ok {
+				t.Errorf("command %q (trailsEnabled=%v) is advertised but unclassified; "+
+					"add it to agentHelpAudiences", path, trailsEnabled)
+			}
+			// Groups that break read-only subcommands out into the listing must
+			// classify ALL their children: an unclassified one is silently withheld
+			// from the safe-to-run bucket, which is the exact failure the breakout
+			// exists to prevent.
+			if _, broken := agentHelpBreakoutGroups[path]; !broken {
+				continue
+			}
+			for _, child := range agentHelpCommands(sub, trailsEnabled) {
+				childPath := agentHelpPath(child)
+				if _, ok := agentHelpClassified(childPath); !ok {
+					t.Errorf("subcommand %q of breakout group %q is unclassified; "+
+						"add it to agentHelpAudiences", childPath, path)
+				}
+			}
+		}
+	}
+}
+
+// The read-only heading promises "changes nothing", so the drill-down must not
+// contradict it. checkpoint and session both READ as read-only from their Short
+// help ("Inspect and search checkpoints", "Manage agent sessions") but are not:
+// `checkpoint policy` updates policy and `session` carries adopt/attach/resume/
+// stop. Both were classified read-only in an earlier revision of this table.
+func TestAgentHelpAudiences_GroupsWithMutatingSubcommandsAreNotReadOnly(t *testing.T) {
+	t.Parallel()
+
+	for name, why := range map[string]string{
+		"checkpoint": "`checkpoint policy` updates policy",
+		"session":    "adopt/attach/resume/stop mutate session state",
+	} {
+		if got := agentHelpAudienceFor(name); got == agentHelpAudienceReadOnly {
+			t.Errorf("%q must not be classified read-only: %s", name, why)
+		}
+	}
+}
+
+// The top listing groups by who should initiate the command, so an agent can
+// answer "may I run this unprompted?" without drilling into all 33 commands.
+func TestRenderAgentHelpTop_GroupsByAudience(t *testing.T) {
+	t.Parallel()
+
+	out := renderAgentHelpTop(NewRootCmd(), agentHelpTestRepo, true)
+
+	for _, section := range agentHelpAudienceSections {
+		if !strings.Contains(out, section.heading) {
+			t.Fatalf("missing %q section heading:\n%s", section.slug, out)
+		}
+	}
+
+	// Ordering is load-bearing: what the agent may do on its own comes first,
+	// what it must leave alone comes last.
+	readOnly := strings.Index(out, agentHelpAudienceSections[0].heading)
+	taskDriven := strings.Index(out, agentHelpAudienceSections[1].heading)
+	userOwned := strings.Index(out, agentHelpAudienceSections[2].heading)
+	if readOnly >= taskDriven || taskDriven >= userOwned {
+		t.Errorf("sections out of order (read-only=%d task-driven=%d user-owned=%d):\n%s",
+			readOnly, taskDriven, userOwned, out)
+	}
+
+	// Spot-check that representative commands land in the right band.
+	for name, wantSection := range map[string]int{
+		"status": 0, "why": 0, // read-only inspection
+		"checkpoint list": 0, "session list": 0, // read-only subcommands of task-driven groups
+		"trail": 1, "api": 1, // writes data / spends tokens
+		"enable": 2, "auth": 2, // setup
+		"review": 2, "investigate": 2, // multi-agent runs spend real money
+	} {
+		idx := strings.Index(out, "\n    "+name+" ")
+		if idx < 0 {
+			t.Fatalf("command %q not listed:\n%s", name, out)
+		}
+		start := strings.Index(out, agentHelpAudienceSections[wantSection].heading)
+		end := len(out)
+		if wantSection+1 < len(agentHelpAudienceSections) {
+			end = strings.Index(out, agentHelpAudienceSections[wantSection+1].heading)
+		}
+		if idx < start || idx > end {
+			t.Errorf("command %q is not under the %q heading:\n%s",
+				name, agentHelpAudienceSections[wantSection].slug, out)
+		}
+	}
+}
+
+// A --json consumer must get the same "may I run this unprompted?" answer as a
+// text reader (the repo's agent-safe-fallback rule): every top-level command
+// carries an audience, breakout groups carry one per subcommand, and anything
+// the table makes no claim about omits the field rather than asserting the
+// user-owned default.
+func TestRenderAgentHelpJSON_CarriesAudienceWhereClassified(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+	raw, err := renderAgentHelpJSON(root, root, agentHelpTestRepo, true)
+	if err != nil {
+		t.Fatalf("render top json: %v", err)
+	}
+	var top agentHelpJSON
+	if err := json.Unmarshal([]byte(raw), &top); err != nil {
+		t.Fatalf("unmarshal top json: %v", err)
+	}
+	seen := map[string]string{}
+	for _, sub := range top.Subcommands {
+		if sub.Audience == "" {
+			t.Errorf("top-level command %q has no audience in --json", sub.Name)
+		}
+		seen[sub.Name] = sub.Audience
+	}
+	if got := seen["enable"]; got != "user-owned" {
+		t.Errorf("enable audience = %q, want user-owned", got)
+	}
+	if got := seen["status"]; got != "read-only" {
+		t.Errorf("status audience = %q, want read-only", got)
+	}
+
+	// Drilling into a breakout group carries per-subcommand audiences, so a
+	// --json consumer can tell `checkpoint list` from `checkpoint policy`.
+	drill := drillJSON(t, root, "checkpoint")
+	want := map[string]string{
+		"list":    "read-only",
+		"explain": "read-only",
+		"search":  "read-only",
+		"tokens":  "read-only",
+		"policy":  "task-driven",
+	}
+	for _, sub := range drill.Subcommands {
+		if w, ok := want[sub.Name]; ok && sub.Audience != w {
+			t.Errorf("checkpoint %s audience = %q, want %q", sub.Name, sub.Audience, w)
+		}
+	}
+
+	// A group the table makes no claim about omits the field rather than
+	// asserting the user-owned default, which would read as a deliberate
+	// classification the table never made.
+	drill = drillJSON(t, root, "org")
+	for _, sub := range drill.Subcommands {
+		if sub.Audience != "" {
+			t.Errorf("unclassified subcommand org %s should omit audience, got %q", sub.Name, sub.Audience)
+		}
+	}
+}
+
+// drillJSON renders one command's --json drill-down for assertions.
+func drillJSON(t *testing.T, root *cobra.Command, name string) agentHelpJSON {
+	t.Helper()
+	child := agentHelpFindChild(root, name)
+	if child == nil {
+		t.Fatalf("%s command not found", name)
+	}
+	raw, err := renderAgentHelpJSON(root, child, agentHelpTestRepo, true)
+	if err != nil {
+		t.Fatalf("render %s drill json: %v", name, err)
+	}
+	var doc agentHelpJSON
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("unmarshal %s drill json: %v", name, err)
+	}
+	return doc
+}
