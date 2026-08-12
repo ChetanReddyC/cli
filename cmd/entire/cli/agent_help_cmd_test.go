@@ -796,7 +796,44 @@ func TestAgentHelpAPI_IsUnlistedAndFramedAsLastResort(t *testing.T) {
 		"rather than hand-rolling curl",
 	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("api help missing %q:\n%s", want, out)
+			t.Errorf("agent-facing api help missing %q:\n%s", want, out)
+		}
+	}
+
+	// The same fact has opposite value for a human, who typed `entire api --help`
+	// on purpose and does not need talking out of it. Guidance ships on the agent
+	// channel only; cobra's Long must stay a reference.
+	if strings.Contains(child.Long, "LAST RESORT") {
+		t.Errorf("agent guidance leaked into human help (cobra Long):\n%s", child.Long)
+	}
+	if strings.Contains(child.Short, "Escape hatch") {
+		t.Errorf("agent framing leaked into Short, which `entire help` shows: %q", child.Short)
+	}
+	// What IS true for both audiences stays in Long, where both see it.
+	if !strings.Contains(child.Long, "can change shape without notice") {
+		t.Errorf("human help should still carry the stability caveat:\n%s", child.Long)
+	}
+}
+
+// Guidance is agent-only by construction: nothing in agentHelpGuidance may be
+// duplicated into the command's cobra help, or humans get the lecture too.
+func TestAgentHelpGuidance_NeverLeaksIntoCobraHelp(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+	for path, guidance := range agentHelpGuidance {
+		cmd := root
+		for _, name := range strings.Fields(path) {
+			cmd = agentHelpFindChild(cmd, name)
+			if cmd == nil {
+				t.Fatalf("agentHelpGuidance names unknown command %q", path)
+			}
+		}
+		// Compare on the first line, which is the distinctive part; whole-string
+		// equality would miss a partial paste.
+		firstLine := strings.SplitN(guidance, "\n", 2)[0]
+		if strings.Contains(cmd.Long, firstLine) || strings.Contains(cmd.Short, firstLine) {
+			t.Errorf("guidance for %q is duplicated into its cobra help; keep it agent-only", path)
 		}
 	}
 }

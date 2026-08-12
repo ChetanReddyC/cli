@@ -113,16 +113,29 @@ jurisdiction's cell instead of the caller's home cell and implies `--to cell`
 via `auth.CellTarget`). `{owner}`/`{repo}`/`{repo_id}` in the path are filled
 from the current repo's origin remote.
 
-`api` is an **escape hatch, not a front-line command**, and its help says so.
-It is the right tool in exactly two cases: developing against Entire's own APIs
-and wanting a raw response, or needing something no first-class command covers.
-Otherwise the purpose-built command wins — raw endpoints are internal and can
-change shape without notice, so parsing them is brittle. It is therefore
-deliberately **not** in `agent-help`'s curated listing (`listed: false`), but
-stays visible in `entire help` and named in agent-help's footer index so an
-agent that genuinely needs raw access finds it instead of hand-rolling curl
-with a token — which is the failure this command exists to prevent. Keep both
-halves of that balance in mind when changing its visibility.
+`api` is an **escape hatch, not a front-line command**: it is right when
+developing against Entire's own APIs and wanting a raw response, or when no
+first-class command covers the need — not during ordinary work in a repo with
+Entire enabled. It is therefore deliberately **not** in `agent-help`'s curated
+listing (`listed: false`), but stays visible in `entire help` and named in
+agent-help's footer index, so an agent that genuinely needs raw access finds it
+instead of hand-rolling curl with a token — the failure this command exists to
+prevent. Keep both halves of that balance in mind when changing its visibility.
+
+**Where that steer lives matters.** "This is a last resort" is agent guidance,
+not human help: someone who typed `entire api --help` chose the command on
+purpose, and telling them to reconsider is noise. So it lives in
+`agentHelpGuidance` (keyed by command path, rendered only by `agent-help` as a
+"When to use this:" block and as a `guidance` field in `--json`), never in
+cobra's `Long`. The split rule, which applies to any command that needs it:
+
+- true for **both** audiences → `Long` (e.g. "these endpoints are internal and
+  can change shape without notice")
+- useful only to an agent choosing from a surface it doesn't know →
+  `agentHelpGuidance`
+
+`TestAgentHelpGuidance_NeverLeaksIntoCobraHelp` fails CI if guidance text is
+pasted into a command's `Short`/`Long`.
 
 `agent-help` renders machine-readable, agent-facing usage live from the Cobra
 command tree (so it always matches the installed binary): bare prints a

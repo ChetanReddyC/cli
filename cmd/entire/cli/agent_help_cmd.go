@@ -178,6 +178,28 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"review":      {agentHelpAudienceUserOwned, false},
 }
 
+// agentHelpGuidance is agent-only advice about WHEN to reach for a command,
+// keyed by the same command path as agentHelpClassification.
+//
+// It is deliberately not in the command's Long. Cobra's Long is human help, and
+// a human who typed `entire api --help` chose that command on purpose — telling
+// them it is a last resort is noise at best and condescending at worst. An agent
+// is in the opposite position: it is picking from a surface it does not know, so
+// "prefer the purpose-built command" is the single most useful thing to say.
+// Same fact, opposite value, so it ships on the agent channel only. Anything
+// true for both audiences (e.g. "these endpoints are internal and can change")
+// belongs in Long instead, where both see it.
+var agentHelpGuidance = map[string]string{
+	"api": "LAST RESORT. Right in two cases: you are developing against Entire's own\n" +
+		"APIs and want a raw response, or no first-class command covers your need.\n" +
+		"Otherwise prefer the command built for the job (checkpoint, session, trail,\n" +
+		"status, repo, …) — its output is stable, raw endpoints are not. If you are\n" +
+		"reaching for this during ordinary work in a repo with Entire enabled, run\n" +
+		"`entire agent-help` first; there is probably a command for it. When you do\n" +
+		"need it, use this rather than hand-rolling curl — it attaches the right\n" +
+		"bearer and dials the right host for you.",
+}
+
 // agentHelpFactsFor classifies one command path, defaulting the unclassified
 // case to user-owned and unlisted so an unclassified addition is under- rather
 // than over-advertised.
@@ -445,9 +467,12 @@ type agentHelpSubcommandJSON struct {
 }
 
 type agentHelpJSON struct {
-	Command     string                    `json:"command"`
-	Short       string                    `json:"short,omitempty"`
-	Long        string                    `json:"long,omitempty"`
+	Command string `json:"command"`
+	Short   string `json:"short,omitempty"`
+	Long    string `json:"long,omitempty"`
+	// Guidance is agent-only advice on WHEN to use the command, absent from
+	// cobra's human help. Structured consumers get it alongside text readers.
+	Guidance    string                    `json:"guidance,omitempty"`
 	Example     string                    `json:"example,omitempty"`
 	Repo        string                    `json:"repo,omitempty"`
 	Flags       []agentHelpFlagJSON       `json:"flags,omitempty"`
@@ -457,11 +482,12 @@ type agentHelpJSON struct {
 // renderAgentHelpJSON renders the structured form of a command node.
 func renderAgentHelpJSON(rootCmd, target *cobra.Command, repoLine string, trailsEnabled bool) (string, error) {
 	doc := agentHelpJSON{
-		Command: target.CommandPath(),
-		Short:   target.Short,
-		Long:    strings.TrimSpace(target.Long),
-		Example: strings.TrimSpace(target.Example),
-		Repo:    repoLine,
+		Command:  target.CommandPath(),
+		Short:    target.Short,
+		Long:     strings.TrimSpace(target.Long),
+		Guidance: agentHelpGuidance[agentHelpPath(target)],
+		Example:  strings.TrimSpace(target.Example),
+		Repo:     repoLine,
 	}
 	if target != rootCmd {
 		collect := func(fs *flag.FlagSet) {
@@ -546,6 +572,13 @@ func renderAgentHelpCommand(cmd *cobra.Command, repoLine string, trailsEnabled b
 	fmt.Fprintf(&b, "%s — %s\n", cmd.CommandPath(), cmd.Short)
 	if long := strings.TrimSpace(cmd.Long); long != "" && long != strings.TrimSpace(cmd.Short) {
 		b.WriteString(long)
+		b.WriteString("\n")
+	}
+	// Before the flags and examples: whether to use the command at all outranks
+	// how to call it.
+	if guidance := agentHelpGuidance[agentHelpPath(cmd)]; guidance != "" {
+		b.WriteString("\nWhen to use this:\n")
+		b.WriteString(guidance)
 		b.WriteString("\n")
 	}
 	if example := strings.TrimSpace(cmd.Example); example != "" {
