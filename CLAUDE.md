@@ -499,43 +499,14 @@ reftable and sha256 repositories. Reviewers should flag any new
 `gitrepo.Status(ctx, repo)`; a `forbidigo` rule in `.golangci.yaml` enforces
 this, and `gitrepo/status.go` is the only sanctioned call site.
 
-`Worktree.Status()` walks the whole worktree twice — once in
-`gitignore.ReadPatterns` collecting patterns, once diffing. `ReadPatterns` does
-**not** thread a parent directory's patterns into its recursive walk: each
-recursive call rebuilds its pattern set from that directory's own ignore files,
-so the prune check only ever matches patterns declared by the directory being
-scanned.
-
-**Consequence for `.gitignore` layout:** a rule prunes a subtree only when its
-target is a *direct child* of the `.gitignore` declaring it. A root-level
-`e2e/artifacts/` rule is one level too deep and never prunes, so every
-`Status()` descended ~15k artifact directories and cost 5.25s (against 0.013s
-for `git status --porcelain`), which timed out agent hooks. The rule therefore
-lives in `e2e/.gitignore` as `/artifacts/`. When adding a new ignored directory,
-declare it in a `.gitignore` in its parent directory rather than as a nested
-path from the root — reviewers should flag multi-component directory patterns
-added to the root `.gitignore`.
-
-Anchor the relocated pattern with a leading slash. Moving `a/b/` to a
-`.gitignore` in `a/` as bare `b/` also drops git's root anchoring, so it would
-newly match `b` at any depth below `a/`; `/b/` preserves the original scope and
-prunes identically.
-
-`gitrepo.WithStatusCache(ctx)` memoizes the walk for callers that read status
-more than once. Install it **only** across a window that neither writes tracked
-files nor stages anything: the TurnStart hook qualifies (it runs before the agent
-acts and writes only session metadata under `.entire/` and refs under `.git/`),
-post-agent hooks such as TurnEnd do not — `DetectFileChanges` there must observe
-the agent's edits.
-
-Staging counts as invalidation even though `.git/index` sits inside `.git/`: the
-index feeds the status diff, so an index write makes a cached result stale. Entire
-performs no index writes today — there are no `SetIndex` calls, the single
-`Storer.Index()` use (`strategy/content_overlap.go`) is a read, and the git
-subcommands on the hook paths are all index-read-only. **If you add an
-index-mutating operation, check whether it lands inside a status-cache window.**
-The cache is context-scoped to one short-lived hook process, so it cannot go
-stale across turns.
+`Worktree.Status()` walks the worktree, so its cost scales with working-set size
+rather than with the size of the change being inspected, which makes it the most
+expensive git read on the hook paths. Avoid calling it more than once per hook.
+Do not memoize it either: a context-scoped cache was tried and removed, because
+the write-free window it required cost more to maintain than the walk saved (see
+`git log` on `gitrepo/status.go` for the measurements). The turn-start hook
+currently walks twice — `CapturePrePromptState` and the strategy's prompt
+attribution each read their own status.
 
 #### go-git v5 Bugs - Use CLI Instead
 
