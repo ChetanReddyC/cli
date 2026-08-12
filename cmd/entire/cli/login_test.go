@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
@@ -488,7 +490,7 @@ func TestPromptLoginURL_Cancellation(t *testing.T) {
 	}
 }
 
-func TestReadLoginURLActionBytes(t *testing.T) {
+func TestReadLoginURLActionEvents(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -504,18 +506,46 @@ func TestReadLoginURLActionBytes(t *testing.T) {
 		{name: "lowercase open", input: "o", want: loginURLOpen},
 		{name: "uppercase open", input: "O", want: loginURLOpen},
 		{name: "control c", input: "\x03", wantErr: context.Canceled},
+		{name: "right arrow ignored", input: "\x1b[C\r", want: loginURLContinue},
+		{name: "F1 ignored", input: "\x1bOP\r", want: loginURLContinue},
+		{name: "application right arrow ignored", input: "\x1bOC\r", want: loginURLContinue},
+		{name: "alt copy key ignored", input: "\x1bc\r", want: loginURLContinue},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			result := readLoginURLActionBytes(strings.NewReader(tt.input))
+			input := iotest.OneByteReader(strings.NewReader(tt.input))
+			result := readLoginURLActionEvents(context.Background(), input)
 			if !errors.Is(result.err, tt.wantErr) {
 				t.Fatalf("error = %v, want %v", result.err, tt.wantErr)
 			}
 			if result.action != tt.want {
 				t.Errorf("action = %v, want %v", result.action, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadLoginURLActionEvents_EscapeSequencesContainNoActions(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name  string
+		input string
+	}{
+		{name: "right arrow", input: "\x1b[C"},
+		{name: "F1", input: "\x1bOP"},
+		{name: "application right arrow", input: "\x1bOC"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			input := iotest.OneByteReader(strings.NewReader(tt.input))
+			result := readLoginURLActionEvents(context.Background(), input)
+			if !errors.Is(result.err, io.EOF) {
+				t.Fatalf("error = %v, want EOF without an action", result.err)
 			}
 		})
 	}

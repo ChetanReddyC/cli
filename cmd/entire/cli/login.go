@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/atotto/clipboard"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/entireio/auth-go/tokens"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
@@ -546,7 +547,7 @@ func readLoginURLActionFromTTY(ctx context.Context, tty *os.File) (loginURLActio
 
 	resultCh := make(chan loginURLActionResult, 1)
 	go func() {
-		resultCh <- readLoginURLActionBytes(tty)
+		resultCh <- readLoginURLActionEvents(ctx, tty)
 	}()
 
 	finish := func() error {
@@ -574,25 +575,53 @@ func readLoginURLActionFromTTY(ctx context.Context, tty *os.File) (loginURLActio
 	}
 }
 
-// readLoginURLActionBytes ignores unsupported keys until it sees one of the
-// advertised choices. Ctrl-C is handled explicitly because raw mode prevents
-// the terminal driver from turning it into SIGINT.
-func readLoginURLActionBytes(r io.Reader) loginURLActionResult {
-	var key [1]byte
-	for {
-		if _, err := io.ReadFull(r, key[:]); err != nil {
-			return loginURLActionResult{err: fmt.Errorf("read login action: %w", err)}
-		}
+// readLoginURLActionEvents decodes complete terminal events so bytes inside an
+// escape sequence cannot trigger an advertised action. Ctrl-C is handled
+// explicitly because raw mode prevents the terminal driver from turning it
+// into SIGINT.
+func readLoginURLActionEvents(ctx context.Context, r io.Reader) loginURLActionResult {
+	readerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-		switch key[0] {
-		case '\r', '\n':
-			return loginURLActionResult{action: loginURLContinue}
-		case 'c', 'C':
-			return loginURLActionResult{action: loginURLCopy}
-		case 'o', 'O':
-			return loginURLActionResult{action: loginURLOpen}
-		case 0x03:
-			return loginURLActionResult{err: context.Canceled}
+	// TerminalReader reads at most 4096 bytes at a time. Matching that capacity
+	// lets it finish emitting the current batch when an early action returns.
+	events := make(chan uv.Event, 4096)
+	streamDone := make(chan error, 1)
+	terminalReader := uv.NewTerminalReader(r, os.Getenv("TERM"))
+	go func() {
+		streamDone <- terminalReader.StreamEvents(readerCtx, events)
+		close(events)
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return loginURLActionResult{err: ctx.Err()}
+		case event, ok := <-events:
+			if !ok {
+				if ctx.Err() != nil {
+					return loginURLActionResult{err: ctx.Err()}
+				}
+				if err := <-streamDone; err != nil {
+					return loginURLActionResult{err: fmt.Errorf("read login action: %w", err)}
+				}
+				return loginURLActionResult{err: fmt.Errorf("read login action: %w", io.EOF)}
+			}
+
+			key, ok := event.(uv.KeyPressEvent)
+			if !ok {
+				continue
+			}
+			switch {
+			case key.MatchString("enter", "ctrl+j"):
+				return loginURLActionResult{action: loginURLContinue}
+			case key.MatchString("c", "C"):
+				return loginURLActionResult{action: loginURLCopy}
+			case key.MatchString("o", "O"):
+				return loginURLActionResult{action: loginURLOpen}
+			case key.MatchString("ctrl+c"):
+				return loginURLActionResult{err: context.Canceled}
+			}
 		}
 	}
 }
