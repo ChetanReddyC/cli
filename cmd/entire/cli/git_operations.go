@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
@@ -578,7 +579,13 @@ func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, 
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
 
-	if remote.Configured(ctx) {
+	s, settingsErr := settings.Load(settings.WithWorktreeRoot(ctx, worktreeRoot))
+	if settingsErr != nil {
+		logging.Warn(ctx, "checkpoint ref discovery: settings unavailable; leaving list local-only",
+			slog.String("error", settingsErr.Error()))
+		return nil, nil
+	}
+	if s.GetCheckpointRemote() != nil {
 		url, err := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: worktreeRoot})
 		if err != nil {
 			return nil, fmt.Errorf("resolve checkpoint remote URL: %w", err)
@@ -592,6 +599,9 @@ func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, 
 			return nil, fmt.Errorf("ls-remote checkpoint refs from %s: %w", remote.RedactURL(url), err)
 		}
 		return parseCheckpointRefNames(output), nil
+	}
+	if s.HasCheckpointRemoteKey() {
+		return nil, nil
 	}
 
 	candidates := strategy.CheckpointReadRemotes(ctx)

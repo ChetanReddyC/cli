@@ -5,46 +5,79 @@ package integration
 import (
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// TestCheckpointRefsDiscovery_CrossMachine: git-refs only — a fresh clone
-// with zero local checkpoint state discovers refs-native checkpoints on its
-// remote WITHOUT a dedicated checkpoint_remote, then hydrates them on read.
-// This closes the default-setup gap scoped out in #1771: discovery previously
-// required a configured checkpoint_remote, so `checkpoint list` and the
-// branch explain view showed nothing on a second machine.
-func TestCheckpointRefsDiscovery_CrossMachine(t *testing.T) {
+// TestCheckpointRefsDiscovery_CrossMachineReadCandidates: git-refs only — a
+// fresh clone discovers and hydrates refs-native checkpoints from both the
+// elected sync remote and the legacy origin tier. This closes the default-
+// setup gap scoped out in #1771 without letting discovery advertise a
+// checkpoint that the read path cannot fetch.
+func TestCheckpointRefsDiscovery_CrossMachineReadCandidates(t *testing.T) {
 	t.Parallel()
 
-	env := NewFeatureBranchEnv(t)
-	env.CheckpointStore = StoreGitRefs
+	const (
+		originRemote   = "origin"
+		upstreamRemote = "upstream"
+	)
 
-	bareOrigin := env.SetupBareRemote()
+	for _, checkpointRemote := range []string{upstreamRemote, originRemote} {
+		t.Run(checkpointRemote, func(t *testing.T) {
+			t.Parallel()
 
-	checkpointID := createCheckpointedCommit(t, env, "Add machine module", "machine.go", "package machine", "Add machine module")
-	env.GitPush("origin", "HEAD")
-	env.RunPrePush("origin")
-	if !env.CheckpointExistsOnRemote(bareOrigin, checkpointID) {
-		t.Fatalf("checkpoint %s should be on origin", checkpointID)
-	}
+			env := NewFeatureBranchEnv(t)
+			env.CheckpointStore = StoreGitRefs
 
-	// Machine B: a fresh clone with no local checkpoint refs and no dedicated
-	// checkpoint_remote. The list assertion is discovery-load-bearing: the
-	// branch view only surfaces a checkpoint whose ID store.List knows, and a
-	// pristine clone has no local refs, so only remote discovery can supply
-	// it (known-ID hydration fires on explain, asserted separately).
-	cloneEnv := env.CloneFrom(bareOrigin)
-	if cloneEnv.CheckpointsPresentLocally() {
-		t.Fatal("fixture: the clone must start with zero local checkpoint state")
-	}
+			bareOrigin := env.SetupBareRemote()
+			bareUpstream := env.SetupNamedBareRemote(upstreamRemote)
+			if checkpointRemote == upstreamRemote {
+				env.PatchSettings(map[string]any{
+					"strategy_options": map[string]any{
+						"checkpoint_push_remote": upstreamRemote,
+					},
+				})
+			}
 
-	listOutput := cloneEnv.RunCLI("checkpoint", "list")
-	if !strings.Contains(listOutput, "Add machine module") && !strings.Contains(listOutput, checkpointID[:8]) {
-		t.Errorf("cross-machine discovery should surface the remote checkpoint, got:\n%s", listOutput)
-	}
+			checkpointID := createCheckpointedCommit(t, env, "Add machine module", "machine.go", "package machine", "Add machine module")
+			env.GitPush(originRemote, "HEAD")
+			env.RunPrePush(checkpointRemote)
 
-	output := cloneEnv.RunCLI("checkpoint", "explain", "--checkpoint", checkpointID)
-	if !strings.Contains(output, "Add machine module") {
-		t.Errorf("the discovered checkpoint should hydrate on read, got:\n%s", output)
+			bareByRemote := map[string]string{originRemote: bareOrigin, upstreamRemote: bareUpstream}
+			if !env.CheckpointExistsOnRemote(bareByRemote[checkpointRemote], checkpointID) {
+				t.Fatalf("checkpoint %s should be on %s", checkpointID, checkpointRemote)
+			}
+			otherRemote := originRemote
+			if checkpointRemote == originRemote {
+				otherRemote = upstreamRemote
+			}
+			if env.CheckpointExistsOnRemote(bareByRemote[otherRemote], checkpointID) {
+				t.Fatalf("fixture: checkpoint %s must exist only on %s", checkpointID, checkpointRemote)
+			}
+
+			// Machine B always elects upstream. The origin case therefore proves
+			// that a miss on the elected remote advances to the legacy tier.
+			cloneEnv := env.CloneFrom(bareOrigin)
+			testutil.AddRemote(t, cloneEnv.RepoDir, upstreamRemote, bareUpstream)
+			cloneEnv.setGitConfigBaseline()
+			cloneEnv.PatchSettings(map[string]any{
+				"strategy_options": map[string]any{
+					"checkpoint_push_remote": upstreamRemote,
+				},
+			})
+			if cloneEnv.CheckpointsPresentLocally() {
+				t.Fatal("fixture: the clone must start with zero local checkpoint state")
+			}
+
+			listOutput := cloneEnv.RunCLI("checkpoint", "list")
+			if !strings.Contains(listOutput, "Add machine module") && !strings.Contains(listOutput, checkpointID[:8]) {
+				t.Errorf("cross-machine discovery should surface the remote checkpoint, got:\n%s", listOutput)
+			}
+
+			output := cloneEnv.RunCLI("checkpoint", "explain", "--checkpoint", checkpointID)
+			if !strings.Contains(output, "Add machine module") {
+				t.Errorf("the discovered checkpoint should hydrate on read, got:\n%s", output)
+			}
+		})
 	}
 }
