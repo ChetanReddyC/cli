@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"charm.land/huh/v2"
 
@@ -72,7 +73,7 @@ func MaybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVer
 
 	if os.Getenv(envKillSwitch) != "" || !interactive.CanPromptInteractively() || !isTerminalOut(w) {
 		printNotification(w, currentVersion, latestVersion)
-		fmt.Fprintf(w, "To update, run:\n  %s\n", cmdStr)
+		fmt.Fprintf(w, "To update, run:\n%s\n", indentCommand(cmdStr))
 		return autoUpdateActionSkip
 	}
 
@@ -84,9 +85,9 @@ func MaybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVer
 
 	switch action {
 	case autoUpdateActionUpdate:
-		fmt.Fprintf(w, "\nUpdating Entire CLI: %s\n", cmdStr)
+		fmt.Fprintf(w, "\nUpdating Entire CLI:\n%s\n", indentCommand(cmdStr))
 		if err := runInstaller(ctx, cmdStr); err != nil {
-			fmt.Fprintf(w, "Update failed: %v\nTry again later running:\n  %s\n", err, cmdStr)
+			fmt.Fprintf(w, "Update failed: %v\nTry again later running:\n%s\n", err, indentCommand(cmdStr))
 			return autoUpdateActionUpdate
 		}
 		fmt.Fprintln(w, "Update complete. Re-run entire to use the new version.")
@@ -125,20 +126,39 @@ func realChooseUpdate(ctx context.Context, currentVersion, latestVersion, cmdStr
 	return action, nil
 }
 
+// indentCommand indents each line of a (possibly multi-line) installer command
+// so it reads as a block under a "run:" heading.
+func indentCommand(cmdStr string) string {
+	return "  " + strings.ReplaceAll(cmdStr, "\n", "\n  ")
+}
+
 // realRunInstaller shells out to the installer command, streaming stdin/stdout/stderr
 // so password prompts and progress output reach the user.
+//
+// cmdStr may hold several newline-separated commands (e.g. the Scoop package
+// rename: install, uninstall, reset). Each line is run as its own process and
+// a failure stops the sequence, so a later step never runs after an earlier one
+// failed (the uninstall must not run if the install did not succeed). Keeping
+// the steps as separate lines — rather than a `;`/`&&` shell one-liner — lets
+// the same string be pasted into any shell the user happens to be in.
 func realRunInstaller(ctx context.Context, cmdStr string) error {
-	var c *exec.Cmd
-	if runtime.GOOS == goosWindows {
-		c = exec.CommandContext(ctx, "cmd", "/C", cmdStr)
-	} else {
-		c = exec.CommandContext(ctx, "sh", "-c", cmdStr)
-	}
-	c.Stdin = os.Stdin
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	if err := c.Run(); err != nil {
-		return fmt.Errorf("installer exited: %w", err)
+	for line := range strings.SplitSeq(cmdStr, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var c *exec.Cmd
+		if runtime.GOOS == goosWindows {
+			c = exec.CommandContext(ctx, "cmd", "/C", line)
+		} else {
+			c = exec.CommandContext(ctx, "sh", "-c", line)
+		}
+		c.Stdin = os.Stdin
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+		if err := c.Run(); err != nil {
+			return fmt.Errorf("installer exited: %w", err)
+		}
 	}
 	return nil
 }

@@ -429,19 +429,22 @@ func updateCommand(currentVersion string) string {
 	case installManagerScoop:
 		// The Scoop package was renamed from `cli` to `entire`. A binary still
 		// running from the old `cli` app dir can never cross the rename with a
-		// plain `scoop update entire/cli`, so install the new `entire` package.
-		// `scoop install` auto-refreshes the bucket when it is >3h stale
-		// (is_scoop_outdated), so the new manifest lands without an explicit
-		// refresh, and the most-recent install owns the shared `entire.exe`
-		// shim — so this single command migrates the user. It is deliberately
-		// one shell-agnostic command (no `;`/`&&`/conditionals): the string is
-		// both auto-run and printed for the user to paste into any shell, and
-		// installing without removing the old package can never leave them
-		// without a working CLI. Cleanup of the leftover `cli` app is handled
-		// by the transition manifest's post_install nudge on `scoop update`.
-		// Binaries already on the `entire` app just update in place.
+		// plain `scoop update entire/cli`, so migrate it: install the new
+		// `entire` package, remove the old `cli` package, then reset the shared
+		// `entire.exe` shim (which uninstalling `cli` can take with it).
+		//
+		// These are three separate one-command lines, NOT a shell one-liner.
+		// The string is both auto-run and printed for the user to paste into an
+		// unknown shell (cmd, PowerShell, git-bash, WSL), so it must carry no
+		// `;`/`&&`/conditional. realRunInstaller runs each line as its own
+		// process and stops on the first failure, so the uninstall only runs
+		// once the install has succeeded — a stale bucket or transient failure
+		// never leaves the user without a working CLI. `scoop install` also
+		// auto-refreshes the bucket when >3h stale (is_scoop_outdated), so the
+		// new manifest lands without an explicit refresh. Binaries already on
+		// the `entire` app just update in place.
 		if scoopAppName() == "cli" {
-			return "scoop install entire/entire"
+			return "scoop install entire/entire\nscoop uninstall entire/cli\nscoop reset entire"
 		}
 		return "scoop update entire/entire"
 	}
