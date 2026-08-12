@@ -155,6 +155,35 @@ func TestMergeSemanticV4Responses_Tier0MixedCapabilityFallback(t *testing.T) {
 	}
 }
 
+// TestMergeSemanticV4Responses_EqualRerankTieBreaks verifies the secondary keys
+// when rerank scores tie: tier 0 falls back to BM25 desc and tier 1 to retrieval
+// Score desc, matching the BFF's `|| bm25Of` / `|| scoreOf` tie-breaks.
+func TestMergeSemanticV4Responses_EqualRerankTieBreaks(t *testing.T) {
+	t.Parallel()
+
+	cell := &search.Response{Results: []search.Result{
+		// tier 0, equal rerank → BM25 desc decides: t0-hi before t0-lo.
+		v4Ckpt("t0-lo", 0, search.Meta{RerankScore: fptr(0.50), BM25Score: fptr(2.0)}),
+		v4Ckpt("t0-hi", 0, search.Meta{RerankScore: fptr(0.50), BM25Score: fptr(8.0)}),
+		// tier 1, equal rerank → Score desc decides: t1-hi before t1-lo.
+		v4Ckpt("t1-lo", 1, search.Meta{RerankScore: fptr(0.30), Score: 0.1}),
+		v4Ckpt("t1-hi", 1, search.Meta{RerankScore: fptr(0.30), Score: 0.9}),
+	}, Total: 4}
+
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellOK(cell),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"t0-hi", "t0-lo", "t1-hi", "t1-lo"}
+	got := v4ResultIDs(t, resp.Results)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("merged order = %v, want %v", got, want)
+	}
+}
+
 // TestMergeSemanticV4Responses_PagePassthrough confirms the requested page is
 // reflected in the merged response (the TUI's fetch-more pages server-side).
 func TestMergeSemanticV4Responses_PagePassthrough(t *testing.T) {
