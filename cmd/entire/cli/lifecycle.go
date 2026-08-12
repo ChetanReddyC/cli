@@ -891,6 +891,13 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		logging.Warn(logCtx, "failed to compute file changes",
 			slog.String("error", err.Error()))
 	}
+	if changes != nil && preState != nil && preState.UntrackedScanSkipped {
+		// The turn-start untracked scan was skipped (e.g. status-walk budget
+		// breach), so there is no baseline: every untracked file in the
+		// worktree would be misreported as created by this turn.
+		logging.Warn(logCtx, "skipping new-file detection: pre-prompt untracked scan was skipped")
+		changes.New = nil
+	}
 	detectSpan.End()
 
 	// Filter and normalize all paths
@@ -1164,6 +1171,12 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	if err != nil {
 		logging.Warn(logCtx, "failed to compute file changes",
 			slog.String("error", err.Error()))
+	}
+	if changes != nil && preState != nil && preState.UntrackedScanSkipped {
+		// Same degradation as turn-end: without a pre-task baseline, every
+		// untracked file would be misreported as created by this task.
+		logging.Warn(logCtx, "skipping new-file detection: pre-task untracked scan was skipped")
+		changes.New = nil
 	}
 
 	// Get worktree root and normalize paths

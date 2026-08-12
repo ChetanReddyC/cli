@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
@@ -813,6 +814,99 @@ func TestHandleLifecycleTurnEnd_EmptyRepository(t *testing.T) {
 	if err != nil {
 		t.Errorf("expected nil for empty repository (graceful no-op), got: %v", err)
 	}
+}
+
+// mockAnalyzerAgent adds TranscriptAnalyzer so turn-end can derive modified
+// files from the transcript when git status is unavailable.
+type mockAnalyzerAgent struct {
+	mockLifecycleAgent
+
+	modifiedFiles []string
+}
+
+var _ agent.TranscriptAnalyzer = (*mockAnalyzerAgent)(nil)
+
+func (m *mockAnalyzerAgent) GetTranscriptPosition(string) (int, error) { return 0, nil }
+
+func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(string, int) ([]string, int, error) {
+	return m.modifiedFiles, 0, nil
+}
+
+// TestTurnFlow_StatusBudgetBreachDegradesGracefully pins the zombie-hook
+// incident regression (stray `git init` in $HOME): when the worktree status
+// walk breaches its wall-clock budget, both turn hooks must still succeed —
+// the agent treats a non-zero hook exit as failure — and turn-end must
+// checkpoint the transcript-derived files while skipping new-file detection,
+// so pre-existing untracked files are not misattributed to the agent. Before
+// the budget existed the failure mode was worse (hook ground for hours), but
+// the degrade path itself is what this test locks in.
+func TestTurnFlow_StatusBudgetBreachDegradesGracefully(t *testing.T) {
+	// Not parallel: t.Chdir plus the process-global status budget latch.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "README.md", "# test\n")
+	testutil.GitAdd(t, tmpDir, "README.md")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	gitrepo.SetStatusBudgetBreachedForTesting(true)
+	t.Cleanup(func() { gitrepo.SetStatusBudgetBreachedForTesting(false) })
+
+	ctx := context.Background()
+	sessionID := "sess-budget-breach"
+
+	// Pre-existing untracked file that must not be claimed by the checkpoint.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "preexisting.txt"), []byte("x"), 0o600))
+
+	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
+
+	// Agents report absolute paths; resolve symlinks (macOS /var → /private/var)
+	// so the path normalizes against the repo root the handler resolves.
+	resolvedDir, err := filepath.EvalSymlinks(tmpDir)
+	require.NoError(t, err)
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "mock-analyzer",
+			agentType:      "Mock Analyzer Agent",
+			transcriptData: []byte(`{"type":"user","message":"test"}`),
+		},
+		modifiedFiles: []string{filepath.Join(resolvedDir, "agent.txt")},
+	}
+
+	// Turn start: the untracked scan is degraded, not fatal.
+	startEvent := &agent.Event{
+		Type:       agent.TurnStart,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Prompt:     "write agent.txt",
+		Timestamp:  time.Now(),
+	}
+	require.NoError(t, handleLifecycleTurnStart(ctx, ag, startEvent))
+
+	preState, err := LoadPrePromptState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, preState)
+	require.True(t, preState.UntrackedScanSkipped, "breached scan must be recorded so turn-end skips new-file detection")
+
+	// The agent writes its file during the turn.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "agent.txt"), []byte("agent"), 0o600))
+
+	endEvent := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, endEvent), "turn-end must exit 0 when status is unavailable")
+
+	// Capture proceeded from transcript-derived data: the agent's file is in
+	// the session state, the pre-existing untracked file is not.
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Contains(t, state.FilesTouched, "agent.txt")
+	require.NotContains(t, state.FilesTouched, "preexisting.txt")
 }
 
 // --- handleLifecycleCompaction tests ---

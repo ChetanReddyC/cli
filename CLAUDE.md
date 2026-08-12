@@ -531,6 +531,18 @@ the write-free window it required cost more to maintain than the walk saved (see
 currently walks twice — `CapturePrePromptState` and the strategy's prompt
 attribution each read their own status.
 
+Agent-hook capture paths must use `gitrepo.StatusWithBudget` instead: it bounds
+the walk with a wall-clock budget (`statusWalkBudget`) because go-git's walk is
+not context-cancellable and a pathological worktree (e.g. a stray `git init` in
+`$HOME`) otherwise leaves the hook process grinding for hours after the agent's
+own hook timeout fires. On breach it returns an error wrapping
+`gitrepo.ErrStatusBudgetExceeded` — hook callers warn and continue with
+transcript-derived data (capture is fail-open; new-file detection is skipped for
+the turn via the pre-prompt/pre-task `UntrackedScanSkipped` marker) — and a
+process-local latch makes every later `StatusWithBudget` call in the same hook
+process fail fast rather than re-entering the walk. Paths where a user is
+actively waiting on a command (review, rewind) keep calling `gitrepo.Status`.
+
 #### go-git v5 Bugs - Use CLI Instead
 
 **Do NOT use go-git v5 for `checkout` or `reset --hard` operations.**

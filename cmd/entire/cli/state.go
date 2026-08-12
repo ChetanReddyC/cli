@@ -29,6 +29,13 @@ type PrePromptState struct {
 	Timestamp      string   `json:"timestamp"`
 	UntrackedFiles []string `json:"untracked_files"`
 
+	// UntrackedScanSkipped records that the pre-prompt untracked scan failed
+	// (e.g. the status walk breached its wall-clock budget). Turn-end must
+	// then skip new-file detection entirely: with no baseline, every
+	// untracked file in the worktree would be misreported as created by this
+	// turn.
+	UntrackedScanSkipped bool `json:"untracked_scan_skipped,omitempty"`
+
 	// TranscriptOffset is the unified transcript position when this state was captured.
 	// For Claude Code (JSONL), this is the line count.
 	// For Gemini CLI (JSON), this is the message count.
@@ -115,11 +122,11 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		return fmt.Errorf("failed to create tmp directory: %w", err)
 	}
 
-	// Get list of untracked files (excluding .entire directory itself)
-	untrackedFiles, err := getUntrackedFilesForState(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get untracked files: %w", err)
-	}
+	// Get list of untracked files (excluding .entire directory itself).
+	// Fail open on error: hooks must never break the agent, and the rest of
+	// the snapshot (transcript position) is still worth capturing. The
+	// skipped-scan marker tells turn-end to disable new-file detection.
+	untrackedFiles, scanSkipped := untrackedFilesOrSkip(ctx)
 
 	// Get transcript position using TranscriptAnalyzer if available
 	var transcriptOffset int
@@ -135,10 +142,11 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 
 	// Create state file using os.Root for traversal-resistant write
 	state := PrePromptState{
-		SessionID:        sessionID,
-		Timestamp:        time.Now().UTC().Format(time.RFC3339),
-		UntrackedFiles:   untrackedFiles,
-		TranscriptOffset: transcriptOffset,
+		SessionID:            sessionID,
+		Timestamp:            time.Now().UTC().Format(time.RFC3339),
+		UntrackedFiles:       untrackedFiles,
+		UntrackedScanSkipped: scanSkipped,
+		TranscriptOffset:     transcriptOffset,
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
@@ -273,7 +281,7 @@ func DetectFileChanges(ctx context.Context, previouslyUntracked []string) (*File
 	}
 	defer repo.Close()
 
-	status, err := gitrepo.Status(ctx, repo)
+	status, err := gitrepo.StatusWithBudget(ctx, repo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get status: %w", err)
 	}
@@ -428,6 +436,22 @@ func resolveTmpDir(ctx context.Context) string {
 	return abs
 }
 
+// untrackedFilesOrSkip runs the pre-prompt/pre-task untracked scan, degrading
+// instead of failing: on any error (including a status-walk budget breach) it
+// warns and reports the scan as skipped so the paired end-hook disables
+// new-file detection for the turn. Hook paths must never fail on status
+// errors — capture is fail-open.
+func untrackedFilesOrSkip(ctx context.Context) (untrackedFiles []string, scanSkipped bool) {
+	untrackedFiles, err := getUntrackedFilesForState(ctx)
+	if err != nil {
+		logging.Warn(logging.WithComponent(ctx, "state"),
+			"untracked-file scan failed; capture degraded: new-file detection disabled for this turn",
+			slog.String("error", err.Error()))
+		return nil, true
+	}
+	return untrackedFiles, false
+}
+
 // getUntrackedFilesForState returns a list of untracked files using go-git
 // Excludes .entire directory
 func getUntrackedFilesForState(ctx context.Context) ([]string, error) {
@@ -437,7 +461,7 @@ func getUntrackedFilesForState(ctx context.Context) ([]string, error) {
 	}
 	defer repo.Close()
 
-	status, err := gitrepo.Status(ctx, repo)
+	status, err := gitrepo.StatusWithBudget(ctx, repo)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // already present in codebase
 	}
@@ -459,6 +483,10 @@ type PreTaskState struct {
 	ToolUseID      string   `json:"tool_use_id"`
 	Timestamp      string   `json:"timestamp"`
 	UntrackedFiles []string `json:"untracked_files"`
+
+	// UntrackedScanSkipped mirrors PrePromptState.UntrackedScanSkipped for the
+	// subagent path: when set, subagent-end must skip new-file detection.
+	UntrackedScanSkipped bool `json:"untracked_scan_skipped,omitempty"`
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -493,17 +521,16 @@ func CapturePreTaskState(ctx context.Context, toolUseID string) error {
 		return fmt.Errorf("failed to create tmp directory: %w", err)
 	}
 
-	// Get list of untracked files (excluding .entire directory itself)
-	untrackedFiles, err := getUntrackedFilesForState(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get untracked files: %w", err)
-	}
+	// Get list of untracked files (excluding .entire directory itself).
+	// Fail open on error, same as CapturePrePromptState.
+	untrackedFiles, scanSkipped := untrackedFilesOrSkip(ctx)
 
 	// Create state file using os.Root for traversal-resistant write
 	state := PreTaskState{
-		ToolUseID:      toolUseID,
-		Timestamp:      time.Now().UTC().Format(time.RFC3339),
-		UntrackedFiles: untrackedFiles,
+		ToolUseID:            toolUseID,
+		Timestamp:            time.Now().UTC().Format(time.RFC3339),
+		UntrackedFiles:       untrackedFiles,
+		UntrackedScanSkipped: scanSkipped,
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
