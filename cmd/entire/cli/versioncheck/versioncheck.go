@@ -343,6 +343,16 @@ func releaseChannel(version string) string {
 	return installChannelStable
 }
 
+// isMajorV8 reports whether currentVersion is a v8.x release. Used to route
+// Scoop users through the v9 package rename (`cli` -> `entire`) on upgrade.
+func isMajorV8(currentVersion string) bool {
+	v := currentVersion
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	return semver.IsValid(v) && semver.Major(v) == "v8"
+}
+
 func installManagerForCurrentBinary() string {
 	execPath, err := executablePath()
 	if err != nil {
@@ -401,6 +411,16 @@ func updateCommand(currentVersion string) string {
 	case installManagerMise:
 		return "mise upgrade entire"
 	case installManagerScoop:
+		// The Scoop package was renamed from `cli` to `entire` in v9. A v8
+		// binary is installed as `entire/cli`, so a plain `scoop update
+		// entire/cli` can never cross the rename. Route v8 Scoop users through
+		// the rename: drop the old `cli` package and install the new `entire`
+		// package. `scoop install` auto-refreshes the bucket when it is >3h
+		// stale (is_scoop_outdated), so the new `entire` manifest lands without
+		// an explicit refresh step.
+		if isMajorV8(currentVersion) {
+			return "scoop uninstall entire/cli && scoop install entire/entire"
+		}
 		return "scoop update entire/cli"
 	}
 

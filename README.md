@@ -68,7 +68,17 @@ Install with Scoop:
 
 ```powershell
 scoop bucket add entire https://github.com/entireio/scoop-bucket.git
-scoop install entire/cli
+scoop install entire/entire
+```
+
+#### Upgrading to v9 (Scoop package rename)
+
+The Scoop package was renamed from `cli` to `entire` in v9. If you installed a
+v8 build (`entire/cli`), remove the old package and install the new one:
+
+```powershell
+scoop uninstall entire/cli
+scoop install entire/entire
 ```
 
 ### Go (development/manual setup)
@@ -105,7 +115,7 @@ How to use each channel:
 - Homebrew nightly: `brew install --cask entire@nightly`
 - `install.sh` stable: `curl -fsSL https://entire.io/install.sh | bash`
 - `install.sh` nightly: `curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly`
-- Scoop: currently supports `stable` only via `scoop install entire/cli`
+- Scoop: currently supports `stable` only via `scoop install entire/entire`
 
 ## Typical Workflow
 

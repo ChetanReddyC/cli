@@ -393,6 +393,12 @@ func TestUpdateCommand(t *testing.T) {
 			want:           "scoop update entire/cli",
 		},
 		{
+			name:           "scoop path v8 routes through package rename",
+			currentVersion: "8.4.1",
+			execPath:       func() (string, error) { return scoopExecutablePath, nil },
+			want:           "scoop uninstall entire/cli && scoop install entire/entire",
+		},
+		{
 			name:           "unknown path stable falls back to stable curl command",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return plainBinPath, nil },
