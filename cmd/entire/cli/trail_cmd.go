@@ -165,6 +165,10 @@ type trailShowOptions struct {
 
 func newTrailShowCmd() *cobra.Command {
 	var opts trailShowOptions
+	// branchFlag is bound only so cobra has somewhere to write --branch; RunE
+	// reads it back through trailBranchFlag (which trims) along with every other
+	// field, so a value reaches opts exactly one way.
+	var branchFlag string
 	cmd := &cobra.Command{
 		Use:   "show [<trail>]",
 		Short: "Show a trail",
@@ -191,7 +195,7 @@ Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 			return runTrailShow(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.Branch, "branch", "", "Show the trail for this branch instead of the current branch; cannot be combined with a trail selector")
+	cmd.Flags().StringVar(&branchFlag, "branch", "", "Show the trail for this branch instead of the current branch; cannot be combined with a trail selector")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output the trail as JSON (same object shape as one entry of 'trail list --json')")
 	return cmd
 }
@@ -1380,6 +1384,13 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 	// caller knows the metadata already applied and only the body needs a
 	// retry, rather than assuming nothing changed.
 	meta, hasMeta, bodyReq := splitTrailUpdate(updateReq)
+	if !hasMeta && bodyReq == nil {
+		// Nothing changed — most often the interactive form opened and closed
+		// untouched. Say so instead of printing the success line: no PATCH went
+		// out, and agents read that line as confirmation the write landed.
+		fmt.Fprintf(w, "No changes to apply to the trail for branch %s\n", branch)
+		return nil
+	}
 	if hasMeta {
 		if err := sendTrailPatch(ctx, client, path, meta); err != nil {
 			return err
@@ -1531,6 +1542,13 @@ func splitTrailUpdate(full api.TrailUpdateRequest) (meta api.TrailUpdateRequest,
 // without anyone having to remember to extend this check. Forgetting to would
 // make splitTrailUpdate return hasMeta=false and drop that change silently: the
 // PATCH is never sent, yet the command still reports success.
+//
+// The reflective default is only right for fields the server treats as
+// metadata. A field that has to travel *with* the body instead — a hypothetical
+// body_format or body_version — would be routed into the metadata PATCH here
+// and rejected under the very "Body updates cannot be combined with metadata
+// updates" rule the split exists to satisfy. Adding one means deciding
+// explicitly where it belongs in splitTrailUpdate; it is not handled for free.
 func trailUpdateRequestHasFields(req api.TrailUpdateRequest) bool {
 	v := reflect.ValueOf(req)
 	for i := range v.NumField() {

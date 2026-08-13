@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1773,9 +1774,11 @@ func TestSplitTrailUpdateCountsEveryNonBodyFieldAsMetadata(t *testing.T) {
 		}
 		t.Run(field.Name, func(t *testing.T) {
 			t.Parallel()
-			if field.Type.Kind() != reflect.Ptr {
-				t.Skipf("field %s is not a pointer; extend this test for its zero/set semantics", field.Name)
-			}
+			// Fail rather than skip: a skipped subtest passes quietly, so a
+			// non-pointer field would silently retire the guarantee this test
+			// exists to provide, exactly when it starts mattering.
+			require.Equalf(t, reflect.Ptr, field.Type.Kind(),
+				"field %s is not a pointer; decide its zero/set semantics and extend this test before adding it", field.Name)
 			var req api.TrailUpdateRequest
 			// A pointer to the zero value is still "provided" — that is how a
 			// field is cleared (e.g. an empty title, an emptied assignee list).
@@ -1795,6 +1798,10 @@ func TestSplitTrailUpdateCountsEveryNonBodyFieldAsMetadata(t *testing.T) {
 func TestRunTrailUpdateSendsTitleAndBodyAsSeparatePatches(t *testing.T) {
 	t.Parallel()
 
+	// patches is written from the handler goroutine and read from the test
+	// goroutine, so it is guarded — the counter-based tests in this file use
+	// sync/atomic for the same reason; a slice needs a mutex instead.
+	var mu sync.Mutex
 	var patches []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -1812,7 +1819,9 @@ func TestRunTrailUpdateSendsTitleAndBodyAsSeparatePatches(t *testing.T) {
 				t.Errorf("decode patch request: %v", err)
 				return
 			}
+			mu.Lock()
 			patches = append(patches, got)
+			mu.Unlock()
 			// Mirror the server's own rule ("Body updates cannot be combined
 			// with metadata updates").
 			_, hasBody := got[trailBodyField]
@@ -1849,11 +1858,51 @@ func TestRunTrailUpdateSendsTitleAndBodyAsSeparatePatches(t *testing.T) {
 	})
 
 	require.NoError(t, err)
+	mu.Lock()
+	defer mu.Unlock()
 	require.Len(t, patches, 2, "title and body must go out as two PATCHes")
 	require.Equal(t, map[string]any{"title": "new title"}, patches[0])
 	require.Equal(t, map[string]any{trailBodyField: "new body"}, patches[1])
 	require.Contains(t, out.String(), "Updated trail for branch feature/x")
 	require.Empty(t, errOut.String())
+}
+
+// TestRunTrailUpdateReportsNoChangesWhenNothingWasSent pins that an update
+// which sends no PATCH does not claim success — agents read the success line as
+// confirmation the write landed.
+func TestRunTrailUpdateReportsNoChangesWhenNothingWasSent(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != trailTestBasePath {
+			t.Errorf("no PATCH should be sent, got: %s %s", r.Method, r.URL.Path)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+			Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}},
+			Total:  1,
+		}); err != nil {
+			t.Errorf("encode list response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	// The real source of an empty update is the interactive form closing
+	// untouched, which leaves every *Changed flag false. That exact input would
+	// re-open the form here (noFlags), so stand in with a non-nil but empty
+	// label slice: it clears noFlags, and buildTrailUpdateRequest still returns
+	// an empty request — the same state the split has to refuse to report as a
+	// success.
+	err := runTrailUpdateWithClient(t.Context(), &out, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		Branch:   "feature/x",
+		LabelAdd: []string{},
+	})
+
+	require.NoError(t, err)
+	require.Contains(t, out.String(), "No changes to apply")
+	require.NotContains(t, out.String(), "Updated trail")
 }
 
 // TestRunTrailUpdateReportsAppliedMetadataWhenBodyPatchFails covers the
