@@ -41,11 +41,17 @@ const sweepCondenseBudget = time.Second
 // number finalized. Each session is best-effort: a failure to mark one ended is
 // logged and skipped; a condense failure is logged but the session is still
 // counted (PostCommit will retry the condense later).
-func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
+//
+// The second return value tears down the logging this sweep set up, and is the
+// caller's to scope: defer it for as long as the caller keeps doing work that
+// logs, not just around this call. `entire doctor` is why — it goes on to
+// condense and discard sessions, and closing the log file first would put those
+// handlers' output back on the user's terminal.
+func finalizeExitedSessions(ctx context.Context, states []*session.State) (int, func()) {
 	// Nothing to do is overwhelmingly the common case, and returning here keeps
 	// the sweep off the logging and store setup below entirely.
 	if !slices.ContainsFunc(states, (*session.State).OwnerExited) {
-		return 0
+		return 0, func() {}
 	}
 
 	// Neither caller (`entire status`, `entire doctor`) initializes logging, so
@@ -54,7 +60,7 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 	// paired with it exactly as at the other command-level Init sites, or
 	// `log_level` in settings would be ignored on this path.
 	logging.SetLogLevelGetter(GetLogLevel)
-	defer logging.EnsureInitialized(ctx)()
+	stopLogging := logging.EnsureInitialized(ctx)
 
 	logCtx := logging.WithComponent(ctx, "session")
 	condenseDeadline := time.Now().Add(sweepCondenseBudget)
@@ -108,5 +114,5 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 		}
 		finalized++
 	}
-	return finalized
+	return finalized, stopLogging
 }

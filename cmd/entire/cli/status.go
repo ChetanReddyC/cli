@@ -428,14 +428,19 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 	// SessionStop hook firing, so it doesn't linger as "active" until the
 	// inactivity timeout. The sweep marks them ended in place, so the filter
 	// below drops them.
-	if n := finalizeExitedSessions(ctx, states); n > 0 {
+	n, stopLogging := finalizeExitedSessions(ctx, states)
+	defer stopLogging()
+	if n > 0 {
 		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("Finalized %d exited session(s) (agent process gone).", n)))
 	}
 
-	// Filter to active sessions only
+	// Filter to active sessions only, per session.State.IsEnded — the same rule
+	// `entire session stop` filters on, so status can't advertise a session that
+	// stop then refuses to list. EndedAt alone is not it: `entire session attach`
+	// sets Phase to ended without stamping EndedAt.
 	var active []*session.State
 	for _, s := range states {
-		if s.EndedAt == nil {
+		if !s.IsEnded() {
 			active = append(active, s)
 		}
 	}
@@ -820,7 +825,8 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 				// Finalize sessions whose agent has exited (matches the human
 				// status path) so --json doesn't leave them orphaned ACTIVE or
 				// report them under active_sessions.
-				finalizeExitedSessions(ctx, states)
+				_, stopLogging := finalizeExitedSessions(ctx, states)
+				defer stopLogging()
 				// Deduplicate by agent: one entry per agent, "active" wins over "idle".
 				type agentEntry struct {
 					brief    sessionBriefJSON
@@ -828,7 +834,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 				}
 				byAgent := make(map[string]*agentEntry)
 				for _, st := range states {
-					if st.EndedAt != nil {
+					if st.IsEnded() {
 						continue
 					}
 					agent := string(st.AgentType)
@@ -868,7 +874,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 
 // sessionStatusLabel derives a display status from a session state.
 func sessionStatusLabel(s *session.State) string {
-	if s.EndedAt != nil {
+	if s.IsEnded() {
 		return "ended"
 	}
 	if s.OwnerExited() {

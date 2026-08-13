@@ -137,7 +137,12 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// hook fired). A gone process is unambiguous, so these are condensed on the
 	// spot rather than left for the interactive prompt below; the sweep marks
 	// them ended in place so classifySession won't re-flag them.
-	if n := finalizeExitedSessions(ctx, states); n > 0 {
+	// Deferred here rather than inside the sweep: the condense and discard paths
+	// below log, and this keeps their output in .entire/logs/ instead of on the
+	// terminal alongside doctor's own report.
+	n, stopLogging := finalizeExitedSessions(ctx, states)
+	defer stopLogging()
+	if n > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Finalized %d exited session(s) (agent process gone).\n\n", n)
 	}
 

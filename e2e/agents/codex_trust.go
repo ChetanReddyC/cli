@@ -27,6 +27,7 @@ type codexHookEvents struct {
 	PreCompact        []codexHookGroup `json:"PreCompact"`
 	PostCompact       []codexHookGroup `json:"PostCompact"`
 	SessionStart      []codexHookGroup `json:"SessionStart"`
+	SessionEnd        []codexHookGroup `json:"SessionEnd"`
 	UserPromptSubmit  []codexHookGroup `json:"UserPromptSubmit"`
 	Stop              []codexHookGroup `json:"Stop"`
 }
@@ -47,6 +48,11 @@ type codexHookHandlers struct {
 // codexHookEventLabels lists every event name in the order Codex emits in
 // the JSON schema, paired with the snake_case label it uses for trust state
 // keys (codex-rs/hooks/src/lib.rs:hook_event_key_label).
+//
+// Every event Entire installs must appear here. Codex silently skips a hook
+// with no trusted_hash entry, so an event missing from this table is installed
+// but inert for the whole e2e suite — the hook never fires and nothing fails
+// loudly to say so. TestCodexHookTrustState_CoversEveryInstalledEvent guards it.
 var codexHookEventLabels = []struct {
 	displayName string
 	keyLabel    string
@@ -57,6 +63,7 @@ var codexHookEventLabels = []struct {
 	{"PreCompact", "pre_compact"},
 	{"PostCompact", "post_compact"},
 	{"SessionStart", "session_start"},
+	{"SessionEnd", "session_end"},
 	{"UserPromptSubmit", "user_prompt_submit"},
 	{"Stop", "stop"},
 }
@@ -124,6 +131,8 @@ func codexEventGroups(events *codexHookEvents, displayName string) []codexHookGr
 		return events.PostCompact
 	case "SessionStart":
 		return events.SessionStart
+	case "SessionEnd":
+		return events.SessionEnd
 	case "UserPromptSubmit":
 		return events.UserPromptSubmit
 	case "Stop":

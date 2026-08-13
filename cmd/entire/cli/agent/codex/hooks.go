@@ -36,20 +36,28 @@ type managedHook struct {
 	verb    string // `entire hooks codex <verb>`
 	timeout int
 	wrap    func(cmd string, windows bool) string
+
+	// core marks the events whose absence means Codex was never enabled in this
+	// repo, as opposed to enabled against an older release that installed fewer
+	// events. Only these gate AreHooksInstalled — see the comment there.
+	core bool
 }
 
 // managedHooks is the full set of Codex events Entire installs.
 var managedHooks = []managedHook{
-	{"SessionStart", HookNameSessionStart, defaultHookTimeoutSec, func(cmd string, windows bool) string {
+	{event: "SessionStart", verb: HookNameSessionStart, timeout: defaultHookTimeoutSec, core: true, wrap: func(cmd string, windows bool) string {
 		return agent.WrapProductionJSONWarningHookCommandForOS(cmd, agent.WarningFormatSingleLine, windows)
 	}},
 	// SessionEnd is the one event Codex clamps: it caps handlers at
 	// SESSION_END_MAX_TIMEOUT_SEC and warns at every startup when a config asks
 	// for more, so it is installed at exactly the ceiling. See SessionEndTimeoutSec.
-	{"SessionEnd", HookNameSessionEnd, SessionEndTimeoutSec, agent.WrapProductionSilentHookCommandForOS},
-	{"UserPromptSubmit", HookNameUserPromptSubmit, defaultHookTimeoutSec, agent.WrapProductionSilentHookCommandForOS},
-	{"Stop", HookNameStop, defaultHookTimeoutSec, agent.WrapProductionSilentHookCommandForOS},
-	{"PostToolUse", HookNamePostToolUse, defaultHookTimeoutSec, agent.WrapProductionSilentHookCommandForOS},
+	//
+	// Not core: it postdates the four events below, so requiring it would
+	// un-enable Codex for everyone who enabled it before this release.
+	{event: "SessionEnd", verb: HookNameSessionEnd, timeout: SessionEndTimeoutSec, wrap: agent.WrapProductionSilentHookCommandForOS},
+	{event: "UserPromptSubmit", verb: HookNameUserPromptSubmit, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
+	{event: "Stop", verb: HookNameStop, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
+	{event: "PostToolUse", verb: HookNamePostToolUse, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
 }
 
 // InstallHooks installs Codex hooks in .codex/hooks.json.
@@ -210,7 +218,15 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	return nil
 }
 
-// AreHooksInstalled checks if Entire hooks are installed in Codex hooks.json.
+// AreHooksInstalled reports whether Codex is wired up to Entire in this repo.
+//
+// It requires only the core events, not everything InstallHooks writes today.
+// The two questions are different: this one decides whether Codex is listed as
+// an installed agent (`entire status`, the review and investigate pickers), and
+// answering it with the full set would drop Codex out of all of them the moment
+// a release adds an event — every existing install predates the addition. Drift
+// against today's set is MissingEntireHooks' job, which `entire doctor` reports
+// with the fix (`entire enable`).
 func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -235,6 +251,9 @@ func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 	}
 
 	for _, h := range managedHooks {
+		if !h.core {
+			continue
+		}
 		var groups []MatcherGroup
 		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
 			return false

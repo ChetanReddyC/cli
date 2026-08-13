@@ -279,8 +279,9 @@ func runStop(ctx context.Context, cmd *cobra.Command, sessionID string, all, for
 }
 
 // filterActiveSessions returns sessions that have not been explicitly ended,
-// per session.State.IsEnded — the shared rule, so any session visible in
-// `entire status` is also visible in `sessions stop`.
+// per session.State.IsEnded. `entire status` filters on the same predicate
+// (writeActiveSessions, runStatusJSON), so any session it lists as active is
+// also one `sessions stop` will offer.
 func filterActiveSessions(states []*strategy.SessionState) []*strategy.SessionState {
 	var active []*strategy.SessionState
 	for _, s := range states {

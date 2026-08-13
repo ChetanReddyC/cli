@@ -315,6 +315,29 @@ func TestAreHooksInstalled_PartialHooks(t *testing.T) {
 	require.False(t, ag.AreHooksInstalled(context.Background()))
 }
 
+// TestAreHooksInstalled_PreSessionEndInstall — a user who enabled Codex before
+// SessionEnd joined the install set still counts as installed, so Codex keeps
+// appearing in `entire status` and the agent pickers instead of vanishing until
+// they re-run enable. The gap is drift, and MissingEntireHooks reports it.
+func TestAreHooksInstalled_PreSessionEndInstall(t *testing.T) {
+	tempDir := setupTestEnv(t)
+
+	codexDir := filepath.Join(tempDir, ".codex")
+	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(codexDir, HooksFileName), []byte(`{
+		"hooks": {
+			"SessionStart": [{"matcher": null, "hooks": [{"type": "command", "command": "entire hooks codex session-start", "timeout": 30}]}],
+			"UserPromptSubmit": [{"matcher": null, "hooks": [{"type": "command", "command": "entire hooks codex user-prompt-submit", "timeout": 30}]}],
+			"Stop": [{"matcher": null, "hooks": [{"type": "command", "command": "entire hooks codex stop", "timeout": 30}]}],
+			"PostToolUse": [{"matcher": null, "hooks": [{"type": "command", "command": "entire hooks codex post-tool-use", "timeout": 30}]}]
+		}
+	}`), 0o600))
+
+	ag := &CodexAgent{}
+	require.True(t, ag.AreHooksInstalled(context.Background()))
+	require.Equal(t, []string{"session_end"}, MissingEntireHooks(tempDir))
+}
+
 func TestInstallHooks_PreservesExistingHooksJSON(t *testing.T) {
 	tempDir := setupTestEnv(t)
 

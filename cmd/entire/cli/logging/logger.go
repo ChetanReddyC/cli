@@ -152,6 +152,10 @@ func Init(ctx context.Context, sessionID string) error {
 // from a hook cannot close the hook's log file out from under it. Like Init, it
 // CREATES .entire/logs/, so call it only once the command is committed to doing
 // work in an Entire-enabled repository.
+//
+// Scope the returned cleanup to everything the command still has to log, not
+// just the call that needed logging in the first place: it closes the file, so
+// anything logged after it runs goes back to the terminal via slog.Default().
 func EnsureInitialized(ctx context.Context) func() {
 	mu.RLock()
 	already := logger != nil
@@ -169,6 +173,14 @@ func EnsureInitialized(ctx context.Context) func() {
 // Close closes the log file if one is open.
 // Flushes any buffered data before closing.
 // Safe to call multiple times.
+//
+// It also drops the logger itself, so a caller that keeps logging afterwards
+// falls back to slog.Default() rather than writing into a handler bound to the
+// buffer we just closed. That handler holds the *bufio.Writer by value (see
+// createLogger), so leaving it in place would silently swallow every later line:
+// short writes sit in an orphaned buffer nobody flushes, and once it fills the
+// underlying file is already closed. Commands that Close mid-run and keep
+// working should call EnsureInitialized again rather than rely on the fallback.
 func Close() {
 	mu.Lock()
 	defer mu.Unlock()
@@ -181,6 +193,7 @@ func Close() {
 		_ = logFile.Close()
 		logFile = nil
 	}
+	logger = nil
 	currentSessionID = ""
 }
 

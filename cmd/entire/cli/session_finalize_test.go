@@ -51,7 +51,9 @@ func TestFinalizeExitedSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if n := finalizeExitedSessions(ctx, states); n != len(exitedIDs) {
+	n, stopLogging := finalizeExitedSessions(ctx, states)
+	defer stopLogging()
+	if n != len(exitedIDs) {
 		t.Fatalf("finalizeExitedSessions = %d, want %d", n, len(exitedIDs))
 	}
 
@@ -163,7 +165,9 @@ func TestFinalizeExitedSessions_RevalidatesUnderLock(t *testing.T) {
 		Owner:     &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
 	}
 
-	if n := finalizeExitedSessions(ctx, []*session.State{stale}); n != 0 {
+	n, stopLogging := finalizeExitedSessions(ctx, []*session.State{stale})
+	defer stopLogging()
+	if n != 0 {
 		t.Fatalf("finalizeExitedSessions = %d, want 0 (revalidation should skip the revived session)", n)
 	}
 

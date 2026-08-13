@@ -298,6 +298,41 @@ func TestEnsureInitialized_NoOpWhenAlreadyInitialized(t *testing.T) {
 	}
 }
 
+// Logging after the cleanup must fall back to slog.Default(), not disappear.
+// The handler holds the buffered writer by value, so a logger left in place
+// after Close writes into an orphaned buffer over a closed file: short lines are
+// never flushed and longer ones fail. `entire doctor` hits exactly this — it
+// keeps condensing sessions after the exited-session sweep tears its logging
+// down.
+func TestEnsureInitialized_CleanupRestoresFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	initGitRepo(t, tmpDir)
+	resetLogger()
+
+	done := EnsureInitialized(context.Background())
+	Info(context.Background(), "during the sweep")
+	done()
+
+	var fallback bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&fallback, nil)))
+	defer slog.SetDefault(prev)
+
+	Info(context.Background(), "after the sweep")
+
+	if !strings.Contains(fallback.String(), "after the sweep") {
+		t.Errorf("line logged after cleanup was swallowed; slog.Default() got %q", fallback.String())
+	}
+	data, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(data), "during the sweep") {
+		t.Errorf("log file missing the swept line; got %q", string(data))
+	}
+}
+
 func TestClose_SafeToCallMultipleTimes(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
