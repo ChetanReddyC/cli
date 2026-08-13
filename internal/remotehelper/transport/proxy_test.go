@@ -867,12 +867,13 @@ func TestProxyConsumesServerHeaderFormat(t *testing.T) {
 // and immediately closes them, so every request against it fails.
 //
 // Do not build this by starting an httptest.Server and closing it: closing
-// hands the port back to the OS, and because every test in this file runs
-// with t.Parallel(), another test's httptest.NewServer can be given the same
-// port while the first test still treats it as dead. That made two tests fail
-// together — one saw its "dead" node answer 200, the other saw the first
-// test's request land in its handler. Here the listener stays bound for the
-// test's lifetime, so nothing else can take the port.
+// hands the port back to the OS, and tests in this file run with t.Parallel(),
+// so another test's httptest.NewServer can be given the same port while the
+// first test still treats it as dead. That failed
+// TestColdPathRedirectAllReplicasFail and TestServiceRPC together — one saw
+// its "dead" node answer 200, the other saw the foreign request land in its
+// handler. Here the listener stays bound for the test's lifetime, so nothing
+// else can take the port.
 func deadServerURL(t *testing.T) string {
 	t.Helper()
 	var lc net.ListenConfig
@@ -880,6 +881,11 @@ func deadServerURL(t *testing.T) string {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l.Close() })
 	go func() {
+		// If Accept ever fails for a reason other than our own Close, drop the
+		// listener with it. A bound port with nobody accepting completes the
+		// handshake from the kernel backlog, so requests would hang instead of
+		// failing — and these callers pass no timeout.
+		defer func() { _ = l.Close() }()
 		for {
 			c, err := l.Accept()
 			if err != nil {
@@ -1427,7 +1433,7 @@ func TestColdPathDropsOutOfClusterReplicasFromHeader(t *testing.T) {
 
 func TestColdPathRefusesOutOfClusterLocationSalvage(t *testing.T) {
 	t.Parallel()
-	deadReplica := deadServerURL(t) // in-cluster (127.0.0.1) but unreachable
+	deadReplica := deadServerURL(t) // in-cluster (127.0.0.1) but never answers
 
 	entry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The only replica is dead, forcing the salvage path; Location points

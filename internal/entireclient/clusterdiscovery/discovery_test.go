@@ -46,6 +46,11 @@ func deadPinningClient(t *testing.T) *http.Client {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l.Close() })
 	go func() {
+		// If Accept ever fails for a reason other than our own Close, drop the
+		// listener with it. A bound port with nobody accepting completes the
+		// handshake from the kernel backlog, so requests would hang instead of
+		// failing.
+		defer func() { _ = l.Close() }()
 		for {
 			c, err := l.Accept()
 			if err != nil {
