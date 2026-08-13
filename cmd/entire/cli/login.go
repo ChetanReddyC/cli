@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
@@ -508,6 +506,17 @@ func waitForEnter(ctx context.Context) error {
 	}
 }
 
+// openBrowser opens browserURL in the user's default browser.
+//
+// The URL must never reach a shell. An OAuth authorization URL is a query
+// string full of `&` separators, and cmd.exe treats an unquoted `&` as a
+// command separator, so `cmd /c start "" <url>` delivered only the text up to
+// the first `&`. That is how a Windows `entire login` opened
+// `/authorize?client_id=entire-cli` and was rejected for a missing
+// redirect_uri. Percent-encoded URLs are exposed to cmd's `%VAR%` expansion
+// too, so quoting alone would not be enough. The per-platform launchers live
+// in browser_open_windows.go / browser_open_other.go; Windows calls
+// ShellExecute so no command line is parsed at all.
 func openBrowser(ctx context.Context, browserURL string) error {
 	u, err := url.Parse(browserURL)
 	if err != nil || (u.Scheme != schemeHTTPS && u.Scheme != schemeHTTP) {
@@ -523,31 +532,5 @@ func openBrowser(ctx context.Context, browserURL string) error {
 		return errors.New("browser unavailable under test")
 	}
 
-	var command string
-	var args []string
-
-	switch runtime.GOOS {
-	case darwinGOOS:
-		command = "open"
-		args = []string{browserURL}
-	case "linux":
-		command = "xdg-open"
-		args = []string{browserURL}
-	case "windows":
-		command = "cmd"
-		args = []string{"/c", "start", "", browserURL}
-	default:
-		return fmt.Errorf("unsupported platform %s", runtime.GOOS)
-	}
-
-	cmd := exec.CommandContext(ctx, command, args...)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start browser command %q: %w", command, err)
-	}
-
-	if err := cmd.Process.Release(); err != nil {
-		return fmt.Errorf("release browser process: %w", err)
-	}
-
-	return nil
+	return openBrowserPlatform(ctx, browserURL)
 }
