@@ -190,7 +190,11 @@ func TestConfigureCustomRules_CompileErrorDoesNotLogPattern(t *testing.T) {
 	restore := captureSlogForTest(&buf)
 	defer restore()
 
-	const leakyPattern = `SECRET_LITERAL_hunter2[` // invalid regex; error text would quote it
+	// Trailing "(" specifically: Go's missing-closing-paren error quotes the
+	// FULL pattern ("missing closing ): `SECRET_LITERAL_hunter2(`"), unlike
+	// the missing-bracket error, which quotes only the offending "[" — a
+	// bracket fixture would pass even against unsanitized err.Error() logging.
+	const leakyPattern = `SECRET_LITERAL_hunter2(`
 	ConfigureCustomRules(CustomRulesConfig{
 		Inline: map[string]string{"oops": leakyPattern},
 	})
