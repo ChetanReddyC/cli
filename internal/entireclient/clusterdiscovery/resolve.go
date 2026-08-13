@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/entireio/cli/internal/entireclient/contexts"
@@ -25,25 +25,13 @@ import (
 //     miss or expiry we re-fetch; if the re-fetch fails we fall back to
 //     the stale cached cores rather than break the op.
 //
-//   - Which of the user's accounts to use — recomputed every call from the
-//     live contexts, never persisted. So a user with several accounts is
-//     never silently pinned to one identity.
+//   - Which of the user's accounts to use — the active context
+//     (current_context), and nothing else. The cluster's cores only decide
+//     whether that identity is accepted; see requireActiveContext for the
+//     policy and why it has no fallback tiers.
 //
-// Account selection (selectContext):
-//
-//  1. If the active context (current_context) is issued by one of the
-//     cluster's cores, use it. This is the explicit lever: `entire auth
-//     use <name>` chooses the identity for every cluster that context's
-//     core fronts.
-//  2. Otherwise gather every local context eligible for the cluster (its
-//     CoreURL is among the advertised cores):
-//     - exactly one  → use it (the common single-account case);
-//     - none         → error with the login hint listing the cluster's cores;
-//     - more than one → error asking the user to pick with `entire auth use`,
-//     rather than silently guessing an account.
-//
-// We never fall back to an active context whose core does NOT front the
-// cluster: the cluster would reject the exchanged token as "unknown
+// In particular we never fall back to an active context whose core does NOT
+// front the cluster: the cluster would reject the exchanged token as "unknown
 // cluster_host", and silently authenticating a staging identity against a
 // prod cluster (or vice versa) is exactly the confusion the /.well-known
 // lookup exists to prevent.
@@ -99,7 +87,7 @@ func resolveClusterAuth(ctx context.Context, configDir, cacheDir, clusterHost st
 		return nil, err
 	}
 
-	selected, err := selectContext(f, "cluster "+clusterHost, entry.CoreURLs, debugf)
+	selected, err := requireActiveContext(f, "cluster "+clusterHost, entry.CoreURLs, debugf)
 	if err != nil {
 		return nil, err
 	}
@@ -219,64 +207,135 @@ func resolveClusterCores(ctx context.Context, cacheDir, clusterHost string, requ
 		}, debugf)
 }
 
-// selectContext applies the account-selection rules over a resource's
-// advertised trusted issuers. subject is a noun phrase identifying the
-// resource ("cluster nyc.entire.io" / "API host partial.to") used in
-// messages, so the same rules serve both the git-cluster and data-API
-// resolvers. See ResolveContextForCluster for the rationale.
-func selectContext(f *contexts.File, subject string, coreURLs []string, debugf DebugFunc) (*contexts.Context, error) {
-	eligible := eligibleContexts(f, coreURLs)
-
-	// 1. Active context wins when it's eligible for this resource.
-	if current := f.Find(f.CurrentContext); current != nil {
-		for _, c := range eligible {
-			if c.Name == current.Name {
-				debugf("%s -> active context %s", subject, current.Name)
-				return current, nil
-			}
-		}
+// requireActiveContext resolves the login context for a resource from the ACTIVE
+// context alone, and is the one place the CLI's account-selection policy lives.
+// subject is a noun phrase identifying the resource ("cluster nyc.entire.io" /
+// "API host partial.to") used in messages, so the same rule serves the
+// git-cluster, data-API, and cell resolvers.
+//
+// The policy: `entire auth use <name>` is the only thing that decides which
+// identity acts; a resource's advertised issuers decide only whether that
+// identity is *accepted*, never which one is *chosen*. So this validates, it
+// does not choose — hence the name.
+//
+// Two implicit tiers used to sit underneath: "the sole eligible context", and an
+// ambiguity error when several were eligible. Both are gone, because they made
+// the acting identity depend on what *else* happened to be stored — adding a
+// second login could silently change which account a command ran as, and the
+// same command could act as different identities on two machines. For a question
+// as consequential as "whose credentials is this running under?", a predictable
+// error beats a convenient guess.
+//
+// See docs/architecture/upstream-host-resolution.md#account-selection.
+func requireActiveContext(f *contexts.File, subject string, coreURLs []string, debugf DebugFunc) (*contexts.Context, error) {
+	current := f.Find(f.CurrentContext)
+	if current != nil && contextEligible(current, coreURLs) {
+		debugf("%s -> active context %s", subject, current.Name)
+		return current, nil
 	}
-
-	// 2. Otherwise the eligible set decides.
-	switch len(eligible) {
-	case 0:
-		return nil, errors.New(renderLoginHint(subject, coreURLs))
-	case 1:
-		debugf("%s -> sole eligible context %s", subject, eligible[0].Name)
-		return eligible[0], nil
-	default:
-		return nil, ambiguousContextError(subject, eligible)
+	if current != nil {
+		debugf("%s -> active context %s (%s) is not trusted here", subject, current.Name, current.CoreURL)
 	}
+	return nil, errors.New(renderUnusableActiveContext(subject, current, eligibleContexts(f, coreURLs), coreURLs))
 }
 
-// eligibleContexts returns the local contexts whose core is among coreURLs,
-// de-duplicated by name. Order is unspecified — callers either use the sole
-// element or report the whole set, never index [0] as a silent winner.
+// contextEligible reports whether c's core is among the resource's advertised
+// trusted issuers. It is the single eligibility predicate: both the accept
+// decision and the candidate list reported on failure go through it, so the two
+// can never disagree about what "eligible" means.
+//
+// Comparison is trailing-slash- and whitespace-insensitive, matching
+// trustedLoginServers' normalisation of the same URLs — a core advertised with
+// padding must not be rejected here and then echoed back as trusted. A context
+// with no CoreURL is never eligible: it names no issuer to match, and without
+// this guard a resource advertising a blank core would match it.
+func contextEligible(c *contexts.Context, coreURLs []string) bool {
+	want := normalizeCoreURL(c.CoreURL)
+	if want == "" {
+		return false
+	}
+	return slices.ContainsFunc(coreURLs, func(coreURL string) bool {
+		return normalizeCoreURL(coreURL) == want
+	})
+}
+
+// normalizeCoreURL folds a core URL to the form core URLs are compared and
+// displayed in: whitespace and trailing slashes are insignificant, so
+// `https://core.example/ ` and `https://core.example` are the same issuer. The
+// single normaliser behind contextEligible, activeLoginLabel, and
+// trustedLoginServers, so the accept decision and every message agree.
+func normalizeCoreURL(coreURL string) string {
+	return strings.TrimRight(strings.TrimSpace(coreURL), "/")
+}
+
+// eligibleContexts returns the saved contexts this resource would accept, for
+// reporting only — requireActiveContext never picks from it. Filtering f.Contexts
+// once (rather than iterating coreURLs and collecting per-issuer matches) makes
+// duplicates structurally impossible, so no de-duplication is needed even when a
+// resource advertises the same core twice.
 func eligibleContexts(f *contexts.File, coreURLs []string) []*contexts.Context {
-	seen := make(map[string]bool)
 	var out []*contexts.Context
-	for _, coreURL := range coreURLs {
-		for _, c := range f.ContextsForIssuer(coreURL) {
-			if !seen[c.Name] {
-				seen[c.Name] = true
-				out = append(out, c)
-			}
+	for _, c := range f.Contexts {
+		if contextEligible(c, coreURLs) {
+			out = append(out, c)
 		}
 	}
 	return out
 }
 
-// ambiguousContextError is returned when more than one local context could
-// authenticate against the resource and none is active. We refuse to guess —
-// the user picks explicitly. Names are sorted so the message is stable.
-func ambiguousContextError(subject string, eligible []*contexts.Context) error {
-	names := make([]string, len(eligible))
-	for i, c := range eligible {
+// renderUnusableActiveContext explains why no identity is available, in the
+// terms of what the user can actually do about it — a wrong remedy here is a
+// dead end. Two independent facts pick the message: whether an identity resolved
+// at all (is there a login to report as rejected?) and whether any saved login
+// is eligible (is the fix a local switch, or a new login?).
+//
+// Naming the login matters because "not logged in" is actively misleading for
+// someone who IS logged in, just to a federation this resource doesn't trust; it
+// sends them to `entire login`, which reproduces the same failure. The
+// no-identity cases must NOT use that phrasing, which is why they get their own
+// first lines rather than an interpolated-away clause.
+//
+// Returns a string, matching renderLoginHint and leaving the single errors.New
+// to the caller.
+func renderUnusableActiveContext(subject string, current *contexts.Context, eligible []*contexts.Context, coreURLs []string) string {
+	const switchHint = "Switch with `entire auth use <context>`, then re-run your command."
+	names := strings.Join(contextNames(eligible), ", ")
+	switch {
+	case current == nil && len(eligible) > 0:
+		// current_context unset or dangling, but a saved login would work.
+		return fmt.Sprintf("no active auth context for %s.\nThese saved logins can authenticate it: %s\n%s",
+			subject, names, switchHint)
+	case current == nil:
+		return renderLoginHint(subject, coreURLs)
+	case len(eligible) > 0:
+		return fmt.Sprintf("%s does not accept your active login %s.\nThese saved logins can authenticate it: %s\n%s",
+			subject, activeLoginLabel(current), names, switchHint)
+	default:
+		return fmt.Sprintf("%s does not accept your active login %s, and no other saved login does either.\n%s",
+			subject, activeLoginLabel(current), renderLoginInstruction(coreURLs))
+	}
+}
+
+// activeLoginLabel renders `"name" (core)` for a context known to be non-nil,
+// degrading to `"name"` when its metadata carries no core URL rather than
+// emitting a dangling `()`. A core-less context is never eligible, so it always
+// arrives here.
+func activeLoginLabel(c *contexts.Context) string {
+	if core := normalizeCoreURL(c.CoreURL); core != "" {
+		return fmt.Sprintf("%q (%s)", c.Name, core)
+	}
+	return fmt.Sprintf("%q", c.Name)
+}
+
+// contextNames returns the contexts' names, sorted so error messages are stable
+// across saves and across runs.
+func contextNames(cs []*contexts.Context) []string {
+	names := make([]string, len(cs))
+	for i, c := range cs {
 		names[i] = c.Name
 	}
-	sort.Strings(names)
-	return fmt.Errorf("multiple login contexts can authenticate against %s (%s); choose one with `entire auth use <context>` and re-run",
-		subject, strings.Join(names, ", "))
+	slices.Sort(names)
+	return names
 }
 
 // formatDiscoveryError turns a Discover error into the message

@@ -55,10 +55,12 @@ func TestResolve_ActiveContextWinsWhenEligible(t *testing.T) {
 	assert.Equal(t, "bob@eu", c.Name, "active eligible context must win over other same-core accounts")
 }
 
-// TestResolve_SoleEligibleContextUsedDespiteUnrelatedActive: the active
-// context is on an unrelated core, but the user has exactly one context
-// eligible for the cluster — use it (the 99% single-account case).
-func TestResolve_SoleEligibleContextUsedDespiteUnrelatedActive(t *testing.T) {
+// TestResolve_UnrelatedActiveContextErrorsNamingEligibleLogin: the active
+// context is on an unrelated core while exactly one saved context is eligible.
+// The old resolver silently used that sole eligible context; we now refuse to
+// substitute an identity the user didn't select, and name it instead so the
+// switch is one obvious command.
+func TestResolve_UnrelatedActiveContextErrorsNamingEligibleLogin(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
 	defer srv.Close()
@@ -72,15 +74,22 @@ func TestResolve_SoleEligibleContextUsedDespiteUnrelatedActive(t *testing.T) {
 		},
 	}))
 
-	c, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
-	require.NoError(t, err)
-	assert.Equal(t, "prod-eu", c.Name)
+	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not accept your active login")
+	assert.Contains(t, err.Error(), `"paul@unrelated"`, "the message must name the active login, or the mismatch is invisible")
+	assert.Contains(t, err.Error(), "https://eu.auth.partial.to", "and the core it belongs to")
+	assert.Contains(t, err.Error(), "prod-eu", "and the saved login that would work")
+	assert.Contains(t, err.Error(), "entire auth use")
+	// A local switch is the fix here, so don't send the user through a login flow.
+	assert.NotContains(t, err.Error(), "entire login")
 }
 
-// TestResolve_AmbiguousMultipleEligibleErrors: two same-core accounts are
-// eligible and neither is active — refuse to guess, list both, and tell the
-// user to pick. This is the footgun this redesign closes.
-func TestResolve_AmbiguousMultipleEligibleErrors(t *testing.T) {
+// TestResolve_UnrelatedActiveContextNamesAllEligibleLogins: what used to be the
+// "ambiguous" case is now the same case as a single candidate — the resolver
+// never picks, so two eligible contexts are simply two names to offer. Sorted,
+// so the message is stable across saves.
+func TestResolve_UnrelatedActiveContextNamesAllEligibleLogins(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(coresHandler(t, nil, "https://core-us.entire.io"))
 	defer srv.Close()
@@ -97,15 +106,16 @@ func TestResolve_AmbiguousMultipleEligibleErrors(t *testing.T) {
 
 	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "cluster1.entire.io", hostPinningClient(t, srv), t.Logf)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "multiple login contexts")
-	assert.Contains(t, err.Error(), "admin@core-us")
-	assert.Contains(t, err.Error(), "alice@core-us")
+	assert.Contains(t, err.Error(), "admin@core-us, alice@core-us", "candidates must be listed in sorted order")
 	assert.Contains(t, err.Error(), "entire auth use")
 }
 
-// TestResolve_NoEligibleContextReturnsLoginHint: discovery succeeds but the
-// user has no context for any advertised core.
-func TestResolve_NoEligibleContextReturnsLoginHint(t *testing.T) {
+// TestResolve_ActiveContextIneligibleAndNothingElseFits: an active context that
+// the cluster doesn't trust, with no saved alternative. The user needs a new
+// login, so the hint must name the servers the cluster actually trusts —
+// otherwise bare `entire login` re-authenticates against the default server and
+// reproduces this same error.
+func TestResolve_ActiveContextIneligibleAndNothingElseFits(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
 	defer srv.Close()
@@ -120,12 +130,90 @@ func TestResolve_NoEligibleContextReturnsLoginHint(t *testing.T) {
 
 	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no auth context for cluster aws-eu-central-1.entire.io")
-	assert.Contains(t, err.Error(), "entire login")
-	// Advertised login servers + the `entire auth use` hint are intentionally
-	// squashed for now (see renderLoginHint).
-	assert.NotContains(t, err.Error(), "https://eu.auth.entire.io")
+	assert.Contains(t, err.Error(), `"staging"`, "name the active login that was rejected")
+	assert.Contains(t, err.Error(), "no other saved login does either")
+	assert.Contains(t, err.Error(), "https://eu.auth.entire.io", "the trusted server is the only actionable detail")
+	// The situation is already explained in the first line; don't also assert
+	// "no auth context for <cluster>", which reads as logged-out.
+	assert.NotContains(t, err.Error(), "no auth context for")
+	assert.Contains(t, err.Error(), "entire login --server")
+	// Nothing local to switch to, so offering `auth use` would be a dead end.
 	assert.NotContains(t, err.Error(), "entire auth use")
+}
+
+// TestResolve_NoActiveContextReturnsLoginHint: genuinely logged out (no
+// current_context) — the plain login hint, still naming the cluster's servers.
+func TestResolve_NoActiveContextReturnsLoginHint(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
+	defer srv.Close()
+
+	_, err := ResolveContextForCluster(t.Context(), t.TempDir(), t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no auth context for cluster aws-eu-central-1.entire.io")
+	assert.Contains(t, err.Error(), "https://eu.auth.entire.io")
+	assert.Contains(t, err.Error(), "entire login --server")
+	// With no active login there is nothing to report as rejected.
+	assert.NotContains(t, err.Error(), "does not accept your active login")
+}
+
+// TestResolve_DanglingCurrentContextIsNotAnIdentity: current_context naming a
+// context that no longer exists must not resolve to some other saved login. The
+// saved login is offered, not used.
+func TestResolve_DanglingCurrentContextIsNotAnIdentity(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	require.NoError(t, contexts.Save(configDir, &contexts.File{
+		CurrentContext: "deleted-long-ago",
+		Contexts: []*contexts.Context{
+			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
+		},
+	}))
+
+	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "prod-eu", "offer the eligible login")
+	assert.Contains(t, err.Error(), "entire auth use")
+}
+
+// TestResolve_ContextWithoutCoreURLIsNeverEligible: a context carrying no
+// issuer matches nothing, even against a resource advertising an empty core URL.
+// Without the guard, normalizeCoreURL("") == normalizeCoreURL("") would make a
+// blank context authenticate anything.
+//
+// It must also not be OFFERED as a candidate. The accept check and the candidate
+// list are one predicate for this reason: when they were two, this input
+// produced "does not accept your active login \"blank\". These saved logins can
+// authenticate it: blank" — telling the user to switch to the login they were
+// already on.
+func TestResolve_ContextWithoutCoreURLIsNeverEligible(t *testing.T) {
+	t.Parallel()
+	f := &contexts.File{
+		CurrentContext: "blank",
+		Contexts:       []*contexts.Context{{Name: "blank", Handle: "paul", KeychainService: "kc:blank"}},
+	}
+	_, err := requireActiveContext(f, "cluster c.entire.io", []string{""}, t.Logf)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "These saved logins can authenticate it",
+		"a context rejected by the accept check must not be offered as a candidate")
+	assert.NotContains(t, err.Error(), "entire auth use")
+}
+
+// TestResolve_EligibilityIgnoresWhitespaceAndTrailingSlash: the accept check and
+// the trusted-server list share one normaliser, so a padded advertised core is
+// accepted rather than rejected-then-echoed-back-as-trusted.
+func TestResolve_EligibilityIgnoresWhitespaceAndTrailingSlash(t *testing.T) {
+	t.Parallel()
+	f := &contexts.File{
+		CurrentContext: "eu",
+		Contexts:       []*contexts.Context{{Name: "eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:eu"}},
+	}
+	c, err := requireActiveContext(f, "cluster c.entire.io", []string{" https://eu.auth.entire.io/ "}, t.Logf)
+	require.NoError(t, err)
+	assert.Equal(t, "eu", c.Name)
 }
 
 // TestResolve_CoresCachedAcrossCalls: the first call hits /.well-known and
