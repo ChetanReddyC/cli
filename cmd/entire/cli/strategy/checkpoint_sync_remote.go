@@ -111,6 +111,37 @@ func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote string) bool
 	return true
 }
 
+// hintGatedCheckpointSync tells the user, on a gated pre-push, that
+// checkpoints are waiting for the elected sync remote and how to re-route
+// them — otherwise the gate is a silent no-op and checkpoints strand locally
+// until the elected remote happens to be pushed.
+//
+// Stays quiet unless every condition holds: the election succeeded AND was
+// automatic (an explicit checkpoint_push_remote is a decision already made,
+// and the fail-closed misconfigured case warns through the gate itself), the
+// push target is a configured remote (checkpoint_push_remote takes a remote
+// name, so a raw-URL push has no actionable suggestion), and checkpoints are
+// actually waiting. Fully local — no network.
+func hintGatedCheckpointSync(ctx context.Context, pushRemote string) {
+	syncRemote, err := ResolveCheckpointSyncRemote(ctx)
+	if err != nil || syncRemote.Name == "" || syncRemote.Source == SyncRemoteSourceConfig {
+		return
+	}
+	if !isConfiguredRemote(ctx, pushRemote) {
+		return
+	}
+	count, err := CountUnpushedCheckpoints(ctx, syncRemote.Name)
+	if err != nil || count == 0 {
+		return
+	}
+	fmt.Fprintf(stderrWriter,
+		"[entire] %d checkpoint(s) are waiting to sync to %q, this repo's checkpoint sync remote; this push to %q does not carry them.\n",
+		count, syncRemote.Name, pushRemote)
+	fmt.Fprintf(stderrWriter,
+		"[entire] To sync checkpoints to %q instead, set strategy_options.checkpoint_push_remote to %q in .entire/settings.json.\n",
+		pushRemote, pushRemote)
+}
+
 // configuredRemotesInConfigOrder lists remote names in .git/config section
 // order (approximates "first remote added"; `git remote` output is
 // alphabetical and unsuitable). Remotes configured with only pushurl are

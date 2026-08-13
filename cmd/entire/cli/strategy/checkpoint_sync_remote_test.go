@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -376,5 +377,97 @@ func TestCheckpointSyncAllowedForRemote(t *testing.T) {
 		t.Chdir(tmpDir)
 
 		assert.False(t, checkpointSyncAllowedForRemote(ctx, "origin"))
+	})
+}
+
+// captureStderrWriter redirects the strategy package's user-facing stderr into
+// a buffer for the duration of the test.
+func captureStderrWriter(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	oldWriter := stderrWriter
+	stderrWriter = &buf
+	t.Cleanup(func() { stderrWriter = oldWriter })
+	return &buf
+}
+
+// Regression: after the single-remote gate (ENT-1451) shipped, a push to a
+// non-elected remote stopped carrying checkpoints with no signal in the push
+// output — users whose habitual push remote lost the default election to a
+// dormant origin saw checkpoints strand locally and had to discover
+// checkpoint_push_remote through support. The gated pre-push must name the
+// elected destination and the setting.
+//
+// Not parallel: uses t.Chdir()
+func TestHintGatedCheckpointSync(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+
+	// initHintRepo builds a repo with unpushed v1 checkpoint commits and an
+	// origin+publish remote pair, so a push to "publish" is gated under the
+	// default election.
+	initHintRepo := func(t *testing.T) string {
+		dir, _, second := initCountTestRepo(t)
+		testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+		testutil.AddRemote(t, dir, "publish", "https://example.com/publish.git")
+		testutil.GitUpdateRef(t, dir, v1LocalRef, second)
+		return dir
+	}
+
+	t.Run("automatic election with waiting checkpoints prints the hint", func(t *testing.T) {
+		dir := initHintRepo(t)
+		t.Chdir(dir)
+		buf := captureStderrWriter(t)
+
+		hintGatedCheckpointSync(ctx, "publish")
+
+		out := buf.String()
+		assert.Contains(t, out, `"origin"`, "hint must name the elected destination")
+		assert.Contains(t, out, "checkpoint_push_remote", "hint must name the setting that re-routes sync")
+		assert.Contains(t, out, `"publish"`, "hint must name the remote the user actually pushed")
+	})
+
+	t.Run("explicit checkpoint_push_remote stays silent", func(t *testing.T) {
+		dir := initHintRepo(t)
+		testutil.WriteCheckpointPushRemoteSetting(t, dir, "origin")
+		t.Chdir(dir)
+		buf := captureStderrWriter(t)
+
+		hintGatedCheckpointSync(ctx, "publish")
+
+		assert.Empty(t, buf.String(), "a configured election is a decision already made; gated pushes must not nag")
+	})
+
+	t.Run("nothing waiting stays silent", func(t *testing.T) {
+		dir, _, _ := initCountTestRepo(t)
+		testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+		testutil.AddRemote(t, dir, "publish", "https://example.com/publish.git")
+		t.Chdir(dir)
+		buf := captureStderrWriter(t)
+
+		hintGatedCheckpointSync(ctx, "publish")
+
+		assert.Empty(t, buf.String(), "no stranded checkpoints, nothing to warn about")
+	})
+
+	t.Run("raw URL push stays silent", func(t *testing.T) {
+		dir := initHintRepo(t)
+		t.Chdir(dir)
+		buf := captureStderrWriter(t)
+
+		hintGatedCheckpointSync(ctx, "https://example.com/elsewhere.git")
+
+		assert.Empty(t, buf.String(), "checkpoint_push_remote takes a remote name; a URL push has no actionable hint")
+	})
+
+	t.Run("failed election stays silent", func(t *testing.T) {
+		dir := initHintRepo(t)
+		testutil.WriteCheckpointPushRemoteSetting(t, dir, "gone")
+		t.Chdir(dir)
+		buf := captureStderrWriter(t)
+
+		hintGatedCheckpointSync(ctx, "publish")
+
+		assert.Empty(t, buf.String(), "the fail-closed election already logs its own warning")
 	})
 }

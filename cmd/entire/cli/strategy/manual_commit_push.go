@@ -82,6 +82,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// resolvePushSettings: hasCheckpointURL is only known after resolution,
 	// so hoisting the gate above it would break the exemption.
 	if !ps.hasCheckpointURL() && !checkpointSyncAllowedForRemote(ctx, ps.remote) {
+		hintGatedCheckpointSync(ctx, ps.remote)
 		return nil
 	}
 
