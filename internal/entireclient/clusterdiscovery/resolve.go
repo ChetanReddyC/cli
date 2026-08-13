@@ -25,10 +25,11 @@ import (
 //     miss or expiry we re-fetch; if the re-fetch fails we fall back to
 //     the stale cached cores rather than break the op.
 //
-//   - Which of the user's accounts to use — the active context
-//     (current_context), and nothing else. The cluster's cores only decide
-//     whether that identity is accepted; see requireActiveContext for the
-//     policy and why it has no fallback tiers.
+//   - Which of the user's accounts to use — whichever the user selected, via
+//     `--context`/$ENTIRE_CONTEXT for one invocation or the stored
+//     current_context otherwise, and nothing else. The cluster's cores only
+//     decide whether that identity is accepted; see requireActiveContext for
+//     the policy and why it has no fallback tiers.
 //
 // In particular we never fall back to an active context whose core does NOT
 // front the cluster: the cluster would reject the exchanged token as "unknown
@@ -213,10 +214,11 @@ func resolveClusterCores(ctx context.Context, cacheDir, clusterHost string, requ
 // "API host partial.to") used in messages, so the same rule serves the
 // git-cluster, data-API, and cell resolvers.
 //
-// The policy: `entire auth use <name>` is the only thing that decides which
-// identity acts; a resource's advertised issuers decide only whether that
-// identity is *accepted*, never which one is *chosen*. So this validates, it
-// does not choose — hence the name.
+// The policy: the user decides which identity acts — `--context` or
+// $ENTIRE_CONTEXT for one invocation, else `entire auth use` for the stored
+// default. A resource's advertised issuers decide only whether that identity is
+// *accepted*, never which one is *chosen*. So this validates, it does not
+// choose — hence the name.
 //
 // Two implicit tiers used to sit underneath: "the sole eligible context", and an
 // ambiguity error when several were eligible. Both are gone, because they made
@@ -228,15 +230,31 @@ func resolveClusterCores(ctx context.Context, cacheDir, clusterHost string, requ
 //
 // See docs/architecture/upstream-host-resolution.md#account-selection.
 func requireActiveContext(f *contexts.File, subject string, coreURLs []string, debugf DebugFunc) (*contexts.Context, error) {
-	current := f.Find(f.CurrentContext)
-	if current != nil && contextEligible(current, coreURLs) {
-		debugf("%s -> active context %s", subject, current.Name)
-		return current, nil
+	// An explicit --context/$ENTIRE_CONTEXT naming no saved login fails here,
+	// before any eligibility talk: "that context doesn't exist" and "that context
+	// isn't trusted here" are different mistakes with different fixes.
+	sel, err := f.Active()
+	if err != nil {
+		return nil, err //nolint:wrapcheck // UnknownContextError is already a complete operator message
 	}
-	if current != nil {
-		debugf("%s -> active context %s (%s) is not trusted here", subject, current.Name, current.CoreURL)
+	if sel.Context != nil && contextEligible(sel.Context, coreURLs) {
+		debugf("%s -> %s", subject, describeSelection(sel))
+		return sel.Context, nil
 	}
-	return nil, errors.New(renderUnusableActiveContext(subject, current, eligibleContexts(f, coreURLs), coreURLs))
+	if sel.Context != nil {
+		debugf("%s -> %s (%s) is not trusted here", subject, describeSelection(sel), sel.Context.CoreURL)
+	}
+	return nil, errors.New(renderUnusableActiveContext(subject, sel, eligibleContexts(f, coreURLs), coreURLs))
+}
+
+// describeSelection labels a resolved identity for debug output, naming the
+// mechanism that chose it so a trace answers "why this login?" and not just
+// "which login?".
+func describeSelection(sel contexts.Selection) string {
+	if sel.Explicit() {
+		return fmt.Sprintf("context %s (from %s)", sel.Context.Name, sel.Source)
+	}
+	return "active context " + sel.Context.Name
 }
 
 // contextEligible reports whether c's core is among the resource's advertised
@@ -295,36 +313,51 @@ func eligibleContexts(f *contexts.File, coreURLs []string) []*contexts.Context {
 // no-identity cases must NOT use that phrasing, which is why they get their own
 // first lines rather than an interpolated-away clause.
 //
+// The remedy also tracks where the identity came from: someone who passed
+// `--context` needs to change that argument, not run `auth use`, which would
+// leave the flag still overriding it on the next run.
+//
 // Returns a string, matching renderLoginHint and leaving the single errors.New
 // to the caller.
-func renderUnusableActiveContext(subject string, current *contexts.Context, eligible []*contexts.Context, coreURLs []string) string {
-	const switchHint = "Switch with `entire auth use <context>`, then re-run your command."
+func renderUnusableActiveContext(subject string, sel contexts.Selection, eligible []*contexts.Context, coreURLs []string) string {
 	names := strings.Join(contextNames(eligible), ", ")
+	switchHint := "Switch with `entire auth use <context>`, then re-run your command."
+	if sel.Explicit() {
+		switchHint = fmt.Sprintf("Name one with `--context <context>` (or %s), then re-run your command.", contexts.EnvContextVar)
+	}
 	switch {
-	case current == nil && len(eligible) > 0:
-		// current_context unset or dangling, but a saved login would work.
+	case sel.Context == nil && len(eligible) > 0:
+		// current_context unset or dangling, but a saved login would work. An
+		// explicit selection can't land here: it either matched or already errored.
 		return fmt.Sprintf("no active auth context for %s.\nThese saved logins can authenticate it: %s\n%s",
 			subject, names, switchHint)
-	case current == nil:
+	case sel.Context == nil:
 		return renderLoginHint(subject, coreURLs)
 	case len(eligible) > 0:
-		return fmt.Sprintf("%s does not accept your active login %s.\nThese saved logins can authenticate it: %s\n%s",
-			subject, activeLoginLabel(current), names, switchHint)
+		return fmt.Sprintf("%s does not accept %s.\nThese saved logins can authenticate it: %s\n%s",
+			subject, loginLabel(sel), names, switchHint)
 	default:
-		return fmt.Sprintf("%s does not accept your active login %s, and no other saved login does either.\n%s",
-			subject, activeLoginLabel(current), renderLoginInstruction(coreURLs))
+		return fmt.Sprintf("%s does not accept %s, and no other saved login does either.\n%s",
+			subject, loginLabel(sel), renderLoginInstruction(coreURLs))
 	}
 }
 
-// activeLoginLabel renders `"name" (core)` for a context known to be non-nil,
-// degrading to `"name"` when its metadata carries no core URL rather than
+// loginLabel names the rejected login and how it was chosen — "your active
+// login" reads as a mistake in stored state, which is wrong when the user named
+// the context on this very command line.
+//
+// The core URL degrades away when the metadata carries none, rather than
 // emitting a dangling `()`. A core-less context is never eligible, so it always
 // arrives here.
-func activeLoginLabel(c *contexts.Context) string {
-	if core := normalizeCoreURL(c.CoreURL); core != "" {
-		return fmt.Sprintf("%q (%s)", c.Name, core)
+func loginLabel(sel contexts.Selection) string {
+	role := "your active login"
+	if sel.Explicit() {
+		role = "the login selected by " + sel.Source
 	}
-	return fmt.Sprintf("%q", c.Name)
+	if core := normalizeCoreURL(sel.Context.CoreURL); core != "" {
+		return fmt.Sprintf("%s %q (%s)", role, sel.Context.Name, core)
+	}
+	return fmt.Sprintf("%s %q", role, sel.Context.Name)
 }
 
 // contextNames returns the contexts' names, sorted so error messages are stable

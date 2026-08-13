@@ -133,10 +133,34 @@ the cluster path), `internal/entireclient/discovery/cluster_cores.go`
 
 One rule, everywhere a host is matched — git clusters, the data API,
 cluster-addressed control-plane commands, and entire-api cell routing
-(`auth/cell_data_api.go`'s `resolveStoredCellSubject`): **the active context is
-the identity, or the command fails.** `entire auth use <ctx>` is the only lever;
-`/.well-known` decides only whether that identity is *accepted*, never which one
-is *chosen*.
+(`auth/cell_data_api.go`'s `resolveStoredCellSubject`): **the identity is the one
+the user selected, or the command fails.** `/.well-known` decides only whether
+that identity is *accepted*, never which one is *chosen*.
+
+Selection resolves in one place, `contexts.File.Active`, with this precedence:
+
+| Source | Scope | Use it for |
+| --- | --- | --- |
+| `--context <name>` | one command | a single cross-federation command |
+| `$ENTIRE_CONTEXT` | one process/shell | git operations, hooks, a whole shell session |
+| `current_context` (`entire auth use`) | persistent, machine-wide | your normal default |
+
+The two overrides exist because `auth use` is the wrong tool for a one-off: it
+mutates state shared by every shell, worktree, and background git hook on the
+machine, so forgetting to switch back silently retargets the next `git push`. And
+a flag alone is not enough — git invokes `git-remote-entire` itself, so
+`ENTIRE_CONTEXT=staging git push` is the *only* way to scope a git operation.
+
+An override naming no saved context is a hard error
+(`contexts.UnknownContextError`), never a fall-through to `current_context`:
+running as an identity other than the one asked for would succeed silently as the
+wrong account. It is reported before any trust check, because "that context
+doesn't exist" and "that context isn't trusted here" are different mistakes.
+
+Every consumer resolves through `Active`, so the selection is coherent: `auth
+status` reports it, `auth contexts` marks it, and `logout` revokes and deletes
+*that* login. Resolving the removal target separately from the revocation target
+would end one session server-side while deleting another's local credentials.
 
 Two implicit tiers used to sit underneath — "the sole eligible context", and an
 ambiguity error when several were eligible. Both are gone. They made the acting
@@ -155,16 +179,20 @@ it. Two independent facts pick the message
 (`clusterdiscovery.renderUnusableActiveContext`): whether an active context
 exists, and whether any saved login is eligible.
 
-| Active context | A saved login is eligible | Message |
+| Identity resolved | A saved login is eligible | Message |
 | --- | --- | --- |
-| yes | yes | names the active login, lists the eligible ones (sorted), points at `entire auth use` |
-| yes | no | names the active login, adds "no other saved login does either", then the trusted servers and `entire login --server <url>` |
-| no | yes | "no active auth context for …", lists the eligible ones, points at `entire auth use` |
+| yes | yes | names the rejected login, lists the eligible ones (sorted), points at the switch |
+| yes | no | names the rejected login, adds "no other saved login does either", then the trusted servers and `entire login --server <url>` |
+| no | yes | "no active auth context for …", lists the eligible ones, points at the switch |
 | no | no | the login hint, plus the trusted servers and `entire login --server <url>` |
 
-The two no-active-context rows must not use the "does not accept your active
-login" phrasing — there is no active login to reject, and a dangling
-`current_context` lands there.
+The two no-identity rows must not use the "does not accept your active login"
+phrasing — there is no active login to reject, and a dangling `current_context`
+lands there.
+
+"Points at the switch" also tracks the source: an identity that came from
+`--context` is fixed by changing that argument, not by `entire auth use`, which
+the flag would keep overriding on the next run.
 
 The advertised servers are named whenever no saved login fits, because they are
 then the only actionable detail: bare `entire login` re-authenticates against the

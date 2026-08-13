@@ -27,6 +27,12 @@ func newAuthUseCmd() *cobra.Command {
 			"`git clone entire://…`, the control-plane commands (auth status,\n" +
 			"org/project/repo/grant), and the data-API commands (activity, search,\n" +
 			"trail, dispatch). The switch takes effect on the next operation.\n\n" +
+			"This is persistent and machine-wide — it changes the identity for every\n" +
+			"shell, worktree, and background git hook until you switch back. To act as\n" +
+			"another login for a single command instead, pass --context, or set\n" +
+			"ENTIRE_CONTEXT for one shell or one git operation:\n\n" +
+			"  entire --context staging activity\n" +
+			"  ENTIRE_CONTEXT=staging git push\n\n" +
 			"Data-API commands still take their HOST from ENTIRE_API_BASE_URL; the\n" +
 			"context supplies the identity, and the host must trust its login server.",
 		Args:              cobra.ExactArgs(1),

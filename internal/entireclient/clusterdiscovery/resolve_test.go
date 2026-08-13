@@ -463,3 +463,86 @@ func TestResolve_503(t *testing.T) {
 	assert.Contains(t, err.Error(), "does not advertise any trusted login servers")
 	assert.Contains(t, err.Error(), "cluster administrator")
 }
+
+// TestResolve_ContextOverrideSelectsWithoutMutatingState: --context acts as a
+// saved login for one invocation. This is what makes cross-federation work
+// possible without `entire auth use`, whose effect is global and sticky — it
+// would retarget every other terminal, worktree, and background git hook on the
+// machine until switched back.
+//
+// Mutates the process-wide override, so no t.Parallel.
+func TestResolve_ContextOverrideSelectsWithoutMutatingState(t *testing.T) {
+	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	stored := &contexts.File{
+		CurrentContext: "paul@unrelated",
+		Contexts: []*contexts.Context{
+			{Name: "paul@unrelated", CoreURL: "https://eu.auth.partial.to", Handle: "paul", KeychainService: "kc:unrelated"},
+			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
+		},
+	}
+	require.NoError(t, contexts.Save(configDir, stored))
+
+	contexts.SetFlagOverrideForTest(t, "prod-eu")
+	c, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.NoError(t, err)
+	assert.Equal(t, "prod-eu", c.Name)
+
+	// The whole point: the stored default is untouched, so the next command in
+	// another shell still acts as the login the user actually selected.
+	reloaded, err := contexts.Load(configDir)
+	require.NoError(t, err)
+	assert.Equal(t, "paul@unrelated", reloaded.CurrentContext,
+		"an override must not persist; that is what distinguishes it from `auth use`")
+}
+
+// TestResolve_IneligibleOverrideBlamesTheFlagNotTheStoredDefault: when the
+// explicitly named context isn't trusted, telling the user to run `auth use`
+// sends them to change the wrong thing — the flag would still override it.
+func TestResolve_IneligibleOverrideBlamesTheFlagNotTheStoredDefault(t *testing.T) {
+	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	require.NoError(t, contexts.Save(configDir, &contexts.File{
+		CurrentContext: "prod-eu",
+		Contexts: []*contexts.Context{
+			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
+			{Name: "staging", CoreURL: "https://eu.auth.partial.to", Handle: "paul", KeychainService: "kc:staging"},
+		},
+	}))
+
+	contexts.SetFlagOverrideForTest(t, "staging")
+	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the login selected by --context")
+	assert.Contains(t, err.Error(), "prod-eu", "offer the login that would work")
+	assert.Contains(t, err.Error(), "--context <context>")
+	assert.NotContains(t, err.Error(), "entire auth use",
+		"`auth use` cannot fix a run whose identity comes from the flag")
+}
+
+// TestResolve_UnknownOverrideFailsBeforeEligibility: "that context doesn't exist"
+// and "that context isn't trusted here" are different mistakes. Reporting the
+// second for the first would send the user hunting a trust problem over a typo,
+// and must never silently fall back to current_context.
+func TestResolve_UnknownOverrideFailsBeforeEligibility(t *testing.T) {
+	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	require.NoError(t, contexts.Save(configDir, &contexts.File{
+		CurrentContext: "prod-eu",
+		Contexts:       []*contexts.Context{{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"}},
+	}))
+
+	contexts.SetFlagOverrideForTest(t, "prod-eü")
+	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.Error(t, err)
+	var unknown *contexts.UnknownContextError
+	require.ErrorAs(t, err, &unknown, "callers must be able to tell a bad name from a trust failure")
+	assert.Contains(t, err.Error(), "prod-eu", "list what is actually saved")
+	assert.NotContains(t, err.Error(), "does not accept")
+}

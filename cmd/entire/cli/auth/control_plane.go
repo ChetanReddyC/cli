@@ -105,14 +105,23 @@ func targetForContext(c *contexts.Context) (ControlPlaneTarget, error) {
 // ok=false when there is no current context or it carries no CoreURL (an
 // unusable pointer we treat as "no active context" rather than dialing an
 // empty host).
+//
+// A `--context`/$ENTIRE_CONTEXT selection is honoured here too, so the identity
+// the control plane acts as is the same one git and the data API use. An
+// explicit selection naming no saved context is a hard error rather than
+// ok=false: "you asked for a context that doesn't exist" must not degrade into
+// the `entire login` hint.
 func activeContext() (c *contexts.Context, ok bool, err error) {
 	f, err := contexts.Load(userdirs.Config())
 	if err != nil {
 		return nil, false, fmt.Errorf("load contexts: %w", err)
 	}
-	c = f.Find(f.CurrentContext)
-	if c == nil || c.CoreURL == "" {
+	sel, err := f.Active()
+	if err != nil {
+		return nil, false, err //nolint:wrapcheck // UnknownContextError is already a complete operator message
+	}
+	if sel.Context == nil || sel.Context.CoreURL == "" {
 		return nil, false, nil
 	}
-	return c, true, nil
+	return sel.Context, true, nil
 }
