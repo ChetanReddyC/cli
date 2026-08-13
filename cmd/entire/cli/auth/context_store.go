@@ -181,3 +181,20 @@ func Contexts() ([]*contexts.Context, string, error) {
 	}
 	return f.Contexts, sel.Context.Name, nil
 }
+
+// StoredContexts returns all stored login contexts and the STORED
+// current_context, ignoring any `--context`/$ENTIRE_CONTEXT override.
+//
+// Use this for questions about what is *persisted* — does a default exist, what
+// should become the new default — as opposed to which identity is *acting*,
+// which is Contexts. Resolving the acting identity here would answer the wrong
+// question: after `logout --context staging` the override names a context that
+// no longer exists, so Active fails and a caller asking "is a default still
+// set?" would silently get an error instead of "no".
+func StoredContexts() ([]*contexts.Context, string, error) {
+	f, err := contexts.Load(userdirs.Config())
+	if err != nil {
+		return nil, "", fmt.Errorf("load contexts: %w", err)
+	}
+	return f.Contexts, f.CurrentContext, nil
+}
