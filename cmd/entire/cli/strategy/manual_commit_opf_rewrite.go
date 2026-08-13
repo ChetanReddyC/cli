@@ -84,16 +84,29 @@ func (e *V1RefMovedError) Error() string {
 // commits as Entire-OPF-Applied would be a privacy regression (future
 // pushes would skip them while their content is regex-only). Abort
 // before CAS so the user fixes their OPF install and retries.
+//
+// Cause carries the underlying batch error when there is one (the
+// breaker-tripped-at-start construction has none) so the real failure
+// survives into the pre-push abort message and errors.Is/As chains.
 type OPFRuntimeFailedError struct {
 	OPFCommand string
+	Cause      error
 }
 
 func (e *OPFRuntimeFailedError) Error() string {
-	return fmt.Sprintf("OPF runtime failed during pre-push rewrite (command=%q); "+
+	msg := fmt.Sprintf("OPF runtime failed during pre-push rewrite (command=%q); "+
 		"aborting push so regex-only content isn't tagged as OPF-applied. "+
 		"Run `%s --help` to verify your OPF install, then retry. Or set "+
 		"ENTIRE_OPF=no on the push to skip OPF for this push only.",
 		e.OPFCommand, e.OPFCommand)
+	if e.Cause != nil {
+		msg += fmt.Sprintf(" (cause: %v)", e.Cause)
+	}
+	return msg
+}
+
+func (e *OPFRuntimeFailedError) Unwrap() error {
+	return e.Cause
 }
 
 // OPFNoCategoriesError: OPF is enabled but the effective category set
@@ -101,7 +114,10 @@ func (e *OPFRuntimeFailedError) Error() string {
 // cannot run. Proceeding would stamp Entire-OPF-Applied on commits OPF
 // never saw, and later rewrites would skip them permanently — even
 // after the user fixes the config. Abort the push with remediation
-// instead.
+// instead. The rewrite-level gate is deliberately unconditional: it
+// aborts even a re-parent-only push (every unpushed commit already
+// tagged), keeping the invariant simple rather than poking a
+// no-new-stamping hole through it.
 type OPFNoCategoriesError struct{}
 
 func (e *OPFNoCategoriesError) Error() string {
@@ -109,7 +125,9 @@ func (e *OPFNoCategoriesError) Error() string {
 		"so the model scan cannot run; aborting push so unscanned content isn't " +
 		"tagged as OPF-applied. Enable at least one category (e.g. " +
 		`"private_person": true) under redaction.openai_privacy_filter.categories ` +
-		"in .entire/settings.json, or set enabled: false to push regex-only content."
+		"in .entire/settings.json (or .entire/settings.local.json), set " +
+		"enabled: false to push regex-only content, or set ENTIRE_OPF=no on the " +
+		"push to skip OPF for this push only."
 }
 
 const (
@@ -229,7 +247,8 @@ const rawByteCapMultiplier = 100
 //
 // Caller checks redact.OPFEnabled() and skips this when OPF is off.
 // Returns one of {V1DivergedError, BootstrapTooLargeError,
-// V1RefMovedError, OPFRuntimeFailedError, OPFNoCategoriesError} for
+// V1RefMovedError, OPFRuntimeFailedError, OPFNoCategoriesError,
+// OPFBatchTooLargeError, OPFRawBytesTooLargeError} for
 // privacy-critical failures — the pre-push hook propagates these so
 // git push aborts.
 func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target string) (plumbing.Hash, error) {
@@ -269,11 +288,11 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 	}
 
 	// Fail-closed defense: enabled-with-no-categories means the model
-	// scan can't run at all. Diagnose it here — before the breaker
-	// check and the batch call — so the user gets the config-specific
-	// remediation rather than OPFRuntimeFailedError's "verify your OPF
-	// install". BatchBytesWithPrivacyFilter rejects this state too, but
-	// its error would be wrapped as a runtime failure below.
+	// scan can't run at all. The decision resolution in prePush already
+	// rejects this state before any prompt; this second gate covers
+	// direct callers and sits before the breaker check so the user gets
+	// the config-specific remediation rather than OPFRuntimeFailedError's
+	// "verify your OPF install".
 	if redact.OPFMisconfiguredNoCategories() {
 		return plumbing.ZeroHash, &OPFNoCategoriesError{}
 	}
@@ -350,7 +369,13 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 		}
 		globalRedacted, err = redact.BatchBytesWithPrivacyFilter(ctx, globalBlobs)
 		if err != nil {
-			return plumbing.ZeroHash, &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand()}
+			// Converge with the up-front gate: the misconfiguration
+			// sentinel must surface config remediation, not "verify
+			// your OPF install".
+			if errors.Is(err, redact.ErrOPFNoEnabledCategories) {
+				return plumbing.ZeroHash, &OPFNoCategoriesError{}
+			}
+			return plumbing.ZeroHash, &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand(), Cause: err}
 		}
 	}
 
@@ -572,10 +597,11 @@ func rebuildV1Commit(ctx context.Context, repo *git.Repository, oldCommit *objec
 // to "redact everything except the deferred file" means new types are
 // covered by default; opting out requires an explicit code change.
 //
-// RedactBlobBytes itself handles arbitrary content: .jsonl/.json go
-// through JSON-aware leaf redaction; anything else gets byte
-// redaction over the raw content. The OPF has-space gate excludes
-// binary blobs from paying inference cost.
+// The batch redactor (redact.BatchBytesWithPrivacyFilter, via
+// NamedBlob) handles arbitrary content: .jsonl/.json go through
+// JSON-aware leaf redaction; anything else gets byte redaction over
+// the raw content. The OPF has-space gate excludes binary blobs from
+// paying inference cost.
 func isRedactableBlobName(name string) bool {
 	return name != paths.ContentHashFileName
 }

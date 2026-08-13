@@ -475,6 +475,9 @@ func TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesFailsClosed(t *testing.T
 		{name: "empty_map", categories: map[string]bool{}},
 		{name: "nil_map", categories: nil},
 		{name: "all_false", categories: map[string]bool{"private_person": false}},
+		// Unknown keys are rejected at settings load, but OPFConfig is
+		// constructible directly; enabledCategories must filter them.
+		{name: "only_unknown_keys", categories: map[string]bool{"typo_category": true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -495,5 +498,30 @@ func TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesFailsClosed(t *testing.T
 				t.Errorf("want 0 OPF calls when no categories enabled, got %d", fake.batchCalls)
 			}
 		})
+	}
+}
+
+// TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesWinsOverBreaker
+// pins the check ordering: a tripped circuit breaker must not
+// downgrade the no-categories misconfiguration back into silent
+// regex-only success — the caller stamps the Entire-OPF-Applied
+// trailer on any nil-error return. Unreachable through the production
+// config lifecycle today (Configure resets the breaker, and tripping
+// it requires an enabled category), but the guarantee must hold by
+// construction, not by that coincidence.
+func TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesWinsOverBreaker(t *testing.T) {
+	fake := &fakeRuntime{}
+	configureFakeOPF(t, fake, map[string]bool{})
+	opfBreakerTripped.Store(true)
+
+	inputs := []NamedBlob{
+		{Name: "x.jsonl", Content: []byte(`{"text":"Alice met Bob"}`)},
+	}
+	out, err := BatchBytesWithPrivacyFilter(context.Background(), inputs)
+	if !errors.Is(err, ErrOPFNoEnabledCategories) {
+		t.Fatalf("want ErrOPFNoEnabledCategories despite tripped breaker, got %v", err)
+	}
+	if out != nil {
+		t.Errorf("want nil output on fail-closed error, got %d blobs", len(out))
 	}
 }

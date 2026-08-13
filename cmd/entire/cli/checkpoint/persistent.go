@@ -2407,8 +2407,12 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, fileP
 // string leaves and applies OPF only to those, preserving the JSON
 // structure.
 //
-// Post-commit condensation uses false (fast path). The pre-push rewrite
-// (strategy/manual_commit_opf_rewrite.go) uses true.
+// Post-commit condensation uses false (fast path). The pre-push
+// rewrite does NOT come through here — it batches all blobs through
+// redact.BatchBytesWithPrivacyFilter, which fails closed on an
+// enabled-but-no-categories OPF config; the true path below silently
+// falls back to regex-only in that state, so it must not be wired
+// into any flow that stamps the Entire-OPF-Applied trailer.
 func RedactBlobBytes(ctx context.Context, content []byte, treePath string, usePrivacyFilter bool) []byte {
 	if strings.HasSuffix(treePath, ".jsonl") || strings.HasSuffix(treePath, ".json") {
 		var (
