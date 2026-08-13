@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"reflect"
 	"testing"
@@ -30,7 +31,7 @@ func TestReadLoginURLActionFromTTY_SingleKeyAndRestoresTerminal(t *testing.T) {
 
 	resultCh := make(chan loginURLActionTestResult, 1)
 	go func() {
-		action, err := readLoginURLActionFromTTY(context.Background(), tty)
+		action, err := readLoginURLActionFromTTY(context.Background(), io.Discard, tty)
 		resultCh <- loginURLActionTestResult{action: action, err: err}
 	}()
 	waitForLoginPromptTTYRaw(t, observer, before)
@@ -82,7 +83,7 @@ func TestReadLoginURLActionFromTTY_UnavailableInputContinuesAndCloses(t *testing
 		t.Fatalf("create non-TTY input: %v", err)
 	}
 
-	action, err := readLoginURLActionFromTTY(context.Background(), notTTY)
+	action, err := readLoginURLActionFromTTY(context.Background(), io.Discard, notTTY)
 	if err != nil {
 		t.Fatalf("readLoginURLActionFromTTY() error = %v", err)
 	}
@@ -92,6 +93,62 @@ func TestReadLoginURLActionFromTTY_UnavailableInputContinuesAndCloses(t *testing
 	if _, err := notTTY.Stat(); !errors.Is(err, os.ErrClosed) {
 		t.Errorf("input was not closed after fallback: %v", err)
 	}
+}
+
+// A successful authentication must cancel and join an active Bubble Tea input
+// reader before returning. Waiting until the PTY is observably raw prevents the
+// test from passing because authentication won a startup race before Bubble Tea
+// took ownership of the terminal.
+func TestWaitForLoginURLResult_AuthCompletionCancelsTTYAndRestoresTerminal(t *testing.T) {
+	t.Parallel()
+
+	ptmx, tty, observer, before := openLoginPromptPTY(t)
+	defer ptmx.Close()
+	defer observer.Close()
+
+	authComplete := make(chan struct{})
+	interactor := loginURLInteractor{
+		keysAvailable: func() bool { return true },
+		readAction: func(ctx context.Context) (loginURLAction, error) {
+			return readLoginURLActionFromTTY(ctx, io.Discard, tty)
+		},
+		copyURL: noopCopyURL,
+		openURL: noopOpenURL,
+	}
+
+	resultCh := make(chan loginURLWaitResult[string], 1)
+	go func() {
+		value, err := waitForLoginURLResult(
+			context.Background(),
+			io.Discard,
+			io.Discard,
+			"https://auth.test/authorize",
+			"Waiting... ",
+			interactor,
+			func(context.Context) (string, error) {
+				<-authComplete
+				return testLoginComplete, nil
+			},
+		)
+		resultCh <- loginURLWaitResult[string]{value: value, err: err}
+	}()
+
+	waitForLoginPromptTTYRaw(t, observer, before)
+	close(authComplete)
+
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			t.Fatalf("waitForLoginURLResult() error = %v", result.err)
+		}
+		if result.value != testLoginComplete {
+			t.Errorf("result = %q, want %q", result.value, testLoginComplete)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("authentication completed but the active TTY reader was not joined")
+	}
+
+	assertLoginPromptTTYRestored(t, observer, before)
 }
 
 // Ctrl-C is delivered as a keypress while Bubble Tea owns the raw TTY, rather
@@ -107,7 +164,7 @@ func TestReadLoginURLActionFromTTY_ControlCRecordsInterrupt(t *testing.T) {
 
 	resultCh := make(chan loginURLActionTestResult, 1)
 	go func() {
-		action, err := readLoginURLActionFromTTY(context.Background(), tty)
+		action, err := readLoginURLActionFromTTY(context.Background(), io.Discard, tty)
 		resultCh <- loginURLActionTestResult{action: action, err: err}
 	}()
 	waitForLoginPromptTTYRaw(t, observer, before)
