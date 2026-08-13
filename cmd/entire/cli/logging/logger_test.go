@@ -131,6 +131,34 @@ func TestInit_ReturnedContextCarriesSessionStampedLogger(t *testing.T) {
 	}
 }
 
+// TestInit_StderrFallbackAttachesNoContextLogger pins the summary-gate
+// contract for the fallback path: when Init cannot open .entire/logs/ and
+// falls back to stderr, the returned context must NOT carry a logger —
+// otherwise the redaction summary gate (logger != nil) fires and hooks
+// splash a JSON INFO line onto the user's terminal on every commit.
+func TestInit_StderrFallbackAttachesNoContextLogger(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	initGitRepo(t, tmpDir)
+
+	// A regular file at .entire makes MkdirAll(".entire/logs") fail,
+	// forcing the stderr fallback.
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire"), []byte("not a dir"), 0o600); err != nil {
+		t.Fatalf("failed to block .entire dir: %v", err)
+	}
+
+	logCtx, err := Init(context.Background(), testSessionID)
+	if err != nil {
+		t.Fatalf("Init() error = %v (fallback must not be an error)", err)
+	}
+	defer Close()
+
+	if LoggerFromContext(logCtx) != nil {
+		t.Error("LoggerFromContext() must be nil on the stderr fallback path")
+	}
+}
+
 func TestInit_WritesJSONLogs(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)

@@ -82,8 +82,9 @@ func SetLogLevelGetter(getter func() string) {
 // The returned context carries the initialized logger (see LoggerFromContext),
 // already stamped with session_id when one was given. Entry points pass it
 // down so downstream code — and packages that take an injected *slog.Logger,
-// like redact — never need to ask whether logging is ready. On error the
-// input context is returned unchanged.
+// like redact — never need to ask whether logging is ready. On error, and on
+// the stderr fallback paths, the input context is returned without a logger:
+// a context logger means "writes go to .entire/logs/", never to the terminal.
 func Init(ctx context.Context, sessionID string) (context.Context, error) {
 	// Validate session ID if provided (used only for the slog attribute, not the filename)
 	if sessionID != "" {
@@ -126,17 +127,20 @@ func Init(ctx context.Context, sessionID string) (context.Context, error) {
 
 	logsPath := filepath.Join(repoRoot, LogsDir)
 	if err := os.MkdirAll(logsPath, 0o750); err != nil {
-		// Fall back to stderr
+		// Fall back to stderr. Deliberately no context logger: a context
+		// logger asserts "file-backed logging is ready", and gates like the
+		// redaction summary use its presence to decide whether an INFO line
+		// lands in .entire/logs/ or would splash JSON onto the terminal.
 		logger = createLogger(os.Stderr, level)
-		return contextWithInitLogger(ctx, logger, sessionID), nil
+		return ctx, nil
 	}
 
 	logFilePath := filepath.Join(logsPath, "entire.log")
 	f, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // fixed filename, not user-controlled
 	if err != nil {
-		// Fall back to stderr
+		// Fall back to stderr (see the fallback above: no context logger).
 		logger = createLogger(os.Stderr, level)
-		return contextWithInitLogger(ctx, logger, sessionID), nil
+		return ctx, nil
 	}
 
 	logFile = f

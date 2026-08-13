@@ -1,8 +1,10 @@
 package redact
 
 import (
+	"errors"
 	"log/slog"
 	"regexp"
+	"regexp/syntax"
 	"sync"
 )
 
@@ -57,6 +59,21 @@ func loggerOrDefault(l *slog.Logger) *slog.Logger {
 		return l
 	}
 	return slog.Default()
+}
+
+// compileErrorAttr describes a regex compile failure without the pattern
+// text: regexp error strings quote the full pattern verbatim, and these
+// warnings are persisted to .entire/logs/ and packaged by doctor bundle. A
+// user who pastes a literal secret as a custom_redactions value and gets the
+// regex wrong must not have it stored there — the rule that would have
+// redacted it is exactly the one that failed to compile. The rule label/id
+// attrs beside this identify which pattern to fix; the user owns its text.
+func compileErrorAttr(err error) slog.Attr {
+	var serr *syntax.Error
+	if errors.As(err, &serr) {
+		return slog.String("error", string(serr.Code))
+	}
+	return slog.String("error", "regex compile failed")
 }
 
 // ActiveCustomRules reports how many user-defined rules (inline + pack)
@@ -121,7 +138,7 @@ func compileCustomRule(logger *slog.Logger, label, pattern, warning string, attr
 		all := make([]any, 0, len(attrs)+2)
 		all = append(all, componentAttr)
 		all = append(all, attrs...)
-		all = append(all, slog.String("error", err.Error()))
+		all = append(all, compileErrorAttr(err))
 		logger.Warn(warning, all...)
 		return compiledCustomRule{}, false
 	}

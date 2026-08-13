@@ -191,7 +191,7 @@ func compilePIIPatterns(cfg *PIIConfig) []piiPattern {
 			logger.Warn("skipping invalid custom PII pattern",
 				componentAttr,
 				slog.String("label", label),
-				slog.String("error", err.Error()))
+				compileErrorAttr(err))
 			continue
 		}
 		patterns = append(patterns, piiPattern{regex: compiled, label: strings.ToUpper(label)})

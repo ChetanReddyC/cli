@@ -395,6 +395,13 @@ func EnsureRedactionConfigured(ctx context.Context) {
 	initRedactionOnce.Do(func() {
 		logger := logging.LoggerFromContext(ctx)
 
+		// Redaction config is a process-wide one-shot: if the caller's ctx
+		// is already canceled (Ctrl-C mid-hook), a failed settings read here
+		// would consume the Once and leave the user's custom rules
+		// unconfigured — fail-open — for the rest of the process. Keep the
+		// ctx values (logger, worktree root) but not its cancellation.
+		ctx := context.WithoutCancel(ctx)
+
 		s, err := settings.Load(ctx)
 		if err != nil {
 			logCtx := logging.WithComponent(ctx, "redaction")

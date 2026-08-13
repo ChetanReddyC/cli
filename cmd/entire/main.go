@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/procsignal"
 	"github.com/spf13/cobra"
@@ -85,6 +86,15 @@ func main() {
 	}
 
 	executed, err := rootCmd.ExecuteContextC(ctx)
+
+	// Flush the buffered .entire/logs writer regardless of how the command
+	// ended. Cobra skips PersistentPostRunE when RunE returns an error, so a
+	// failing hook (e.g. pre-push aborting on an OPF runtime failure) would
+	// otherwise exit with its diagnostics still sitting in the 8KB buffer —
+	// losing exactly the log lines that explain the failure. Close is safe
+	// to call twice and a no-op when logging was never initialized.
+	logging.Close()
+
 	if err != nil {
 		var silent *cli.SilentError
 
