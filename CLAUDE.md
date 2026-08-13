@@ -692,7 +692,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - `strategy.go` - Interface definition and context structs (`StepContext`, `TaskStepContext`, `RewindPoint`, etc.)
 - `common.go` - Helpers for metadata extraction, tree building, rewind validation, `ListCheckpoints()`
 - `manual_commit*.go` - Manual-commit strategy: main impl, types, session state, condensation, rewind, git ops, logs, hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push), reset
-- `manual_commit_opf_rewrite.go` - Pre-push OPF re-redaction: walks unpushed v1 commits, runs OPF over their blobs, rebuilds commits with `Entire-OPF-Applied: true` trailer, CAS-updates the local ref. Sentinel error types (use `errors.As`): `V1DivergedError`, `BootstrapTooLargeError`, `V1RefMovedError`, `OPFRuntimeFailedError`.
+- `manual_commit_opf_rewrite.go` - Pre-push OPF re-redaction: walks unpushed v1 commits, runs OPF over their blobs, rebuilds commits with `Entire-OPF-Applied: true` trailer, CAS-updates the local ref. Sentinel error types (use `errors.As`): `V1DivergedError`, `BootstrapTooLargeError`, `V1RefMovedError`, `OPFRuntimeFailedError`, `OPFNoCategoriesError` (OPF enabled with zero effective categories — the rewrite fails closed instead of stamping the trailer without a scan).
 - `cleanup.go` - Cleanup discovery/deletion for shadow branches, session states, and checkpoint metadata
 - `session_state.go` - Package-level session state functions
 - `hooks.go` - Git hook installation

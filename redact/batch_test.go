@@ -460,24 +460,40 @@ func TestSumProseLeafBytes_CountsAcrossBlobShapes(t *testing.T) {
 	}
 }
 
-// TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesReturns7Layer
-// covers the configuration edge case where OPF is enabled but every
-// category is turned off — the model has nothing to look for, so we
-// skip the shell-out entirely and return regex-only output.
-func TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesReturns7Layer(t *testing.T) {
-	fake := &fakeRuntime{}
-	// Empty categories — Configure call still wires the runtime but
-	// enabledCategories returns nothing.
-	configureFakeOPF(t, fake, map[string]bool{})
+// TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesFailsClosed
+// covers the misconfiguration where OPF is enabled but the effective
+// category set is empty (empty map, all-false, or omitted). The model
+// scan cannot run, and the only caller stamps the Entire-OPF-Applied
+// trailer on success — so silently returning regex-only output here
+// produced a false attestation and made later rewrites skip the commit
+// permanently. Fail closed instead.
+func TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesFailsClosed(t *testing.T) {
+	cases := []struct {
+		name       string
+		categories map[string]bool
+	}{
+		{name: "empty_map", categories: map[string]bool{}},
+		{name: "nil_map", categories: nil},
+		{name: "all_false", categories: map[string]bool{"private_person": false}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeRuntime{}
+			configureFakeOPF(t, fake, tc.categories)
 
-	inputs := []NamedBlob{
-		{Name: "x.jsonl", Content: []byte(`{"text":"Alice met Bob"}`)},
-	}
-	_, err := BatchBytesWithPrivacyFilter(context.Background(), inputs)
-	if err != nil {
-		t.Fatalf("no-categories path should not error: %v", err)
-	}
-	if fake.batchCalls != 0 {
-		t.Errorf("want 0 OPF calls when no categories enabled, got %d", fake.batchCalls)
+			inputs := []NamedBlob{
+				{Name: "x.jsonl", Content: []byte(`{"text":"Alice met Bob"}`)},
+			}
+			out, err := BatchBytesWithPrivacyFilter(context.Background(), inputs)
+			if !errors.Is(err, ErrOPFNoEnabledCategories) {
+				t.Fatalf("want ErrOPFNoEnabledCategories, got %v", err)
+			}
+			if out != nil {
+				t.Errorf("want nil output on fail-closed error, got %d blobs", len(out))
+			}
+			if fake.batchCalls != 0 {
+				t.Errorf("want 0 OPF calls when no categories enabled, got %d", fake.batchCalls)
+			}
+		})
 	}
 }

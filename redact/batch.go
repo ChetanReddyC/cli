@@ -34,10 +34,13 @@ type NamedBlob struct {
 // (cross-blob walker) needs an explicit signal that OPF did not
 // finish.
 //
-// When OPF is unconfigured, disabled, has no enabled categories, or
-// the per-process circuit breaker has tripped, returns regex-only
-// output for every blob with no error. This matches the existing
-// non-batched paths and keeps the caller's hot-path code clean.
+// When OPF is unconfigured, disabled, or the per-process circuit
+// breaker has tripped, returns regex-only output for every blob with
+// no error. This matches the existing non-batched paths and keeps the
+// caller's hot-path code clean. Enabled with zero effective categories
+// is different: that returns ErrOPFNoEnabledCategories, because the
+// caller is about to stamp the Entire-OPF-Applied trailer and a silent
+// regex-only success here would make that attestation false.
 func BatchBytesWithPrivacyFilter(ctx context.Context, inputs []NamedBlob) ([][]byte, error) {
 	if len(inputs) == 0 {
 		return nil, nil
@@ -48,7 +51,7 @@ func BatchBytesWithPrivacyFilter(ctx context.Context, inputs []NamedBlob) ([][]b
 	}
 	cats := enabledCategories(cfg)
 	if len(cats) == 0 {
-		return applyRegexLayersToBlobs(inputs), nil
+		return nil, ErrOPFNoEnabledCategories
 	}
 
 	// Pass 1: collect unique prose-shaped leaves across every blob.

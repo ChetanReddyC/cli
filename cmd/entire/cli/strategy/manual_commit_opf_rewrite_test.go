@@ -236,6 +236,52 @@ func TestRewriteUnpushedV1WithOPF_HappyPath_RewritesAndTagsApplied(t *testing.T)
 	}))
 }
 
+// Regression: OPF enabled with an empty effective category set used
+// to succeed silently — the model scan
+// never ran, yet the rewrite stamped Entire-OPF-Applied: true, so later
+// rewrites skipped the commit permanently even after the user fixed the
+// config. The rewrite must abort instead, and a corrected config must
+// then scan the same commits normally.
+func TestRewriteUnpushedV1WithOPF_NoEnabledCategoriesAbortsThenRepairs(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	redact.ResetOPFConfigForTest()
+	t.Cleanup(redact.ResetOPFConfigForTest)
+	redact.ConfigurePrivacyFilterWithRuntime(redact.OPFConfig{
+		Enabled:    true,
+		Categories: map[string]bool{},
+		Command:    "/tmp/test-opf",
+	}, fake)
+	repo, originalTip := setupV1Repo(t)
+
+	_, err := RewriteUnpushedV1WithOPF(context.Background(), repo, "origin")
+	var noCatErr *OPFNoCategoriesError
+	require.ErrorAs(t, err, &noCatErr)
+	require.Equal(t, 0, fake.batchCallCount(), "OPF must not be invoked with zero categories")
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.Equal(t, originalTip, ref.Hash(), "aborted rewrite must not move the v1 ref")
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	require.False(t, trailers.HasOPFApplied(commit.Message),
+		"no commit may carry Entire-OPF-Applied when the scan never ran")
+
+	// Fix the config: because the abort left no trailer behind, the same
+	// commits are still eligible and the next push scans them normally.
+	redact.ConfigurePrivacyFilterWithRuntime(redact.OPFConfig{
+		Enabled:    true,
+		Categories: map[string]bool{"private_person": true},
+		Command:    "/tmp/test-opf",
+	}, fake)
+	newTip, err := RewriteUnpushedV1WithOPF(context.Background(), repo, "origin")
+	require.NoError(t, err)
+	require.NotEqual(t, originalTip, newTip)
+	require.Equal(t, 1, fake.batchCallCount())
+	repaired, err := repo.CommitObject(newTip)
+	require.NoError(t, err)
+	require.True(t, trailers.HasOPFApplied(repaired.Message))
+}
+
 func TestPrePushFromGitHook_DeferralStillRunsOPF(t *testing.T) {
 	fake := &fakeOPFForRewrite{}
 	configureFakeOPF(t, fake)

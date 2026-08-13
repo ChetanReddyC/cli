@@ -96,6 +96,22 @@ func (e *OPFRuntimeFailedError) Error() string {
 		e.OPFCommand, e.OPFCommand)
 }
 
+// OPFNoCategoriesError: OPF is enabled but the effective category set
+// is empty (categories omitted, {}, or all-false), so the model scan
+// cannot run. Proceeding would stamp Entire-OPF-Applied on commits OPF
+// never saw, and later rewrites would skip them permanently — even
+// after the user fixes the config. Abort the push with remediation
+// instead.
+type OPFNoCategoriesError struct{}
+
+func (e *OPFNoCategoriesError) Error() string {
+	return "OpenAI Privacy Filter is enabled but no detection category is enabled, " +
+		"so the model scan cannot run; aborting push so unscanned content isn't " +
+		"tagged as OPF-applied. Enable at least one category (e.g. " +
+		`"private_person": true) under redaction.openai_privacy_filter.categories ` +
+		"in .entire/settings.json, or set enabled: false to push regex-only content."
+}
+
 const (
 	// bootstrapDefaultLimit caps first-push history rewrites. Picked
 	// to bound worst-case wall-clock at ~50min @ 30s/commit.
@@ -213,8 +229,9 @@ const rawByteCapMultiplier = 100
 //
 // Caller checks redact.OPFEnabled() and skips this when OPF is off.
 // Returns one of {V1DivergedError, BootstrapTooLargeError,
-// V1RefMovedError, OPFRuntimeFailedError} for privacy-critical
-// failures — the pre-push hook propagates these so git push aborts.
+// V1RefMovedError, OPFRuntimeFailedError, OPFNoCategoriesError} for
+// privacy-critical failures — the pre-push hook propagates these so
+// git push aborts.
 func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target string) (plumbing.Hash, error) {
 	localTip, err := readV1Tip(repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	if err != nil {
@@ -249,6 +266,16 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 		if limit := resolveBootstrapLimit(); len(unpushed) > limit {
 			return plumbing.ZeroHash, &BootstrapTooLargeError{Count: len(unpushed), Limit: limit}
 		}
+	}
+
+	// Fail-closed defense: enabled-with-no-categories means the model
+	// scan can't run at all. Diagnose it here — before the breaker
+	// check and the batch call — so the user gets the config-specific
+	// remediation rather than OPFRuntimeFailedError's "verify your OPF
+	// install". BatchBytesWithPrivacyFilter rejects this state too, but
+	// its error would be wrapped as a runtime failure below.
+	if redact.OPFMisconfiguredNoCategories() {
+		return plumbing.ZeroHash, &OPFNoCategoriesError{}
 	}
 
 	// Fail-closed defense: if OPF is already broken at the start of

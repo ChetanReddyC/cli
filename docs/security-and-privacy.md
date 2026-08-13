@@ -103,6 +103,8 @@ Available categories (set to `true` to enable, `false` or omit to skip):
 
 Unknown category names are rejected at settings load time so typos surface immediately instead of silently disabling a category.
 
+Enabling the filter requires at least one enabled category. With `enabled: true` and no effective category (`categories` omitted, empty, or all-false) the model scan cannot run, so the pre-push rewrite aborts the push with a configuration error rather than tagging commits as OPF-applied without a scan. Enable a category or set `enabled: false` to proceed.
+
 Full settings reference:
 
 ```json

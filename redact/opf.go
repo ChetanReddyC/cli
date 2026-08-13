@@ -98,6 +98,26 @@ func OPFEnabled() bool {
 	return cfg != nil && cfg.Enabled
 }
 
+// ErrOPFNoEnabledCategories is returned by privacy-critical OPF entry
+// points when OPF is enabled but the effective category set is empty
+// (categories omitted, {}, all-false, or only unknown keys). The model
+// scan cannot run in this state; succeeding silently would let callers
+// attest OPF ran (Entire-OPF-Applied trailer) when it never did.
+var ErrOPFNoEnabledCategories = errors.New(
+	"openai_privacy_filter is enabled but no detection category is enabled; " +
+		"enable at least one category (e.g. \"private_person\": true) in " +
+		"redaction.openai_privacy_filter.categories, or set enabled: false")
+
+// OPFMisconfiguredNoCategories reports whether OPF is enabled for this
+// process with an empty effective category set — the state described by
+// ErrOPFNoEnabledCategories. The pre-push gate checks this before
+// prompting or rewriting so the push aborts with remediation instead of
+// stamping the Entire-OPF-Applied trailer on unscanned commits.
+func OPFMisconfiguredNoCategories() bool {
+	cfg := getOPFConfig()
+	return cfg != nil && cfg.Enabled && len(enabledCategories(cfg)) == 0
+}
+
 // OPFBreakerTripped reports whether the per-process OPF circuit breaker
 // has been tripped — i.e. an OPF invocation failed at some point during
 // this process's lifetime. The pre-push rewrite uses this to detect
