@@ -107,9 +107,10 @@ func OPFEnabled() bool {
 // JSONLContentWithPrivacyFilter) still fall back silently in this
 // state because their callers do not attest that OPF ran.
 var ErrOPFNoEnabledCategories = errors.New(
-	"openai_privacy_filter is enabled but no detection category is enabled; " +
-		"enable at least one category (e.g. \"private_person\": true) in " +
-		"redaction.openai_privacy_filter.categories, or set enabled: false")
+	"redaction.openai_privacy_filter is enabled but no detection category is enabled; " +
+		"enable at least one category (e.g. \"private_person\": true) under " +
+		"redaction.openai_privacy_filter.categories in .entire/settings.json " +
+		"(or .entire/settings.local.json), or set enabled: false")
 
 // OPFMisconfiguredNoCategories reports whether OPF is enabled for this
 // process with an empty effective category set — the state described by
