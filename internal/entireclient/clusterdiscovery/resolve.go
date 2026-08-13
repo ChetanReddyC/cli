@@ -268,6 +268,14 @@ func describeSelection(sel contexts.Selection) string {
 // with no CoreURL is never eligible: it names no issuer to match, and without
 // this guard a resource advertising a blank core would match it.
 func contextEligible(c *contexts.Context, coreURLs []string) bool {
+	// A nil entry comes from a hand-edited or truncated contexts.json (`[null]`),
+	// the same trust boundary deleteContextKeychain's blank-audience guard
+	// contemplates. It is never eligible, and must not panic: eligibleContexts
+	// walks every stored entry on the failure path, and that path runs inside
+	// git-remote-entire during `git push`.
+	if c == nil {
+		return false
+	}
 	want := normalizeCoreURL(c.CoreURL)
 	if want == "" {
 		return false

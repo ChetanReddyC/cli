@@ -546,3 +546,49 @@ func TestResolve_UnknownOverrideFailsBeforeEligibility(t *testing.T) {
 	assert.Contains(t, err.Error(), "prod-eu", "list what is actually saved")
 	assert.NotContains(t, err.Error(), "does not accept")
 }
+
+// TestResolve_NilStoredContextDoesNotPanic: a hand-edited or truncated
+// contexts.json can contain `{"contexts":[null]}`. Every reader of f.Contexts
+// must skip it rather than dereference it — this path runs inside
+// git-remote-entire during `git push`, where a panic is the worst outcome
+// available.
+//
+// The failure path is the exposed one: eligibleContexts walks every stored entry
+// to build the candidate list, so the nil is reached even though no context can
+// possibly match.
+func TestResolve_NilStoredContextDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	f := &contexts.File{
+		CurrentContext: "gone",
+		Contexts: []*contexts.Context{
+			nil,
+			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
+		},
+	}
+
+	// Empty coreURLs is the case the old loop shape never dereferenced at all.
+	_, err := requireActiveContext(f, "cluster c.entire.io", nil, t.Logf)
+	require.Error(t, err)
+
+	// And with a matching core, the nil entry must be skipped while the real one
+	// is still offered.
+	_, err = requireActiveContext(f, "cluster c.entire.io", []string{"https://eu.auth.entire.io"}, t.Logf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "prod-eu", "the valid entry is still a candidate")
+}
+
+// A nil entry must also not panic the selection itself, which resolves through
+// contexts.File.Find before any eligibility check.
+func TestResolve_NilStoredContextIsSelectable(t *testing.T) {
+	t.Parallel()
+	f := &contexts.File{
+		CurrentContext: "prod-eu",
+		Contexts: []*contexts.Context{
+			nil,
+			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
+		},
+	}
+	c, err := requireActiveContext(f, "cluster c.entire.io", []string{"https://eu.auth.entire.io"}, t.Logf)
+	require.NoError(t, err)
+	assert.Equal(t, "prod-eu", c.Name)
+}
