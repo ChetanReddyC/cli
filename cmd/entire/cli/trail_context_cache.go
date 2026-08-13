@@ -410,7 +410,8 @@ func newRefreshTrailEnablementCmd() *cobra.Command {
 			// logging.Init falls back to cwd when WorktreeRoot fails.
 			if _, err := paths.WorktreeRoot(ctx); err == nil {
 				logging.SetLogLevelGetter(GetLogLevel)
-				if err := logging.Init(ctx, ""); err == nil {
+				if logCtx, err := logging.Init(ctx, ""); err == nil {
+					ctx = logCtx
 					defer logging.Close()
 				}
 			}

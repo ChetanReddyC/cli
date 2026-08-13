@@ -63,7 +63,8 @@ fails even with --dry-run.`, imp.AgentType()),
 			// logging.Debug below is a no-op. WorktreeRoot already succeeded,
 			// so this cannot create .entire/logs/ outside a repo.
 			logging.SetLogLevelGetter(GetLogLevel)
-			if err := logging.Init(ctx, ""); err == nil {
+			if logCtx, err := logging.Init(ctx, ""); err == nil {
+				ctx = logCtx
 				defer logging.Close()
 			}
 
@@ -75,7 +76,7 @@ fails even with --dry-run.`, imp.AgentType()),
 			// redactor packs) before any checkpoint write. Imported transcripts
 			// are redacted with redact.JSONLBytes, which honors this config; without
 			// it only always-on secret scanning would run on imported history.
-			strategy.EnsureRedactionConfigured()
+			strategy.EnsureRedactionConfigured(ctx)
 
 			// Logged so support can tell why an import has no anchor (empty
 			// sha: nothing resolved) or a stale one (origin tip not fetched).

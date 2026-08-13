@@ -67,7 +67,8 @@ func newCleanCmd() *cobra.Command {
 
 			// Initialize logging
 			logging.SetLogLevelGetter(GetLogLevel)
-			if err := logging.Init(ctx, ""); err == nil {
+			if logCtx, err := logging.Init(ctx, ""); err == nil {
+				ctx = logCtx
 				defer logging.Close()
 			}
 

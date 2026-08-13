@@ -1,23 +1,29 @@
 package redact
 
 import (
-	"context"
 	"log/slog"
 	"regexp"
 	"sync"
-	"sync/atomic"
 )
 
 // CustomRulesConfig configures inline custom_redactions and parsed rule packs.
 type CustomRulesConfig struct {
 	// Inline maps a label (used only in logs/diagnostics) to a Go RE2 regex
-	// string. Failed compilations are logged (see SetWarnFunc) and dropped.
+	// string. Failed compilations are logged to Logger and dropped.
 	Inline map[string]string
 
 	// Packs are pre-parsed rule packs (see LoadPacks). Per-rule regex
 	// compilation failures are logged and dropped; sample mismatches are
 	// logged but do not drop the rule.
 	Packs []*Pack
+
+	// Logger receives this package's diagnostics (rule compile errors,
+	// sample mismatches). The CLI injects the logger its entry point
+	// initialized so warnings reach .entire/logs/ instead of the
+	// process-default stderr logger, which hook contexts swallow.
+	// nil means slog.Default(), preserving standalone behavior for
+	// library consumers and tests.
+	Logger *slog.Logger
 }
 
 // compiledCustomRule is a compiled regex retained across calls.
@@ -42,38 +48,15 @@ var (
 // (`logging.WithComponent(ctx, "redaction")`).
 var componentAttr = slog.String("component", "redaction")
 
-// WarnFunc receives this package's diagnostics (pack load failures, rule
-// compile errors, sample mismatches, OPF runtime failures).
-type WarnFunc func(ctx context.Context, msg string, attrs ...any)
-
-// warnFunc holds the configured sink. nil means the process-default slog
-// logger, resolved at emit time, which preserves standalone behavior for
-// library consumers and tests.
-var warnFunc atomic.Pointer[WarnFunc]
-
-// SetWarnFunc routes this package's diagnostics through f. The CLI wires
-// this to its logging package so warnings reach .entire/logs/ instead of
-// the process-default stderr logger, which hook contexts swallow. A func
-// (not a logger snapshot) so the sink resolves the live logger on every
-// call and survives logging re-Init/Close. Pass nil to restore the default.
-func SetWarnFunc(f WarnFunc) {
-	if f == nil {
-		warnFunc.Store(nil)
-		return
+// loggerOrDefault resolves an injected diagnostics logger, falling back to
+// the process-default slog logger when the caller didn't provide one. No
+// package-level sink exists on purpose: the logger arrives by injection
+// (config field or parameter) from whichever entry point initialized it.
+func loggerOrDefault(l *slog.Logger) *slog.Logger {
+	if l != nil {
+		return l
 	}
-	warnFunc.Store(&f)
-}
-
-func logWarn(msg string, attrs ...any) {
-	logWarnContext(context.Background(), msg, attrs...)
-}
-
-func logWarnContext(ctx context.Context, msg string, attrs ...any) {
-	if f := warnFunc.Load(); f != nil {
-		(*f)(ctx, msg, attrs...)
-		return
-	}
-	slog.WarnContext(ctx, msg, attrs...)
+	return slog.Default()
 }
 
 // ActiveCustomRules reports how many user-defined rules (inline + pack)
@@ -95,9 +78,11 @@ func ActiveCustomRules() int {
 // Call once at process startup after loading settings. Thread-safe.
 func ConfigureCustomRules(cfg CustomRulesConfig) {
 	state := &customRulesState{}
+	logger := loggerOrDefault(cfg.Logger)
 
 	for label, pattern := range cfg.Inline {
 		compiled, ok := compileCustomRule(
+			logger,
 			label,
 			pattern,
 			"skipping invalid custom_redactions pattern",
@@ -111,6 +96,7 @@ func ConfigureCustomRules(cfg CustomRulesConfig) {
 	for _, pack := range cfg.Packs {
 		for _, rule := range pack.Rules {
 			compiled, ok := compileCustomRule(
+				logger,
 				pack.Name+"."+rule.ID,
 				rule.Regex,
 				"skipping invalid pack rule",
@@ -119,7 +105,7 @@ func ConfigureCustomRules(cfg CustomRulesConfig) {
 			)
 			if ok {
 				state.rules = append(state.rules, compiled)
-				runRuleSamples(pack, rule, compiled.regex)
+				runRuleSamples(logger, pack, rule, compiled.regex)
 			}
 		}
 	}
@@ -129,14 +115,14 @@ func ConfigureCustomRules(cfg CustomRulesConfig) {
 	customConfig = state
 }
 
-func compileCustomRule(label, pattern, warning string, attrs ...any) (compiledCustomRule, bool) {
+func compileCustomRule(logger *slog.Logger, label, pattern, warning string, attrs ...any) (compiledCustomRule, bool) {
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
 		all := make([]any, 0, len(attrs)+2)
 		all = append(all, componentAttr)
 		all = append(all, attrs...)
 		all = append(all, slog.String("error", err.Error()))
-		logWarn(warning, all...)
+		logger.Warn(warning, all...)
 		return compiledCustomRule{}, false
 	}
 	return compiledCustomRule{label: label, regex: compiled}, true
@@ -145,11 +131,11 @@ func compileCustomRule(label, pattern, warning string, attrs ...any) (compiledCu
 // runRuleSamples checks each sample against the compiled regex and logs a
 // warning per mismatch. Failures never drop the rule — sample validation
 // is informational, not gating.
-func runRuleSamples(pack *Pack, rule Rule, compiled *regexp.Regexp) {
+func runRuleSamples(logger *slog.Logger, pack *Pack, rule Rule, compiled *regexp.Regexp) {
 	for i, s := range rule.Samples {
 		got := compiled.MatchString(s.Input)
 		if got != s.Redacted {
-			logWarn("redactor pack sample mismatch",
+			logger.Warn("redactor pack sample mismatch",
 				componentAttr,
 				slog.String("pack", pack.sourcePath),
 				slog.String("rule", rule.ID),

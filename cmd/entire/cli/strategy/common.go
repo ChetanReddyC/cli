@@ -379,18 +379,21 @@ var initRedactionOnce sync.Once
 // redact package: PII detection (opt-in), inline custom_redactions, and rule
 // packs auto-discovered from .entire/redactors/.
 //
-// Must be called at each process entry point before checkpoint writes.
-func EnsureRedactionConfigured() {
+// Must be called at each process entry point before checkpoint writes, with
+// the context that entry point built: when the entry point initialized
+// logging (logging.Init), the context carries the logger and the redact
+// package's diagnostics land in .entire/logs/ — hook contexts swallow
+// stderr, so without this users can't tell whether their rules loaded.
+// Without a context logger, diagnostics fall back to the process-default
+// stderr logger (fine for interactive commands like doctor) and the
+// load-time summary is skipped.
+//
+// sync.Once: the first caller's context wins. Every caller is a process
+// entry point that just built its context, so later calls are no-ops by
+// design, not a lost injection.
+func EnsureRedactionConfigured(ctx context.Context) {
 	initRedactionOnce.Do(func() {
-		ctx := context.Background()
-
-		// Route the redact package's diagnostics into .entire/logs/ before
-		// any rule loading below can emit them; logging.Warn resolves the
-		// live logger per call, so this survives logging re-Init/Close and
-		// stamps session_id like every other CLI log line.
-		redact.SetWarnFunc(func(ctx context.Context, msg string, attrs ...any) {
-			logging.Warn(ctx, msg, attrs...)
-		})
+		logger := logging.LoggerFromContext(ctx)
 
 		s, err := settings.Load(ctx)
 		if err != nil {
@@ -406,6 +409,7 @@ func EnsureRedactionConfigured() {
 				Enabled:        true,
 				Categories:     make(map[redact.PIICategory]bool),
 				CustomPatterns: pii.CustomPatterns,
+				Logger:         logger,
 			}
 			cfg.Categories[redact.PIIEmail] = pii.Email == nil || *pii.Email
 			cfg.Categories[redact.PIIPhone] = pii.Phone == nil || *pii.Phone
@@ -425,7 +429,7 @@ func EnsureRedactionConfigured() {
 			logging.Warn(logCtx, "failed to resolve redactors path", slog.String("error", perr.Error()))
 			packsDir = packsRelPath
 		}
-		packs, lerr := redact.LoadPacks(packsDir)
+		packs, lerr := redact.LoadPacks(packsDir, logger)
 		if lerr != nil {
 			logCtx := logging.WithComponent(ctx, "redaction")
 			logging.Warn(logCtx, "failed to load redactor packs", slog.String("error", lerr.Error()))
@@ -440,6 +444,7 @@ func EnsureRedactionConfigured() {
 			redact.ConfigureCustomRules(redact.CustomRulesConfig{
 				Inline: inline,
 				Packs:  packs,
+				Logger: logger,
 			})
 		}
 
@@ -451,15 +456,16 @@ func EnsureRedactionConfigured() {
 				Categories: opf.Categories,
 				Command:    opf.Command,
 				Timeout:    opf.TimeoutSeconds,
+				Logger:     logger,
 			})
 		}
 
 		// Load-time summary so "are my rules active?" is answerable from the
-		// log alone. Only when the CLI logger was initialized: in commands
-		// that never call logging.Init, logging.Info falls through to the
-		// process-default stderr logger and this line would surface as
+		// log alone. Only when the entry point injected an initialized logger:
+		// in commands that never call logging.Init, logging.Info falls through
+		// to the process-default stderr logger and this line would surface as
 		// terminal noise instead of landing in .entire/logs/.
-		if logging.IsInitialized() {
+		if logger != nil {
 			packRules := 0
 			for _, p := range packs {
 				packRules += len(p.Rules)

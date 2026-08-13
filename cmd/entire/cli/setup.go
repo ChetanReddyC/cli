@@ -931,7 +931,8 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 			// than seeding it with an untracked directory Entire's gitignore
 			// entry does not exist yet to cover.
 			logging.SetLogLevelGetter(GetLogLevel)
-			if err := logging.Init(ctx, ""); err == nil {
+			if logCtx, err := logging.Init(ctx, ""); err == nil {
+				ctx = logCtx
 				defer logging.Close()
 			}
 

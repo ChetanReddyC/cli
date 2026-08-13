@@ -60,8 +60,11 @@ For each stuck session, you can choose to:
 
 Use --force to condense all fixable sessions without prompting.  Sessions that can't
 be condensed will be discarded.`,
-		PreRun: func(_ *cobra.Command, _ []string) {
-			strategy.EnsureRedactionConfigured()
+		PreRun: func(cmd *cobra.Command, _ []string) {
+			// No logging.Init here: doctor is interactive, so redaction
+			// diagnostics fall back to stderr and the load-time summary is
+			// skipped (no logger in the context).
+			strategy.EnsureRedactionConfigured(cmd.Context())
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runSessionsFix(cmd, forceFlag)

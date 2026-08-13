@@ -2,8 +2,10 @@
 //
 // Usage:
 //
-//	// Initialize logger for a session (typically at session start)
-//	if err := logging.Init(sessionID); err != nil {
+//	// Initialize logger for a session (typically at the cobra entry point);
+//	// the returned context carries the logger for downstream injection.
+//	ctx, err := logging.Init(ctx, sessionID)
+//	if err != nil {
 //	    // handle error
 //	}
 //	defer logging.Close()
@@ -76,11 +78,17 @@ func SetLogLevelGetter(getter func() string) {
 // If sessionID is non-empty, it is stored as an slog attribute on every log line for filtering.
 // If the log file cannot be created, falls back to stderr.
 // Log level is controlled by ENTIRE_LOG_LEVEL environment variable.
-func Init(ctx context.Context, sessionID string) error {
+//
+// The returned context carries the initialized logger (see LoggerFromContext),
+// already stamped with session_id when one was given. Entry points pass it
+// down so downstream code — and packages that take an injected *slog.Logger,
+// like redact — never need to ask whether logging is ready. On error the
+// input context is returned unchanged.
+func Init(ctx context.Context, sessionID string) (context.Context, error) {
 	// Validate session ID if provided (used only for the slog attribute, not the filename)
 	if sessionID != "" {
 		if err := validation.ValidateSessionID(sessionID); err != nil {
-			return fmt.Errorf("invalid session ID for logging: %w", err)
+			return ctx, fmt.Errorf("invalid session ID for logging: %w", err)
 		}
 	}
 
@@ -120,7 +128,7 @@ func Init(ctx context.Context, sessionID string) error {
 	if err := os.MkdirAll(logsPath, 0o750); err != nil {
 		// Fall back to stderr
 		logger = createLogger(os.Stderr, level)
-		return nil
+		return contextWithInitLogger(ctx, logger, sessionID), nil
 	}
 
 	logFilePath := filepath.Join(logsPath, "entire.log")
@@ -128,7 +136,7 @@ func Init(ctx context.Context, sessionID string) error {
 	if err != nil {
 		// Fall back to stderr
 		logger = createLogger(os.Stderr, level)
-		return nil
+		return contextWithInitLogger(ctx, logger, sessionID), nil
 	}
 
 	logFile = f
@@ -136,17 +144,17 @@ func Init(ctx context.Context, sessionID string) error {
 	logger = createLogger(logBufWriter, level)
 	currentSessionID = sessionID
 
-	return nil
+	return contextWithInitLogger(ctx, logger, sessionID), nil
 }
 
-// IsInitialized reports whether Init has set up a logger (including its
-// stderr fallback). Lets callers skip log lines that would otherwise fall
-// through to the process-default stderr logger and surface as terminal
-// noise in commands that never call Init.
-func IsInitialized() bool {
-	mu.RLock()
-	defer mu.RUnlock()
-	return logger != nil
+// contextWithInitLogger attaches the logger Init built to the context,
+// pre-stamped with session_id so direct consumers emit lines filterable the
+// same way as the package-level Debug/Info/Warn/Error functions.
+func contextWithInitLogger(ctx context.Context, l *slog.Logger, sessionID string) context.Context {
+	if sessionID != "" {
+		l = l.With(slog.String("session_id", sessionID))
+	}
+	return WithLogger(ctx, l)
 }
 
 // Close closes the log file if one is open.

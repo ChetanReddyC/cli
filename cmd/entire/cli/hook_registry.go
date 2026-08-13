@@ -62,7 +62,12 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 		Short:  handler.Description() + " hook handlers",
 		Hidden: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			agentHookLogCleanup = initHookLogging(cmd.Context())
+			// Cobra invokes this PersistentPreRunE with the leaf command, so
+			// SetContext hands the logger-carrying context straight to the
+			// hook verb's RunE via cmd.Context().
+			logCtx, cleanup := initHookLogging(cmd.Context())
+			cmd.SetContext(logCtx)
+			agentHookLogCleanup = cleanup
 			return nil
 		},
 		PersistentPostRunE: func(_ *cobra.Command, _ []string) error {
@@ -123,7 +128,8 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	}
 
 	if initLogging {
-		cleanup := initHookLogging(cmd.Context())
+		logCtx, cleanup := initHookLogging(cmd.Context())
+		cmd.SetContext(logCtx)
 		defer cleanup()
 	}
 

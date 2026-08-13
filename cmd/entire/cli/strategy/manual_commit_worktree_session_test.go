@@ -350,7 +350,9 @@ func TestManualCommitStrategy_FindSessionsForWorktree_WarnsOnAmbiguousSiblingSes
 
 	t.Chdir(commitWorktree)
 	clearSessionMatchCaches()
-	require.NoError(t, logging.Init(ctx, "warn-test-session"))
+	logCtx, logErr := logging.Init(ctx, "warn-test-session")
+	require.NoError(t, logErr)
+	ctx = logCtx
 	t.Cleanup(logging.Close)
 
 	finder := &ManualCommitStrategy{}

@@ -337,7 +337,8 @@ func runInvestigate(ctx context.Context, cmd *cobra.Command, args []string, f ru
 	// would interleave with the dashboard frame and corrupt the display.
 	// Failure is non-fatal; the fallback inside logging.log uses
 	// slog.Default().
-	if err := logging.Init(ctx, ""); err == nil {
+	if logCtx, err := logging.Init(ctx, ""); err == nil {
+		ctx = logCtx
 		defer logging.Close()
 	}
 

@@ -42,7 +42,7 @@ func TestInitHookLogging(t *testing.T) {
 			t.Fatalf("failed to create settings file: %v", err)
 		}
 
-		cleanup := initHookLogging(context.Background())
+		_, cleanup := initHookLogging(context.Background())
 		if cleanup == nil {
 			t.Fatal("expected cleanup function, got nil")
 		}
@@ -92,7 +92,7 @@ func TestInitHookLogging(t *testing.T) {
 			t.Fatalf("failed to create logs directory: %v", err)
 		}
 
-		cleanup := initHookLogging(context.Background())
+		_, cleanup := initHookLogging(context.Background())
 		if cleanup == nil {
 			t.Fatal("expected cleanup function, got nil")
 		}
@@ -123,7 +123,7 @@ func TestInitHookLogging_SkipsWhenNotSetUp(t *testing.T) {
 
 	// Do NOT create .entire/settings.json - simulating a repo where Entire is not set up
 
-	cleanup := initHookLogging(context.Background())
+	_, cleanup := initHookLogging(context.Background())
 	if cleanup == nil {
 		t.Fatal("expected cleanup function, got nil")
 	}
@@ -159,7 +159,7 @@ func TestInitHookLogging_SkipsWhenDisabled(t *testing.T) {
 		t.Fatalf("failed to create settings file: %v", err)
 	}
 
-	cleanup := initHookLogging(context.Background())
+	_, cleanup := initHookLogging(context.Background())
 	if cleanup == nil {
 		t.Fatal("expected cleanup function, got nil")
 	}

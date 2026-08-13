@@ -123,14 +123,18 @@ func (g *gitHookContext) skipUnreadableCheckpointPolicy(err error) bool {
 	return true
 }
 
-// initHookLogging initializes logging for hooks by finding the most recent session.
-// Returns a cleanup function that should be deferred.
-// If Entire is not set up or disabled, returns a no-op to avoid creating files.
-func initHookLogging(ctx context.Context) func() {
+// initHookLogging initializes logging for hooks by finding the most recent
+// session. Returns the context carrying the initialized logger — cobra
+// PreRun/RunE callers must pass it down (cmd.SetContext) so downstream hook
+// handlers receive the logger by injection — plus a cleanup function that
+// should be deferred.
+// If Entire is not set up or disabled, returns the input context and a no-op
+// cleanup to avoid creating files.
+func initHookLogging(ctx context.Context) (context.Context, func()) {
 	// Don't create any files if Entire is not set up or disabled.
 	// This is checked here as defense-in-depth (also checked in PersistentPreRunE).
 	if !settings.IsSetUpAndEnabled(ctx) {
-		return func() {}
+		return ctx, func() {}
 	}
 
 	// Set up log level getter so logging can read from settings
@@ -138,16 +142,19 @@ func initHookLogging(ctx context.Context) func() {
 
 	// Read session ID for the slog attribute (empty string is fine - log file is fixed)
 	sessionID := strategy.FindMostRecentSession(ctx)
-	if err := logging.Init(ctx, sessionID); err != nil {
+	logCtx, err := logging.Init(ctx, sessionID)
+	if err != nil {
 		// Init failed - logging will use stderr fallback
-		return func() {}
+		return ctx, func() {}
 	}
 
 	// Configure redaction once at startup: PII (opt-in), inline custom_redactions,
-	// and rule packs discovered under .entire/redactors/. No-op if nothing is configured.
-	strategy.EnsureRedactionConfigured()
+	// and rule packs discovered under .entire/redactors/. No-op if nothing is
+	// configured. Receives logCtx so redaction diagnostics and the load-time
+	// summary route through the injected logger into .entire/logs/.
+	strategy.EnsureRedactionConfigured(logCtx)
 
-	return logging.Close
+	return logCtx, logging.Close
 }
 
 // hookLogCleanup stores the cleanup function for hook logging.
@@ -176,7 +183,12 @@ func newHooksGitCmd() *cobra.Command {
 			discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			external.DiscoverAndRegister(discoveryCtx)
-			hookLogCleanup = initHookLogging(ctx)
+			// Cobra invokes this PersistentPreRunE with the leaf command, so
+			// SetContext hands the logger-carrying context straight to the
+			// verb's RunE via cmd.Context().
+			logCtx, cleanup := initHookLogging(ctx)
+			cmd.SetContext(logCtx)
+			hookLogCleanup = cleanup
 			return nil
 		},
 		PersistentPostRunE: func(_ *cobra.Command, _ []string) error {

@@ -83,7 +83,8 @@ func runResume(ctx context.Context, cmd *cobra.Command, branchName string, force
 	// creating .entire/logs/ in arbitrary directories.
 	if _, err := paths.WorktreeRoot(ctx); err == nil {
 		logging.SetLogLevelGetter(GetLogLevel)
-		if err := logging.Init(ctx, ""); err == nil {
+		if logCtx, err := logging.Init(ctx, ""); err == nil {
+			ctx = logCtx
 			defer logging.Close()
 		}
 	}
@@ -173,7 +174,8 @@ func switchToBranchForResume(ctx context.Context, w, errW io.Writer, branchName 
 func resumeSessionOnBranch(ctx context.Context, cmd *cobra.Command, branchName string, checkpointID id.CheckpointID, force bool) error {
 	if _, err := paths.WorktreeRoot(ctx); err == nil {
 		logging.SetLogLevelGetter(GetLogLevel)
-		if err := logging.Init(ctx, ""); err == nil {
+		if logCtx, err := logging.Init(ctx, ""); err == nil {
+			ctx = logCtx
 			defer logging.Close()
 		}
 	}

@@ -62,7 +62,8 @@ Existing local session logs are never overwritten unless --force is given.`,
 			}
 			if _, err := paths.WorktreeRoot(cmd.Context()); err == nil {
 				logging.SetLogLevelGetter(GetLogLevel)
-				if err := logging.Init(cmd.Context(), ""); err == nil {
+				if logCtx, err := logging.Init(cmd.Context(), ""); err == nil {
+					cmd.SetContext(logCtx)
 					defer logging.Close()
 				}
 			}

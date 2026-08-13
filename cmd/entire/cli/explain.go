@@ -317,7 +317,8 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 			// creating .entire/logs/ in arbitrary directories.
 			if _, err := paths.WorktreeRoot(cmd.Context()); err == nil {
 				logging.SetLogLevelGetter(GetLogLevel)
-				if err := logging.Init(cmd.Context(), ""); err == nil {
+				if logCtx, err := logging.Init(cmd.Context(), ""); err == nil {
+					cmd.SetContext(logCtx)
 					defer logging.Close()
 				}
 			}
