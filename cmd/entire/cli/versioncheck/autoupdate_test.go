@@ -210,28 +210,55 @@ func TestMaybeAutoUpdate_WindowsUnknownInstallerNoAutoRun(t *testing.T) {
 
 // TestMaybeAutoUpdate_WindowsNeverAutoRuns verifies that on Windows the update
 // is never auto-run — a running entire.exe can't replace its own shim — so the
-// migration commands are printed for the user to run once entire has exited.
+// command is printed for the user to run once entire has exited. This holds for
+// every auto-installable manager on Windows, not just Scoop: mise is covered so
+// narrowing the branch back to Scoop can't silently regress it.
 func TestMaybeAutoUpdate_WindowsNeverAutoRuns(t *testing.T) {
-	f := newAutoUpdateFixture(t)
-	useScoopExecutable(t)
-
-	origGOOS := goos
-	goos = goosWindows
-	t.Cleanup(func() { goos = origGOOS })
-
-	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
-
-	if f.installCalls != 0 {
-		t.Fatalf("installer must not auto-run on Windows; calls=%d", f.installCalls)
+	tests := []struct {
+		name    string
+		setup   func(*testing.T)
+		wantCmd string
+	}{
+		{
+			name:    "scoop cli app prints migration command",
+			setup:   useScoopExecutable,
+			wantCmd: `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`,
+		},
+		{
+			name:    "mise prints upgrade command",
+			setup:   useMiseExecutable,
+			wantCmd: "mise upgrade entire",
+		},
 	}
-	out := buf.String()
-	if !strings.Contains(out, "when entire is not running") {
-		t.Errorf("missing Windows manual-run hint: %q", out)
-	}
-	wantScoopCmd := `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`
-	if !strings.Contains(out, "  "+wantScoopCmd) {
-		t.Errorf("manual hint missing migration commands %q: %q", wantScoopCmd, out)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newAutoUpdateFixture(t)
+			tt.setup(t)
+
+			origGOOS := goos
+			goos = goosWindows
+			t.Cleanup(func() { goos = origGOOS })
+
+			var buf bytes.Buffer
+			action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+
+			if f.installCalls != 0 {
+				t.Fatalf("installer must not auto-run on Windows; calls=%d", f.installCalls)
+			}
+			// Plain skip, not skip-until-next-version: Windows gets no prompt,
+			// so there is no per-version choice to persist.
+			if action != autoUpdateActionSkip {
+				t.Errorf("action = %q, want %q", action, autoUpdateActionSkip)
+			}
+			out := buf.String()
+			if !strings.Contains(out, "when entire is not running") {
+				t.Errorf("missing Windows manual-run hint: %q", out)
+			}
+			if !strings.Contains(out, "  "+tt.wantCmd) {
+				t.Errorf("manual hint missing command %q: %q", tt.wantCmd, out)
+			}
+		})
 	}
 }
 

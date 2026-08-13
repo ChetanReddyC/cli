@@ -373,10 +373,10 @@ func scoopAppName() string {
 	if !ok {
 		return ""
 	}
-	if app, _, ok := strings.Cut(rest, "/"); ok {
-		return app
-	}
-	return rest
+	// Cut returns the whole string when the separator is absent, so this covers
+	// both `.../scoop/apps/cli/current/entire.exe` and a bare app segment.
+	app, _, _ := strings.Cut(rest, "/")
+	return app
 }
 
 func installManagerForCurrentBinary() string {
@@ -435,17 +435,30 @@ func updateCommand(currentVersion string) string {
 		// running from the old `cli` app dir can never cross the rename with a
 		// plain `scoop update entire/cli`, so migrate it: install the new
 		// `entire` package, remove the old `cli` package, then reset the shared
-		// `entire.exe` shim (which uninstalling `cli` can take with it).
+		// shims. Both manifests declare `bin: [git-remote-entire.exe,
+		// entire.exe]`, so the two packages contend for the same shims. Current
+		// Scoop handles that itself: installing `entire` renames the displaced
+		// shim to `entire.shim.cli` (warn_on_overwrite) and uninstalling `cli`
+		// removes only that suffixed copy (rm_shim), leaving the active shims
+		// pointing at `entire`. The reset step is belt-and-braces for older
+		// Scoop versions that overwrote shims without that alt-file dance and
+		// would otherwise take `entire.exe` and the git remote helper with them.
 		//
 		// The Windows updater is print-only, so return a self-contained command
 		// users can paste into either cmd or PowerShell. Explicitly invoking
 		// cmd.exe makes `&&` portable across those shells and ensures uninstall
-		// only runs after install succeeds; reset likewise requires a successful
-		// uninstall. A stale bucket or transient failure therefore never removes
-		// the working CLI. `scoop install` also
-		// auto-refreshes the bucket when >3h stale (is_scoop_outdated), so the
-		// new manifest lands without an explicit refresh. Binaries already on
-		// the `entire` app just update in place.
+		// only runs after install succeeds — a stale bucket or transient failure
+		// therefore never removes the working CLI. (The uninstall→reset link is
+		// weaker: `scoop uninstall` ends in an unconditional `exit 0`, so reset
+		// runs even when the uninstall skipped its work. That is harmless, since
+		// reset is a no-op on the Scoop versions that make it unnecessary.)
+		//
+		// `scoop install` also auto-refreshes the bucket when >3h stale
+		// (is_scoop_outdated), so the new manifest usually lands
+		// without an explicit refresh; a bucket clone older than that check can
+		// still fail with "couldn't find manifest", and the README migration
+		// section names `scoop update` as the retry. Binaries already on the
+		// `entire` app just update in place.
 		if scoopAppName() == "cli" {
 			return `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`
 		}

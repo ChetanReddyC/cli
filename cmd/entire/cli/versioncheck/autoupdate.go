@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"runtime"
 
 	"charm.land/huh/v2"
 
@@ -76,6 +75,11 @@ func MaybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVer
 	// mid-run (install leaves the shim on the old package, and uninstall fails
 	// with "still running"). Never auto-run on Windows — print the command(s)
 	// to run once entire has exited.
+	//
+	// This returns plain skip, not skipUntilNextVersion, so Windows users can't
+	// suppress a specific version: the nudge returns every 24h until they
+	// update. That is deliberate while the Scoop rename migration is live —
+	// there is no prompt to choose from, so there is no choice to remember.
 	if goos == goosWindows {
 		printNotification(w, currentVersion, latestVersion)
 		fmt.Fprintf(w, "To update, run the following when entire is not running:\n  %s\n", cmdStr)
@@ -138,13 +142,15 @@ func realChooseUpdate(ctx context.Context, currentVersion, latestVersion, cmdStr
 }
 
 // realRunInstaller shells out to the installer command, streaming stdin/stdout/stderr
-// so password prompts and progress output reach the user. Only ever runs
-// single-command installers (brew, mise, curl): the multi-line Scoop rename is
-// Windows-only and Windows is print-only (see MaybeAutoUpdate), so it never
-// reaches the runner.
+// so password prompts and progress output reach the user. In practice it only
+// ever runs the POSIX installers (brew, mise, curl): MaybeAutoUpdate returns
+// before reaching here on Windows, so the cmd.exe branch below is unreachable
+// today. It is kept as cover for Windows print-only being lifted later, and
+// reads the same `goos` seam MaybeAutoUpdate does so a test can drive both
+// consistently.
 func realRunInstaller(ctx context.Context, cmdStr string) error {
 	var c *exec.Cmd
-	if runtime.GOOS == goosWindows {
+	if goos == goosWindows {
 		c = exec.CommandContext(ctx, "cmd", "/C", cmdStr)
 	} else {
 		c = exec.CommandContext(ctx, "sh", "-c", cmdStr)

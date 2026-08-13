@@ -131,11 +131,21 @@ scoops:
   # the user at the Scoop commands to move onto the renamed `entire` package
   # (see cmd/entire/cli/versioncheck). The post_install prints the same nudge.
   #
+  # Accepted cost of the transition window: `scoop search entire` lists both
+  # packages, so a new user can still install the deprecated `cli`. Scoop has no
+  # deprecation field — the description below is the only signal available.
+  #
   # No `depends: [entire]`: pulling in the `entire` package automatically would
-  # fight the CLI-driven migration and the shared-shim ownership between the two
-  # apps. The renamed `entire` package is installed only when the user runs the
-  # migration commands. Drop this entry a few releases after migration has
-  # largely completed.
+  # fight the CLI-driven migration and ownership of the shims both manifests
+  # declare (`entire.exe` and `git-remote-entire.exe`). The renamed `entire`
+  # package is installed only when the user runs the migration commands.
+  #
+  # Drop this entry (and the `scoopAppName() == "cli"` branch in
+  # cmd/entire/cli/versioncheck) no earlier than v0.12.0. There is no telemetry
+  # dimension for the install manager, so completion can't be measured — the
+  # version is a deliberate cutoff, not an observation. Dropping it orphans any
+  # remaining `cli` installs silently, so if a data-driven call is wanted
+  # instead, add the Scoop app dir as a telemetry dimension first.
   - name: cli
     repository:
       owner: entireio

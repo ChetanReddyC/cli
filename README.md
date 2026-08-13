@@ -75,14 +75,20 @@ scoop install entire/entire
 
 The Scoop package was renamed from `cli` to `entire`. If your install is still
 registered as the old `cli` package, run the migration below. It installs the
-new package before removing the old one, and only continues when each command
-succeeds (`scoop reset` re-links the shared `entire.exe` shim). Run it where
-`entire` is **not** running — a live `entire.exe` locks its own shim, so Scoop
-can't relink or uninstall it mid-run:
+new package before removing the old one, so the old install is only removed
+once the new one is in place (`scoop reset` re-links the shared `entire.exe`
+and `git-remote-entire.exe` shims). Run it where `entire` is **not** running — a
+live `entire.exe` locks its own shim, so Scoop can't relink or uninstall it
+mid-run:
 
 ```powershell
 cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"
 ```
+
+If the first step fails with "couldn't find manifest", your bucket clone
+predates the renamed package — run `scoop update` to refresh it, then retry the
+command above. Nothing is removed until the install succeeds, so a failed
+attempt leaves your existing install working.
 
 ### Go (development/manual setup)
 

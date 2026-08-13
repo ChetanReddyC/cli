@@ -352,8 +352,60 @@ const brewUpgradeCmd = "brew upgrade --yes entire"
 const scoopExecutablePath = `C:\Users\test\scoop\apps\cli\current\entire.exe`
 const scoopEntireExecutablePath = `C:\Users\test\scoop\apps\entire\current\entire.exe`
 
+// plainBinPath is a POSIX install under no recognized install manager.
+const plainBinPath = "/usr/local/bin/entire"
+
+// TestScoopAppName pins the signal the rename migration keys off. The ""
+// results matter most: they are what keeps the `== "cli"` comparison in
+// updateCommand from misfiring on a non-Scoop binary that happens to live in a
+// directory named `cli`.
+func TestScoopAppName(t *testing.T) {
+	tests := []struct {
+		name     string
+		execPath func() (string, error)
+		want     string
+	}{
+		{
+			name:     "pre-rename cli app dir",
+			execPath: func() (string, error) { return scoopExecutablePath, nil },
+			want:     "cli",
+		},
+		{
+			name:     "renamed entire app dir",
+			execPath: func() (string, error) { return scoopEntireExecutablePath, nil },
+			want:     "entire",
+		},
+		{
+			name:     "non-scoop path in a cli directory",
+			execPath: func() (string, error) { return `C:\tools\cli\entire.exe`, nil },
+			want:     "",
+		},
+		{
+			name:     "posix install",
+			execPath: func() (string, error) { return plainBinPath, nil },
+			want:     "",
+		},
+		{
+			name:     "executable path unavailable",
+			execPath: func() (string, error) { return "", errors.New("not found") },
+			want:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := executablePath
+			executablePath = tt.execPath
+			t.Cleanup(func() { executablePath = original })
+
+			if got := scoopAppName(); got != tt.want {
+				t.Errorf("scoopAppName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUpdateCommand(t *testing.T) {
-	const plainBinPath = "/usr/local/bin/entire"
 	tests := []struct {
 		name           string
 		currentVersion string
@@ -461,7 +513,7 @@ func TestUpdateCommandForCurrentBinary(t *testing.T) {
 			name:           "non-windows unknown installer returns curl command",
 			currentVersion: "1.2.3",
 			goos:           "linux",
-			execPath:       func() (string, error) { return "/usr/local/bin/entire", nil },
+			execPath:       func() (string, error) { return plainBinPath, nil },
 			want:           "curl -fsSL https://entire.io/install.sh | bash",
 		},
 	}
