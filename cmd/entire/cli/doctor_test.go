@@ -307,10 +307,7 @@ func TestClassifySession_WorktreeIDInShadowBranch(t *testing.T) {
 	assert.Equal(t, expectedBranch, result.ShadowBranch)
 }
 
-// writeRootlessMetadataCommit stores an empty-tree, parentless commit and
-// returns its hash. Two such commits (with distinct messages) share no common
-// ancestor — exactly the "disconnected metadata" shape the doctor check
-// diagnoses.
+// Distinct parentless commits have no common ancestor.
 func writeRootlessMetadataCommit(t *testing.T, repo *git.Repository, message string) plumbing.Hash {
 	t.Helper()
 	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
@@ -379,13 +376,7 @@ func TestRunSessionsFix_MetadataCheckFailure_PropagatesError(t *testing.T) {
 	assert.Contains(t, stderr.String(), "Error: metadata check failed")
 }
 
-// TestCheckDisconnectedMetadata_NonElectedRemote_ReportOnly pins the repair
-// confinement gate: the disconnected tracking ref belongs to the legacy origin
-// tier while the election picks upstream, so doctor must report the
-// disconnection but never run the repair — ReconcileDisconnectedMetadataRef
-// advances/rewrites the local v1 ref, and a stale non-elected origin driving
-// that is the #1374-class hazard. force=true proves even forced runs stay
-// report-only.
+// Even forced doctor repairs must not advance local state from a legacy tier.
 func TestCheckDisconnectedMetadata_NonElectedRemote_ReportOnly(t *testing.T) {
 	// Cannot use t.Parallel(): t.Chdir and IsolateGitConfigEnv (t.Setenv)
 	// modify process-global state.

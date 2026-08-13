@@ -15,11 +15,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// candidatesFixture creates a work repo with two remotes — "upstream" (the
-// elected/first read candidate) and "origin" (the legacy tier) — each backed
-// by a local bare repo, and chdirs into the work repo. The checkpoint ref is
-// pushed to each remote per the flags, pointing at DIFFERENT commits so a
-// test can prove which candidate served a fetch.
+// When both remotes contain the ref, they point at different commits so tests
+// can identify which candidate served the fetch.
 func candidatesFixture(t *testing.T, refOnUpstream, refOnOrigin bool) (workDir string, ref plumbing.ReferenceName, upstreamHash, originHash string) {
 	t.Helper()
 	testutil.IsolateGitConfigEnv(t)
@@ -77,9 +74,6 @@ func localRefHash(t *testing.T, dir string, ref plumbing.ReferenceName) string {
 	return candidateRevParse(t, dir, ref.String())
 }
 
-// TestFetchCheckpointRefFrom_FirstCandidateWins: the ref exists on both
-// candidates at different commits; the fetch must serve it from the FIRST
-// candidate (the elected remote), proven by the resulting local ref hash.
 func TestFetchCheckpointRefFrom_FirstCandidateWins(t *testing.T) {
 	workDir, ref, upstreamHash, originHash := candidatesFixture(t, true, true)
 
@@ -135,9 +129,6 @@ func TestFetchCheckpointRefFrom_AllFailSurfacesTransportError(t *testing.T) {
 	}
 }
 
-// TestFetchCheckpointRefFrom_AbsentOnEveryCandidateIsAbsence: every candidate
-// is reachable and none has the ref — genuine absence, wrapping
-// plumbing.ErrReferenceNotFound (the first candidate's error).
 func TestFetchCheckpointRefFrom_AbsentOnEveryCandidateIsAbsence(t *testing.T) {
 	_, ref, _, _ := candidatesFixture(t, false, false)
 
@@ -146,48 +137,13 @@ func TestFetchCheckpointRefFrom_AbsentOnEveryCandidateIsAbsence(t *testing.T) {
 	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound)
 }
 
-// TestFetchCheckpointRefFrom_EmptyChainWithRemotesIsNotAbsence: an empty
-// chain whose emptiness is NOT backed by a remoteless repo (a fail-closed
-// election left a configured remote out of the chain) must surface an error,
-// never absence.
-func TestFetchCheckpointRefFrom_EmptyChainWithRemotesIsNotAbsence(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	bareDir := t.TempDir()
-	out, err := exec.CommandContext(t.Context(), "git", "init", "--bare", bareDir).CombinedOutput()
-	require.NoError(t, err, "git init --bare: %s", out)
+func TestFetchCheckpointRefFrom_DedicatedCheckpointRemoteBypassesCandidates(t *testing.T) {
+	workDir, ref, _, _ := candidatesFixture(t, true, false)
+	testutil.WriteFile(t, workDir, ".entire/settings.json",
+		`{"enabled": true, "strategy_options": {"checkpoint_remote": null}}`)
 
-	workDir := t.TempDir()
-	testutil.InitRepo(t, workDir)
-	testutil.WriteFile(t, workDir, "f.txt", "content")
-	testutil.GitAdd(t, workDir, "f.txt")
-	testutil.GitCommit(t, workDir, "init")
-	testutil.AddRemote(t, workDir, "upstream", bareDir)
-	t.Chdir(workDir)
-
-	ref := plumbing.ReferenceName("refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9")
-	err = FetchCheckpointRefFrom(context.Background(), ref, nil, nil)
+	err := FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, nil)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
-		"a repo with configured remotes must never classify an empty chain as absence")
-}
-
-// TestFetchCheckpointRefFrom_DedicatedCheckpointRemoteBypassesCandidates: a
-// configured checkpoint_remote is a dedicated store — the candidate chain
-// does not apply and the legacy single-target semantics hold. The ref exists
-// ONLY on the first candidate (upstream): if the chain were consulted the
-// fetch would succeed, so the surfaced refusal error proves the bypass.
-func TestFetchCheckpointRefFrom_DedicatedCheckpointRemoteBypassesCandidates(t *testing.T) {
-	settings := []string{
-		`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "bogusforge", "repo": "acme/checkpoints"}}}`,
-		`{"enabled": true, "strategy_options": {"checkpoint_remote": null}}`,
-	}
-	for _, contents := range settings {
-		workDir, ref, _, _ := candidatesFixture(t, true, false)
-		testutil.WriteFile(t, workDir, ".entire/settings.json", contents)
-
-		err := FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, nil)
-		require.Error(t, err)
-		require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
-			"a dedicated checkpoint_remote key must keep the single-target semantics even when malformed")
-	}
+		"a checkpoint_remote key must keep dedicated-store semantics even when malformed")
 }

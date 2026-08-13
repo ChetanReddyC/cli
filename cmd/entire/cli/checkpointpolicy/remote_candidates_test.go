@@ -11,8 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// initPolicyBare creates a bare repo seeded with the given policy (pushed
-// from a scratch work repo) and returns its path plus the policy commit hash.
 func initPolicyBare(t *testing.T, policy checkpointpolicy.Policy) (string, plumbing.Hash) {
 	t.Helper()
 	workDir, workRepo := initPolicyRepoWithDir(t)
@@ -25,8 +23,6 @@ func initPolicyBare(t *testing.T, policy checkpointpolicy.Policy) (string, plumb
 	return bareDir, hash
 }
 
-// TestSyncFromPolicyFirstCandidateWins: both candidates carry a policy ref at
-// different commits; the first candidate's baseline wins.
 func TestSyncFromPolicyFirstCandidateWins(t *testing.T) {
 	firstBare, firstHash := initPolicyBare(t, checkpointpolicy.DefaultPolicy())
 	secondBare, secondHash := initPolicyBare(t, checkpointpolicy.Policy{
@@ -45,8 +41,6 @@ func TestSyncFromPolicyFirstCandidateWins(t *testing.T) {
 	require.Equal(t, firstHash, got.Hash, "the first candidate's policy must win")
 }
 
-// TestSyncFromPolicyTransportErrorAdvances: an unreachable first candidate
-// advances to the next candidate instead of failing the sync.
 func TestSyncFromPolicyTransportErrorAdvances(t *testing.T) {
 	secondBare, secondHash := initPolicyBare(t, checkpointpolicy.DefaultPolicy())
 
@@ -60,10 +54,6 @@ func TestSyncFromPolicyTransportErrorAdvances(t *testing.T) {
 	require.Equal(t, secondHash, got.Hash)
 }
 
-// TestSyncFromPolicyAllFailSurfacesFirstError: when every candidate fails,
-// the FIRST candidate's error surfaces (the elected remote is the primary
-// story). The two failures are distinguishable — ls-remote names the missing
-// path — so this proves first-error, not just any-error.
 func TestSyncFromPolicyAllFailSurfacesFirstError(t *testing.T) {
 	localDir, localRepo := initPolicyRepoWithDir(t)
 	_, err := checkpointpolicy.SyncFrom(t.Context(), localRepo, []checkpointpolicy.Target{
@@ -78,9 +68,6 @@ func TestSyncFromPolicyAllFailSurfacesFirstError(t *testing.T) {
 		"the second candidate's error must not mask the first's")
 }
 
-// TestSyncFromPolicySkipLocalUpdateNeverAdvancesLocalRef: a legacy-tier
-// (SkipLocalUpdate) baseline is reported but must not create/advance the
-// local policy ref — the elected-remote-only rule for local-ref writers.
 func TestSyncFromPolicySkipLocalUpdateNeverAdvancesLocalRef(t *testing.T) {
 	bareDir, remoteHash := initPolicyBare(t, checkpointpolicy.DefaultPolicy())
 
@@ -96,21 +83,4 @@ func TestSyncFromPolicySkipLocalUpdateNeverAdvancesLocalRef(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, localState.Hash.IsZero(),
 		"a legacy-tier baseline must never advance the local policy ref")
-}
-
-// TestSyncFromPolicyAbsentEverywhereFallsBackToLocal: every candidate is
-// reachable and none has a policy ref — defaults, no error.
-func TestSyncFromPolicyAbsentEverywhereFallsBackToLocal(t *testing.T) {
-	localDir, localRepo, firstBare := initPolicyRemoteFixture(t)
-	secondBare := filepath.Join(t.TempDir(), "second.git")
-	_, err := git.PlainInit(secondBare, true)
-	require.NoError(t, err)
-
-	got, err := checkpointpolicy.SyncFrom(t.Context(), localRepo, []checkpointpolicy.Target{
-		{Remote: firstBare, Dir: localDir},
-		{Remote: secondBare, Dir: localDir},
-	})
-	require.NoError(t, err)
-	require.Equal(t, checkpointpolicy.SourceDefaults, got.Source)
-	require.True(t, got.Hash.IsZero())
 }

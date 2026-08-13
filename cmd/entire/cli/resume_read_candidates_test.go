@@ -13,8 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Promotion may only use the explicitly elected remote; merely appearing in
-// the read chain does not authorize origin to rewrite local state.
+// Membership in the read chain does not authorize local-ref mutation.
 func TestPromoteRemoteTrackingPrimary_NonElectedOriginNeverPromotes(t *testing.T) {
 	tests := []struct {
 		name      string

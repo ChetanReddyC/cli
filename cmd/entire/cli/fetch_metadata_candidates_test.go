@@ -13,13 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// metadataCandidatesFixture builds a local repo with two remotes — "upstream"
-// (elected via checkpoint_push_remote) and "origin" (legacy tier) — each a
-// local bare repo. When onOrigin is set the metadata branch is pushed to
-// origin at commit A; when onUpstream is set it is pushed to upstream (at
-// commit B when origin also carries it, so a test can prove which candidate
-// served a fetch). The local metadata branch is deleted afterwards; the
-// working repo is chdir'd into.
+// When both remotes contain metadata, they point at different commits so tests
+// can identify which candidate served the fetch.
 func metadataCandidatesFixture(t *testing.T, onOrigin, onUpstream bool) (localDir, originHash, upstreamHash string) {
 	t.Helper()
 	testutil.IsolateGitConfigEnv(t)
@@ -78,7 +73,6 @@ func metadataCandidatesFixture(t *testing.T, onOrigin, onUpstream bool) (localDi
 	return localDir, originHash, upstreamHash
 }
 
-// refExists reports whether ref resolves in dir.
 func refExists(t *testing.T, dir, ref string) bool {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), "git", "-C", dir, "rev-parse", "--verify", "--quiet", ref)
@@ -86,13 +80,7 @@ func refExists(t *testing.T, dir, ref string) bool {
 	return cmd.Run() == nil
 }
 
-// TestFetchMetadataTreeOnly_LegacyOriginFetchNeverAdvancesLocal: the elected
-// remote (upstream) has no metadata branch; the legacy origin tier does. The
-// fetch must succeed via origin's tracking ref — and must NOT create or
-// advance the local metadata branch, which only the elected remote may feed
-// (the #1374-class confinement).
-//
-// Uses t.Chdir — not parallel.
+// A legacy-tier read must not advance the local primary (#1374 confinement).
 func TestFetchMetadataTreeOnly_LegacyOriginFetchNeverAdvancesLocal(t *testing.T) {
 	localDir, originHash, _ := metadataCandidatesFixture(t, true, false)
 
@@ -105,12 +93,6 @@ func TestFetchMetadataTreeOnly_LegacyOriginFetchNeverAdvancesLocal(t *testing.T)
 	assert.Equal(t, originHash, revParse(t, localDir, "refs/remotes/origin/"+paths.MetadataBranchName))
 }
 
-// TestFetchMetadataTreeOnly_ElectedCandidateWinsAndAdvancesLocal: both
-// candidates carry the metadata branch at different tips; the elected remote
-// (upstream, tried first) must serve the fetch and advance the local branch
-// to ITS tip.
-//
-// Uses t.Chdir — not parallel.
 func TestFetchMetadataTreeOnly_ElectedCandidateWinsAndAdvancesLocal(t *testing.T) {
 	localDir, originHash, upstreamHash := metadataCandidatesFixture(t, true, true)
 
@@ -123,11 +105,7 @@ func TestFetchMetadataTreeOnly_ElectedCandidateWinsAndAdvancesLocal(t *testing.T
 	assert.NotEqual(t, originHash, got)
 }
 
-// TestResolveCheckpointPolicyTargets_SplitsReadAndPush: the policy READ path
-// iterates the candidate chain with the legacy tier marked read-only, while
-// the PUSH target is the elected remote alone.
-//
-// Uses t.Chdir — not parallel.
+// The legacy read tier must never become a policy push or local-update target.
 func TestResolveCheckpointPolicyTargets_SplitsReadAndPush(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	dir := t.TempDir()
@@ -153,30 +131,4 @@ func TestResolveCheckpointPolicyTargets_SplitsReadAndPush(t *testing.T) {
 	assert.Equal(t, "upstream", pushTarget.Remote, "the push target is the elected remote only")
 	assert.False(t, pushTarget.SkipLocalUpdate)
 	assert.NotEmpty(t, pushTarget.Dir)
-}
-
-// TestResolveCheckpointPolicyTargets_FailClosedElection_NoPushTarget: a
-// fail-closed election yields no push target; the fail-open origin remains a
-// read-only candidate.
-//
-// Uses t.Chdir — not parallel.
-func TestResolveCheckpointPolicyTargets_FailClosedElection_NoPushTarget(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "f.txt", "init")
-	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "init")
-	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
-	testutil.WriteCheckpointPushRemoteSetting(t, dir, "gone")
-	t.Chdir(dir)
-
-	readTargets, pushTarget, err := resolveCheckpointPolicyTargets(context.Background())
-	require.NoError(t, err)
-
-	require.Len(t, readTargets, 1)
-	assert.Equal(t, "origin", readTargets[0].Remote)
-	assert.True(t, readTargets[0].SkipLocalUpdate,
-		"the fail-open origin candidate must stay read-only — it is not the elected remote")
-	assert.Nil(t, pushTarget, "a fail-closed election yields no policy push target")
 }

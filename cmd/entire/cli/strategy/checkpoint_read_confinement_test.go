@@ -14,10 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// initRemoteElectionRepo creates an isolated git repository with one seed
-// commit for remote-election tests: isolated git config env, InitRepo, and an
-// initial commit so HEAD exists. Callers add remotes/settings and t.Chdir
-// themselves.
 func initRemoteElectionRepo(t *testing.T) string {
 	t.Helper()
 	testutil.IsolateGitConfigEnv(t)
@@ -29,7 +25,6 @@ func initRemoteElectionRepo(t *testing.T) string {
 	return tmpDir
 }
 
-// electionRevParse resolves ref to a hash in dir.
 func electionRevParse(t *testing.T, dir, ref string) string {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), "git", "rev-parse", ref)
@@ -40,8 +35,7 @@ func electionRevParse(t *testing.T, dir, ref string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// Origin may be consulted for reads after another remote wins—or no remote
-// wins—but it must never seed the local primary in either case.
+// A read-only origin must never seed the local primary.
 func TestEnsurePrimaryRef_NonElectedOriginNeverSeedsLocal(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -89,10 +83,6 @@ func TestEnsurePrimaryRef_NonElectedOriginNeverSeedsLocal(t *testing.T) {
 	}
 }
 
-// Not parallel: uses t.Chdir()
-//
-// The elected remote's tracking ref seeds the local primary even when the
-// elected remote is not origin.
 func TestEnsurePrimaryRef_ElectedUpstreamTrackingSeedsLocal(t *testing.T) {
 	tmpDir := initRemoteElectionRepo(t)
 	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
