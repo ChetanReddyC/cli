@@ -271,6 +271,17 @@ URL mode is exempt — it addresses a separate metadata store directly. `entire
 status` shows the sync destination and how many checkpoints have not reached
 it yet.
 
+A gated push is not fully silent: when checkpoints are waiting for the
+elected remote, the hook prints a two-line stderr hint naming the elected
+destination, the waiting count, and the `checkpoint_push_remote` setting
+(pointed at `.entire/settings.local.json` — a remote name is a per-clone
+fact) that re-routes sync to the remote being pushed. The hint stays quiet
+when the election was explicit (`checkpoint_push_remote` is already set),
+when the push target is a raw URL rather than a configured remote, when
+nothing is waiting, and when the election failed (the fail-closed case logs
+a warning instead). See `hintGatedCheckpointSync` in
+`strategy/checkpoint_sync_remote.go`.
+
 Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkpoint**:
 
 ```

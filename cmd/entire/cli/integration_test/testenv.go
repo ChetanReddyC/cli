@@ -1975,9 +1975,7 @@ func (env *TestEnv) GitPushWithHooks(remote, refSpec string) {
 // env.cliEnv().
 func (env *TestEnv) RunPrePush(remote string) {
 	env.T.Helper()
-	if err := env.RunPrePushWithError(remote); err != nil {
-		env.T.Fatalf("PrePush failed: %v", err)
-	}
+	_ = env.RunPrePushOutput(remote)
 }
 
 // RunPrePushWithError runs the pre-push hook and returns any error instead of failing.

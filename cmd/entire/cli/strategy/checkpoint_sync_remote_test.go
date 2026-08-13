@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/stretchr/testify/assert"
@@ -425,6 +426,25 @@ func TestHintGatedCheckpointSync(t *testing.T) {
 		assert.Contains(t, out, `"origin"`, "hint must name the elected destination")
 		assert.Contains(t, out, "checkpoint_push_remote", "hint must name the setting that re-routes sync")
 		assert.Contains(t, out, `"publish"`, "hint must name the remote the user actually pushed")
+		// A remote name is a per-clone fact: pointing at the tracked
+		// settings.json would invite committing it, fail-closing sync for
+		// every teammate whose clone lacks that remote name.
+		assert.Contains(t, out, ".entire/settings.local.json", "hint must point at the clone-local settings file")
+	})
+
+	t.Run("checkpoints already on the elected remote stay silent", func(t *testing.T) {
+		// Pins that the count runs against the ELECTED remote, not the pushed
+		// one: origin's tracking ref is up to date, publish has none, so
+		// counting against "publish" would report every v1 commit and nag on
+		// every gated push forever after checkpoints already synced.
+		dir := initHintRepo(t)
+		testutil.GitUpdateRef(t, dir, "refs/remotes/origin/"+paths.MetadataBranchName, testutil.GetHeadHash(t, dir))
+		t.Chdir(dir)
+		buf := captureStderrWriter(t)
+
+		hintGatedCheckpointSync(ctx, "publish")
+
+		assert.Empty(t, buf.String(), "nothing is waiting for the elected remote; the gated push has nothing to warn about")
 	})
 
 	t.Run("explicit checkpoint_push_remote stays silent", func(t *testing.T) {

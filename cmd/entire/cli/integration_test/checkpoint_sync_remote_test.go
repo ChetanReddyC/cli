@@ -383,8 +383,12 @@ func TestCheckpointSyncRemote_DedicatedCheckpointRemoteExemptFromGate(t *testing
 	checkpointID := createCheckpointedCommit(t, env, "Add dedicated module", "dedicated.go", "package dedicated", "Add dedicated module")
 
 	// Pre-push for the non-elected remote: the dedicated URL exemption applies,
-	// so the checkpoint syncs to the dedicated store.
-	env.RunPrePush("publish")
+	// so the checkpoint syncs to the dedicated store. The gated-push hint must
+	// stay absent — the checkpoints DID sync, and telling a dedicated-mode
+	// user to set checkpoint_push_remote would break their setup.
+	if out := env.RunPrePushOutput("publish"); strings.Contains(out, "checkpoint_push_remote") {
+		t.Errorf("dedicated checkpoint_remote mode must not show the gated-push hint; output:\n%s", out)
+	}
 
 	if !env.BranchExistsOnRemote(checkpointBare, paths.MetadataBranchName) {
 		t.Fatal("dedicated checkpoint store should have the checkpoint branch")
