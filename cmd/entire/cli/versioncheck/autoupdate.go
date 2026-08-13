@@ -70,11 +70,12 @@ func MaybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVer
 
 	cmdStr := updateCommand(currentVersion)
 
-	// Windows can't replace a running executable: the live entire.exe holds its
-	// own shim open, so scoop can't relink or uninstall it mid-run (install
-	// leaves the shim on the old package, and uninstall fails with "still
-	// running"). Never auto-run on Windows — print the command(s) to run once
-	// entire has exited.
+	// Windows can't replace a running executable, so no installer can update
+	// entire in place while it runs. For Scoop this is acute: the live
+	// entire.exe holds its own shim open, so scoop can't relink or uninstall it
+	// mid-run (install leaves the shim on the old package, and uninstall fails
+	// with "still running"). Never auto-run on Windows — print the command(s)
+	// to run once entire has exited.
 	if goos == goosWindows {
 		printNotification(w, currentVersion, latestVersion)
 		fmt.Fprintf(w, "To update, run the following when entire is not running:\n  %s\n", cmdStr)

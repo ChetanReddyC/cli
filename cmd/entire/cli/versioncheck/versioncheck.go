@@ -343,6 +343,21 @@ func releaseChannel(version string) string {
 	return installChannelStable
 }
 
+// normalizedExecPath returns the running binary's real path with all separators
+// normalized to forward slashes (symlinks resolved, best-effort). Both the
+// install-manager detection and the Scoop app-dir lookup key off this form.
+func normalizedExecPath() (string, error) {
+	execPath, err := executablePath()
+	if err != nil {
+		return "", err
+	}
+	realPath, err := filepath.EvalSymlinks(execPath)
+	if err != nil {
+		realPath = execPath
+	}
+	return strings.ReplaceAll(filepath.ToSlash(realPath), "\\", "/"), nil
+}
+
 // scoopAppName returns the Scoop app directory the running binary lives under
 // — the path segment after `/scoop/apps/` (e.g. "cli" or "entire") — or ""
 // when the binary is not a Scoop install. This is the durable signal for the
@@ -350,15 +365,10 @@ func releaseChannel(version string) string {
 // `entire` regardless of its version (the fix ships in a final `cli` release,
 // so the migrating binary's version is already past the rename).
 func scoopAppName() string {
-	execPath, err := executablePath()
+	normalized, err := normalizedExecPath()
 	if err != nil {
 		return ""
 	}
-	realPath, err := filepath.EvalSymlinks(execPath)
-	if err != nil {
-		realPath = execPath
-	}
-	normalized := strings.ReplaceAll(filepath.ToSlash(realPath), "\\", "/")
 	_, rest, ok := strings.Cut(normalized, "/scoop/apps/")
 	if !ok {
 		return ""
@@ -370,16 +380,10 @@ func scoopAppName() string {
 }
 
 func installManagerForCurrentBinary() string {
-	execPath, err := executablePath()
+	normalizedPath, err := normalizedExecPath()
 	if err != nil {
 		return installManagerUnknown
 	}
-
-	realPath, err := filepath.EvalSymlinks(execPath)
-	if err != nil {
-		realPath = execPath
-	}
-	normalizedPath := strings.ReplaceAll(filepath.ToSlash(realPath), "\\", "/")
 
 	switch {
 	case strings.Contains(normalizedPath, "/Cellar/") ||
