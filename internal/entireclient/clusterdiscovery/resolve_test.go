@@ -204,10 +204,8 @@ func TestResolve_ClusterHostCaseInsensitive(t *testing.T) {
 // break an operation whose cores we already knew.
 func TestResolve_StaleCacheFallbackOnDiscoveryFailure(t *testing.T) {
 	t.Parallel()
-	// Server is closed immediately so any discovery attempt fails.
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	client := hostPinningClient(t, srv)
-	srv.Close()
+	// Pinned at a host that never answers, so any discovery attempt fails.
+	client := deadPinningClient(t)
 
 	configDir := t.TempDir()
 	cacheDir := t.TempDir()
@@ -274,9 +272,7 @@ func TestResolve_PreAudienceCacheRefetched(t *testing.T) {
 // transient discovery failure as "cluster doesn't do jurisdiction tokens".
 func TestResolve_PreAudienceEntryNotUsedAsDiscoveryFallback(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	client := hostPinningClient(t, srv)
-	srv.Close() // discovery fails
+	client := deadPinningClient(t) // discovery fails
 
 	configDir := t.TempDir()
 	cacheDir := t.TempDir()
@@ -339,9 +335,7 @@ func TestResolve_AudienceAgnosticCallersSkipPreAudienceRefetch(t *testing.T) {
 // the "doesn't look like a cluster" message.
 func TestResolve_Unreachable(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	client := hostPinningClient(t, srv)
-	srv.Close()
+	client := deadPinningClient(t)
 
 	configDir := t.TempDir()
 	require.NoError(t, contexts.Save(configDir, &contexts.File{
