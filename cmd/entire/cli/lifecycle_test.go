@@ -1042,6 +1042,55 @@ func TestHandleLifecycleSubagentEnd_ScanSkippedMarkerSkipsNewFileDetection(t *te
 		"marker must disable new-file detection on the subagent path")
 }
 
+// TestHandleClaudeCodePostTodo_ScanSkippedMarkerSkipsNewFileDetection is the
+// PostTodo twin of the turn-end/subagent-end marker tests: PostTodo detects
+// changes with a nil baseline (all untracked files classified New), so after
+// a pre-task scan breach (marker written in one process) a PostTodo whose own
+// walk succeeds would claim every pre-existing untracked file in the
+// incremental checkpoint. Deleting the PostTodo marker guard must fail this
+// test.
+func TestHandleClaudeCodePostTodo_ScanSkippedMarkerSkipsNewFileDetection(t *testing.T) {
+	// Not parallel: t.Chdir, the process-global status budget latch, and the
+	// currentHookAgentName hook-context global.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "README.md", "# test\n")
+	testutil.GitAdd(t, tmpDir, "README.md")
+	testutil.GitCommit(t, tmpDir, "init")
+	// PostTodo skips on the default branch; incremental checkpoints only run
+	// on feature branches.
+	testutil.GitCheckoutNewBranch(t, tmpDir, "feature/posttodo")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	currentHookAgentName = agent.AgentNameClaudeCode
+	t.Cleanup(func() { currentHookAgentName = "" })
+
+	ctx := context.Background()
+	toolUseID := "toolu-posttodo-01"
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "preexisting.txt"), []byte("x"), 0o600))
+
+	// Process A: pre-task capture under a breached budget writes the marker.
+	gitrepo.SetStatusBudgetBreachedForTesting(true)
+	require.NoError(t, CapturePreTaskState(ctx, toolUseID))
+	gitrepo.SetStatusBudgetBreachedForTesting(false)
+
+	// The subagent modifies a tracked file during the task, so the incremental
+	// checkpoint still has real content to save.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# test\nmodified\n"), 0o600))
+
+	input := `{"session_id":"sess-posttodo","transcript_path":"","tool_name":"TodoWrite",` +
+		`"tool_use_id":"toolu-todowrite-01","tool_input":{"todos":[{"content":"do work","status":"completed"}]}}`
+	require.NoError(t, handleClaudeCodePostTodoFromReader(ctx, strings.NewReader(input)))
+
+	state, err := strategy.LoadSessionState(ctx, "sess-posttodo")
+	require.NoError(t, err)
+	require.Contains(t, state.FilesTouched, "README.md")
+	require.NotContains(t, state.FilesTouched, "preexisting.txt",
+		"marker must disable new-file detection on the PostTodo path")
+}
+
 // --- handleLifecycleCompaction tests ---
 
 func TestHandleLifecycleCompaction_PreservesTranscriptOffset(t *testing.T) {

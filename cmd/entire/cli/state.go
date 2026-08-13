@@ -466,12 +466,25 @@ func resolveTmpDir(ctx context.Context) string {
 func untrackedFilesOrSkip(ctx context.Context) (untrackedFiles []string, scanSkipped bool) {
 	untrackedFiles, err := getUntrackedFilesForState(ctx)
 	if err != nil {
-		logging.Warn(logging.WithComponent(ctx, "state"),
-			"untracked-file scan failed; capture degraded: new-file detection disabled for this turn",
-			slog.String("error", err.Error()))
+		logStatusDegrade(logging.WithComponent(ctx, "state"),
+			"untracked-file scan failed; capture degraded: new-file detection disabled for this turn", err)
 		return nil, true
 	}
 	return untrackedFiles, false
+}
+
+// logStatusDegrade logs a status-derived degrade at the appropriate level:
+// budget breaches were already warned about — with repo root, elapsed, and
+// budget — by the gitrepo layer at the moment of the breach, so re-warning
+// here would double-log the same event; they get Debug. Any other status
+// error (repo-open failure, corrupted .git, …) has no other warning source
+// and keeps Warn.
+func logStatusDegrade(ctx context.Context, msg string, err error) {
+	if errors.Is(err, gitrepo.ErrStatusBudgetExceeded) {
+		logging.Debug(ctx, msg, slog.String("error", err.Error()))
+		return
+	}
+	logging.Warn(ctx, msg, slog.String("error", err.Error()))
 }
 
 // getUntrackedFilesForState returns a list of untracked files using go-git

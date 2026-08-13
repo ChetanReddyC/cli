@@ -889,8 +889,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Detect file changes via git status
 	changes, err := DetectFileChanges(ctx, preUntrackedFiles)
 	if err != nil {
-		logging.Warn(logCtx, "failed to compute file changes",
-			slog.String("error", err.Error()))
+		logStatusDegrade(logCtx, "failed to compute file changes", err)
 	}
 	if changes != nil && preState != nil && preState.UntrackedScanSkipped {
 		// The turn-start untracked scan was skipped (e.g. status-walk budget
@@ -1183,8 +1182,7 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	}
 	changes, err := DetectFileChanges(ctx, preUntrackedFiles)
 	if err != nil {
-		logging.Warn(logCtx, "failed to compute file changes",
-			slog.String("error", err.Error()))
+		logStatusDegrade(logCtx, "failed to compute file changes", err)
 	}
 	if changes != nil && preState != nil && preState.UntrackedScanSkipped {
 		// Same degradation as turn-end: without a pre-task baseline, every
