@@ -411,6 +411,19 @@ func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher
 		return fmt.Errorf("validate token: %w", err)
 	}
 
+	// The home jurisdiction is a claim on the login token, and that claim is
+	// what jurisdictional calls actually route on (see
+	// auth.HomeJurisdictionFromLoginJWT). /me reports the jurisdiction of
+	// whichever core answered, which is not the account's home when a login
+	// was dispatched to a non-home region — the device flow geo-routes, so an
+	// AU account approving in EU gets an EU-issued token whose /me says "eu"
+	// while the claim (and all routing) says "au". Printing /me's value there
+	// would hand the user the wrong slug for --jurisdiction. Prefer the claim;
+	// fall back to /me for tokens that carry none.
+	if juris, jerr := auth.HomeJurisdictionFromLoginJWT(t.token); jerr == nil && juris != "" {
+		profile.Jurisdiction = juris
+	}
+
 	fmt.Fprintf(w, "Logged in to %s\n", t.coreURL)
 	writeProfileLines(w, profile)
 

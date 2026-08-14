@@ -109,6 +109,66 @@ func TestWriteProfileLines_Jurisdiction(t *testing.T) {
 	}
 }
 
+// The device flow geo-routes: an AU account that approves in EU gets an
+// EU-issued token, and EU's /me then reports its own jurisdiction. The slug
+// printed here is the one users pass to --jurisdiction, so it has to come from
+// the token's home_jurisdiction claim — which is also what every jurisdictional
+// call routes on — not from whichever core answered.
+func TestRunAuthStatus_JurisdictionComesFromTheTokenClaim(t *testing.T) {
+	t.Parallel()
+
+	// EU-issued token for an AU-homed account, the shape a geo-routed device
+	// login actually produces.
+	token := makeTestJWT(t, `{"iss":"https://eu.auth.entire.io","home_jurisdiction":"au"}`)
+	euSaysEU := func(context.Context, string, string) (*authProfile, error) {
+		return &authProfile{Handle: "alice", Provider: "github", Jurisdiction: "eu"}, nil
+	}
+
+	var out bytes.Buffer
+	target := statusTarget{coreURL: testCoreURL, token: token, activeContext: "eu.auth.entire.io", totalContexts: 1}
+	if err := runAuthStatus(context.Background(), &out, euSaysEU, noSessions, target); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "Jurisdiction: au") {
+		t.Fatalf("output = %q, want 'Jurisdiction: au' from the home_jurisdiction claim", got)
+	}
+	if strings.Contains(got, "Jurisdiction: eu") {
+		t.Fatalf("output = %q, must not report the issuing core's jurisdiction", got)
+	}
+	// The core actually dialled is still reported verbatim — that part was right.
+	if !strings.Contains(got, "Logged in to "+testCoreURL) {
+		t.Fatalf("output = %q, want the dialled core named", got)
+	}
+}
+
+// A token with no home_jurisdiction claim (or one that isn't a JWT at all)
+// leaves /me's answer in place rather than blanking the line.
+func TestRunAuthStatus_JurisdictionFallsBackToProfile(t *testing.T) {
+	t.Parallel()
+
+	for name, token := range map[string]string{
+		"JWT without the claim": makeTestJWT(t, `{"iss":"https://us.auth.entire.io"}`),
+		"opaque non-JWT token":  "tok",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			fetch := func(context.Context, string, string) (*authProfile, error) {
+				return &authProfile{Handle: "alice", Provider: "github", Jurisdiction: "us"}, nil
+			}
+			var out bytes.Buffer
+			target := statusTarget{coreURL: testCoreURL, token: token, totalContexts: 1}
+			if err := runAuthStatus(context.Background(), &out, fetch, noSessions, target); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !strings.Contains(out.String(), "Jurisdiction: us") {
+				t.Fatalf("output = %q, want /me's 'Jurisdiction: us' retained", out.String())
+			}
+		})
+	}
+}
+
 // In ENTIRE_TOKEN mode there is no stored context, keychain slot, or revocable
 // session: status names the env-token core and bearer source, and renders none
 // of the context/keychain/session lines. listSessions must not be called — you
