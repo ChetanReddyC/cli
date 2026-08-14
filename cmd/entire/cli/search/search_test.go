@@ -426,6 +426,28 @@ func TestResultID_SessionFallsBackToCheckpointID(t *testing.T) {
 	}
 }
 
+// TestDedupID_LegacySessionRepoQualified pins the fix for the repo-scoped
+// checkpoint-id collision: checkpoint ids are unique only within a repo, so the
+// legacy-session dedupe key is repo-qualified. Two repos' legacy rows sharing a
+// checkpoint id must NOT collapse, while ResultID stays the raw id for display.
+func TestDedupID_LegacySessionRepoQualified(t *testing.T) {
+	t.Parallel()
+	a := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", CheckpointID: "cp-dup", Org: "acme", Repo: "backend"}}
+	b := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", CheckpointID: "cp-dup", Org: "acme", Repo: "frontend"}}
+	if a.DedupID() == b.DedupID() {
+		t.Errorf("same checkpointId in different repos collide: %q", a.DedupID())
+	}
+	// Display id stays the raw checkpoint id (machine-lookup), unqualified.
+	if got := a.ResultID(); got != "cp-dup" {
+		t.Errorf("ResultID = %q, want raw cp-dup", got)
+	}
+	// A real session's DedupID is just its sessionId (no repo qualification).
+	normal := Result{Type: TypeSession, Session: &SessionResult{SessionID: "sess-1", Org: "acme", Repo: "backend"}}
+	if got := normal.DedupID(); got != "sess-1" {
+		t.Errorf("real session DedupID = %q, want sess-1", got)
+	}
+}
+
 func TestSearch_ResultJSONRoundTrip(t *testing.T) {
 	t.Parallel()
 

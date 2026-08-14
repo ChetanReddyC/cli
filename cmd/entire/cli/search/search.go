@@ -379,6 +379,20 @@ func (r *Result) ResultID() string {
 	return r.rawString("id")
 }
 
+// DedupID is the identity used to collapse cross-cell duplicates. It matches
+// ResultID except for a server-folded legacy session (ENT-1595), whose only id
+// is its checkpoint id — unique only WITHIN a repo. That raw id is repo-qualified
+// here (mirroring the search service's synthetic session key) so two repos'
+// legacy rows sharing a checkpoint id don't collide in the deduper and drop a
+// valid result. ResultID stays the raw, machine-lookup id used for display/JSON.
+func (r *Result) DedupID() string {
+	if r.Type == TypeSession && r.Session != nil &&
+		r.Session.SessionID == "" && r.Session.CheckpointID != "" {
+		return r.Session.Org + "\x00" + r.Session.Repo + "\x00" + r.Session.CheckpointID
+	}
+	return r.ResultID()
+}
+
 // ResultTitle returns the primary display text for any result type. Repo/PR
 // raw payloads identify themselves via "title", "name", or "fullName".
 func (r *Result) ResultTitle() string {
