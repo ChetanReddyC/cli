@@ -158,7 +158,7 @@ func TestRunBrowserLogin_RetargetsExchangeToCallbackIssuer(t *testing.T) {
 	}
 
 	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow,
-		"https://auth.entire.io", noopOpenURL, browserLoginTimeout)
+		"https://auth.entire.io", newTestLoginURLInteractor(), browserLoginTimeout)
 	if err == nil || !strings.Contains(err.Error(), "stop before persist") {
 		t.Fatalf("runBrowserLogin() = %v, want the exchange to have been attempted", err)
 	}
@@ -189,7 +189,7 @@ func TestRunBrowserLogin_NoRetargetWhenIssuerMatchesOrIsAbsent(t *testing.T) {
 				exchErr:  errors.New("stop before persist"),
 			}
 			err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow,
-				"https://auth.entire.io", noopOpenURL, browserLoginTimeout)
+				"https://auth.entire.io", newTestLoginURLInteractor(), browserLoginTimeout)
 			if err == nil {
 				t.Fatal("runBrowserLogin() = nil, want the stubbed exchange error")
 			}
@@ -213,7 +213,7 @@ func TestRunBrowserLogin_RejectsHostileCallbackIssuer(t *testing.T) {
 	}
 
 	err := runBrowserLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, flow,
-		"https://auth.entire.io", noopOpenURL, browserLoginTimeout)
+		"https://auth.entire.io", newTestLoginURLInteractor(), browserLoginTimeout)
 	if err == nil || !strings.Contains(err.Error(), "unacceptable issuer") {
 		t.Fatalf("runBrowserLogin() = %v, want an unacceptable-issuer error", err)
 	}
@@ -248,7 +248,7 @@ func TestRunLogin_RetargetsPollToTheRespondingRegion(t *testing.T) {
 		responses: []pollResponse{{result: &auth.DeviceAuthPoll{Error: "access_denied"}}},
 	}
 
-	err := runLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, client, noopOpenURL, false)
+	err := runLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, client, newTestLoginURLInteractor(), false)
 	if err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Fatalf("runLogin() = %v, want the stubbed access_denied", err)
 	}
@@ -269,7 +269,7 @@ func TestRunLogin_NoRetargetWhenTheApexAnsweredItself(t *testing.T) {
 		responses: []pollResponse{{result: &auth.DeviceAuthPoll{Error: "access_denied"}}},
 	}
 
-	if err := runLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, client, noopOpenURL, false); err == nil {
+	if err := runLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, client, newTestLoginURLInteractor(), false); err == nil {
 		t.Fatal("runLogin() = nil, want the stubbed access_denied")
 	}
 	if client.tokenIssuerCalls != 0 {
@@ -286,7 +286,7 @@ func TestRunLogin_RejectsHostileDeviceResponseOrigin(t *testing.T) {
 		responses: []pollResponse{{result: &auth.DeviceAuthPoll{AccessToken: "should-never-be-reached"}}},
 	}
 
-	err := runLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, client, noopOpenURL, false)
+	err := runLogin(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, client, newTestLoginURLInteractor(), false)
 	if err == nil || !strings.Contains(err.Error(), "unacceptable issuer") {
 		t.Fatalf("runLogin() = %v, want an unacceptable-issuer error", err)
 	}
