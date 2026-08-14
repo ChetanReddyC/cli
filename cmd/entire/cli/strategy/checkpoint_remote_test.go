@@ -1569,15 +1569,21 @@ func checkpointRemoteGitOutput(ctx context.Context, t *testing.T, dir string, ar
 	return strings.TrimSpace(string(out))
 }
 
-// TestEnsurePrimaryRef_BootstrapFetchIsBlobFiltered pins that the enable-time
-// bootstrap fetches the commit graph but not v1's blobs. The bootstrap only has
-// to land the ref so a later orphan cannot diverge from it; v1's blobs are the
-// full transcript archive, so fetching them makes `entire enable` on a fresh
-// clone pay for the entire checkpoint history before doing anything else.
+// TestEnsurePrimaryRef_BootstrapLandsReadableBranch pins that after the
+// enable-time bootstrap, the branch it landed is actually readable — not just
+// present as a ref.
 //
-// Uses the git-branch primary backend: under git-refs the bootstrap is skipped
-// outright (see TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapUnderGitRefsPrimary).
-func TestEnsurePrimaryRef_BootstrapFetchIsBlobFiltered(t *testing.T) {
+// A blob-filtered bootstrap looks safe (the bootstrap itself only needs the ref
+// to stop a later orphan diverging) and is not. The bootstrap is only ever
+// reached under the git-branch primary, where the branch it lands IS the repo's
+// checkpoint store: GitStore.List reads each checkpoint's metadata.json through
+// a plain tree with no blob fetcher, and the read path's recovery tier is keyed
+// on the ref being missing — so once the filtered fetch lands the ref, nothing
+// ever backfills the blobs and `checkpoint list` shows bare IDs forever.
+//
+// Asserting on the blob rather than on fetch flags is deliberate: it pins the
+// property that matters (the store is readable) rather than the mechanism.
+func TestEnsurePrimaryRef_BootstrapLandsReadableBranch(t *testing.T) {
 	ctx := context.Background()
 
 	remoteDir := checkpointRemoteWithV1(ctx, t)
@@ -1607,12 +1613,13 @@ func TestEnsurePrimaryRef_BootstrapFetchIsBlobFiltered(t *testing.T) {
 	assert.Equal(t, remoteTip, checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName),
 		"bootstrap must still land the local ref at the checkpoint remote's tip")
 
-	// ...but the transcript blobs were not downloaded. rev-list --missing=print
-	// reports them without triggering the lazy fetch that `git cat-file` would.
+	// ...and the checkpoint's metadata blob came with it. rev-list --missing=print
+	// reports absent objects with a "?" prefix without triggering the lazy fetch
+	// that `git cat-file` would, so this distinguishes "present" from "promised".
 	missing := checkpointRemoteGitOutput(ctx, t, localDir,
 		"rev-list", "--objects", "--missing=print", "refs/heads/"+paths.MetadataBranchName)
-	assert.Contains(t, missing, "?"+metadataBlob,
-		"bootstrap must fetch the commit graph blob-filtered, not the full transcript history")
+	assert.NotContains(t, missing, "?"+metadataBlob,
+		"bootstrap must land a readable branch: without metadata.json, checkpoint list shows a bare ID with no prompt, date, or counts")
 }
 
 // TestFetchBranchIfMissing_ReportsUnreachableRemote pins that a checkpoint remote

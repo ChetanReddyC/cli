@@ -720,13 +720,15 @@ func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Reposit
 
 	branchName := primary.Short()
 	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + branchName)
-	// Blob-filtered: this bootstrap only has to land the ref at the remote's tip
-	// so a later orphan cannot diverge from it. Nothing here reads blob content
-	// (SafelyAdvanceLocalRef takes the ref-not-found path and just sets the
-	// hash), while v1's blobs are the entire transcript archive — fetching them
-	// would make `entire enable` on a fresh clone pay for the full history up
-	// front. Reads pull the blobs they need on demand via BlobFetcher.
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", false, checkpointRemoteForegroundFetchTimeout); err != nil {
+	// Unfiltered. The bootstrap itself only needs the ref, but it is only ever
+	// reached under the git-branch primary (git-refs returns above), and there
+	// the branch it lands IS the repo's checkpoint store — refs.Read and
+	// refs.Primary are the same v1 branch. GitStore.List reads each checkpoint's
+	// metadata.json through a plain tree with no blob fetcher, and once this ref
+	// resolves the recovery tier never fires again, so a blob-filtered bootstrap
+	// would leave `checkpoint list` permanently showing bare IDs with no prompt,
+	// date, or counts.
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, checkpointRemoteForegroundFetchTimeout); err != nil {
 		// Warn, not Debug: `entire enable` is an explicit user action, and this
 		// failure means existing checkpoints stay unreachable until a read
 		// re-fetches them. At Debug the command looked like it had simply
@@ -818,10 +820,10 @@ func healEmptyOrphanFromCheckpointRemote(ctx context.Context, repo *git.Reposito
 	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + primary.Short())
 	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
 
-	// Blob-filtered, for the same reason as the bootstrap fetch above: this heal
-	// replaces a data-free orphan with the real branch tip, and the only content
-	// it inspects is metadataBranchHasData's walk of the root tree's entry names.
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", false, checkpointRemoteForegroundFetchTimeout); err != nil {
+	// Unfiltered, for the same reason as the bootstrap fetch above: this heal
+	// replaces a data-free orphan with the real branch, which readers then treat
+	// as the checkpoint store.
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, checkpointRemoteForegroundFetchTimeout); err != nil {
 		// Warn for the same reason as the bootstrap fetch: this only runs from an
 		// explicit setup flow, and failing leaves the repo on a data-free orphan.
 		logging.Warn(ctx, "checkpoint-remote: empty-orphan heal fetch failed; keeping local orphan",

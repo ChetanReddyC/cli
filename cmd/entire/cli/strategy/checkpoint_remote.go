@@ -166,22 +166,25 @@ func fetchMetadataBranchWithin(ctx context.Context, remoteURL string, timeout ti
 // leaking into logs.
 //
 // When noFilter is true, --filter=blob:none is suppressed even if filtered
-// fetches are globally enabled. The distinction matters: v1's blobs are the full
-// transcript archive, so an unfiltered fetch costs the whole history where a
-// filtered one costs the commit graph.
+// fetches are globally enabled. v1's blobs are the full transcript archive, so
+// an unfiltered fetch costs the whole history where a filtered one costs only
+// the commit graph — but every caller here passes true, and the reason is worth
+// stating because the cheaper option looks safe and is not.
 //
-// Filtered is only correct where nothing downstream reads blob content from the
-// local branch. That holds for the enable bootstrap/heal, which exist solely to
-// land the ref at the remote tip so a later orphan cannot diverge from it. It
-// does NOT hold once the branch is the repo's checkpoint store: GitStore.List
-// reads each checkpoint's metadata.json through a plain tree with no blob
-// fetcher attached, so on a blob-filtered branch every entry silently degrades
-// to an ID with no prompt, date, or counts. Paths that leave the branch in place
-// for reading — FetchMetadataBranch, and the push-path fetch that lands the
-// store a git-branch repo then reads — therefore pass noFilter.
+// Filtering would be correct only where nothing downstream reads blob content
+// from the local branch. No caller meets that bar: each one lands v1 as the
+// repo's checkpoint store, and GitStore.List reads each checkpoint's
+// metadata.json through a plain tree with no blob fetcher attached. Worse, the
+// read path's recovery tier is keyed on the *ref* being missing, so once a
+// filtered fetch lands the ref it never fires again — leaving `checkpoint list`
+// permanently showing bare IDs with no prompt, date, or counts, recoverable only
+// by explaining each checkpoint by ID.
+//
+// The parameter is kept rather than inlined so the contract stays explicit at
+// each call site.
 // timeout bounds the fetch: pass checkpointRemoteFetchTimeout on the push hot
 // path and checkpointRemoteForegroundFetchTimeout from user-initiated commands.
-func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool, timeout time.Duration) error {
+func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool, timeout time.Duration) error { //nolint:unparam // every caller needs blob content today; see the doc above for why the filtered variant is unsafe here
 	fetchCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
