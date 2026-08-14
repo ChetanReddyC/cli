@@ -117,7 +117,12 @@ type CommitResult struct {
 
 // SessionResult represents a session returned by the search service.
 type SessionResult struct {
-	SessionID      string  `json:"sessionId"`
+	SessionID string `json:"sessionId"`
+	// CheckpointID identifies a server-folded legacy session (ENT-1595) whose
+	// sessionId is empty (the checkpoint predates the sessionId attribute). The
+	// cross-cell dedupe (ResultID) falls back to it so distinct legacy rows are
+	// not collapsed by matching empty sessionIds — matching the BFF's merge.
+	CheckpointID   string  `json:"checkpointId,omitempty"`
 	DisplayName    string  `json:"displayName"`
 	Prompt         *string `json:"prompt"`
 	Agent          *string `json:"agent"`
@@ -363,7 +368,12 @@ func (r *Result) ResultID() string {
 	if id := resultField(r,
 		func(c *CheckpointResult) string { return c.ID },
 		func(c *CommitResult) string { return c.CommitSHA },
-		func(s *SessionResult) string { return s.SessionID }); id != "" {
+		func(s *SessionResult) string {
+			if s.SessionID != "" {
+				return s.SessionID
+			}
+			return s.CheckpointID // server-folded legacy session (ENT-1595)
+		}); id != "" {
 		return id
 	}
 	return r.rawString("id")

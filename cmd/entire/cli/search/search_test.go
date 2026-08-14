@@ -409,6 +409,23 @@ func TestSearch_ResultAccessors(t *testing.T) {
 	}
 }
 
+// TestResultID_SessionFallsBackToCheckpointID pins the ENT-1595 dedupe identity:
+// a server-folded legacy session has no sessionId, so ResultID falls back to its
+// checkpointId — the cross-cell dedupe then keys on a real identity and distinct
+// legacy rows aren't collapsed, matching the BFF's session merge.
+func TestResultID_SessionFallsBackToCheckpointID(t *testing.T) {
+	t.Parallel()
+	legacy := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", CheckpointID: "cp-9"}}
+	if got := legacy.ResultID(); got != "cp-9" {
+		t.Errorf("legacy session ResultID = %q, want checkpointId cp-9", got)
+	}
+	// A real session still keys on its sessionId even with a checkpoint anchor.
+	normal := Result{Type: TypeSession, Session: &SessionResult{SessionID: "sess-1", CheckpointID: "cp-1"}}
+	if got := normal.ResultID(); got != "sess-1" {
+		t.Errorf("real session ResultID = %q, want sess-1", got)
+	}
+}
+
 func TestSearch_ResultJSONRoundTrip(t *testing.T) {
 	t.Parallel()
 
