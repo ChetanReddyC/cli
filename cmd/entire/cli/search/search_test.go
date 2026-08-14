@@ -448,6 +448,12 @@ func TestDedupID_RepoQualifiesCheckpointScopedIDs(t *testing.T) {
 	if ca.DedupID() == cb.DedupID() {
 		t.Errorf("checkpoints with same id in different repos collide: %q", ca.DedupID())
 	}
+	// Commit rows too: the same SHA lives in a fork and its upstream (two repos).
+	ma := Result{Type: TypeCommit, Commit: &CommitResult{CommitSHA: "sha-dup", Org: "acme", Repo: "backend"}}
+	mb := Result{Type: TypeCommit, Commit: &CommitResult{CommitSHA: "sha-dup", Org: "acme", Repo: "fork"}}
+	if ma.DedupID() == mb.DedupID() {
+		t.Errorf("same commit SHA in a fork and its upstream collide: %q", ma.DedupID())
+	}
 	// Casing skew across cells (git remote vs repo index) must still dedupe.
 	cUpper := Result{Type: TypeCheckpoint, Checkpoint: &CheckpointResult{ID: "cp-dup", Org: "acme", Repo: "Backend"}}
 	if ca.DedupID() != cUpper.DedupID() {
