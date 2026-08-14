@@ -41,6 +41,11 @@ type pushSettings struct {
 	checkpointURL string
 	// pushDisabled is true if push_sessions is explicitly set to false.
 	pushDisabled bool
+	// primaryIsRefs records whether the git-refs backend is the configured
+	// primary, resolved once here so the pre-push path does not re-read the
+	// checkpoints config (LoadCheckpointsConfig is uncached: two whole-file
+	// reads and JSON parses per call).
+	primaryIsRefs bool
 }
 
 // pushTarget returns the target to use for git push/fetch commands for checkpoint branches.
@@ -75,8 +80,9 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 	}
 
 	ps := pushSettings{
-		remote:       pushRemoteName,
-		pushDisabled: s.IsPushSessionsDisabled(),
+		remote:        pushRemoteName,
+		pushDisabled:  s.IsPushSessionsDisabled(),
+		primaryIsRefs: primaryIsGitRefs(ctx),
 	}
 
 	config := s.GetCheckpointRemote()
@@ -109,7 +115,7 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 	// forever and every single push would re-pay the fetch. On a large checkpoint
 	// remote that is a multi-second stall on each `git push` for a branch this
 	// push will not touch.
-	if !primaryIsGitRefs(ctx) {
+	if !ps.primaryIsRefs {
 		if err := fetchMetadataBranchIfMissing(ctx, checkpointURL); err != nil {
 			logging.Warn(ctx, "checkpoint-remote: failed to fetch metadata branch",
 				slog.String("error", err.Error()),
@@ -206,6 +212,10 @@ func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, lab
 // established by probing with ls-remote first — positive evidence, matching
 // remote.FetchCheckpointRef's absence-vs-failure contract — rather than by
 // treating every fetch error as absence.
+//
+// The probe and the fetch share one deadline, so the budget the caller sees is
+// the constant's value rather than twice it: per-call timeouts do not compose
+// when applied at two nesting levels.
 func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -219,9 +229,10 @@ func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
 		return nil // Branch exists locally, skip fetch
 	}
 
-	probeCtx, cancel := context.WithTimeout(ctx, checkpointRemoteFetchTimeout)
+	ctx, cancel := context.WithTimeout(ctx, checkpointRemoteFetchTimeout)
 	defer cancel()
-	out, probeErr := remote.LsRemoteInDir(probeCtx, "", remoteURL, refs.Primary.String())
+
+	out, probeErr := remote.LsRemoteInDir(ctx, "", remoteURL, refs.Primary.String())
 	if probeErr != nil {
 		return fmt.Errorf("probe %s on %s: %w", refs.Primary, remote.RedactURL(remoteURL), probeErr)
 	}

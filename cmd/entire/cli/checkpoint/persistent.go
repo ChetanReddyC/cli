@@ -2234,21 +2234,14 @@ func (s *GitStore) getFetchingTree(ctx context.Context) (*FetchingTree, error) {
 // every committed checkpoint reads as "not found" with no way to recover.
 func (s *GitStore) getSessionsBranchTree(ctx context.Context) (*object.Tree, error) {
 	ref, err := s.resolveSessionsBranchRef()
-	if err != nil {
-		if s.metadataBranchFetcher == nil {
-			return nil, err
-		}
-		if fetchErr := s.metadataBranchFetcher(ctx); fetchErr != nil {
-			logging.Debug(ctx, "sessions branch: checkpoint remote fetch failed",
-				slog.String("ref", s.refs.Read.String()),
-				slog.String("error", fetchErr.Error()),
-			)
-			return nil, err
-		}
+	if err != nil && s.tryFetchMetadataBranch(ctx) {
+		// Recovered: re-resolve. On failure keep the original not-found error —
+		// callers such as List treat not-found as an empty result, so surfacing a
+		// transport error here would turn an offline read into a hard failure.
 		ref, err = s.resolveSessionsBranchRef()
-		if err != nil {
-			return nil, err
-		}
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	commit, err := s.repo.CommitObject(ref.Hash())
@@ -2262,6 +2255,27 @@ func (s *GitStore) getSessionsBranchTree(ctx context.Context) (*object.Tree, err
 	}
 
 	return tree, nil
+}
+
+// tryFetchMetadataBranch runs the injected metadata-branch fetcher at most once
+// per store, reporting whether it succeeded. The once-per-store latch matters:
+// a single command re-enters getSessionsBranchTree several times (List, then
+// getFetchingTree for each read), so without it a repo the fetch cannot recover
+// — remote has no v1, is unreachable, or refuses auth — would re-pay the whole
+// fetch budget on every entry.
+func (s *GitStore) tryFetchMetadataBranch(ctx context.Context) bool {
+	if s.metadataBranchFetcher == nil || s.metadataBranchFetchTried {
+		return false
+	}
+	s.metadataBranchFetchTried = true
+	if err := s.metadataBranchFetcher(ctx); err != nil {
+		logging.Debug(ctx, "sessions branch: checkpoint remote fetch failed",
+			slog.String("ref", s.refs.Read.String()),
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	return true
 }
 
 // resolveSessionsBranchRef resolves refs.Read, falling back to origin's

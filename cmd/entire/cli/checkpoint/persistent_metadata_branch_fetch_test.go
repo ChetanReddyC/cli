@@ -80,6 +80,32 @@ func TestGetSessionsBranchTree_SkipsFetchWhenBranchPresent(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestGetSessionsBranchTree_FetchesAtMostOncePerStore pins the recovery latch.
+// A single command re-enters getSessionsBranchTree several times — List, then
+// getFetchingTree for each read — so a repo the fetch cannot recover (remote has
+// no v1, unreachable, or refusing auth) would otherwise re-pay the whole fetch
+// budget on every entry, multiplying one command's worst case by the number of
+// reads it performs.
+func TestGetSessionsBranchTree_FetchesAtMostOncePerStore(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	seedBranchCheckpoint(t, store, id.MustCheckpointID("a1b2c3d4e5f6"), "s1")
+	dropV1Branch(t, repo)
+
+	calls := 0
+	store.SetMetadataBranchFetcher(func(_ context.Context) error {
+		calls++
+		return errors.New("remote unreachable")
+	})
+
+	for range 3 {
+		_, err := store.getSessionsBranchTree(t.Context())
+		require.Error(t, err)
+	}
+	assert.Equal(t, 1, calls, "an unrecoverable branch must not re-fetch on every read")
+}
+
 // TestGetSessionsBranchTree_FetchFailureKeepsOriginalError pins that a failing
 // fetch degrades to the pre-existing "not found" error rather than replacing it
 // with a transport error. Callers such as List treat not-found as an empty

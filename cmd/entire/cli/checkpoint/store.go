@@ -36,6 +36,9 @@ type GitStore struct {
 	refs                  PersistentRefs
 	blobFetcher           BlobFetchFunc
 	metadataBranchFetcher MetadataBranchFetchFunc
+	// metadataBranchFetchTried latches the one recovery attempt per store; see
+	// tryFetchMetadataBranch.
+	metadataBranchFetchTried bool
 }
 
 // ephemeralStore is the git shadow-branch (temporary) checkpoint store. It is

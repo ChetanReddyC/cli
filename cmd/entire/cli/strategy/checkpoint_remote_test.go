@@ -1413,22 +1413,12 @@ func runCheckpointRemoteGit(ctx context.Context, t *testing.T, dir string, args 
 
 func checkpointRemoteCurrentBranch(ctx context.Context, t *testing.T, dir string) string {
 	t.Helper()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	return strings.TrimSpace(string(out))
+	return checkpointRemoteGitOutput(ctx, t, dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
 func checkpointRemoteRevParse(ctx context.Context, t *testing.T, dir, rev string) string {
 	t.Helper()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", rev)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	return strings.TrimSpace(string(out))
+	return checkpointRemoteGitOutput(ctx, t, dir, "rev-parse", rev)
 }
 
 func commitCheckpointRemoteMetadata(ctx context.Context, t *testing.T, dir, checkpointID, label string) {
@@ -1477,7 +1467,7 @@ func checkpointRemoteWithV1(ctx context.Context, t *testing.T) string {
 // gitRefsPrimaryLocalRepo builds a local repo configured with a github
 // checkpoint_remote and the git-refs primary backend, with the derived
 // checkpoint URL redirected at remoteDir so any fetch would succeed.
-func gitRefsPrimaryLocalRepo(ctx context.Context, t *testing.T, remoteDir string) string {
+func checkpointRemoteLocalRepo(ctx context.Context, t *testing.T, remoteDir, settingsJSON string) string {
 	t.Helper()
 	localDir := t.TempDir()
 	testutil.InitRepo(t, localDir)
@@ -1488,16 +1478,21 @@ func gitRefsPrimaryLocalRepo(ctx context.Context, t *testing.T, remoteDir string
 
 	entireDir := filepath.Join(localDir, ".entire")
 	require.NoError(t, os.MkdirAll(entireDir, 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}, "checkpoints": {"primary": {"type": "git-refs"}}}`),
-		0o644,
-	))
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(settingsJSON), 0o644))
 
-	// A hermetic redirect that WOULD serve the branch: a passing test therefore
-	// proves the fetch never ran, not that it ran and failed.
+	// A hermetic redirect that WOULD serve the branch: a test asserting the
+	// branch is absent therefore proves the fetch never ran, not that it ran
+	// and failed.
 	redirectGitURL(t, localDir, "git@github.com:org/checkpoints.git", "file://"+remoteDir)
 	return localDir
+}
+
+// gitRefsPrimaryLocalRepo is checkpointRemoteLocalRepo with the git-refs primary
+// selected in settings.
+func gitRefsPrimaryLocalRepo(ctx context.Context, t *testing.T, remoteDir string) string {
+	t.Helper()
+	return checkpointRemoteLocalRepo(ctx, t, remoteDir,
+		`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}, "checkpoints": {"primary": {"type": "git-refs"}}}`)
 }
 
 // TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapUnderGitRefsPrimary pins that
@@ -1591,24 +1586,12 @@ func TestEnsurePrimaryRef_BootstrapFetchIsBlobFiltered(t *testing.T) {
 	runCheckpointRemoteGit(ctx, t, remoteDir, "config", "uploadpack.allowFilter", "true")
 
 	remoteTip := checkpointRemoteRevParse(ctx, t, remoteDir, paths.MetadataBranchName)
-	metadataBlob := checkpointRemoteGitOutput(ctx, t, remoteDir,
-		"rev-parse", "refs/heads/"+paths.MetadataBranchName+":aa/aaaaaaaaaa/"+paths.MetadataFileName)
+	metadataBlob := checkpointRemoteRevParse(ctx, t, remoteDir,
+		"refs/heads/"+paths.MetadataBranchName+":aa/aaaaaaaaaa/"+paths.MetadataFileName)
 
-	localDir := t.TempDir()
-	testutil.InitRepo(t, localDir)
-	testutil.WriteFile(t, localDir, "f.txt", "init")
-	testutil.GitAdd(t, localDir, "f.txt")
-	testutil.GitCommit(t, localDir, "init")
-	runCheckpointRemoteGit(ctx, t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
-
-	entireDir := filepath.Join(localDir, ".entire")
-	require.NoError(t, os.MkdirAll(entireDir, 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(entireDir, "settings.json"),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}, "filtered_fetches": true}}`),
-		0o644,
-	))
-	redirectGitURL(t, localDir, "git@github.com:org/checkpoints.git", "file://"+remoteDir)
+	// git-branch primary (no checkpoints block) so the bootstrap actually runs.
+	localDir := checkpointRemoteLocalRepo(ctx, t, remoteDir,
+		`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}, "filtered_fetches": true}}`)
 
 	t.Chdir(localDir)
 	paths.ClearWorktreeRootCache()

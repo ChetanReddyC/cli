@@ -2513,11 +2513,16 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	// surface refs-native checkpoints written on another machine, and the
 	// fetchers hydrate each on read. WithRemoteListDiscovery keeps this off the
 	// per-turn hook hot path.
+	//
+	// Deliberately no MetadataBranchFetcher: that tier transfers the whole v1
+	// branch, and enumeration must stay proportionate to rendering a list — the
+	// refs side next to it discovers by name only for the same reason. A repo
+	// with no local v1 lists what it has; naming a specific checkpoint
+	// (explain --checkpoint) is what earns the fetch.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
-		BlobFetcher:           FetchBlobsByHash,
-		RefFetcher:            FetchCheckpointRef,
-		RemoteRefLister:       ListCheckpointRefsOnRemote,
-		MetadataBranchFetcher: FetchMetadataFromCheckpointRemote,
+		BlobFetcher:     FetchBlobsByHash,
+		RefFetcher:      FetchCheckpointRef,
+		RemoteRefLister: ListCheckpointRefsOnRemote,
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("open checkpoint store: %w", err)

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -59,7 +58,9 @@ func TestEnable_GitRefsPrimaryDoesNotPullCheckpointBranch(t *testing.T) {
 	// The settings that drive this must have survived enable, or the assertion
 	// above would pass for the wrong reason (a repo that silently fell back to
 	// the git-branch primary has no v1 branch yet either).
-	settings := readFileInDir(t, consumerDir, filepath.Join(".entire", paths.SettingsFileName))
+	settingsBytes, err := os.ReadFile(filepath.Join(consumerDir, ".entire", paths.SettingsFileName))
+	require.NoError(t, err)
+	settings := string(settingsBytes)
 	assert.Contains(t, settings, `"git-refs"`, "enable must preserve the committed git-refs primary")
 	assert.Contains(t, settings, checkpointRemoteRepoSlug, "enable must preserve the committed checkpoint_remote")
 
@@ -70,7 +71,7 @@ func TestEnable_GitRefsPrimaryDoesNotPullCheckpointBranch(t *testing.T) {
 
 	// Prove the read did the recovery rather than finding data that was already
 	// there: the branch is local only now, after explain.
-	requireMetadataBranchPresent(t, consumerDir,
+	require.True(t, testutil.BranchExists(t, consumerDir, paths.MetadataBranchName),
 		"explain should have fetched v1 from the checkpoint remote")
 }
 
@@ -149,46 +150,24 @@ func setupGitRefsCheckpointRemoteRepo(t *testing.T, checkpointBareDir string) st
 // origin remote-tracking ref.
 func requireNoMetadataBranch(t *testing.T, dir, msg string) {
 	t.Helper()
+	require.False(t, testutil.BranchExists(t, dir, paths.MetadataBranchName), msg)
+
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 	defer repo.Close()
-
-	_, err = repo.Storer.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName))
-	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, msg)
 	_, err = repo.Storer.Reference(plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName))
 	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, msg)
 }
 
-// requireMetadataBranchPresent asserts the v1 branch resolves locally.
-func requireMetadataBranchPresent(t *testing.T, dir, msg string) {
-	t.Helper()
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-	defer repo.Close()
-
-	_, err = repo.Storer.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName))
-	require.NoError(t, err, msg)
-}
-
-func readFileInDir(t *testing.T, dir, rel string) string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(dir, rel))
-	require.NoError(t, err)
-	return string(data)
-}
-
-// runEntireInDir runs the entire binary in dir and returns combined output,
-// failing the test if the command errors. Uses execx.NonInteractive (project
-// rule for spawning the entire binary in tests) so the child has no controlling
-// terminal and never blocks on a prompt.
+// runEntireInDir runs the entire binary in dir under git-isolated env and
+// returns its combined output, failing the test if the command errors. Thin
+// wrapper over runEntire, which owns the execx.NonInteractive spawn (project
+// rule: the child gets no controlling terminal, so it never blocks on a prompt).
 func runEntireInDir(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := execx.NonInteractive(t.Context(), getTestBinary(), args...)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runEntire(t, testutil.GitIsolatedEnv(), dir, args...)
 	if err != nil {
-		t.Fatalf("entire %v failed: %v\n%s", args, err, out)
+		t.Fatalf("entire %v failed: %v\n%s%s", args, err, stdout, stderr)
 	}
-	return string(out)
+	return stdout + stderr
 }
