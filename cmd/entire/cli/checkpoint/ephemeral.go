@@ -834,7 +834,7 @@ func (s *ephemeralStore) buildTreeWithChanges(
 		if relErr != nil {
 			logInvalidGitTreePath(ctx, "add metadata directory", metadataDir, relErr)
 		} else {
-			metaChanges, metaErr := addDirectoryToChanges(ctx, s.repo, metadataDirAbs, metadataRel)
+			metaChanges, metaErr := addDirectoryToChanges(ctx, s.repo, repoRedactCache(ctx, s.repo), metadataDirAbs, metadataRel)
 			if metaErr != nil {
 				return plumbing.ZeroHash, fmt.Errorf("failed to add metadata directory: %w", metaErr)
 			}
@@ -948,7 +948,7 @@ type treeNode struct {
 // addDirectoryToChanges walks a filesystem directory and returns TreeChange entries
 // for each file, suitable for use with ApplyTreeChanges.
 // dirPathAbs is the absolute filesystem path; dirPathRel is the git tree-relative path.
-func addDirectoryToChanges(ctx context.Context, repo *git.Repository, dirPathAbs, dirPathRel string) ([]TreeChange, error) {
+func addDirectoryToChanges(ctx context.Context, repo *git.Repository, cache *redactCache, dirPathAbs, dirPathRel string) ([]TreeChange, error) {
 	var changes []TreeChange
 	err := filepath.Walk(dirPathAbs, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -987,7 +987,7 @@ func addDirectoryToChanges(ctx context.Context, repo *git.Repository, dirPathAbs
 
 		treePath := filepath.ToSlash(filepath.Join(dirPathRel, relWithinDir))
 
-		blobHash, mode, blobErr := createRedactedBlobFromFile(ctx, repo, path, treePath)
+		blobHash, mode, blobErr := createRedactedBlobFromFile(ctx, repo, cache, path, treePath)
 		if blobErr != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, blobErr)
 		}

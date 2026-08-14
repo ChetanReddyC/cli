@@ -2405,7 +2405,10 @@ func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, sessionDi
 		// tree, re-redacts these blobs with OPF when enabled, and
 		// rewrites entire/checkpoints/v1 into OPF-applied (9-layer)
 		// commits before they leave the local machine.
-		blobHash, mode, err := createRedactedBlobFromFile(ctx, s.repo, path, relPath)
+		// No prefix cache here: this path is unreachable in production (no
+		// production WriteOptions sets MetadataDir) and relPath is not
+		// session-scoped, so it would key every session to one slot.
+		blobHash, mode, err := createRedactedBlobFromFile(ctx, s.repo, nil, path, relPath)
 		if err != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, err)
 		}
@@ -2434,7 +2437,7 @@ func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, sessionDi
 // regex-only blobs into OPF-applied (9-layer) commits before they leave the
 // local machine.
 // JSONL files get JSONL-aware redaction; all other files get plain byte redaction.
-func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, filePath, treePath string) (plumbing.Hash, filemode.FileMode, error) {
+func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, cache *redactCache, filePath, treePath string) (plumbing.Hash, filemode.FileMode, error) {
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("failed to stat file: %w", err)
@@ -2461,12 +2464,23 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, fileP
 		return hash, mode, nil
 	}
 
-	content = RedactBlobBytes(ctx, content, treePath, false)
+	// Large append-only transcripts reuse the prefix redacted for the previous
+	// checkpoint and redact only what was appended; see redact_cache.go. Output is
+	// identical to redacting the whole file.
+	result := redactIncrementally(ctx, repo, cache, content, treePath)
+	if result.Redacted == nil {
+		result.Redacted = RedactBlobBytes(ctx, content, treePath, false)
+	}
 
-	hash, err := CreateBlobFromContent(repo, content)
+	hash, err := CreateBlobFromContent(repo, result.Redacted)
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("failed to create blob: %w", err)
 	}
+
+	if result.StorePrefix {
+		cache.storePrefix(ctx, treePath, result.SourceHash, len(content), hash)
+	}
+
 	return hash, mode, nil
 }
 
