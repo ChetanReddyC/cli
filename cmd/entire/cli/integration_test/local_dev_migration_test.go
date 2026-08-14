@@ -1,0 +1,196 @@
+//go:build integration
+
+package integration
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
+)
+
+// legacyGitHookEras are the two shapes local-dev mode wrote into .git/hooks over
+// time. Both ran Entire from the working tree; neither is generated any more.
+//
+// The argument suffixes are reproduced verbatim from what those versions emitted,
+// because they are what makes the two eras behave differently after an upgrade:
+// every `go run` hook carried `|| true`, while the launcher-era pre-push did not
+// (a repo-relative prefix got no availability guard, and pre-push deliberately
+// propagates exit codes for OPF). So the launcher era fails a push outright,
+// where the `go run` era merely keeps working slowly.
+var legacyGitHookEras = []struct {
+	name    string
+	command func(hookName, args string) string
+}{
+	{
+		name: "go run era",
+		command: func(hookName, args string) string {
+			return "go run ./cmd/entire/main.go hooks git " + hookName + " " + args + " || true"
+		},
+	},
+	{
+		name: "entire-dev launcher era",
+		command: func(hookName, args string) string {
+			// Deliberately unguarded and without `|| true`, matching what the
+			// pre-removal generator produced for a repo-relative prefix.
+			return "./scripts/entire-dev hooks git " + hookName + " " + args
+		},
+	},
+}
+
+// legacyHookArgs mirrors the per-hook argument lists in strategy.buildHookSpecs.
+var legacyHookArgs = map[string]string{
+	"prepare-commit-msg": `"$1" "$2" 2>/dev/null`,
+	"commit-msg":         `"$1"`,
+	"post-commit":        `2>/dev/null`,
+	"post-rewrite":       `"$1" 2>/dev/null`,
+	"pre-push":           `"$1"`,
+}
+
+// TestLocalDevMigration_TurnStartReplacesLegacyGitHooks covers the upgrade path
+// for a clone that still has local-dev git hooks.
+//
+// `.git/hooks/*` are per-clone and untracked, so pulling the release that removed
+// local-dev mode does not touch them — they keep naming a launcher inside the
+// working tree, which by then is either deleted or merely slow. They also still
+// carry Entire's marker, so a marker-only check reports them as installed and
+// nothing ever replaces them. This pins that the first turn-start migrates them
+// instead, since that is the only thing a user does without being told to.
+func TestLocalDevMigration_TurnStartReplacesLegacyGitHooks(t *testing.T) {
+	t.Parallel()
+
+	for _, era := range legacyGitHookEras {
+		t.Run(era.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := NewRepoWithCommit(t)
+			hooksDir := filepath.Join(env.RepoDir, ".git", "hooks")
+			seedLegacyGitHooks(t, hooksDir, era.command)
+
+			// The trap this guards: legacy hooks carry the marker, so anything
+			// checking only for that would call them installed and skip the
+			// reinstall forever.
+			if strategy.IsGitHookInstalledInDir(context.Background(), env.RepoDir) {
+				t.Fatal("legacy local-dev hooks must not count as installed, or EnsureSetup never migrates them")
+			}
+
+			session := env.NewSession()
+			if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+				t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+			}
+
+			if !strategy.IsGitHookInstalledInDir(context.Background(), env.RepoDir) {
+				t.Error("hooks should read as installed after the migrating turn-start")
+			}
+			assertGitHooksInvokeBinary(t, hooksDir)
+		})
+	}
+}
+
+// TestLocalDevMigration_LauncherEraPushIsRepaired pins the user-visible symptom
+// of the launcher era specifically: its pre-push hook was generated with no
+// availability guard and no `|| true`, so once the tracked launcher script is
+// gone (the upgrade deletes it) the hook fails and git rejects the push. The
+// migration has to actually clear that, not just rewrite the file.
+func TestLocalDevMigration_LauncherEraPushIsRepaired(t *testing.T) {
+	t.Parallel()
+
+	env := NewRepoWithCommit(t)
+	// SetupBareRemote pushes the current HEAD, so add a commit afterwards:
+	// git skips pre-push entirely when there is nothing to send, which would
+	// make this test pass without ever running the hook. GitCommit goes through
+	// go-git and fires no hooks, so it cannot trip the broken hook itself.
+	env.SetupBareRemote()
+	env.WriteFile("migration.txt", "needs pushing\n")
+	env.GitAdd("migration.txt")
+	env.GitCommit("add something to push")
+
+	hooksDir := filepath.Join(env.RepoDir, ".git", "hooks")
+	seedLegacyGitHooks(t, hooksDir, func(hookName, args string) string {
+		return "./scripts/entire-dev hooks git " + hookName + " " + args
+	})
+
+	// The upgrade removed scripts/entire-dev, so the hook now names a path that
+	// does not exist. Confirm that genuinely breaks the push before asserting the
+	// repair — otherwise this test could pass without ever reproducing the bug.
+	if out, err := pushWithHooksExpectingResult(env, "origin", "HEAD"); err == nil {
+		t.Fatalf("expected the push to fail while a legacy unguarded pre-push hook names a missing launcher, got:\n%s", out)
+	}
+
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	assertGitHooksInvokeBinary(t, hooksDir)
+
+	if out, err := pushWithHooksExpectingResult(env, "origin", "HEAD"); err != nil {
+		t.Errorf("push should succeed after migration, got %v\noutput: %s", err, out)
+	}
+}
+
+// pushWithHooksExpectingResult pushes WITHOUT --no-verify so the installed
+// pre-push hook runs, returning the outcome instead of failing the test. The
+// harness's GitPushWithHooks fatals on error and reinstalls its own pre-push
+// hook, both of which defeat the point here.
+func pushWithHooksExpectingResult(env *TestEnv, remote, refSpec string) (string, error) {
+	env.T.Helper()
+
+	cmd := execx.NonInteractive(env.T.Context(), "git", "push", remote, refSpec)
+	cmd.Dir = env.RepoDir
+	cmd.Env = env.cliEnv()
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// seedLegacyGitHooks writes every managed hook in a legacy shape, including
+// Entire's marker — which is what made these survive a marker-only check.
+func seedLegacyGitHooks(t *testing.T, hooksDir string, command func(hookName, args string) string) {
+	t.Helper()
+
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("failed to create hooks dir: %v", err)
+	}
+	for _, hookName := range strategy.ManagedGitHookNames() {
+		args, ok := legacyHookArgs[hookName]
+		if !ok {
+			t.Fatalf("no legacy argument list recorded for managed hook %q — add one so this test keeps covering it", hookName)
+		}
+		content := "#!/bin/sh\n# Entire CLI hooks\n" + command(hookName, args) + "\n"
+		hookPath := filepath.Join(hooksDir, hookName)
+		if err := os.WriteFile(hookPath, []byte(content), 0o755); err != nil {
+			t.Fatalf("failed to seed legacy %s hook: %v", hookName, err)
+		}
+	}
+}
+
+// assertGitHooksInvokeBinary checks every managed hook now runs the entire binary
+// and nothing inside the working tree.
+func assertGitHooksInvokeBinary(t *testing.T, hooksDir string) {
+	t.Helper()
+
+	for _, hookName := range strategy.ManagedGitHookNames() {
+		data, err := os.ReadFile(filepath.Join(hooksDir, hookName))
+		if err != nil {
+			t.Fatalf("hook %s should exist after migration: %v", hookName, err)
+		}
+		content := string(data)
+
+		for _, repoContent := range []string{"scripts/entire-dev", "go run ", "git rev-parse --show-toplevel"} {
+			if strings.Contains(content, repoContent) {
+				t.Errorf("hook %s still reaches into the working tree (%q):\n%s", hookName, repoContent, content)
+			}
+		}
+		if !strings.Contains(content, "entire hooks git "+hookName) {
+			t.Errorf("hook %s should invoke the entire binary, got:\n%s", hookName, content)
+		}
+		// Every hook must be guarded, so a missing binary skips the hook rather
+		// than failing the surrounding git operation.
+		if !strings.Contains(content, "command -v entire") {
+			t.Errorf("hook %s should be guarded by a PATH probe, got:\n%s", hookName, content)
+		}
+	}
+}
