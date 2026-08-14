@@ -721,7 +721,16 @@ func readLoginURLAction(ctx context.Context, errW io.Writer) (loginURLAction, er
 // escape-sequence decoding, cancellation, and terminal restoration. If the
 // terminal cannot provide single-key input, disable key actions.
 func readLoginURLActionFromTTY(ctx context.Context, errW io.Writer, tty *os.File) (loginURLAction, error) {
-	defer tty.Close()
+	// Normally this function owns tty and closes it on the way out. The one
+	// exception is a cancelled context — see the comment below — so the close is
+	// conditional rather than a plain defer.
+	closeTTY := true
+	defer func() {
+		if closeTTY {
+			_ = tty.Close()
+		}
+	}()
+
 	if !interactive.IsTerminalReader(tty) {
 		return loginURLNone, nil
 	}
@@ -735,6 +744,20 @@ func readLoginURLActionFromTTY(ctx context.Context, errW io.Writer, tty *os.File
 		tea.WithoutSignalHandler(),
 	).Run()
 	if ctx.Err() != nil {
+		// Do NOT close tty here. When the program is killed by context
+		// cancellation, Bubble Tea's shutdown(kill=true) deliberately skips
+		// waitForReadLoop(), so its input reader goroutine can still be running
+		// after Run returns. On Linux that reader is cancelreader's epoll
+		// implementation, whose wait loop reads tty.Fd() — closing the descriptor
+		// underneath it is a data race (the race detector catches it as
+		// poll.(*FD).destroy vs os.(*File).Fd), and freeing the number lets an
+		// unrelated open reuse it while a live reader still holds the File.
+		//
+		// Bubble Tea exposes nothing to join that goroutine: Program.Wait only
+		// waits on a channel Run already closed via defer. So leave the descriptor
+		// for process exit to reclaim. `entire login` is short-lived and cancels
+		// at most once per sign-in, so this is bounded to a single descriptor.
+		closeTTY = false
 		return loginURLNone, fmt.Errorf("interrupted: %w", ctx.Err())
 	}
 	if err != nil {
