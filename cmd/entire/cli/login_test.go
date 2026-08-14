@@ -397,6 +397,7 @@ func noopCopyURL(string) error { return nil }
 func newTestLoginURLInteractor(actions ...loginURLAction) loginURLInteractor {
 	next := 0
 	return loginURLInteractor{
+		keysAvailable: func() bool { return true },
 		readAction: func(ctx context.Context) (loginURLAction, error) {
 			if next >= len(actions) {
 				<-ctx.Done()
@@ -408,6 +409,90 @@ func newTestLoginURLInteractor(actions ...loginURLAction) loginURLInteractor {
 		},
 		copyURL: noopCopyURL,
 		openURL: noopOpenURL,
+	}
+}
+
+// The prompt advertises keys the process can honour. When the terminal cannot
+// deliver them the line must be suppressed, while the waiting message — and
+// sign-in through the visible URL — carry on unchanged.
+func TestWaitForLoginURLResult_NoKeysSuppressesPrompt(t *testing.T) {
+	t.Parallel()
+
+	interactor := newTestLoginURLInteractor()
+	interactor.keysAvailable = func() bool { return false }
+	interactor.readAction = func(context.Context) (loginURLAction, error) {
+		return loginURLNone, nil
+	}
+
+	var out bytes.Buffer
+	got, err := waitForLoginURLResult(
+		context.Background(), &out, &bytes.Buffer{},
+		"https://auth.test/authorize", "Waiting... ", interactor,
+		func(context.Context) (string, error) { return testLoginComplete, nil },
+	)
+	if err != nil {
+		t.Fatalf("waitForLoginURLResult() error = %v", err)
+	}
+	if got != testLoginComplete {
+		t.Errorf("result = %q, want complete", got)
+	}
+	if strings.Contains(out.String(), loginURLPrompt) {
+		t.Errorf("prompt advertised keys that cannot be read:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "Waiting... ") {
+		t.Errorf("output missing waiting message:\n%s", out.String())
+	}
+}
+
+func TestCopyLoginURL(t *testing.T) {
+	t.Parallel()
+
+	// Released at cleanup so the wedged-helper case leaks no goroutine.
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+
+	tests := []struct {
+		name    string
+		copyURL clipboardWriteFunc
+		timeout time.Duration
+		wantErr string
+	}{
+		{
+			name:    "success",
+			copyURL: noopCopyURL,
+			timeout: time.Minute,
+		},
+		{
+			name:    "propagates failure",
+			copyURL: func(string) error { return errors.New("clipboard unavailable") },
+			timeout: time.Minute,
+			wantErr: "clipboard unavailable",
+		},
+		{
+			// A wedged xclip/xsel must not block the caller's select loop, and
+			// with it a sign-in that has already completed.
+			name:    "times out on a wedged helper",
+			copyURL: func(string) error { <-blocked; return nil },
+			timeout: 10 * time.Millisecond,
+			wantErr: "clipboard write timed out",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := copyLoginURL(tt.copyURL, "https://auth.test", tt.timeout)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("copyLoginURL() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("copyLoginURL() error = %v, want %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 

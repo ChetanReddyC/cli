@@ -31,7 +31,7 @@ func TestReadLoginURLActionFromTTY_SingleKeyAndRestoresTerminal(t *testing.T) {
 
 	resultCh := make(chan loginURLActionTestResult, 1)
 	go func() {
-		action, err := readLoginURLActionFromTTY(context.Background(), tty)
+		action, err := readLoginURLActionFromTTY(context.Background(), io.Discard, tty)
 		resultCh <- loginURLActionTestResult{action: action, err: err}
 	}()
 	waitForLoginPromptTTYRaw(t, observer, before)
@@ -83,7 +83,7 @@ func TestReadLoginURLActionFromTTY_UnavailableInputContinuesAndCloses(t *testing
 		t.Fatalf("create non-TTY input: %v", err)
 	}
 
-	action, err := readLoginURLActionFromTTY(context.Background(), notTTY)
+	action, err := readLoginURLActionFromTTY(context.Background(), io.Discard, notTTY)
 	if err != nil {
 		t.Fatalf("readLoginURLActionFromTTY() error = %v", err)
 	}
@@ -108,8 +108,9 @@ func TestWaitForLoginURLResult_AuthCompletionCancelsTTYAndRestoresTerminal(t *te
 
 	authComplete := make(chan struct{})
 	interactor := loginURLInteractor{
+		keysAvailable: func() bool { return true },
 		readAction: func(ctx context.Context) (loginURLAction, error) {
-			return readLoginURLActionFromTTY(ctx, tty)
+			return readLoginURLActionFromTTY(ctx, io.Discard, tty)
 		},
 		copyURL: noopCopyURL,
 		openURL: noopOpenURL,
@@ -163,7 +164,7 @@ func TestReadLoginURLActionFromTTY_ControlCRecordsInterrupt(t *testing.T) {
 
 	resultCh := make(chan loginURLActionTestResult, 1)
 	go func() {
-		action, err := readLoginURLActionFromTTY(context.Background(), tty)
+		action, err := readLoginURLActionFromTTY(context.Background(), io.Discard, tty)
 		resultCh <- loginURLActionTestResult{action: action, err: err}
 	}()
 	waitForLoginPromptTTYRaw(t, observer, before)

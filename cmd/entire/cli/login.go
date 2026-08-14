@@ -59,20 +59,64 @@ const (
 
 type loginURLActionReadFunc func(ctx context.Context) (loginURLAction, error)
 
-// loginURLInteractor owns the three side effects behind the interactive URL
-// prompt. Production uses the controlling TTY, system clipboard, and default
-// browser; tests provide deterministic functions instead.
+// clipboardCopyTimeout bounds a single clipboard write. See copyLoginURL.
+const clipboardCopyTimeout = 3 * time.Second
+
+// loginURLInteractor owns the side effects behind the interactive URL prompt.
+// Production uses the controlling TTY, system clipboard, and default browser;
+// tests provide deterministic functions instead. keysAvailable answers whether
+// readAction can actually deliver keys, so the prompt only advertises actions
+// this process can honour.
 type loginURLInteractor struct {
-	readAction loginURLActionReadFunc
-	copyURL    clipboardWriteFunc
-	openURL    browserOpenFunc
+	keysAvailable func() bool
+	readAction    loginURLActionReadFunc
+	copyURL       clipboardWriteFunc
+	openURL       browserOpenFunc
 }
 
-func defaultLoginURLInteractor() loginURLInteractor {
+func defaultLoginURLInteractor(errW io.Writer) loginURLInteractor {
 	return loginURLInteractor{
-		readAction: readLoginURLAction,
-		copyURL:    clipboard.WriteAll,
-		openURL:    openBrowser,
+		keysAvailable: loginURLKeysAvailable,
+		readAction: func(ctx context.Context) (loginURLAction, error) {
+			return readLoginURLAction(ctx, errW)
+		},
+		copyURL: clipboard.WriteAll,
+		openURL: openBrowser,
+	}
+}
+
+// loginURLKeysAvailable reports whether single-key actions can be read from the
+// controlling terminal. It mirrors exactly the conditions under which
+// readLoginURLAction gives up and returns loginURLNone, so the prompt is never
+// printed for keys that would be ignored.
+func loginURLKeysAvailable() bool {
+	if interactive.UnderTest() {
+		return false
+	}
+
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer tty.Close()
+
+	return interactive.IsTerminalReader(tty)
+}
+
+// copyLoginURL bounds a clipboard write. clipboardWriteFunc takes no context —
+// atotto/clipboard shells out to xclip/xsel on Linux — so a wedged helper would
+// otherwise block the select loop in waitForLoginURLResult indefinitely, and
+// with it a sign-in that has already completed. On timeout the goroutine is
+// abandoned; the CLI is short-lived and exits soon after.
+func copyLoginURL(copyURL clipboardWriteFunc, loginURL string, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- copyURL(loginURL) }()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("clipboard write timed out after %v", timeout)
 	}
 }
 
@@ -131,7 +175,7 @@ func newLoginCmd() *cobra.Command {
 				return client.StartBrowserAuth(ctx)
 			}
 			return runLoginAuto(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
-				client, startBrowser, defaultLoginURLInteractor(), loginFlowFacts{
+				client, startBrowser, defaultLoginURLInteractor(cmd.ErrOrStderr()), loginFlowFacts{
 					useDevice:  useDevice,
 					canPrompt:  interactive.CanPromptInteractively(),
 					sshSession: isSSHSession(),
@@ -575,7 +619,11 @@ func waitForLoginURLResult[T any](
 
 	statusLineOpen := false
 	renderInitialPrompt := func() {
-		fmt.Fprintln(outW, loginURLPrompt)
+		// Only advertise the keys when the terminal can actually deliver them.
+		// Authentication still completes through the always-visible URL.
+		if interactor.keysAvailable() {
+			fmt.Fprintln(outW, loginURLPrompt)
+		}
 		fmt.Fprint(outW, waitingMessage)
 		statusLineOpen = true
 	}
@@ -623,7 +671,7 @@ func waitForLoginURLResult[T any](
 				result := <-waitCh
 				return result.value, result.err
 			case loginURLCopy:
-				if err := interactor.copyURL(loginURL); err != nil {
+				if err := copyLoginURL(interactor.copyURL, loginURL, clipboardCopyTimeout); err != nil {
 					fmt.Fprintf(errW, "Warning: failed to copy login URL: %v\n", err)
 				} else {
 					fmt.Fprintln(outW, "✓ Copied to clipboard.")
@@ -639,7 +687,6 @@ func waitForLoginURLResult[T any](
 				cancelAction()
 				fmt.Fprintln(outW, "✓ Opened browser.")
 				result := <-waitCh
-				finishStatusLine()
 				return result.value, result.err
 			default:
 				cancelFlow()
@@ -653,8 +700,9 @@ func waitForLoginURLResult[T any](
 
 // readLoginURLAction reads a single key from the controlling terminal without
 // consuming piped stdin. Missing TTYs disable key actions while authentication
-// continues through the always-visible URL.
-func readLoginURLAction(ctx context.Context) (loginURLAction, error) {
+// continues through the always-visible URL. Anything unexpected is reported to
+// errW rather than swallowed, so a user whose keys stopped working can tell why.
+func readLoginURLAction(ctx context.Context, errW io.Writer) (loginURLAction, error) {
 	// In-process and forced-interactive subprocess tests must never touch a
 	// developer's real terminal. Authentication itself continues concurrently.
 	if interactive.UnderTest() {
@@ -666,13 +714,13 @@ func readLoginURLAction(ctx context.Context) (loginURLAction, error) {
 		return loginURLNone, nil //nolint:nilerr // no controlling TTY; continue without key actions
 	}
 
-	return readLoginURLActionFromTTY(ctx, tty)
+	return readLoginURLActionFromTTY(ctx, errW, tty)
 }
 
 // readLoginURLActionFromTTY takes ownership of tty. Bubble Tea handles raw mode,
 // escape-sequence decoding, cancellation, and terminal restoration. If the
 // terminal cannot provide single-key input, disable key actions.
-func readLoginURLActionFromTTY(ctx context.Context, tty *os.File) (loginURLAction, error) {
+func readLoginURLActionFromTTY(ctx context.Context, errW io.Writer, tty *os.File) (loginURLAction, error) {
 	defer tty.Close()
 	if !interactive.IsTerminalReader(tty) {
 		return loginURLNone, nil
@@ -690,6 +738,9 @@ func readLoginURLActionFromTTY(ctx context.Context, tty *os.File) (loginURLActio
 		return loginURLNone, fmt.Errorf("interrupted: %w", ctx.Err())
 	}
 	if err != nil {
+		// Raw mode or the input reader failed. Sign-in continues through the
+		// visible URL, but say so — the prompt already offered the keys.
+		fmt.Fprintf(errW, "Warning: keyboard actions unavailable (%v); open the login URL above to continue.\n", err)
 		return loginURLNone, nil
 	}
 
