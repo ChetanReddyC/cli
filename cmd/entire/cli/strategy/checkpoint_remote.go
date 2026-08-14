@@ -3,6 +3,7 @@ package strategy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -165,12 +166,19 @@ func fetchMetadataBranchWithin(ctx context.Context, remoteURL string, timeout ti
 // leaking into logs.
 //
 // When noFilter is true, --filter=blob:none is suppressed even if filtered
-// fetches are globally enabled. Use noFilter for operations that need blob
-// content (resume, explain) as opposed to operations that only need the ref
-// and its tree structure (enable bootstrap/heal, push recovery). The
-// distinction matters: v1's blobs are the full transcript archive, so an
-// unfiltered fetch costs the whole history where a filtered one costs the
-// commit graph.
+// fetches are globally enabled. The distinction matters: v1's blobs are the full
+// transcript archive, so an unfiltered fetch costs the whole history where a
+// filtered one costs the commit graph.
+//
+// Filtered is only correct where nothing downstream reads blob content from the
+// local branch. That holds for the enable bootstrap/heal, which exist solely to
+// land the ref at the remote tip so a later orphan cannot diverge from it. It
+// does NOT hold once the branch is the repo's checkpoint store: GitStore.List
+// reads each checkpoint's metadata.json through a plain tree with no blob
+// fetcher attached, so on a blob-filtered branch every entry silently degrades
+// to an ID with no prompt, date, or counts. Paths that leave the branch in place
+// for reading — FetchMetadataBranch, and the push-path fetch that lands the
+// store a git-branch repo then reads — therefore pass noFilter.
 // timeout bounds the fetch: pass checkpointRemoteFetchTimeout on the push hot
 // path and checkpointRemoteForegroundFetchTimeout from user-initiated commands.
 func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool, timeout time.Duration) error {
@@ -223,10 +231,16 @@ func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
 	}
 	defer repo.Close()
 
-	// Check if branch already exists locally - if so, nothing to do
+	// Check if branch already exists locally - if so, nothing to do. Only a
+	// genuinely-absent ref means "missing": any other read failure (corrupt or
+	// unreadable ref storage) is surfaced rather than masked as absence, which
+	// would send us to the network to fix a local problem.
 	refs := checkpoint.ResolveRefs(ctx)
-	if _, err := repo.Reference(refs.Primary, true); err == nil {
+	switch _, err := repo.Reference(refs.Primary, true); {
+	case err == nil:
 		return nil // Branch exists locally, skip fetch
+	case !errors.Is(err, plumbing.ErrReferenceNotFound):
+		return fmt.Errorf("read local ref %s: %w", refs.Primary, err)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, checkpointRemoteFetchTimeout)
