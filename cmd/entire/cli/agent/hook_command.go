@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,13 +18,15 @@ import (
 // Entire integration is one generated file in the repo (Pi's extension,
 // OpenCode's plugin), for use by HookFreshness implementations.
 //
-// The file counts as ours only if it contains marker, and as current only if
-// it matches one of renders — the outputs InstallHooks could have written.
-// Pass both the production and local-dev renders: they differ only in the
-// substituted entire command, and CheckHookConfig cannot know which mode
-// installed the file. Matching on content rather than a stamped version keeps
-// this honest for free — any edit to the embedded template makes installed
-// copies read as outdated without anyone remembering to bump anything.
+// The file counts as ours only if it contains marker, and as current only if it
+// matches render — what InstallHooks writes today. Pass exactly that one render:
+// anything else still carrying the marker (a template edit, or a file left by an
+// older version) must read as outdated so the next install replaces it. Passing a
+// legacy render here would mark it current and strand it on disk forever, which
+// is what TestCheckHookConfig_LegacyLocalDevIsDrift pins against. Matching on
+// content rather than a stamped version keeps this honest for free — any edit to
+// the embedded template makes installed copies read as outdated without anyone
+// remembering to bump anything.
 //
 // Line endings are normalized before comparing. These files are generated with
 // LF but are typically committed, so on Windows a checkout under the default
@@ -34,7 +37,7 @@ import (
 // A file that exists but lacks marker reads as HooksAbsent, not HooksOutdated:
 // InstallHooks refuses to overwrite a foreign file at our path, so there is no
 // Entire config there for us to call stale.
-func GeneratedHookFileState(path, marker string, renders ...string) HookConfigState {
+func GeneratedHookFileState(path, marker, render string) HookConfigState {
 	data, err := os.ReadFile(path) //nolint:gosec // path constructed from validated repo root
 	if err != nil {
 		return HooksAbsent
@@ -43,11 +46,8 @@ func GeneratedHookFileState(path, marker string, renders ...string) HookConfigSt
 	if !strings.Contains(content, marker) {
 		return HooksAbsent
 	}
-	normalized := normalizeLineEndings(content)
-	for _, render := range renders {
-		if normalized == normalizeLineEndings(render) {
-			return HooksCurrent
-		}
+	if normalizeLineEndings(content) == normalizeLineEndings(render) {
+		return HooksCurrent
 	}
 	return HooksOutdated
 }
@@ -80,13 +80,19 @@ func MissingEntireWarning(format WarningFormat) string {
 	}
 }
 
-// LocalDevHookScript is the local-development hook launcher, with the repo root
-// resolved at hook runtime via git. It points at scripts/entire-dev, which
-// compiles the CLI on demand and falls back to the entire binary on PATH when
-// the tree does not build (e.g. mid merge-conflict-fix). Agents that locate the
-// repo root with `git rev-parse` build their local-dev command prefix from
-// this; claude-code uses ${CLAUDE_PROJECT_DIR} and defines its own prefix.
-const LocalDevHookScript = `"$(git rev-parse --show-toplevel)"/scripts/entire-dev`
+// LegacyLocalDevHookScript is the removed local-development hook launcher: a
+// repo-relative script whose path was resolved at hook runtime via git.
+//
+// It is retained for DETECTION ONLY. Hooks are never generated with it again —
+// pointing a hook at a path inside the working tree meant that whatever the
+// checked-out branch contained ran on every agent turn, and because local-dev
+// mode was honored from the committed .entire/settings.json, any repository
+// could opt its cloners into that. Agents keep matching this prefix so hooks
+// installed by older versions are recognized as ours and rewritten to the
+// binary form instead of being left in place.
+//
+// Do not use this to build a hook command.
+const LegacyLocalDevHookScript = `"$(git rev-parse --show-toplevel)"/scripts/entire-dev`
 
 // WrapProductionSilentHookCommand exits successfully without output when the
 // Entire CLI is missing from PATH.
@@ -185,6 +191,42 @@ const productionHookWrapperPrefix = `sh -c 'if ! command -v entire >/dev/null 2>
 const windowsProductionHookWrapperPrefix = `where.exe entire >nul 2>nul & if errorlevel 1 `
 const nestedWindowsProductionHookWrapperPrefix = `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 `
 
+// DropStaleManagedHooks removes Entire-owned entries whose command is not one of
+// want, leaving foreign entries and the wanted commands untouched. commandOf
+// reads the command string off an entry, which is the only per-agent knowledge
+// this needs — agents whose config stores it under a different field (e.g.
+// Copilot CLI's `bash`) just return that field. want is a set because one hook
+// list can legitimately carry several Entire commands.
+//
+// It reports whether anything was dropped, because the caller must persist the
+// config even when no hook was *added*: a config can hold both a stale and a
+// current hook at once, and skipping the write would leave the stale one on disk.
+//
+// Every agent must run this on every install, not only under --force. Without it
+// a hook written by an older version survives alongside the freshly added one and
+// keeps firing — which for the removed local-dev mode means a script inside the
+// working tree still executes on every agent turn. This lives here rather than in
+// each agent because it was independently re-derived six times and two of those
+// copies got it wrong, and because `dupl` cannot see duplication across packages.
+func DropStaleManagedHooks[E any](entries []E, commandOf func(E) string, prefixes, want []string) ([]E, bool) {
+	dropped := false
+	kept := make([]E, 0, len(entries))
+	for _, entry := range entries {
+		cmd := commandOf(entry)
+		if IsManagedHookCommand(cmd, prefixes) && !slices.Contains(want, cmd) {
+			dropped = true
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	if !dropped {
+		// Nothing to change: hand back the original slice so the common
+		// idempotent install does not reallocate every hook list.
+		return entries, false
+	}
+	return kept, true
+}
+
 // IsManagedHookCommand reports whether command is either a direct Entire hook
 // command or one of Entire's production wrapper forms that exec that command.
 func IsManagedHookCommand(command string, prefixes []string) bool {
@@ -279,8 +321,8 @@ var (
 // timeout is deliberately generous so a momentarily slow sh isn't misread as
 // absent; if it ever is, the next install simply re-migrates — the outcome is
 // self-correcting, never wedged.
-func UseWindowsProductionHooks(ctx context.Context, localDev bool) bool {
-	if localDev || hookCommandOS != hookWrapperOSWindows {
+func UseWindowsProductionHooks(ctx context.Context) bool {
+	if hookCommandOS != hookWrapperOSWindows {
 		return false
 	}
 	return !shHookWrapperWorks(ctx, shHookWrapperProbeCommand)

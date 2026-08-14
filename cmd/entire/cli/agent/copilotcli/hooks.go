@@ -25,7 +25,7 @@ const hooksDir = ".github/hooks"
 // versions are still recognized.
 var entireHookPrefixes = []string{
 	"entire ",
-	agent.LocalDevHookScript + " ",
+	agent.LegacyLocalDevHookScript + " ",
 	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
 }
 
@@ -45,7 +45,7 @@ var hookConfigKey = map[string]string{
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 // Unknown top-level fields and hook types are preserved on round-trip.
-func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
+func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		worktreeRoot = "."
@@ -102,34 +102,44 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, localDev bool, force
 	}
 
 	// Define command prefix
-	var cmdPrefix string
-	if localDev {
-		cmdPrefix = agent.LocalDevHookScript + " hooks copilot-cli "
-	} else {
-		cmdPrefix = "entire hooks copilot-cli "
-	}
+	const cmdPrefix = "entire hooks copilot-cli "
 
 	count := 0
 
-	// Add hooks that don't already exist
+	// Sync each hook to its desired command. Entire-owned entries carrying any
+	// other command are dropped first, even without --force: a hook written by
+	// an older version would otherwise survive alongside the one added below and
+	// keep firing, which for the removed local-dev mode means a script inside
+	// the working tree still runs on every agent turn.
+	staleDropped := false
 	for _, hookName := range c.HookNames() {
-		cmd := cmdPrefix + hookName
-		if !localDev {
-			cmd = agent.WrapProductionSilentHookCommand(cmd)
-		}
+		cmd := agent.WrapProductionSilentHookCommand(cmdPrefix + hookName)
 		entries := hookEntries[hookName]
+
+		// Keep the matching entry rather than remove-and-re-add: entry-level
+		// fields (cwd, timeoutSec, env) live on the existing entry and a freshly
+		// constructed one would discard them.
+		kept, dropped := agent.DropStaleManagedHooks(entries, hookEntryBash, entireHookPrefixes, []string{cmd})
+		if dropped {
+			staleDropped = true
+		}
+		entries = kept
+
 		if !hookBashExists(entries, cmd) {
 			entries = append(entries, CopilotHookEntry{
 				Type:    "command",
 				Bash:    cmd,
 				Comment: "Entire CLI",
 			})
-			hookEntries[hookName] = entries
 			count++
 		}
+		hookEntries[hookName] = entries
 	}
 
-	if count == 0 {
+	// staleDropped forces a write even when nothing was added: a file holding
+	// both a stale and a current hook adds nothing, and returning early here
+	// would leave the stale hook on disk.
+	if count == 0 && !staleDropped {
 		return 0, nil
 	}
 
@@ -316,6 +326,10 @@ func hookBashExists(entries []CopilotHookEntry, bash string) bool {
 }
 
 // isEntireHook checks if a hook entry's bash command belongs to Entire.
+// hookEntryBash reads the command off a hook entry for the shared helpers.
+// Copilot CLI stores it under `bash`, not `command`.
+func hookEntryBash(e CopilotHookEntry) string { return e.Bash }
+
 func isEntireHook(bash string) bool {
 	return agent.IsManagedHookCommand(bash, entireHookPrefixes)
 }

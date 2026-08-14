@@ -3,13 +3,13 @@ package copilotcli
 import (
 	"context"
 	"encoding/json"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/stretchr/testify/require"
 )
 
 func TestInstallHooks_FreshInstall(t *testing.T) {
@@ -17,7 +17,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	t.Chdir(tempDir)
 
 	ag := &CopilotCLIAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -83,7 +83,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	ag := &CopilotCLIAgent{}
 
 	// First install
-	count1, err := ag.InstallHooks(context.Background(), false, false)
+	count1, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
@@ -92,7 +92,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	}
 
 	// Second install
-	count2, err := ag.InstallHooks(context.Background(), false, false)
+	count2, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("second InstallHooks() error = %v", err)
 	}
@@ -123,7 +123,7 @@ func TestAreHooksInstalled_AfterInstall(t *testing.T) {
 
 	ag := &CopilotCLIAgent{}
 
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -140,7 +140,7 @@ func TestUninstallHooks(t *testing.T) {
 	ag := &CopilotCLIAgent{}
 
 	// Install
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -179,13 +179,13 @@ func TestInstallHooks_ForceReinstall(t *testing.T) {
 	ag := &CopilotCLIAgent{}
 
 	// Install normally
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
 
 	// Force reinstall
-	count, err := ag.InstallHooks(context.Background(), false, true)
+	count, err := ag.InstallHooks(context.Background(), true)
 	if err != nil {
 		t.Fatalf("force InstallHooks() error = %v", err)
 	}
@@ -215,7 +215,7 @@ func TestInstallHooks_PreservesExistingHooks(t *testing.T) {
 	})
 
 	ag := &CopilotCLIAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -230,18 +230,21 @@ func TestInstallHooks_PreservesExistingHooks(t *testing.T) {
 	assertEntryBash(t, hooksFile.Hooks.AgentStop, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli agent-stop"))
 }
 
-func TestInstallHooks_LocalDev(t *testing.T) {
+func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
-
+	ctx := context.Background()
 	ag := &CopilotCLIAgent{}
-	_, err := ag.InstallHooks(context.Background(), true, false)
-	if err != nil {
-		t.Fatalf("InstallHooks(localDev=true) error = %v", err)
-	}
 
-	hooksFile := readHooksFile(t, tempDir)
-	assertEntryBash(t, hooksFile.Hooks.AgentStop, `"$(git rev-parse --show-toplevel)"/scripts/entire-dev hooks copilot-cli agent-stop`)
+	testutil.AssertLegacyHookReplaced(t,
+		filepath.Join(tempDir, ".github", "hooks", HooksFileName),
+		agent.WrapProductionSilentHookCommand("entire hooks copilot-cli agent-stop"),
+		agent.LegacyLocalDevHookScript+" hooks copilot-cli agent-stop",
+		func() {
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+		})
 }
 
 func TestInstallHooks_PreservesUnknownFields(t *testing.T) {
@@ -267,7 +270,7 @@ func TestInstallHooks_PreservesUnknownFields(t *testing.T) {
 	}
 
 	ag := &CopilotCLIAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -322,7 +325,7 @@ func TestUninstallHooks_PreservesUnknownFields(t *testing.T) {
 
 	// Install hooks first
 	ag := &CopilotCLIAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +400,7 @@ func TestInstallHooks_CreatesDirectoryStructure(t *testing.T) {
 	t.Chdir(tempDir)
 
 	ag := &CopilotCLIAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -445,7 +448,7 @@ func TestInstallHooks_PreservesEntryLevelFields(t *testing.T) {
 
 	// Install hooks (adds Entire entries alongside the user entry).
 	ag := &CopilotCLIAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -522,7 +525,7 @@ func TestInstallHooks_MalformedExistingFile(t *testing.T) {
 	}
 
 	ag := &CopilotCLIAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err == nil {
 		t.Fatal("InstallHooks() should return error for malformed JSON")
 	}

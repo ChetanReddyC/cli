@@ -108,10 +108,14 @@ type HookSupport interface {
 	ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*Event, error)
 
 	// InstallHooks installs agent-specific hooks.
-	// If localDev is true, hooks point to local development build.
 	// If force is true, removes existing Entire hooks before installing.
 	// Returns the number of hooks installed.
-	InstallHooks(ctx context.Context, localDev bool, force bool) (int, error)
+	//
+	// Installed hook commands must always name the "entire" binary, never a
+	// path derived from repository content. Implementations recognize the
+	// legacy local-dev command shapes (see LegacyLocalDevHookScript) only so
+	// they can replace them.
+	InstallHooks(ctx context.Context, force bool) (int, error)
 
 	// UninstallHooks removes installed hooks
 	UninstallHooks(ctx context.Context) error

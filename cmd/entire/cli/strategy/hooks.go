@@ -22,13 +22,6 @@ const backupSuffix = ".pre-entire"
 const chainComment = "# Chain: run pre-existing hook"
 const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not installed or not on PATH. Skipping Entire Git hook; continuing. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
 
-// localDevHookCmdPrefix is the command prefix used for git hooks in local
-// development mode. It points at scripts/entire-dev, which compiles the CLI on
-// demand and falls back to the entire binary on PATH when the tree does not
-// build. The path is relative to the repository root, which is git's working
-// directory when it runs hooks.
-const localDevHookCmdPrefix = "./scripts/entire-dev"
-
 // gitHookNames are the git hooks managed by Entire CLI
 var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite", "pre-push"}
 
@@ -159,7 +152,33 @@ func IsGitHookInstalledInDir(ctx context.Context, repoDir string) bool {
 	return isGitHookInstalledInHooksDir(hooksDir)
 }
 
-// isGitHookInstalledInHooksDir checks if all hooks are installed in the given hooks directory.
+// legacyGitHookLaunchers are the markers of a git hook that runs Entire from the
+// working tree instead of the installed binary — the two shapes local-dev mode
+// wrote over time. Retained for DETECTION ONLY: a hook naming either must be
+// treated as needing reinstallation.
+//
+// Such a hook is actively broken, not merely outdated. It carries
+// entireHookMarker, so a marker-only check reports it as installed and nothing
+// ever replaces it. `scripts/entire-dev` no longer exists, and `go run` on a
+// single file cannot build a package split across several — so both fail, and a
+// repo-relative prefix gets no availability guard to swallow it. pre-push
+// deliberately propagates exit codes, so the older of these forms was one
+// missing `|| true` away from rejecting every `git push`.
+//
+// Matching these two rather than "anything unexpected" is deliberate: neither
+// can appear in a hook this version generates (which emits only bare `entire` or
+// a quoted absolute path), and they are the same forms the agents match in their
+// entireHookPrefixes.
+var legacyGitHookLaunchers = []string{"scripts/entire-dev", "go run "}
+
+// bareEntireHookCmd is the default hook command prefix: the entire binary
+// resolved through PATH at hook runtime.
+const bareEntireHookCmd = "entire"
+
+// isGitHookInstalledInHooksDir checks if all hooks are installed in the given
+// hooks directory. A hook that is present but still invokes the removed local-dev
+// launcher counts as NOT installed, which is what makes EnsureSetup reinstall it
+// rather than leaving a broken hook in place forever.
 func isGitHookInstalledInHooksDir(hooksDir string) bool {
 	for _, hook := range gitHookNames {
 		hookPath := filepath.Join(hooksDir, hook)
@@ -167,8 +186,14 @@ func isGitHookInstalledInHooksDir(hooksDir string) bool {
 		if err != nil {
 			return false
 		}
-		if !strings.Contains(string(data), entireHookMarker) {
+		content := string(data)
+		if !strings.Contains(content, entireHookMarker) {
 			return false
+		}
+		for _, launcher := range legacyGitHookLaunchers {
+			if strings.Contains(content, launcher) {
+				return false
+			}
 		}
 	}
 	return true
@@ -244,31 +269,39 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 	}
 }
 
+// gitHookCommand wraps an invocation in an existence test, so a hook whose
+// binary is missing exits cleanly instead of failing the surrounding git
+// operation. Every prefix is guarded — there is no unguarded form.
 func gitHookCommand(cmdPrefix, args string, warnMissing bool) string {
 	invocation := fmt.Sprintf("%s hooks git %s", cmdPrefix, args)
-	availableTest, ok := gitHookCommandAvailableTest(cmdPrefix)
-	if !ok {
-		return invocation
-	}
-
 	missingAction := ":"
 	if warnMissing {
 		missingAction = fmt.Sprintf("printf '%%s\\n' %s >&2 || :", shellQuote(missingEntireGitHookWarning))
 	}
-	return fmt.Sprintf("if %s; then %s; else %s; fi", availableTest, invocation, missingAction)
+	return fmt.Sprintf("if %s; then %s; else %s; fi", gitHookCommandAvailableTest(cmdPrefix), invocation, missingAction)
 }
 
-func gitHookCommandAvailableTest(cmdPrefix string) (string, bool) {
-	if cmdPrefix == "entire" {
-		return "command -v entire >/dev/null 2>&1", true
+// gitHookCommandAvailableTest returns the shell test that decides whether the
+// hook's command can run.
+//
+// It always returns a test. It used to return ok=false for prefixes it could not
+// classify, and gitHookCommand then emitted the invocation unguarded — a path
+// that existed only for the removed local-dev launcher (a repo-relative path).
+// The prefixes hookCmdPrefix can now produce are bare "entire" or a shell-quoted
+// absolute path from os.Executable(), but an odd absolute form (a Windows UNC or
+// extended-length path on a network share) would previously have fallen through
+// and silently lost the guard, which is the one case where losing it hurts most.
+// Defaulting to an executability test keeps the contract unconditional.
+func gitHookCommandAvailableTest(cmdPrefix string) string {
+	if cmdPrefix == bareEntireHookCmd {
+		return "command -v entire >/dev/null 2>&1"
 	}
 	if isWindowsAbsoluteHookCommand(cmdPrefix) {
-		return fmt.Sprintf("[ -f %s ]", cmdPrefix), true
+		// Git for Windows' sh has no reliable -x for native paths; -f is what
+		// distinguishes "binary is there" from "it was uninstalled".
+		return fmt.Sprintf("[ -f %s ]", cmdPrefix)
 	}
-	if strings.HasPrefix(cmdPrefix, "/") || strings.HasPrefix(cmdPrefix, "'/") {
-		return fmt.Sprintf("[ -x %s ]", cmdPrefix), true
-	}
-	return "", false
+	return fmt.Sprintf("[ -x %s ]", cmdPrefix)
 }
 
 func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
@@ -286,10 +319,15 @@ func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
 // InstallGitHook installs generic git hooks that delegate to `entire hook` commands.
 // These hooks work with any strategy - the strategy is determined at runtime.
 // If silent is true, no output is printed (except backup notifications, which always print).
-// localDev controls whether hooks use "go run" (true) or the "entire" binary (false).
 // absolutePath embeds the full binary path in hooks for GUI git clients.
 // Returns the number of hooks that were installed (0 if all already up to date).
-func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (int, error) {
+//
+// Hooks always invoke the "entire" binary. Git hooks written by older versions
+// in local-dev mode ran a repo-relative launcher script instead; they still
+// carry entireHookMarker, so the content comparison below rewrites them to the
+// binary form on the next install rather than leaving them pointed at repo
+// content.
+func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error) {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
 		return 0, err
@@ -310,7 +348,7 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 		return 0, fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
-	cmdPrefix, err := hookCmdPrefix(localDev, absolutePath)
+	cmdPrefix, err := hookCmdPrefix(absolutePath)
 	if err != nil {
 		return 0, err
 	}
@@ -461,14 +499,15 @@ fi
 }
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.
-// Returns the scripts/entire-dev launcher when local_dev is enabled.
 // When absolutePath is true, resolves the full binary path via os.Executable()
 // and returns an error if resolution fails. This is needed for GUI git clients
 // (Xcode, Tower, etc.) that don't source shell profiles.
-func hookCmdPrefix(localDev, absolutePath bool) (string, error) {
-	if localDev {
-		return localDevHookCmdPrefix, nil
-	}
+//
+// The prefix always names a binary outside the repository — either bare
+// "entire" resolved through PATH or an absolute path inlined at install time.
+// Never derive it from repository content: a repo-relative prefix lets whatever
+// the working tree contains run on every git operation.
+func hookCmdPrefix(absolutePath bool) (string, error) {
 	if absolutePath {
 		exe, err := os.Executable()
 		if err != nil {
@@ -480,7 +519,7 @@ func hookCmdPrefix(localDev, absolutePath bool) (string, error) {
 		}
 		return shellQuote(resolved), nil
 	}
-	return "entire", nil
+	return bareEntireHookCmd, nil
 }
 
 // resolveHookExePath resolves exe through symlinks for embedding as an absolute
@@ -512,11 +551,11 @@ func shellQuote(s string) string {
 }
 
 // hookSettingsFromConfig loads hook-related settings from .entire/settings.json.
-// Returns (localDev, absoluteHookPath). On error, both default to false.
-func hookSettingsFromConfig(ctx context.Context) (localDev, absoluteHookPath bool) {
+// Returns absoluteHookPath. On error, it defaults to false.
+func hookSettingsFromConfig(ctx context.Context) (absoluteHookPath bool) {
 	s, err := settings.Load(ctx)
 	if err != nil {
-		return false, false
+		return false
 	}
-	return s.LocalDev, s.AbsoluteGitHookPath
+	return s.AbsoluteGitHookPath
 }

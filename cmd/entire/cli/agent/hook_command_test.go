@@ -13,22 +13,20 @@ func TestUseWindowsProductionHooks(t *testing.T) {
 	shBroken := func(context.Context, string) bool { return false }
 
 	cases := []struct {
-		name     string
-		goos     string
-		localDev bool
-		probe    func(context.Context, string) bool
-		want     bool
+		name  string
+		goos  string
+		probe func(context.Context, string) bool
+		want  bool
 	}{
-		{"non-windows never uses windows wrappers", "linux", false, shBroken, false},
-		{"localDev never uses windows wrappers", windowsOS, true, shBroken, false},
-		{"windows with working sh keeps sh wrappers", windowsOS, false, shWorks, false},
-		{"windows without working sh uses windows wrappers", windowsOS, false, shBroken, true},
+		{"non-windows never uses windows wrappers", "linux", shBroken, false},
+		{"windows with working sh keeps sh wrappers", windowsOS, shWorks, false},
+		{"windows without working sh uses windows wrappers", windowsOS, shBroken, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			restore := SetWindowsHookProbeForTesting(tc.goos, tc.probe)
 			defer restore()
-			if got := UseWindowsProductionHooks(context.Background(), tc.localDev); got != tc.want {
+			if got := UseWindowsProductionHooks(context.Background()); got != tc.want {
 				t.Fatalf("UseWindowsProductionHooks() = %v, want %v", got, tc.want)
 			}
 		})
@@ -229,5 +227,80 @@ func TestIsManagedHookCommand_DoesNotMatchSubstring(t *testing.T) {
 	}
 	if IsManagedHookCommand(`sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec echo "the entire workflow finished"'`, prefixes) {
 		t.Fatal("unexpected match for wrapper that does not exec an Entire hook")
+	}
+}
+
+// TestDropStaleManagedHooks covers the primitive every agent's stale-hook
+// handling routes through, including the case that was silently wrong in two
+// agents: a legacy and a current hook present together.
+func TestDropStaleManagedHooks(t *testing.T) {
+	t.Parallel()
+
+	prefixes := []string{"entire ", LegacyLocalDevHookScript + " "}
+	current := WrapProductionSilentHookCommand("entire hooks x stop")
+	legacy := LegacyLocalDevHookScript + " hooks x stop"
+	foreign := "echo not ours"
+
+	id := func(s string) string { return s }
+
+	cases := []struct {
+		name        string
+		entries     []string
+		want        []string
+		wantKept    []string
+		wantDropped bool
+	}{
+		{"empty", nil, []string{current}, nil, false},
+		{"only current is kept untouched", []string{current}, []string{current}, []string{current}, false},
+		{"legacy alone is dropped", []string{legacy}, []string{current}, nil, true},
+		{
+			// The regression: presence of the current hook must not stop the
+			// legacy one from being dropped, or both fire.
+			name: "legacy alongside current drops only legacy", entries: []string{legacy, current},
+			want: []string{current}, wantKept: []string{current}, wantDropped: true,
+		},
+		{"foreign hooks are never touched", []string{foreign}, []string{current}, []string{foreign}, false},
+		{
+			name: "foreign survives while legacy is dropped", entries: []string{foreign, legacy},
+			want: []string{current}, wantKept: []string{foreign}, wantDropped: true,
+		},
+		{
+			// Several Entire commands can legitimately share one hook list.
+			name: "multiple wanted commands all survive", entries: []string{current, "entire hooks x other"},
+			want: []string{current, "entire hooks x other"}, wantKept: []string{current, "entire hooks x other"}, wantDropped: false,
+		},
+		{"empty want set drops every managed hook", []string{current, legacy, foreign}, nil, []string{foreign}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			kept, dropped := DropStaleManagedHooks(tc.entries, id, prefixes, tc.want)
+			if dropped != tc.wantDropped {
+				t.Errorf("dropped = %v, want %v", dropped, tc.wantDropped)
+			}
+			if len(kept) != len(tc.wantKept) {
+				t.Fatalf("kept = %q, want %q", kept, tc.wantKept)
+			}
+			for i := range kept {
+				if kept[i] != tc.wantKept[i] {
+					t.Errorf("kept[%d] = %q, want %q", i, kept[i], tc.wantKept[i])
+				}
+			}
+		})
+	}
+}
+
+// TestDropStaleManagedHooks_NoOpReturnsInputSlice pins that the idempotent path
+// does not reallocate — installs call this once per hook list.
+func TestDropStaleManagedHooks_NoOpReturnsInputSlice(t *testing.T) {
+	t.Parallel()
+
+	entries := []string{"entire hooks x stop"}
+	kept, dropped := DropStaleManagedHooks(entries, func(s string) string { return s }, []string{"entire "}, []string{"entire hooks x stop"})
+	if dropped {
+		t.Fatal("nothing should have been dropped")
+	}
+	if &kept[0] != &entries[0] {
+		t.Error("no-op should hand back the input slice rather than a copy")
 	}
 }
