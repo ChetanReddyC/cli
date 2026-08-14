@@ -191,6 +191,41 @@ func TestReadLoginURLActionFromTTY_ControlCRecordsInterrupt(t *testing.T) {
 	assertLoginPromptTTYRestored(t, observer, before)
 }
 
+// TestReadLoginURLActionFromTTY_CancelledLeavesDescriptorOpen pins the one
+// exception to this function owning the descriptor it is handed.
+//
+// When the program is killed by context cancellation, Bubble Tea's
+// shutdown(kill=true) skips waitForReadLoop(), so its input reader goroutine can
+// outlive Run. Closing the descriptor there races that reader (on Linux
+// cancelreader's epoll wait loop reads tty.Fd()) and frees an fd number the live
+// reader still holds, so the cancelled path must leave the descriptor alone.
+func TestReadLoginURLActionFromTTY_CancelledLeavesDescriptorOpen(t *testing.T) {
+	t.Parallel()
+
+	ptmx, tty, observer, _ := openLoginPromptPTY(t)
+	defer ptmx.Close()
+	defer observer.Close()
+	// Ownership stays with us on this path, so this close is the real one.
+	defer tty.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	action, err := readLoginURLActionFromTTY(ctx, io.Discard, tty)
+	if action != loginURLNone {
+		t.Errorf("action = %v, want loginURLNone", action)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+
+	// A closed *os.File reports Fd() as -1, so this fails if the descriptor was
+	// reclaimed while a killed reader could still be holding it.
+	if _, err := term.GetState(int(tty.Fd())); err != nil {
+		t.Errorf("descriptor was closed on the cancelled path: %v", err)
+	}
+}
+
 func openLoginPromptPTY(t *testing.T) (ptmx, tty, observer *os.File, before *term.State) {
 	t.Helper()
 
