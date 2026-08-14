@@ -477,7 +477,7 @@ func TestEnd_NoErrorFlagByDefault(t *testing.T) {
 func TestSlowSpanThreshold_DefaultWhenUnset(t *testing.T) {
 	t.Setenv(SlowSpanEnvVar, "")
 	os.Unsetenv(SlowSpanEnvVar)
-	require.Equal(t, defaultSlowSpanThreshold, slowSpanThreshold())
+	require.Equal(t, DefaultSlowSpanThreshold, slowSpanThreshold())
 }
 
 func TestSlowSpanThreshold_HonorsOverride(t *testing.T) {
@@ -488,7 +488,7 @@ func TestSlowSpanThreshold_HonorsOverride(t *testing.T) {
 func TestSlowSpanThreshold_InvalidFallsBackToDefault(t *testing.T) {
 	// A typo must not silently disable slow-hook diagnostics.
 	t.Setenv(SlowSpanEnvVar, "not-a-number")
-	require.Equal(t, defaultSlowSpanThreshold, slowSpanThreshold())
+	require.Equal(t, DefaultSlowSpanThreshold, slowSpanThreshold())
 }
 
 func TestSlowSpanThreshold_ZeroOptsOut(t *testing.T) {

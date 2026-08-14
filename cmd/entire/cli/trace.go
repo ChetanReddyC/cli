@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/perf"
+
 	"charm.land/lipgloss/v2"
 )
 
@@ -249,9 +251,11 @@ func collectTraceEntries(logFile string, last int, hookFilter string) ([]traceEn
 func renderTraceEntries(w io.Writer, entries []traceEntry) {
 	if len(entries) == 0 {
 		fmt.Fprintln(w, "No trace entries found.")
-		fmt.Fprintln(w, `Slow hooks are always traced. Every hook is traced at DEBUG level: set`)
-		fmt.Fprintln(w, `ENTIRE_LOG_LEVEL=DEBUG in your shell profile, or log_level to "DEBUG" in`)
-		fmt.Fprintln(w, `.entire/settings.json.`)
+		fmt.Fprintf(w, "By default, hooks taking %s or longer are traced at WARN; set %s=0\n",
+			perf.DefaultSlowSpanThreshold, perf.SlowSpanEnvVar)
+		fmt.Fprintln(w, `to turn that off, and note that a log_level above WARN hides them too.`)
+		fmt.Fprintln(w, `To trace every hook, set ENTIRE_LOG_LEVEL=DEBUG in your shell profile,`)
+		fmt.Fprintln(w, `or log_level to "DEBUG" in .entire/settings.json.`)
 		return
 	}
 

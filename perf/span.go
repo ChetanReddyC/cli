@@ -16,7 +16,7 @@ import (
 // root span logs at DEBUG as it did before.
 const SlowSpanEnvVar = "ENTIRE_PERF_SLOW_MS"
 
-// defaultSlowSpanThreshold is how long a root span must take before its timing
+// DefaultSlowSpanThreshold is how long a root span must take before its timing
 // tree is logged at WARN instead of DEBUG.
 //
 // Root spans carry the only per-step breakdown of a hook, and they used to log
@@ -27,7 +27,7 @@ const SlowSpanEnvVar = "ENTIRE_PERF_SLOW_MS"
 //
 // 1.5s sits above what a healthy hook costs and below the observed slow cluster,
 // so fast turns stay silent instead of logging a WARN every turn.
-const defaultSlowSpanThreshold = 1500 * time.Millisecond
+const DefaultSlowSpanThreshold = 1500 * time.Millisecond
 
 // slowSpanThreshold reports the duration above which a root span is considered
 // slow. Invalid values fall back to the default rather than disabling
@@ -35,11 +35,11 @@ const defaultSlowSpanThreshold = 1500 * time.Millisecond
 func slowSpanThreshold() time.Duration {
 	raw, ok := os.LookupEnv(SlowSpanEnvVar)
 	if !ok {
-		return defaultSlowSpanThreshold
+		return DefaultSlowSpanThreshold
 	}
 	ms, err := strconv.Atoi(raw)
 	if err != nil {
-		return defaultSlowSpanThreshold
+		return DefaultSlowSpanThreshold
 	}
 	if ms <= 0 {
 		// Explicit opt-out: never escalate.
