@@ -728,6 +728,90 @@ func TestInstallGitHook_Idempotent(t *testing.T) {
 // while invoking a launcher script that no longer exists. Because a repo-relative
 // prefix gets no availability guard and pre-push propagates exit codes, that
 // state rejects `git push`.
+// TestCheckGitHookState covers the three states, and specifically that a legacy
+// hook is Outdated rather than Absent. The distinction is load-bearing: uninstall
+// asks "is there anything of ours to remove" and would skip a stale hook if it
+// read as Absent, while EnsureSetup asks "are these current" and would leave a
+// stale hook forever if it read as Current.
+func TestCheckGitHookState(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no hooks at all is Absent", func(t *testing.T) {
+		t.Parallel()
+		if got := gitHookStateInHooksDir(t.TempDir()); got != GitHooksAbsent {
+			t.Errorf("empty hooks dir = %v, want GitHooksAbsent", got)
+		}
+	})
+
+	t.Run("a foreign hook at our path is Absent", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeCurrentManagedHooks(t, dir)
+		// Overwrite one with somebody else's hook.
+		if err := os.WriteFile(filepath.Join(dir, "pre-push"), []byte("#!/bin/sh\necho lefthook\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got := gitHookStateInHooksDir(dir); got != GitHooksAbsent {
+			t.Errorf("foreign hook = %v, want GitHooksAbsent", got)
+		}
+	})
+
+	t.Run("an incomplete set is Absent", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeCurrentManagedHooks(t, dir)
+		if err := os.Remove(filepath.Join(dir, "post-commit")); err != nil {
+			t.Fatal(err)
+		}
+		if got := gitHookStateInHooksDir(dir); got != GitHooksAbsent {
+			t.Errorf("incomplete set = %v, want GitHooksAbsent", got)
+		}
+	})
+
+	// Kept filesystem-only rather than installing for real: initHooksTestRepo
+	// chdirs, which cannot combine with t.Parallel. A real install is already
+	// asserted to read Current by
+	// TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled.
+	t.Run("hooks in the current shape are Current", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeCurrentManagedHooks(t, dir)
+		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+			t.Errorf("current-shape hooks = %v, want GitHooksCurrent", got)
+		}
+	})
+
+	t.Run("a single legacy hook makes the set Outdated", func(t *testing.T) {
+		t.Parallel()
+		for _, legacy := range []string{
+			"./scripts/entire-dev hooks git pre-push",
+			`go run ./cmd/entire/main.go hooks git pre-push "$1" || true`,
+		} {
+			dir := t.TempDir()
+			writeCurrentManagedHooks(t, dir)
+			legacyContent := "#!/bin/sh\n# " + entireHookMarker + "\n" + legacy + "\n"
+			if err := os.WriteFile(filepath.Join(dir, "pre-push"), []byte(legacyContent), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
+				t.Errorf("legacy hook %q = %v, want GitHooksOutdated", legacy, got)
+			}
+		}
+	})
+}
+
+// writeCurrentManagedHooks writes every managed hook in the shape this version
+// installs. Tests that need a variant overwrite an individual hook afterwards.
+func writeCurrentManagedHooks(t *testing.T, dir string) {
+	t.Helper()
+	for _, hook := range gitHookNames {
+		content := "#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git " + hook + "\n"
+		if err := os.WriteFile(filepath.Join(dir, hook), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
@@ -735,8 +819,8 @@ func TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled(t *testing.T) {
 	if _, err := InstallGitHook(context.Background(), true, false); err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
-	if !isGitHookInstalledInHooksDir(hooksDir) {
-		t.Fatal("a freshly installed hook set should read as installed")
+	if got := gitHookStateInHooksDir(hooksDir); got != GitHooksCurrent {
+		t.Fatalf("a freshly installed hook set should read as current, got %v", got)
 	}
 
 	// Rewriting a single hook into either legacy shape must flip that to false,
@@ -753,8 +837,8 @@ func TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(legacy), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if isGitHookInstalledInHooksDir(hooksDir) {
-			t.Errorf("a hook running Entire from the working tree must count as not installed: %s", legacyCmd)
+		if got := gitHookStateInHooksDir(hooksDir); got != GitHooksOutdated {
+			t.Errorf("a hook running Entire from the working tree must read as outdated, got %v: %s", got, legacyCmd)
 		}
 	}
 }

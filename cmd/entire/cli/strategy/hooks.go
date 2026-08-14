@@ -133,23 +133,75 @@ func getHooksDirInPath(ctx context.Context, dir string) (string, error) {
 	return filepath.Clean(hooksDir), nil
 }
 
-// IsGitHookInstalled checks if all generic Entire CLI hooks are installed.
-func IsGitHookInstalled(ctx context.Context) bool {
+// GitHookState describes .git/hooks relative to what InstallGitHook writes today.
+//
+// Deliberately the same vocabulary as agent.HookConfigState: there are two hook
+// surfaces (git hooks and per-agent configs) and one set of words for "ours and
+// current" vs "ours but stale" vs "not ours". A single bool cannot serve both
+// questions callers ask — EnsureSetup needs "are these current", while uninstall
+// needs "is there anything of ours to remove", and a stale hook answers those
+// differently.
+type GitHookState int
+
+const (
+	// GitHooksAbsent means there is no complete set of Entire git hooks: one is
+	// missing, or a foreign hook sits at one of our paths. A partial set reads
+	// Absent, which is what the predicate has always reported.
+	GitHooksAbsent GitHookState = iota
+	// GitHooksCurrent means every managed hook is ours and in the shape this
+	// version writes.
+	GitHooksCurrent
+	// GitHooksOutdated means the hooks are ours but at least one is a shape we no
+	// longer write. Today that means running Entire from the working tree, which
+	// is broken as well as stale — the path it names is gone.
+	GitHooksOutdated
+)
+
+// CheckGitHookState reports the state of the active hooks directory.
+func CheckGitHookState(ctx context.Context) GitHookState {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
-		return false
+		return GitHooksAbsent
 	}
-	return isGitHookInstalledInHooksDir(hooksDir)
+	return gitHookStateInHooksDir(hooksDir)
 }
 
-// IsGitHookInstalledInDir checks if all Entire CLI hooks are installed in the given repo directory.
-// This is useful for tests that need to check hooks without changing the working directory.
-func IsGitHookInstalledInDir(ctx context.Context, repoDir string) bool {
+// CheckGitHookStateInDir reports the state for a specific repo directory, for
+// callers that must not depend on the working directory.
+func CheckGitHookStateInDir(ctx context.Context, repoDir string) GitHookState {
 	hooksDir, err := getHooksDirInPath(ctx, repoDir)
 	if err != nil {
-		return false
+		return GitHooksAbsent
 	}
-	return isGitHookInstalledInHooksDir(hooksDir)
+	return gitHookStateInHooksDir(hooksDir)
+}
+
+// IsGitHookInstalled reports whether a CURRENT set of Entire git hooks is
+// installed. Callers that need to tell "none" from "ours but stale" — uninstall,
+// doctor — must use CheckGitHookState instead, or they will treat a stale hook as
+// if it were not there.
+func IsGitHookInstalled(ctx context.Context) bool {
+	return CheckGitHookState(ctx) == GitHooksCurrent
+}
+
+// IsGitHookInstalledInDir checks if a current set of Entire CLI hooks is installed
+// in the given repo directory. Useful for tests that must not change cwd.
+func IsGitHookInstalledInDir(ctx context.Context, repoDir string) bool {
+	return CheckGitHookStateInDir(ctx, repoDir) == GitHooksCurrent
+}
+
+// AnyGitHookInstalled reports whether Entire git hooks are present at all,
+// current or not. This is what uninstall needs: a stale hook is still ours, and
+// still ours to remove.
+func AnyGitHookInstalled(ctx context.Context) bool {
+	return CheckGitHookState(ctx) != GitHooksAbsent
+}
+
+// ReinstallGitHooks rewrites the managed git hooks using this repo's hook
+// settings — the same pair EnsureSetup runs, exported so callers outside this
+// package cannot open-code it and silently drop absolute_git_hook_path.
+func ReinstallGitHooks(ctx context.Context) (int, error) {
+	return InstallGitHook(ctx, true, hookSettingsFromConfig(ctx))
 }
 
 // legacyGitHookLaunchers are the markers of a git hook that runs Entire from the
@@ -175,28 +227,33 @@ var legacyGitHookLaunchers = []string{"scripts/entire-dev", "go run "}
 // resolved through PATH at hook runtime.
 const bareEntireHookCmd = "entire"
 
-// isGitHookInstalledInHooksDir checks if all hooks are installed in the given
-// hooks directory. A hook that is present but still invokes the removed local-dev
-// launcher counts as NOT installed, which is what makes EnsureSetup reinstall it
-// rather than leaving a broken hook in place forever.
-func isGitHookInstalledInHooksDir(hooksDir string) bool {
+// gitHookStateInHooksDir classifies the hooks in the given directory. A hook that
+// is present but still invokes a removed local-dev launcher reads Outdated, not
+// Current, which is what makes EnsureSetup reinstall it rather than leaving a
+// broken hook in place forever.
+func gitHookStateInHooksDir(hooksDir string) GitHookState {
+	outdated := false
 	for _, hook := range gitHookNames {
 		hookPath := filepath.Join(hooksDir, hook)
 		data, err := os.ReadFile(hookPath) //nolint:gosec // Path is constructed from constants
 		if err != nil {
-			return false
+			return GitHooksAbsent
 		}
 		content := string(data)
 		if !strings.Contains(content, entireHookMarker) {
-			return false
+			return GitHooksAbsent
 		}
 		for _, launcher := range legacyGitHookLaunchers {
 			if strings.Contains(content, launcher) {
-				return false
+				outdated = true
+				break
 			}
 		}
 	}
-	return true
+	if outdated {
+		return GitHooksOutdated
+	}
+	return GitHooksCurrent
 }
 
 // buildHookSpecs returns the hook specifications for all managed hooks.

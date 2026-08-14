@@ -194,3 +194,87 @@ func assertGitHooksInvokeBinary(t *testing.T, hooksDir string) {
 		}
 	}
 }
+
+// TestLocalDevMigration_DoctorRepairsLegacyGitHooks covers the recovery path for
+// a user who pulls the release and pushes before starting a session — the one
+// order in which the turn-start migration has not run yet, so the push is
+// rejected and doctor is where they look.
+//
+// Uses --force, which is also the non-interactive path: the prompt would
+// otherwise need a TTY.
+func TestLocalDevMigration_DoctorRepairsLegacyGitHooks(t *testing.T) {
+	t.Parallel()
+
+	env := NewRepoWithCommit(t)
+	hooksDir := filepath.Join(env.RepoDir, ".git", "hooks")
+	seedLegacyGitHooks(t, hooksDir, func(hookName, args string) string {
+		return "./scripts/entire-dev hooks git " + hookName + " " + args
+	})
+
+	if got := strategy.CheckGitHookStateInDir(context.Background(), env.RepoDir); got != strategy.GitHooksOutdated {
+		t.Fatalf("seeded legacy hooks should read as outdated, got %v", got)
+	}
+
+	out, err := env.RunCLIWithError("doctor", "--force")
+	if err != nil {
+		t.Fatalf("doctor --force failed: %v\noutput: %s", err, out)
+	}
+
+	// It must say what it found, not silently rewrite files.
+	if !strings.Contains(out, "Git hooks: OUT OF DATE") {
+		t.Errorf("doctor should report the stale git hooks, got:\n%s", out)
+	}
+	if !strings.Contains(out, "git hooks reinstalled") {
+		t.Errorf("doctor should report the repair, got:\n%s", out)
+	}
+
+	if got := strategy.CheckGitHookStateInDir(context.Background(), env.RepoDir); got != strategy.GitHooksCurrent {
+		t.Errorf("git hooks should be current after doctor --force, got %v", got)
+	}
+	assertGitHooksInvokeBinary(t, hooksDir)
+
+	// Second run has nothing to do and must say so rather than rewriting again.
+	out, err = env.RunCLIWithError("doctor", "--force")
+	if err != nil {
+		t.Fatalf("second doctor --force failed: %v\noutput: %s", err, out)
+	}
+	if !strings.Contains(out, "✓ Git hooks: OK") {
+		t.Errorf("doctor should report healthy git hooks on the second run, got:\n%s", out)
+	}
+}
+
+// TestLocalDevMigration_DoctorWarnsWithoutPromptingNonInteractively pins that a
+// non-interactive `entire doctor` reports the stale hooks and exits cleanly
+// instead of failing on a prompt it cannot show. Doctor is a diagnostic an agent
+// or CI job runs unattended, so blocking on a confirm — or exiting non-zero
+// because no TTY exists — makes it unusable there. It must also not silently
+// rewrite the repo's hooks without being asked.
+func TestLocalDevMigration_DoctorWarnsWithoutPromptingNonInteractively(t *testing.T) {
+	t.Parallel()
+
+	env := NewRepoWithCommit(t)
+	hooksDir := filepath.Join(env.RepoDir, ".git", "hooks")
+	seedLegacyGitHooks(t, hooksDir, func(hookName, args string) string {
+		return "./scripts/entire-dev hooks git " + hookName + " " + args
+	})
+
+	// No --force, and the harness runs the CLI without a controlling terminal.
+	out, err := env.RunCLIWithError("doctor")
+	if err != nil {
+		t.Fatalf("doctor should succeed without a TTY, got %v\noutput: %s", err, out)
+	}
+	if !strings.Contains(out, "Git hooks: OUT OF DATE") {
+		t.Errorf("doctor should still report the problem, got:\n%s", out)
+	}
+	if !strings.Contains(out, "--force") {
+		t.Errorf("doctor should name the command that applies the fix, got:\n%s", out)
+	}
+	if strings.Contains(out, "git hooks reinstalled") {
+		t.Errorf("doctor must not repair without being asked, got:\n%s", out)
+	}
+
+	// The hooks are untouched, so the problem is still there to fix later.
+	if got := strategy.CheckGitHookStateInDir(context.Background(), env.RepoDir); got != strategy.GitHooksOutdated {
+		t.Errorf("hooks should be left alone by a non-interactive doctor, got %v", got)
+	}
+}

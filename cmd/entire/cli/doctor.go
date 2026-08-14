@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -102,6 +103,14 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	fmt.Fprintln(cmd.OutOrStdout())
 
 	ctx := cmd.Context()
+
+	// The git hook surface. Checked before the agent hook checks because it is
+	// the more fundamental one: if git hooks are broken, commits are not captured
+	// at all and agent-config drift is noise by comparison.
+	if hooksErr := checkGitHooks(cmd, force); hooksErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: git hook check failed: %v\n", hooksErr)
+		finalErr = NewSilentError(fmt.Errorf("git hook check failed: %w", hooksErr))
+	}
 
 	// Agent-specific: Codex hook trust state.
 	checkCodexHookTrust(cmd)
@@ -434,6 +443,67 @@ func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, err
 		fmt.Fprintln(w, "  -> Skipped")
 	}
 	return confirmed, nil
+}
+
+// checkGitHooks reports whether Entire's git hooks are installed and current,
+// and offers to reinstall them when they are not.
+//
+// This is the one hook surface a user cannot see going wrong. Agent hook configs
+// are committed files that turn up in a diff; .git/hooks is per-clone and
+// untracked, so pulling a release that changes hook generation never touches it.
+// A hook left by the removed local-dev mode still carries Entire's marker, so it
+// looks installed while naming a launcher inside the working tree that no longer
+// exists — and because that shape got no availability guard while pre-push
+// deliberately propagates exit codes, the symptom a user actually sees is `git
+// push` being rejected.
+//
+// Unlike the agent hook checks this one repairs rather than only warning: the
+// reinstall is content-idempotent, backs up any foreign hook it displaces, and
+// writes exactly what the next turn-start would write anyway. Someone reaching
+// for doctor after a rejected push wants to be unblocked, not handed a second
+// command to run.
+func checkGitHooks(cmd *cobra.Command, force bool) error {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	state := strategy.CheckGitHookState(ctx)
+	if state == strategy.GitHooksCurrent {
+		fmt.Fprintln(w, "✓ Git hooks: OK")
+		return nil
+	}
+
+	if state == strategy.GitHooksOutdated {
+		fmt.Fprintln(w, "Git hooks: OUT OF DATE")
+		fmt.Fprintln(w, "  A hook still runs Entire from the working tree instead of the installed")
+		fmt.Fprintln(w, "  binary. This can reject `git push`, because the path it names is gone.")
+	} else {
+		fmt.Fprintln(w, "Git hooks: NOT INSTALLED")
+		fmt.Fprintln(w, "  Commits in this repository are not captured as checkpoints.")
+	}
+	fmt.Fprintln(w, "  Fix: reinstall the managed git hooks (any non-Entire hook is backed up).")
+
+	if !force {
+		// Degrade to warn-only when there is nobody to ask. An agent or CI run
+		// must not be blocked on a prompt, and rewriting a repo's hooks
+		// unasked is worse than naming the command that does it.
+		if !interactive.CanPromptInteractively() {
+			fmt.Fprintln(w, "  Run `entire doctor --force` to apply it.")
+			return nil
+		}
+		proceed, promptErr := confirmDoctorFix(ctx, w, "Reinstall Entire git hooks?")
+		if promptErr != nil {
+			return promptErr
+		}
+		if !proceed {
+			return nil
+		}
+	}
+
+	if _, err := strategy.ReinstallGitHooks(ctx); err != nil {
+		return fmt.Errorf("failed to reinstall git hooks: %w", err)
+	}
+	fmt.Fprintln(w, "  ✓ Fixed: git hooks reinstalled")
+	return nil
 }
 
 // checkHookDrift warns when an installed agent's Entire hook config is out of

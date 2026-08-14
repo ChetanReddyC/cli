@@ -2359,7 +2359,10 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// Gather counts for display
 	sessionStateCount := countSessionStates(ctx)
 	shadowBranchCount := countShadowBranches(ctx)
-	gitHooksInstalled := strategy.IsGitHookInstalled(ctx)
+	// AnyGitHookInstalled, not IsGitHookInstalled: a hook left by an older
+	// version is stale but still ours, and uninstall must still offer to remove
+	// it rather than reporting that Entire is not installed here.
+	gitHooksInstalled := strategy.AnyGitHookInstalled(ctx)
 	agentsWithInstalledHooks := GetAgentsWithHooksInstalled(ctx)
 	entireDirExists := checkEntireDirExists(ctx)
 
