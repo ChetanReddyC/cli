@@ -12,6 +12,53 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/search"
 )
 
+// --- dedup ------------------------------------------------------------------
+
+// TestDedupSemanticResults_LegacySessions exercises the deduper itself (not just
+// DedupID in isolation) over server-folded legacy sessions (ENT-1595) — the
+// behavior that actually matters. On main these rows had an empty ResultID and
+// so were never deduped at all: a repo mirrored across cells double-reported
+// each one. DedupID now gives them a repo-qualified identity.
+func TestDedupSemanticResults_LegacySessions(t *testing.T) {
+	t.Parallel()
+
+	// Distinct legacy sessions (different checkpoints) must all survive.
+	if out, _ := dedupSemanticResults([]search.Result{
+		v4LegacySession("cp-a", "backend", 0.9),
+		v4LegacySession("cp-b", "backend", 0.8),
+	}); len(out) != 2 {
+		t.Errorf("distinct legacy rows collapsed: in=2 out=%d", len(out))
+	}
+
+	// The SAME legacy session mirrored across cells collapses to one.
+	out, dupes := dedupSemanticResults([]search.Result{
+		v4LegacySession("cp-x", "backend", 0.9),
+		v4LegacySession("cp-x", "backend", 0.8),
+	})
+	if len(out) != 1 {
+		t.Errorf("mirrored legacy row not deduped: in=2 out=%d", len(out))
+	}
+	if dupes[search.TypeSession] != 1 {
+		t.Errorf("dupe tally = %v, want session:1", dupes)
+	}
+
+	// Repo casing skew across cells (git remote vs repo index) still dedupes.
+	if out, _ := dedupSemanticResults([]search.Result{
+		v4LegacySession("cp-x", "backend", 0.9),
+		v4LegacySession("cp-x", "Backend", 0.8),
+	}); len(out) != 1 {
+		t.Errorf("casing skew leaked a duplicate: in=2 out=%d", len(out))
+	}
+
+	// Two repos sharing a checkpoint id are distinct sessions — must NOT collapse.
+	if out, _ := dedupSemanticResults([]search.Result{
+		v4LegacySession("cp-dup", "backend", 0.9),
+		v4LegacySession("cp-dup", "frontend", 0.8),
+	}); len(out) != 2 {
+		t.Errorf("cross-repo same-checkpointId collapsed: in=2 out=%d", len(out))
+	}
+}
+
 // --- helpers -----------------------------------------------------------------
 
 func fptr(f float64) *float64 { return &f }
@@ -38,6 +85,16 @@ func v4Commit(sha string, tier int, meta search.Meta) search.Result {
 		Type:   search.TypeCommit,
 		Meta:   meta,
 		Commit: &search.CommitResult{CommitSHA: sha},
+	}
+}
+
+// v4LegacySession builds a server-folded legacy session row (ENT-1595): empty
+// sessionId, its identity carried by a repo-scoped checkpoint id under org acme.
+func v4LegacySession(checkpointID, repo string, score float64) search.Result {
+	return search.Result{
+		Type:    search.TypeSession,
+		Meta:    search.Meta{Score: score},
+		Session: &search.SessionResult{SessionID: "", CheckpointID: checkpointID, Org: "acme", Repo: repo},
 	}
 }
 

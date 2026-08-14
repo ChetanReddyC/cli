@@ -120,8 +120,10 @@ type SessionResult struct {
 	SessionID string `json:"sessionId"`
 	// CheckpointID identifies a server-folded legacy session (ENT-1595) whose
 	// sessionId is empty (the checkpoint predates the sessionId attribute). The
-	// cross-cell dedupe (ResultID) falls back to it so distinct legacy rows are
-	// not collapsed by matching empty sessionIds — matching the BFF's merge.
+	// cross-cell dedupe (DedupID, not ResultID — which stays the raw display id)
+	// falls back to a repo-qualified form of it, so a repo mirrored across cells
+	// reports each legacy session once instead of twice. Drill-down is
+	// `entire checkpoint explain <checkpointId>`, not `entire session info`.
 	CheckpointID   string  `json:"checkpointId,omitempty"`
 	DisplayName    string  `json:"displayName"`
 	Prompt         *string `json:"prompt"`
@@ -380,17 +382,32 @@ func (r *Result) ResultID() string {
 }
 
 // DedupID is the identity used to collapse cross-cell duplicates. It matches
-// ResultID except for a server-folded legacy session (ENT-1595), whose only id
-// is its checkpoint id — unique only WITHIN a repo. That raw id is repo-qualified
-// here (mirroring the search service's synthetic session key) so two repos'
-// legacy rows sharing a checkpoint id don't collide in the deduper and drop a
-// valid result. ResultID stays the raw, machine-lookup id used for display/JSON.
+// ResultID except for the two id types that are unique only WITHIN a repo — a
+// raw checkpoint id, and the checkpoint id a server-folded legacy session
+// (ENT-1595) falls back to when its sessionId is empty. Both are repo-qualified
+// here so two repos' rows sharing a checkpoint id don't collide in the deduper
+// and drop a valid result. (Commit SHAs and session/repo ids are already global,
+// so they pass through.) ResultID stays the raw, machine-lookup id for display.
 func (r *Result) DedupID() string {
-	if r.Type == TypeSession && r.Session != nil &&
-		r.Session.SessionID == "" && r.Session.CheckpointID != "" {
-		return r.Session.Org + "\x00" + r.Session.Repo + "\x00" + r.Session.CheckpointID
+	switch r.Type {
+	case TypeCheckpoint:
+		if r.Checkpoint != nil && r.Checkpoint.ID != "" {
+			return repoQualifiedCheckpointKey(r.Checkpoint.Org, r.Checkpoint.Repo, r.Checkpoint.ID)
+		}
+	case TypeSession:
+		if r.Session != nil && r.Session.SessionID == "" && r.Session.CheckpointID != "" {
+			return repoQualifiedCheckpointKey(r.Session.Org, r.Session.Repo, r.Session.CheckpointID)
+		}
 	}
 	return r.ResultID()
+}
+
+// repoQualifiedCheckpointKey namespaces a repo-scoped checkpoint id by its repo.
+// org/repo are lowercased because the same repo can reach different cells under
+// different casing (git remote entireio/CLI vs repo index entireio/cli — see
+// resolveRepoFilters), and a casing skew would otherwise leak a duplicate.
+func repoQualifiedCheckpointKey(org, repo, checkpointID string) string {
+	return strings.ToLower(org) + "\x00" + strings.ToLower(repo) + "\x00" + checkpointID
 }
 
 // ResultTitle returns the primary display text for any result type. Repo/PR

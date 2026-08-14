@@ -409,10 +409,10 @@ func TestSearch_ResultAccessors(t *testing.T) {
 	}
 }
 
-// TestResultID_SessionFallsBackToCheckpointID pins the ENT-1595 dedupe identity:
+// TestResultID_SessionFallsBackToCheckpointID pins the ENT-1595 display id:
 // a server-folded legacy session has no sessionId, so ResultID falls back to its
-// checkpointId — the cross-cell dedupe then keys on a real identity and distinct
-// legacy rows aren't collapsed, matching the BFF's session merge.
+// checkpointId — giving the row a real id in the TUI and compact JSON instead of
+// a blank one. (Cross-cell dedupe uses DedupID, not ResultID; see below.)
 func TestResultID_SessionFallsBackToCheckpointID(t *testing.T) {
 	t.Parallel()
 	legacy := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", CheckpointID: "cp-9"}}
@@ -426,20 +426,32 @@ func TestResultID_SessionFallsBackToCheckpointID(t *testing.T) {
 	}
 }
 
-// TestDedupID_LegacySessionRepoQualified pins the fix for the repo-scoped
-// checkpoint-id collision: checkpoint ids are unique only within a repo, so the
-// legacy-session dedupe key is repo-qualified. Two repos' legacy rows sharing a
-// checkpoint id must NOT collapse, while ResultID stays the raw id for display.
-func TestDedupID_LegacySessionRepoQualified(t *testing.T) {
+// TestDedupID_RepoQualifiesCheckpointScopedIDs pins the fix for the repo-scoped
+// checkpoint-id collision: checkpoint ids are unique only within a repo, so both
+// a raw checkpoint row and a folded legacy session's checkpoint fallback are
+// repo-qualified (and lowercased) in the dedupe key. Two repos' rows sharing a
+// checkpoint id must NOT collapse; ResultID stays the raw id for display.
+func TestDedupID_RepoQualifiesCheckpointScopedIDs(t *testing.T) {
 	t.Parallel()
-	a := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", CheckpointID: "cp-dup", Org: "acme", Repo: "backend"}}
-	b := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", CheckpointID: "cp-dup", Org: "acme", Repo: "frontend"}}
-	if a.DedupID() == b.DedupID() {
-		t.Errorf("same checkpointId in different repos collide: %q", a.DedupID())
+	// Legacy session: same checkpoint id, different repos → distinct dedupe keys.
+	sa := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", CheckpointID: "cp-dup", Org: "acme", Repo: "backend"}}
+	sb := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", CheckpointID: "cp-dup", Org: "acme", Repo: "frontend"}}
+	if sa.DedupID() == sb.DedupID() {
+		t.Errorf("legacy sessions with same checkpointId in different repos collide: %q", sa.DedupID())
 	}
-	// Display id stays the raw checkpoint id (machine-lookup), unqualified.
-	if got := a.ResultID(); got != "cp-dup" {
-		t.Errorf("ResultID = %q, want raw cp-dup", got)
+	if got := sa.ResultID(); got != "cp-dup" {
+		t.Errorf("ResultID = %q, want raw cp-dup for display", got)
+	}
+	// Checkpoint rows get the same treatment (they key on a raw, repo-scoped id).
+	ca := Result{Type: TypeCheckpoint, Checkpoint: &CheckpointResult{ID: "cp-dup", Org: "acme", Repo: "backend"}}
+	cb := Result{Type: TypeCheckpoint, Checkpoint: &CheckpointResult{ID: "cp-dup", Org: "acme", Repo: "frontend"}}
+	if ca.DedupID() == cb.DedupID() {
+		t.Errorf("checkpoints with same id in different repos collide: %q", ca.DedupID())
+	}
+	// Casing skew across cells (git remote vs repo index) must still dedupe.
+	cUpper := Result{Type: TypeCheckpoint, Checkpoint: &CheckpointResult{ID: "cp-dup", Org: "acme", Repo: "Backend"}}
+	if ca.DedupID() != cUpper.DedupID() {
+		t.Errorf("casing skew leaks a duplicate: %q vs %q", ca.DedupID(), cUpper.DedupID())
 	}
 	// A real session's DedupID is just its sessionId (no repo qualification).
 	normal := Result{Type: TypeSession, Session: &SessionResult{SessionID: "sess-1", Org: "acme", Repo: "backend"}}
