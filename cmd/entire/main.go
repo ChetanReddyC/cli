@@ -29,10 +29,10 @@ func main() {
 
 	// Memoize this process's .git/config remote reads. The checkpoint sync
 	// election re-runs per call by design and each run shells out to git for the
-	// same two answers; one command can elect several times. `entire repo mirror
-	// use` invalidates after re-pointing a remote; long-lived commands (`mcp`,
-	// dispatch/runner) install their own narrower window on top — see
-	// WithFreshGitRemoteCache.
+	// same two answers; one command can elect several times. Answers are
+	// partitioned per git working directory, so a command walking several repos
+	// stays correct. `entire repo mirror use` invalidates after re-pointing a
+	// remote, and `entire mcp` narrows this to one window per request.
 	ctx = strategy.WithGitRemoteCache(ctx)
 
 	// Handle interrupt signals

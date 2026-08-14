@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -52,6 +53,36 @@ func TestGitRemoteCache_OnlyMemoizesWhenInstalled(t *testing.T) {
 		assert.False(t, cachedIsConfiguredRemote(ctx, "gone", probe))
 		assert.Equal(t, 1, calls, "a missing remote must not be re-probed")
 	})
+}
+
+// TestGitRemoteCache_PartitionsByRepository is the regression guard for the
+// cross-repo hazard: `entire dispatch --repos a,b` walks several repositories in
+// ONE process, scoping each election with settings.WithWorktreeRoot. A cache keyed
+// only by remote name answers repo B from repo A's remote list, silently
+// re-breaking c04a2e312 ("honor read candidates per repository").
+func TestGitRemoteCache_PartitionsByRepository(t *testing.T) {
+	t.Parallel()
+
+	ctx := WithGitRemoteCache(context.Background())
+	repoA := settings.WithWorktreeRoot(ctx, t.TempDir())
+	repoB := settings.WithWorktreeRoot(ctx, t.TempDir())
+
+	// Same remote name, opposite answers, one shared cache.
+	assert.True(t, cachedIsConfiguredRemote(repoA, "origin", func() bool { return true }))
+	assert.False(t, cachedIsConfiguredRemote(repoB, "origin", func() bool { return false }),
+		"repo B must not inherit repo A's membership answer")
+
+	listA := func(context.Context) []string { return []string{"origin"} }
+	listB := func(context.Context) []string { return []string{"fork", "upstream"} }
+	assert.Equal(t, []string{"origin"}, cachedRemotesInConfigOrder(repoA, listA))
+	assert.Equal(t, []string{"fork", "upstream"}, cachedRemotesInConfigOrder(repoB, listB),
+		"repo B must not inherit repo A's remote list")
+
+	// Each repo still memoizes within itself.
+	calls := 0
+	countingA := func(context.Context) []string { calls++; return nil }
+	cachedRemotesInConfigOrder(repoA, countingA)
+	assert.Equal(t, 0, calls, "repo A's list was already cached; the partition must not defeat memoization")
 }
 
 // TestGitRemoteCache_EmptyListIsCached: an empty remote list is a real answer,

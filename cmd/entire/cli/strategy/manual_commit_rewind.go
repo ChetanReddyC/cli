@@ -640,7 +640,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 	defer repo.Close()
 
 	WarnIfMetadataDisconnected(ctx)
-	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{BlobFetcher: s.blobFetcher})
+	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{BlobFetcher: s.blobFetcher, ReadRemotes: CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
