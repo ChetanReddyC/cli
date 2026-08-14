@@ -218,3 +218,52 @@ func TestShardLineBounds_SingleShardForSmallInput(t *testing.T) {
 	require.Len(t, bounds, 1)
 	require.Equal(t, lineRange{lo: 0, hi: 3}, bounds[0])
 }
+
+// TestIsLineDelimited covers the predicate callers use to decide whether
+// splitting content and redacting the pieces separately is sound.
+func TestIsLineDelimited(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		content string
+		want    bool
+	}{
+		"jsonl two objects":       {"{\"a\":1}\n{\"b\":2}\n", true},
+		"jsonl single line":       {"{\"a\":1}\n", false},
+		"compact single object":   {`{"info":{"id":"x"},"messages":[{"t":"hi"}]}`, false},
+		"pretty single object":    {"{\n  \"a\": 1\n}\n", false},
+		"single array":            {`[1,2,3]`, false},
+		"not json at all":         {"plain text line\nanother line\n", true},
+		"jsonl with blank lines":  {"{\"a\":1}\n\n{\"b\":2}\n", true},
+		"empty":                   {"", false},
+		"whitespace only":         {"  \n\t\n", false},
+		"trailing partial object": {"{\"a\":1}\n{\"b\":", true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, IsLineDelimited([]byte(tc.content)))
+		})
+	}
+}
+
+// TestIsLineDelimited_AgreesWithRouting pins the predicate to the behaviour it
+// describes: whenever it reports false, JSONLContent must have taken the
+// single-JSON-value path, and vice versa.
+func TestIsLineDelimited_AgreesWithRouting(t *testing.T) {
+	t.Parallel()
+
+	for name, content := range map[string]string{
+		"jsonl":         "{\"a\":\"x\"}\n{\"b\":\"y\"}\n",
+		"single object": "{\n  \"a\": \"x\",\n  \"b\": \"y\"\n}",
+		"single line":   "{\"a\":\"x\"}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, handled, err := redactSingleJSONValue(content, String)
+			require.NoError(t, err)
+			require.Equal(t, !handled, IsLineDelimited([]byte(content)),
+				"IsLineDelimited must mirror the redactor's own routing decision")
+		})
+	}
+}

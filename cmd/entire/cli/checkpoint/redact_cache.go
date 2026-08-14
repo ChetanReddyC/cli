@@ -178,15 +178,24 @@ type redactResult struct {
 }
 
 // incrementalRedactionCandidate reports whether a stored file is worth prefix
-// caching: a large, append-only session transcript.
+// caching: a large, append-only, line-delimited session transcript.
 //
-// Keyed on the transcript's own filename rather than a ".jsonl" suffix, because
-// only full.jsonl is appended to. transcript.jsonl (the compact transcript) is
-// regenerated in full each checkpoint, and agent.ChunkFileName yields
-// "full.jsonl.001" for oversized transcripts; neither should silently qualify.
+// Both checks below are load-bearing for different reasons, so neither is
+// redundant:
+//
+//   - The filename establishes append-only. Only full.jsonl is appended to;
+//     transcript.jsonl (the compact transcript) is regenerated in full each
+//     checkpoint and agent.ChunkFileName yields "full.jsonl.001" for oversized
+//     transcripts, so neither should qualify.
+//   - redact.IsLineDelimited establishes that splicing is sound. The filename
+//     alone is not a safe proxy: OpenCode writes a single JSON object
+//     ({"info":...,"messages":[...]}) to this very path, and redacting a fragment
+//     of a single JSON value drops out of the field-aware pass into raw entropy
+//     detection over partial JSON.
 func incrementalRedactionCandidate(content []byte, treePath string) bool {
 	return len(content) >= redactCacheMinBytes &&
-		filepath.Base(filepath.ToSlash(treePath)) == paths.TranscriptFileName
+		filepath.Base(filepath.ToSlash(treePath)) == paths.TranscriptFileName &&
+		redact.IsLineDelimited(content)
 }
 
 // redactIncrementally redacts content, reusing a previously redacted prefix when

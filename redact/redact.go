@@ -621,6 +621,35 @@ func redactSingleJSONValue(content string, redactor func(string) string) (result
 	return result, true, nil
 }
 
+// IsLineDelimited reports whether JSONLContent will redact content line by line
+// rather than as a single JSON value.
+//
+// Callers that split content and redact the pieces separately MUST check this
+// first. The line path composes -- redact(A+B) == redact(A)+redact(B) for
+// newline-terminated A -- because each line is redacted in isolation. The
+// single-JSON-value path does NOT: it is field-aware across the whole document,
+// so redacting a fragment of it instead falls back to raw regex and entropy
+// detection over partial JSON, which is the identifier corruption
+// redactSingleJSONValue exists to avoid.
+//
+// A filename is not a safe proxy for this. OpenCode writes a single JSON object
+// to the same full.jsonl path that other agents write JSONL to.
+func IsLineDelimited(content []byte) bool {
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 {
+		return false
+	}
+	// Decode stops at the first complete value, so this does not scan a large
+	// JSONL body. Content that is not JSON at all still goes down the line path,
+	// where each line is redacted independently.
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	var parsed any
+	if err := dec.Decode(&parsed); err != nil {
+		return true
+	}
+	return !isSingleJSONValue(dec)
+}
+
 // parseSingleJSONValue reports whether s decodes as exactly one JSON value.
 //
 // Uses a streaming decoder so a large JSONL input is not copied: Decode stops at

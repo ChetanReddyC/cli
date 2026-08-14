@@ -241,3 +241,58 @@ func TestRedactCache_MissingBlobFallsBack(t *testing.T) {
 	want := RedactBlobBytes(context.Background(), []byte(content), "full.jsonl", false)
 	require.Equal(t, string(want), string(got))
 }
+
+// openCodeExport builds an OpenCode-shaped transcript: a single JSON object
+// written to the same full.jsonl path other agents write JSONL to, sized past the
+// cache threshold and newline-terminated like a redirected stdout.
+//
+// Uses few, large messages rather than many small ones: the single-JSON-value
+// path is field-aware per leaf, so leaf count -- not total size -- dominates its
+// cost, and thousands of tiny leaves make this test minutes long.
+func openCodeExport(t *testing.T, minBytes int) string {
+	t.Helper()
+	type msg struct {
+		ID   string `json:"id"`
+		Text string `json:"text"`
+	}
+	var msgs []msg
+	var body []byte
+	for i := 0; ; i++ {
+		msgs = append(msgs, msg{
+			ID: fmt.Sprintf("msg_%06d", i),
+			Text: fmt.Sprintf("token sk-live-%dabcdefghij postgres://u:pw%d@h/db ", i, i) +
+				strings.Repeat("the quick brown fox jumps over the lazy dog ", 600),
+		})
+		var err error
+		body, err = json.Marshal(map[string]any{
+			"info":     map[string]any{"id": "ses_abc", "title": "session"},
+			"messages": msgs,
+		})
+		require.NoError(t, err)
+		if len(body) > minBytes {
+			break
+		}
+	}
+	return string(body) + "\n"
+}
+
+// TestIncrementalRedaction_SingleJSONValueNeverCached is the guard for the
+// OpenCode shape. Splicing a fragment of a single JSON object would redact it
+// with raw entropy detection instead of the field-aware whole-document pass, so
+// it must never enter the cache no matter how large it gets or that it lands on
+// the full.jsonl path.
+func TestIncrementalRedaction_SingleJSONValueNeverCached(t *testing.T) {
+	repo, dir := newTestRepoForCache(t)
+	cache := newRedactCache(filepath.Join(dir, ".git"))
+
+	content := openCodeExport(t, redactCacheMinBytes+1024)
+	require.Greater(t, len(content), redactCacheMinBytes, "fixture must exceed the size gate")
+	require.True(t, strings.HasSuffix(content, "\n"), "fixture must pass the newline gate")
+	require.False(t, incrementalRedactionCandidate([]byte(content), "full.jsonl"),
+		"a single JSON value on the transcript path must not qualify")
+
+	// A real write must leave nothing for a later checkpoint to splice onto.
+	writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
+	require.Nil(t, cache.load("full.jsonl"),
+		"a single-JSON-value transcript must leave no cache entry")
+}
