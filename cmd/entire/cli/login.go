@@ -426,6 +426,17 @@ func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuth
 // persistLogin validates the freshly-issued access token and records it in
 // the shared contexts.json credential model. Shared by the device-code and
 // browser flows.
+//
+// baseURL is the host the user dialled, NOT the region the flow was handed off
+// to, and the token's iss is checked against it deliberately. Do not "tighten"
+// this to require iss == the adopted issuer: the region that answers a handoff
+// is not necessarily the region that mints. The apex geo-routes
+// POST /device_authorization, so an account homed in one region can legitimately
+// be served by another, which then issues with iss set to the home region — the
+// dialled apex is the only origin both are guaranteed to sit under. Pinning the
+// token request to one region answers "where may this code go?"; issMatches
+// against the apex answers "is this issuer acceptable at all?". Conflating them
+// would reject correct cross-region logins.
 func persistLogin(outW io.Writer, baseURL, token, refreshToken string) error {
 	if err := validateReceivedToken(token, baseURL, time.Now()); err != nil {
 		return fmt.Errorf("reject login token: %w", err)

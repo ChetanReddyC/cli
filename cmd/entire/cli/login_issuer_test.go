@@ -14,6 +14,10 @@ import (
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
 
+// testRegionalIssuer is the region the apex hands a login off to in these
+// tests — the issuer that actually mints the token.
+const testRegionalIssuer = "https://us.auth.entire.io"
+
 // The production login server (https://auth.entire.io) is a dispatcher: it
 // hands the login off to a regional login server, which mints the token with
 // iss set to its own host. issMatches therefore has to accept a strict
@@ -152,7 +156,7 @@ func TestRunBrowserLogin_RetargetsExchangeToCallbackIssuer(t *testing.T) {
 	flow := &fakeBrowserFlow{
 		authURL:  "https://auth.entire.io/authorize?x=1",
 		waitCode: "code-1",
-		issuer:   "https://us.auth.entire.io",
+		issuer:   testRegionalIssuer,
 		// Stop before persistLogin, which would reach the credential store.
 		exchErr: errors.New("stop before persist"),
 	}
@@ -165,8 +169,8 @@ func TestRunBrowserLogin_RetargetsExchangeToCallbackIssuer(t *testing.T) {
 	if flow.tokenIssuerCalls != 1 {
 		t.Fatalf("UseTokenIssuer calls = %d, want 1", flow.tokenIssuerCalls)
 	}
-	if flow.gotTokenIssuer != "https://us.auth.entire.io" {
-		t.Fatalf("UseTokenIssuer(%q), want https://us.auth.entire.io", flow.gotTokenIssuer)
+	if flow.gotTokenIssuer != testRegionalIssuer {
+		t.Fatalf("UseTokenIssuer(%q), want %s", flow.gotTokenIssuer, testRegionalIssuer)
 	}
 	if flow.gotExchangeCode != "code-1" {
 		t.Fatalf("Exchange code = %q, want code-1", flow.gotExchangeCode)
@@ -345,11 +349,31 @@ func TestPersistLogin_DispatchedLoginNamesTheRegion(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 
 	var out bytes.Buffer
-	token := loginTestJWT(t, "https://us.auth.entire.io")
+	token := loginTestJWT(t, testRegionalIssuer)
 	if err := persistLogin(&out, "https://auth.entire.io", token, "refresh-token"); err != nil {
 		t.Fatalf("persistLogin() = %v, want nil", err)
 	}
-	if !strings.Contains(out.String(), "https://us.auth.entire.io") {
+	if !strings.Contains(out.String(), testRegionalIssuer) {
 		t.Fatalf("stdout = %q, want it to name the issuing region", out.String())
+	}
+	// The load-bearing half: the persisted context must be keyed on the region,
+	// not the dialled apex. That CoreURL is what every later refresh and RFC
+	// 8693 exchange targets, and the apex serves no token endpoint — so if this
+	// recorded the apex, refresh would 404 and the login would silently be
+	// single-use. Asserting only the stdout line above would leave that
+	// verified by a cosmetic string.
+	ctxs, active, err := auth.Contexts()
+	if err != nil {
+		t.Fatalf("auth.Contexts() = %v, want nil", err)
+	}
+	var got string
+	for _, c := range ctxs {
+		if c.Name == active {
+			got = c.CoreURL
+			break
+		}
+	}
+	if got != testRegionalIssuer {
+		t.Fatalf("active context CoreURL = %q, want the issuing region (contexts=%+v, active=%q)", got, ctxs, active)
 	}
 }

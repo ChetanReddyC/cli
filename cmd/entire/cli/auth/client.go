@@ -120,7 +120,19 @@ func (f *BrowserAuthFlow) Issuer() string { return f.inner.Issuer() }
 // authorization code and the resulting tokens travel to origin, so callers
 // must vet it first.
 func (f *BrowserAuthFlow) UseTokenIssuer(origin string) error {
-	return f.inner.SetTokenBaseURL(api.NormalizeOriginURL(origin)) //nolint:wrapcheck // shim returns authcode errors verbatim so callers can errors.Is on sentinels
+	normalized := api.NormalizeOriginURL(origin)
+	// Same stricter-than-the-dialled-host rule the device flow applies in
+	// Client.UseTokenIssuer, and for the same reason: --insecure-http-auth is
+	// an explicit choice about a host the operator typed, and must not extend
+	// to whatever host that server later names. Applied here too rather than
+	// left to auth-go's SetTokenBaseURL, which honours AllowInsecureHTTP for
+	// any host. Unreachable while adoptIssuer demands https on both sides
+	// before calling either shim — but the two paths must not disagree about
+	// policy, or loosening adoptIssuer would silently loosen only one of them.
+	if err := api.RequireSecureURL(normalized); err != nil && !isLoopbackHTTP(normalized) {
+		return fmt.Errorf("token issuer %s: %w", normalized, err)
+	}
+	return f.inner.SetTokenBaseURL(normalized) //nolint:wrapcheck // shim returns authcode errors verbatim so callers can errors.Is on sentinels
 }
 
 // Wait blocks until the browser is redirected to the loopback listener,
