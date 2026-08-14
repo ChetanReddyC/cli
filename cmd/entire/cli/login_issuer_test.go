@@ -71,6 +71,39 @@ func TestIssMatches(t *testing.T) {
 	}
 }
 
+// The mismatch message must not advertise subdomain delegation for an origin
+// that can never delegate — a plaintext dev/loopback login server issues its
+// own tokens, so pointing at "a subdomain of it" would be a dead end.
+func TestIssMatches_ErrorNamesDelegationOnlyWhenPossible(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name          string
+		claimed       string
+		expected      string
+		wantSubdomain bool
+	}{
+		{"https apex can delegate", "https://evil.example", "https://auth.entire.io", true},
+		{"http dev server cannot", "http://evil.example", "http://127.0.0.1:8787", false},
+		{"https claim under an http dev server", "https://us.auth.entire.io", "http://auth.entire.io", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := issMatches(tc.claimed, tc.expected)
+			if err == nil {
+				t.Fatalf("issMatches(%q, %q) = nil, want error", tc.claimed, tc.expected)
+			}
+			got := strings.Contains(err.Error(), "or a subdomain of it")
+			if got != tc.wantSubdomain {
+				t.Fatalf("issMatches(%q, %q) = %q; mentions subdomain = %v, want %v",
+					tc.claimed, tc.expected, err, got, tc.wantSubdomain)
+			}
+		})
+	}
+}
+
 func TestAdoptIssuer(t *testing.T) {
 	t.Parallel()
 

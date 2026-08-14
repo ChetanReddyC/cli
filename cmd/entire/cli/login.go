@@ -549,7 +549,20 @@ func issMatches(claimed, expected string) error {
 	if isDelegatedIssuer(normClaimed, normExpected) {
 		return nil
 	}
-	return fmt.Errorf("iss mismatch: token claims %q, expected %q or a subdomain of it", normClaimed, normExpected)
+	// Only offer the delegation shape when this origin could ever delegate.
+	// A plaintext dev/loopback login server never can, so naming a subdomain
+	// there would send the reader after a host that gets rejected too.
+	if canDelegate(normExpected) {
+		return fmt.Errorf("iss mismatch: token claims %q, expected %q or a subdomain of it", normClaimed, normExpected)
+	}
+	return fmt.Errorf("iss mismatch: token claims %q, expected %q", normClaimed, normExpected)
+}
+
+// canDelegate reports whether expected is an origin isDelegatedIssuer could
+// accept any subdomain of at all — that is, an https origin with a host.
+func canDelegate(expected string) bool {
+	u, err := url.Parse(expected)
+	return err == nil && u.Scheme == schemeHTTPS && u.Hostname() != ""
 }
 
 // isDelegatedIssuer reports whether claimed is an https origin whose host
