@@ -246,22 +246,34 @@ sync remote, resolved in this order:
 1. `strategy_options.checkpoint_push_remote` if set — fail-closed when it
    names a remote that is not configured (checkpoint sync is disabled until
    fixed, since this is explicit user intent).
-2. `origin`, if configured.
-3. The sole configured remote.
-4. The first remote in `.git/config` order.
+2. The **captured** election, if its remote is still configured — fail-soft
+   otherwise (capture is automatic state, so a renamed/removed remote falls
+   through instead of disabling sync).
+3. `origin`, if configured.
+4. The sole configured remote.
+5. The first remote in `.git/config` order.
 
-The branch's tracking config (`branch.<name>.pushRemote`,
-`remote.pushDefault`, `branch.<name>.remote`) is deliberately **not** a tier.
-Election is compared against the remote of the push being made, so electing
-the tracking remote turns every push to a different remote into a silent
-no-op — `git push <other> HEAD`, a `git clone -o base` whose checkpoints go to
-a separately added `origin`, any repo with `remote.pushDefault` set. It would
-also elect a remote the read paths cannot see, since `resume` and `explain`
-resolve checkpoints through origin's remote-tracking refs.
+**Capture** is how the election follows the user's actual push habit with
+zero configuration: during pre-push, when the push target agrees with the
+branch's declared push destination (`branch.<name>.pushRemote` →
+`remote.pushDefault` → `branch.<name>.remote` — the config a bare `git push`
+resolves through) and differs from the current election, that remote is
+persisted as the captured election (git common dir,
+`entire-checkpoint-sync-remotes.json`, list-shaped for the future multi-remote
+set), a one-line stderr notice announces the change, and the same push carries
+the checkpoints. Declaration alone never elects (the config-at-rest bug that
+got the static tracking tier dropped in `74e239a9` — it turned pushes to every
+other remote into silent no-ops, e.g. `git clone -o base` pushing a separately
+added `origin`); a bare push to an undeclared remote never elects either (the
+pre-single-remote transcript leak). Phase-1 rules: at most one captured
+remote, and the first capture sticks — a mixed-habit repo whose branches push
+two remotes must not flip the election per push. An explicit
+`checkpoint_push_remote` always outranks and disables capture. See
+`strategy/checkpoint_sync_capture.go`.
 
-For the fork setup where `origin` is an unpushable base repo, name the fork
-explicitly with `checkpoint_push_remote` — the only form of it where the
-checkpoints can also be read back.
+For the fork setup where `origin` is an unpushable base repo, capture elects
+the fork automatically on the first tracked push; `checkpoint_push_remote`
+remains the explicit override.
 
 The pre-push hook carries checkpoint data only when the push targets the
 elected remote; pushes to any other remote or to a raw URL sync nothing, on

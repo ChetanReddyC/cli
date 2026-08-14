@@ -81,8 +81,15 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// remote selected by this push. The gate must stay BELOW
 	// resolvePushSettings: hasCheckpointURL is only known after resolution,
 	// so hoisting the gate above it would break the exemption.
-	if !ps.hasCheckpointURL() && !checkpointSyncAllowedForRemote(ctx, ps.remote) {
-		return nil
+	//
+	// Capture runs before the gate so that the push which elects a remote by
+	// evidence (push target agrees with the branch's declared push
+	// destination) is also the first push to carry checkpoints there.
+	if !ps.hasCheckpointURL() {
+		maybeCaptureCheckpointSyncRemote(ctx, ps.remote)
+		if !checkpointSyncAllowedForRemote(ctx, ps.remote) {
+			return nil
+		}
 	}
 
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
