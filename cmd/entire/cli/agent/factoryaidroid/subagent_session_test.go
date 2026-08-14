@@ -1,6 +1,7 @@
 package factoryaidroid
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,6 +79,45 @@ func TestResolveSubagentSession_RejectsPartialLink(t *testing.T) {
 			_, ok := (&FactoryAIDroidAgent{}).ResolveSubagentSession(path)
 
 			assert.False(t, ok)
+		})
+	}
+}
+
+func TestResolveSubagentSession_RejectsPathUnsafeIDs(t *testing.T) {
+	t.Parallel()
+
+	// Both IDs become path segments of the checkpoint's metadata directory, and
+	// the parent ID also names a file we stat. A transcript is a file on disk, so
+	// treat its contents as untrusted and fail closed rather than traversing.
+	tests := map[string]struct{ parent, toolUse string }{
+		"parent traverses":        {"../../etc", "toolu_1"},
+		"parent has separator":    {"a/b", "toolu_1"},
+		"parent is dot dot":       {"..", "toolu_1"},
+		"parent has glob":         {"sess*", "toolu_1"},
+		"parent has volume":       {"C:sess", "toolu_1"},
+		"parent starts with dash": {"-sess", "toolu_1"},
+		"tool use traverses":      {"parent-1", "../../etc"},
+		"tool use has separator":  {"parent-1", "a/b"},
+		"tool use has glob":       {"parent-1", "toolu_*"},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			line, err := json.Marshal(map[string]any{
+				"type":             "session_start",
+				"id":               "w",
+				"sessionTitle":     "worker: x",
+				"callingSessionId": tt.parent,
+				"callingToolUseId": tt.toolUse,
+			})
+			require.NoError(t, err)
+			path := writeTranscript(t, dir, "w", string(line), messageLine)
+
+			_, ok := (&FactoryAIDroidAgent{}).ResolveSubagentSession(path)
+
+			assert.False(t, ok, "a path-unsafe ID must not produce a subagent link")
 		})
 	}
 }

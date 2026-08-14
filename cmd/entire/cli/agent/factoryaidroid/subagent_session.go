@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // droidSessionStart is the first line of a Droid session transcript. A session
@@ -49,6 +50,17 @@ func (f *FactoryAIDroidAgent) ResolveSubagentSession(sessionRef string) (agent.S
 		return agent.SubagentSessionLink{}, false
 	}
 
+	// Both IDs become path segments — of the sibling transcript we stat below and
+	// of the checkpoint's metadata directory. Validate before either is joined
+	// into a path: the transcript is a file on disk, so its contents are an
+	// untrusted input even though Droid is the one that writes it.
+	if err := validation.ValidateAgentSessionID(start.CallingSessionID); err != nil {
+		return agent.SubagentSessionLink{}, false
+	}
+	if err := validation.ValidateToolUseID(start.CallingToolUseID); err != nil {
+		return agent.SubagentSessionLink{}, false
+	}
+
 	subagentType, description := parseDroidSessionTitle(start.SessionTitle)
 	return agent.SubagentSessionLink{
 		ParentSessionID:      start.CallingSessionID,
@@ -62,8 +74,11 @@ func (f *FactoryAIDroidAgent) ResolveSubagentSession(sessionRef string) (agent.S
 // droidSiblingTranscriptPath locates another session's transcript. Droid keeps
 // every session for a working directory as <session-id>.jsonl in one directory,
 // so a Worker's parent is always its sibling. Returns "" when absent.
+//
+// Callers must validate sessionID first; the guard here is belt-and-braces so
+// the function cannot be repurposed into statting an arbitrary path.
 func droidSiblingTranscriptPath(sessionRef, sessionID string) string {
-	if sessionID == "" {
+	if validation.ValidateAgentSessionID(sessionID) != nil {
 		return ""
 	}
 	path := filepath.Join(filepath.Dir(sessionRef), sessionID+".jsonl")

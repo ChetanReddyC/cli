@@ -1279,7 +1279,30 @@ func resolveSubagentSessionLink(
 	if !isSubagent {
 		return agent.SubagentSessionLink{}, false
 	}
-	logging.Debug(logging.WithComponent(ctx, "lifecycle"), "resolved subagent session",
+	// Both IDs are interpolated into metadata paths by
+	// SessionMetadataDirFromSessionID and TaskMetadataDir, neither of which
+	// sanitizes. Enforce it here rather than trusting each implementation: this
+	// is the one choke point every SubagentSessionResolver passes through, and
+	// it mirrors the ValidateSessionID checks the hook dispatcher already
+	// applies to IDs arriving from an agent.
+	logCtx := logging.WithComponent(ctx, "lifecycle")
+	if err := validation.ValidateAgentSessionID(link.ParentSessionID); err != nil {
+		logging.Warn(logCtx, "ignoring subagent session link with invalid parent session ID",
+			slog.String("error", err.Error()))
+		return agent.SubagentSessionLink{}, false
+	}
+	if err := validation.ValidateToolUseID(link.ToolUseID); err != nil {
+		logging.Warn(logCtx, "ignoring subagent session link with invalid tool use ID",
+			slog.String("error", err.Error()))
+		return agent.SubagentSessionLink{}, false
+	}
+	// An empty tool-use ID passes ValidateToolUseID (the field is optional
+	// elsewhere) but cannot name a task directory here.
+	if link.ToolUseID == "" {
+		logging.Warn(logCtx, "ignoring subagent session link with empty tool use ID")
+		return agent.SubagentSessionLink{}, false
+	}
+	logging.Debug(logCtx, "resolved subagent session",
 		slog.String("parent_session_id", link.ParentSessionID),
 		slog.String("tool_use_id", link.ToolUseID),
 		slog.String("subagent_type", link.SubagentType))
