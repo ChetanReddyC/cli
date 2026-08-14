@@ -15,16 +15,6 @@ import (
 // HooksFileName is the hooks config file used by Codex.
 const HooksFileName = "hooks.json"
 
-// entireHookPrefixes identifies Entire hook commands. The removed local-dev and
-// "go run" prefixes are retained so hooks installed by older versions are still
-// recognized — that is what lets InstallHooks replace them with the binary form
-// instead of leaving them pointed at repository content.
-var entireHookPrefixes = []string{
-	"entire ",
-	agent.LegacyLocalDevHookScript + " ",
-	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
-}
-
 // InstallHooks installs Codex hooks in .codex/hooks.json.
 func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
@@ -301,7 +291,7 @@ func dropStaleEntireHooks(groups []MatcherGroup, want ...string) ([]MatcherGroup
 	result := make([]MatcherGroup, 0, len(groups))
 	dropped := false
 	for _, group := range groups {
-		kept, d := agent.DropStaleManagedHooks(group.Hooks, hookEntryCommand, entireHookPrefixes, want)
+		kept, d := agent.DropStaleManagedHooks(group.Hooks, hookEntryCommand, want)
 		if d {
 			dropped = true
 		}
@@ -340,7 +330,7 @@ func addHook(groups []MatcherGroup, command string) []MatcherGroup {
 }
 
 func isEntireHook(command string) bool {
-	return agent.IsManagedHookCommand(command, entireHookPrefixes)
+	return agent.IsManagedHookCommand(command)
 }
 
 func hasEntireHook(groups []MatcherGroup) bool {

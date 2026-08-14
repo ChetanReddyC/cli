@@ -432,7 +432,7 @@ func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	ctx := context.Background()
 	ag := &ClaudeCodeAgent{}
 
-	legacyStop := legacyLocalDevHookCmdPrefix + "hooks claude-code stop"
+	legacyStop := testutil.LegacyClaudeProjectDirCommand("hooks claude-code stop")
 	seedClaudeSettings(t, tempDir, legacyStop)
 
 	// Sanity: the legacy shape must still be recognized as ours, otherwise it
@@ -482,7 +482,7 @@ func TestInstallHooks_ReplacesLegacyLocalDevHookAlongsideCurrent(t *testing.T) {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 	// Append a legacy hook next to the freshly installed current one.
-	appendClaudeStopHook(t, tempDir, legacyLocalDevHookCmdPrefix+"hooks claude-code stop")
+	appendClaudeStopHook(t, tempDir, testutil.LegacyClaudeProjectDirCommand("hooks claude-code stop"))
 
 	if _, err := ag.InstallHooks(ctx, false); err != nil {
 		t.Fatalf("second InstallHooks() error = %v", err)
@@ -504,7 +504,7 @@ func TestUninstallHooks_RemovesLegacyLocalDevHooks(t *testing.T) {
 	ctx := context.Background()
 	ag := &ClaudeCodeAgent{}
 
-	seedClaudeSettings(t, tempDir, legacyLocalDevHookCmdPrefix+"hooks claude-code stop")
+	seedClaudeSettings(t, tempDir, testutil.LegacyClaudeProjectDirCommand("hooks claude-code stop"))
 	if !ag.AreHooksInstalled(ctx) {
 		t.Fatal("legacy local-dev hooks should be detected as installed")
 	}

@@ -109,7 +109,7 @@ func TestInstallHooks_RewritesStaleRender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy := strings.ReplaceAll(extensionTemplate, entireCmdPlaceholder, agent.LegacyLocalDevHookScript)
+	legacy := strings.ReplaceAll(extensionTemplate, entireCmdPlaceholder, testutil.LegacyLocalDevCommand(""))
 	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +293,7 @@ func TestCheckHookConfig_LegacyLocalDevIsDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extensionPath: %v", err)
 	}
-	legacy := strings.ReplaceAll(extensionTemplate, entireCmdPlaceholder, agent.LegacyLocalDevHookScript)
+	legacy := strings.ReplaceAll(extensionTemplate, entireCmdPlaceholder, testutil.LegacyLocalDevCommand(""))
 	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}

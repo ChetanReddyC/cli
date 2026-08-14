@@ -435,6 +435,6 @@ func legacyLocalDevRender() string {
 	return strings.ReplaceAll(
 		renderPlugin(),
 		"command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks opencode",
-		"command -v "+agent.LegacyLocalDevHookScript+" >/dev/null 2>&1; then exit 0; fi; exec "+agent.LegacyLocalDevHookScript+" hooks opencode",
+		"command -v "+testutil.LegacyLocalDevCommand("")+" >/dev/null 2>&1; then exit 0; fi; exec "+testutil.LegacyLocalDevCommand("hooks opencode"),
 	)
 }

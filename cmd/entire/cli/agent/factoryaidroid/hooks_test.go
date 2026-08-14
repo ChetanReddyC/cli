@@ -111,7 +111,7 @@ func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	testutil.AssertLegacyHookReplaced(t,
 		filepath.Join(tempDir, ".factory", "settings.json"),
 		agentpkg.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine),
-		agentpkg.LegacyLocalDevHookScript+" hooks factoryai-droid stop",
+		testutil.LegacyLocalDevCommand("hooks factoryai-droid stop"),
 		func() {
 			if _, err := ag.InstallHooks(ctx, false); err != nil {
 				t.Fatalf("InstallHooks() error = %v", err)

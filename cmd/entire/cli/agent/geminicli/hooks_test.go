@@ -98,7 +98,7 @@ func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	testutil.AssertLegacyHookReplaced(t,
 		filepath.Join(tempDir, ".gemini", "settings.json"),
 		agentpkg.WrapProductionSilentHookCommand("entire hooks gemini after-agent"),
-		agentpkg.LegacyLocalDevHookScript+" hooks gemini after-agent",
+		testutil.LegacyLocalDevCommand("hooks gemini after-agent"),
 		func() {
 			if _, err := ag.InstallHooks(ctx, false); err != nil {
 				t.Fatalf("InstallHooks() error = %v", err)

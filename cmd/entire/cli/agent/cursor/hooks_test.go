@@ -327,7 +327,7 @@ func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	testutil.AssertLegacyHookReplaced(t,
 		filepath.Join(tempDir, ".cursor", HooksFileName),
 		agent.WrapProductionSilentHookCommandForOS("entire hooks cursor stop", agent.UseWindowsProductionHooks(ctx)),
-		agent.LegacyLocalDevHookScript+" hooks cursor stop",
+		testutil.LegacyLocalDevCommand("hooks cursor stop"),
 		func() {
 			if _, err := ag.InstallHooks(ctx, false); err != nil {
 				t.Fatalf("InstallHooks() error = %v", err)
@@ -547,7 +547,7 @@ func TestInstallHooks_DropsLegacyHookAlongsideCurrent(t *testing.T) {
 
 	configPath := filepath.Join(tempDir, ".cursor", HooksFileName)
 	current := agent.WrapProductionSilentHookCommandForOS("entire hooks cursor stop", agent.UseWindowsProductionHooks(ctx))
-	legacy := agent.LegacyLocalDevHookScript + " hooks cursor stop"
+	legacy := testutil.LegacyLocalDevCommand("hooks cursor stop")
 
 	testutil.AssertStaleHookDroppedAlongsideCurrent(t, configPath, current, legacy,
 		func() {

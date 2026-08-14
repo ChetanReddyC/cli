@@ -31,15 +31,6 @@ const (
 // HooksFileName is the hooks file used by Cursor.
 const HooksFileName = "hooks.json"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks. The
-// "go run" prefix is retained so hooks installed by older versions are still
-// recognized.
-var entireHookPrefixes = []string{
-	"entire ",
-	agent.LegacyLocalDevHookScript + " ",
-	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
-}
-
 // HookNames returns the hook verbs Cursor supports.
 // These become subcommands: entire hooks cursor <verb>
 func (c *CursorAgent) HookNames() []string {
@@ -350,7 +341,7 @@ func marshalCursorHookType(rawHooks map[string]json.RawMessage, hookType string,
 // current one, so both fired — for the removed local-dev mode that meant a script
 // inside the working tree kept running on every agent turn.
 func syncEntireHook(entries []CursorHookEntry, command string, count int) ([]CursorHookEntry, int, bool) {
-	entries, dropped := agent.DropStaleManagedHooks(entries, hookEntryCommand, entireHookPrefixes, []string{command})
+	entries, dropped := agent.DropStaleManagedHooks(entries, hookEntryCommand, []string{command})
 	if hookCommandExists(entries, command) {
 		return entries, count, dropped
 	}
@@ -370,7 +361,7 @@ func hookCommandExists(entries []CursorHookEntry, command string) bool {
 }
 
 func isEntireHook(command string) bool {
-	return agent.IsManagedHookCommand(command, entireHookPrefixes)
+	return agent.IsManagedHookCommand(command)
 }
 
 func hasEntireHook(entries []CursorHookEntry) bool {

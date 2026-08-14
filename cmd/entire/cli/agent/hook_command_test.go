@@ -163,12 +163,10 @@ func TestMissingEntireWarning(t *testing.T) {
 func TestIsManagedHookCommand_DirectPrefix(t *testing.T) {
 	t.Parallel()
 
-	prefixes := []string{"entire ", `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `}
-
-	if !IsManagedHookCommand("entire hooks codex stop", prefixes) {
+	if !IsManagedHookCommand("entire hooks codex stop") {
 		t.Fatal("expected direct entire command to match")
 	}
-	if !IsManagedHookCommand(`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks codex stop`, prefixes) {
+	if !IsManagedHookCommand(`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks codex stop`) {
 		t.Fatal("expected local-dev command to match")
 	}
 }
@@ -176,40 +174,23 @@ func TestIsManagedHookCommand_DirectPrefix(t *testing.T) {
 func TestIsManagedHookCommand_WrappedPrefix(t *testing.T) {
 	t.Parallel()
 
-	prefixes := []string{"entire "}
-
-	if !IsManagedHookCommand(
-		WrapProductionSilentHookCommand("entire hooks cursor stop"),
-		prefixes,
-	) {
+	if !IsManagedHookCommand(WrapProductionSilentHookCommand("entire hooks cursor stop")) {
 		t.Fatal("expected wrapped silent command to match")
 	}
-	if !IsManagedHookCommand(
-		WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", WarningFormatSingleLine),
-		prefixes,
-	) {
+	if !IsManagedHookCommand(WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", WarningFormatSingleLine)) {
 		t.Fatal("expected wrapped json warning command to match")
 	}
-	if !IsManagedHookCommand(
-		WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", WarningFormatSingleLine),
-		prefixes,
-	) {
+	if !IsManagedHookCommand(WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", WarningFormatSingleLine)) {
 		t.Fatal("expected wrapped plain text warning command to match")
 	}
-	if !IsManagedHookCommand(
-		WrapWindowsProductionSilentHookCommand("entire hooks codex stop"),
-		prefixes,
-	) {
+	if !IsManagedHookCommand(WrapWindowsProductionSilentHookCommand("entire hooks codex stop")) {
 		t.Fatal("expected windows wrapped silent command to match")
 	}
-	if !IsManagedHookCommand(
-		WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", WarningFormatSingleLine),
-		prefixes,
-	) {
+	if !IsManagedHookCommand(WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", WarningFormatSingleLine)) {
 		t.Fatal("expected windows wrapped json warning command to match")
 	}
 	nestedWindowsWrapper := `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`
-	if !IsManagedHookCommand(nestedWindowsWrapper, prefixes) {
+	if !IsManagedHookCommand(nestedWindowsWrapper) {
 		t.Fatal("expected nested windows wrapper to remain managed")
 	}
 }
@@ -217,15 +198,13 @@ func TestIsManagedHookCommand_WrappedPrefix(t *testing.T) {
 func TestIsManagedHookCommand_DoesNotMatchSubstring(t *testing.T) {
 	t.Parallel()
 
-	prefixes := []string{"entire ", `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `}
-
-	if IsManagedHookCommand(`echo "the entire workflow finished"`, prefixes) {
+	if IsManagedHookCommand(`echo "the entire workflow finished"`) {
 		t.Fatal("unexpected match for unrelated substring command")
 	}
-	if IsManagedHookCommand(`sh -c 'echo "the entire workflow finished"; exit 0'`, prefixes) {
+	if IsManagedHookCommand(`sh -c 'echo "the entire workflow finished"; exit 0'`) {
 		t.Fatal("unexpected match for unrelated wrapped shell command")
 	}
-	if IsManagedHookCommand(`sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec echo "the entire workflow finished"'`, prefixes) {
+	if IsManagedHookCommand(`sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec echo "the entire workflow finished"'`) {
 		t.Fatal("unexpected match for wrapper that does not exec an Entire hook")
 	}
 }
@@ -236,9 +215,8 @@ func TestIsManagedHookCommand_DoesNotMatchSubstring(t *testing.T) {
 func TestDropStaleManagedHooks(t *testing.T) {
 	t.Parallel()
 
-	prefixes := []string{"entire ", LegacyLocalDevHookScript + " "}
 	current := WrapProductionSilentHookCommand("entire hooks x stop")
-	legacy := LegacyLocalDevHookScript + " hooks x stop"
+	legacy := legacyHookCommandPrefixes[0] + "hooks x stop"
 	foreign := "echo not ours"
 
 	id := func(s string) string { return s }
@@ -274,7 +252,7 @@ func TestDropStaleManagedHooks(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			kept, dropped := DropStaleManagedHooks(tc.entries, id, prefixes, tc.want)
+			kept, dropped := DropStaleManagedHooks(tc.entries, id, tc.want)
 			if dropped != tc.wantDropped {
 				t.Errorf("dropped = %v, want %v", dropped, tc.wantDropped)
 			}
@@ -296,7 +274,7 @@ func TestDropStaleManagedHooks_NoOpReturnsInputSlice(t *testing.T) {
 	t.Parallel()
 
 	entries := []string{"entire hooks x stop"}
-	kept, dropped := DropStaleManagedHooks(entries, func(s string) string { return s }, []string{"entire "}, []string{"entire hooks x stop"})
+	kept, dropped := DropStaleManagedHooks(entries, func(s string) string { return s }, []string{"entire hooks x stop"})
 	if dropped {
 		t.Fatal("nothing should have been dropped")
 	}

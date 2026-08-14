@@ -102,3 +102,27 @@ func writeConfig(t *testing.T, path, content string) {
 		t.Fatalf("failed to write %s: %v", path, err)
 	}
 }
+
+// Legacy hook command shapes, for seeding a config an older Entire would have
+// written. They live in this test-only package deliberately: the agent package
+// keeps its recognized set unexported so production code cannot name — and
+// therefore cannot install — a command that runs Entire from the working tree.
+// Construction is available only to tests.
+//
+// suffix is the part after the launcher, e.g. "hooks cursor stop".
+const (
+	legacyGitRevParseLauncher      = `"$(git rev-parse --show-toplevel)"/scripts/entire-dev`
+	legacyClaudeProjectDirLauncher = "${CLAUDE_PROJECT_DIR}/scripts/entire-dev"
+)
+
+// LegacyLocalDevCommand builds the local-dev hook command for agents that
+// resolved the repo root by shelling out to git.
+func LegacyLocalDevCommand(suffix string) string {
+	return legacyGitRevParseLauncher + " " + suffix
+}
+
+// LegacyClaudeProjectDirCommand builds the local-dev hook command for Claude
+// Code, which had ${CLAUDE_PROJECT_DIR} and so did not need git.
+func LegacyClaudeProjectDirCommand(suffix string) string {
+	return legacyClaudeProjectDirLauncher + " " + suffix
+}

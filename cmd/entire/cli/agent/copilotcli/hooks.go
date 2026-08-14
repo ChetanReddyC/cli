@@ -20,15 +20,6 @@ const HooksFileName = "entire.json"
 // hooksDir is the directory within the repo where Copilot CLI looks for hook configs.
 const hooksDir = ".github/hooks"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks in the
-// bash field. The "go run" prefix is retained so hooks installed by older
-// versions are still recognized.
-var entireHookPrefixes = []string{
-	"entire ",
-	agent.LegacyLocalDevHookScript + " ",
-	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
-}
-
 // hookConfigKey maps our kebab-case hook names to camelCase JSON keys.
 var hookConfigKey = map[string]string{
 	HookNameUserPromptSubmitted: "userPromptSubmitted",
@@ -119,7 +110,7 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, force bool) (int, er
 		// Keep the matching entry rather than remove-and-re-add: entry-level
 		// fields (cwd, timeoutSec, env) live on the existing entry and a freshly
 		// constructed one would discard them.
-		kept, dropped := agent.DropStaleManagedHooks(entries, hookEntryBash, entireHookPrefixes, []string{cmd})
+		kept, dropped := agent.DropStaleManagedHooks(entries, hookEntryBash, []string{cmd})
 		if dropped {
 			staleDropped = true
 		}
@@ -331,7 +322,7 @@ func hookBashExists(entries []CopilotHookEntry, bash string) bool {
 func hookEntryBash(e CopilotHookEntry) string { return e.Bash }
 
 func isEntireHook(bash string) bool {
-	return agent.IsManagedHookCommand(bash, entireHookPrefixes)
+	return agent.IsManagedHookCommand(bash)
 }
 
 // hasEntireHook checks if any entry in the slice is an Entire hook.

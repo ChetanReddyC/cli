@@ -80,19 +80,34 @@ func MissingEntireWarning(format WarningFormat) string {
 	}
 }
 
-// LegacyLocalDevHookScript is the removed local-development hook launcher: a
-// repo-relative script whose path was resolved at hook runtime via git.
+// currentHookCommandPrefix is what every agent's hook commands begin with today:
+// the entire binary, resolved through PATH at hook runtime.
+const currentHookCommandPrefix = "entire "
+
+// legacyHookCommandPrefixes are the command shapes Entire wrote in the past and
+// must still recognize as its own, so hooks installed by older versions are
+// replaced rather than left in place beside a current one.
 //
-// It is retained for DETECTION ONLY. Hooks are never generated with it again —
-// pointing a hook at a path inside the working tree meant that whatever the
-// checked-out branch contained ran on every agent turn, and because local-dev
-// mode was honored from the committed .entire/settings.json, any repository
-// could opt its cloners into that. Agents keep matching this prefix so hooks
-// installed by older versions are recognized as ours and rewritten to the
-// binary form instead of being left in place.
+// These are DETECTION-ONLY, and unexported so that is enforced rather than
+// documented: production code outside this file cannot name them, so it cannot
+// splice one into a generated hook command. Every one of them runs Entire from
+// the working tree — pointing a hook at a path inside the checkout meant that
+// whatever the branch contained ran on every agent turn, and because local-dev
+// mode was honored from the committed .entire/settings.json, any repository could
+// opt its cloners into that. Tests that need to *build* one of these (to seed a
+// config an older version would have written) go through
+// agent/testutil, which is test-only by construction.
 //
-// Do not use this to build a hook command.
-const LegacyLocalDevHookScript = `"$(git rev-parse --show-toplevel)"/scripts/entire-dev`
+// Both path styles appear because agents resolved the repo root differently:
+// Claude Code has ${CLAUDE_PROJECT_DIR}, everyone else shelled out to git.
+// The whole set is matched for every agent — a hook naming any of them is ours
+// regardless of which agent's config it turned up in.
+var legacyHookCommandPrefixes = []string{
+	`"$(git rev-parse --show-toplevel)"/scripts/entire-dev `,
+	"${CLAUDE_PROJECT_DIR}/scripts/entire-dev ",
+	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
+	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go ",
+}
 
 // WrapProductionSilentHookCommand exits successfully without output when the
 // Entire CLI is missing from PATH.
@@ -208,12 +223,12 @@ const nestedWindowsProductionHookWrapperPrefix = `cmd.exe /d /s /c "where.exe en
 // working tree still executes on every agent turn. This lives here rather than in
 // each agent because it was independently re-derived six times and two of those
 // copies got it wrong, and because `dupl` cannot see duplication across packages.
-func DropStaleManagedHooks[E any](entries []E, commandOf func(E) string, prefixes, want []string) ([]E, bool) {
+func DropStaleManagedHooks[E any](entries []E, commandOf func(E) string, want []string) ([]E, bool) {
 	dropped := false
 	kept := make([]E, 0, len(entries))
 	for _, entry := range entries {
 		cmd := commandOf(entry)
-		if IsManagedHookCommand(cmd, prefixes) && !slices.Contains(want, cmd) {
+		if IsManagedHookCommand(cmd) && !slices.Contains(want, cmd) {
 			dropped = true
 			continue
 		}
@@ -227,10 +242,16 @@ func DropStaleManagedHooks[E any](entries []E, commandOf func(E) string, prefixe
 	return kept, true
 }
 
-// IsManagedHookCommand reports whether command is either a direct Entire hook
-// command or one of Entire's production wrapper forms that exec that command.
-func IsManagedHookCommand(command string, prefixes []string) bool {
-	if hasManagedHookPrefix(command, prefixes) {
+// IsManagedHookCommand reports whether command is one Entire wrote: the current
+// form or any shape an older version wrote, either bare or inside one of Entire's
+// production wrapper forms.
+//
+// The recognized set is owned here rather than passed in. Each agent previously
+// declared its own copy, which meant six near-identical literals that a new agent
+// could silently omit — and omitting the legacy entries is precisely what leaves
+// an old hook installed forever.
+func IsManagedHookCommand(command string) bool {
+	if hasManagedHookPrefix(command) {
 		return true
 	}
 	if strings.HasPrefix(command, productionHookWrapperPrefix) {
@@ -239,7 +260,7 @@ func IsManagedHookCommand(command string, prefixes []string) bool {
 			return false
 		}
 
-		return hasManagedHookPrefix(wrappedCommand, prefixes)
+		return hasManagedHookPrefix(wrappedCommand)
 	}
 	if strings.HasPrefix(command, windowsProductionHookWrapperPrefix) ||
 		strings.HasPrefix(command, nestedWindowsProductionHookWrapperPrefix) {
@@ -253,13 +274,16 @@ func IsManagedHookCommand(command string, prefixes []string) bool {
 		wrappedCommand := command[idx+len(elseMarker):]
 		wrappedCommand = strings.TrimSuffix(wrappedCommand, `"`)
 		wrappedCommand = strings.TrimSuffix(wrappedCommand, `)`)
-		return hasManagedHookPrefix(wrappedCommand, prefixes)
+		return hasManagedHookPrefix(wrappedCommand)
 	}
 	return false
 }
 
-func hasManagedHookPrefix(command string, prefixes []string) bool {
-	for _, prefix := range prefixes {
+func hasManagedHookPrefix(command string) bool {
+	if strings.HasPrefix(command, currentHookCommandPrefix) {
+		return true
+	}
+	for _, prefix := range legacyHookCommandPrefixes {
 		if strings.HasPrefix(command, prefix) {
 			return true
 		}

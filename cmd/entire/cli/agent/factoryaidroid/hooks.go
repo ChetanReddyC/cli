@@ -36,15 +36,6 @@ const FactorySettingsFileName = "settings.json"
 // metadataDenyRule blocks Factory Droid from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks. The
-// "go run" prefix is retained so hooks installed by older versions are still
-// recognized.
-var entireHookPrefixes = []string{
-	"entire ",
-	agent.LegacyLocalDevHookScript + " ",
-	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
-}
-
 // InstallHooks installs Factory AI Droid hooks in .factory/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
@@ -470,7 +461,7 @@ func addHookToMatcher(matchers []FactoryHookMatcher, matcherName, command string
 
 // isEntireHook checks if a command is an Entire hook
 func isEntireHook(command string) bool {
-	return agent.IsManagedHookCommand(command, entireHookPrefixes)
+	return agent.IsManagedHookCommand(command)
 }
 
 // dropStaleEntireHooks removes Entire-owned hooks whose command is not one of
@@ -482,7 +473,7 @@ func dropStaleEntireHooks(matchers []FactoryHookMatcher, want ...string) ([]Fact
 	result := make([]FactoryHookMatcher, 0, len(matchers))
 	dropped := false
 	for _, matcher := range matchers {
-		kept, d := agent.DropStaleManagedHooks(matcher.Hooks, hookEntryCommand, entireHookPrefixes, want)
+		kept, d := agent.DropStaleManagedHooks(matcher.Hooks, hookEntryCommand, want)
 		if d {
 			dropped = true
 		}

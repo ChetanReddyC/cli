@@ -56,23 +56,6 @@ const ClaudeSettingsFileName = "settings.json"
 // metadataDenyRule blocks Claude from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
 
-// legacyLocalDevHookCmdPrefix is the removed local-dev command prefix: a script
-// inside the working tree, reached through ${CLAUDE_PROJECT_DIR}.
-//
-// Retained for DETECTION ONLY, so hooks written by older versions are still
-// recognized as ours and replaced with the binary form. Never generate a hook
-// command from it — see agent.LegacyLocalDevHookScript for why.
-const legacyLocalDevHookCmdPrefix = "${CLAUDE_PROJECT_DIR}/scripts/entire-dev "
-
-// entireHookPrefixes are command prefixes that identify Entire hooks. The
-// removed local-dev and "go run" prefixes are retained so hooks installed by
-// older versions are still recognized for removal/upgrade.
-var entireHookPrefixes = []string{
-	"entire ",
-	legacyLocalDevHookCmdPrefix,
-	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go ",
-}
-
 // InstallHooks installs Claude Code hooks in .claude/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
@@ -607,7 +590,7 @@ func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string)
 
 // isEntireHook checks if a command is an Entire hook (old or new format)
 func isEntireHook(command string) bool {
-	return agent.IsManagedHookCommand(command, entireHookPrefixes)
+	return agent.IsManagedHookCommand(command)
 }
 
 // dropStaleEntireHooks removes Entire-owned hooks whose command is not one of
@@ -619,7 +602,7 @@ func dropStaleEntireHooks(matchers []ClaudeHookMatcher, want ...string) ([]Claud
 	result := make([]ClaudeHookMatcher, 0, len(matchers))
 	dropped := false
 	for _, matcher := range matchers {
-		kept, d := agent.DropStaleManagedHooks(matcher.Hooks, hookEntryCommand, entireHookPrefixes, want)
+		kept, d := agent.DropStaleManagedHooks(matcher.Hooks, hookEntryCommand, want)
 		if d {
 			dropped = true
 		}

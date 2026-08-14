@@ -239,7 +239,7 @@ func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	testutil.AssertLegacyHookReplaced(t,
 		filepath.Join(tempDir, ".github", "hooks", HooksFileName),
 		agent.WrapProductionSilentHookCommand("entire hooks copilot-cli agent-stop"),
-		agent.LegacyLocalDevHookScript+" hooks copilot-cli agent-stop",
+		testutil.LegacyLocalDevCommand("hooks copilot-cli agent-stop"),
 		func() {
 			if _, err := ag.InstallHooks(ctx, false); err != nil {
 				t.Fatalf("InstallHooks() error = %v", err)
