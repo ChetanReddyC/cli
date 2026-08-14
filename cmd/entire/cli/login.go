@@ -744,9 +744,18 @@ func readLoginURLActionFromTTY(ctx context.Context, errW io.Writer, tty *os.File
 		return loginURLNone, nil
 	}
 
+	// Defensive: unreachable as configured. Run() only returns a nil error via a
+	// graceful QuitMsg, whose sole source here is the tea.Quit below — returned
+	// only once selected is set — because WithoutSignalHandler removes
+	// InterruptMsg and eventLoop's other nil returns imply a cancelled context,
+	// which the check above already caught. Degrade rather than abort anyway: a
+	// future keybinding, filter, or signal handler could arm this branch, and
+	// losing keyboard access must never kill a sign-in the visible URL can still
+	// complete.
 	result, ok := finalModel.(loginURLActionModel)
 	if !ok || !result.selected {
-		return loginURLNone, errors.New("login URL prompt exited without an action")
+		fmt.Fprintln(errW, "Warning: keyboard actions unavailable; open the login URL above to continue.")
+		return loginURLNone, nil
 	}
 	// Bubble Tea puts the TTY in raw mode, so Ctrl-C arrives as a keypress
 	// instead of SIGINT. Record the equivalent process signal before returning
