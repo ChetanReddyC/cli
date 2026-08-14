@@ -40,21 +40,25 @@ type NamedBlob struct {
 // caller's hot-path code clean. Enabled with zero effective categories
 // is different: that returns ErrOPFNoEnabledCategories, because the
 // caller is about to stamp the Entire-OPF-Applied trailer and a silent
-// regex-only success here would make that attestation false. The
-// zero-categories check runs BEFORE the breaker check so the guarantee
-// is unconditional — a tripped breaker must not downgrade the
+// regex-only success here would make that attestation false. Enabled
+// with a nil runtime errors for the same reason. Both fail-closed
+// checks run BEFORE the breaker check so the guarantee is
+// unconditional — a tripped breaker must not downgrade a
 // misconfiguration back into silent regex-only success.
 func BatchBytesWithPrivacyFilter(ctx context.Context, inputs []NamedBlob) ([][]byte, error) {
 	if len(inputs) == 0 {
 		return nil, nil
 	}
 	cfg := getOPFConfig()
-	if cfg == nil || !cfg.Enabled || cfg.runtime == nil {
+	if cfg == nil || !cfg.Enabled {
 		return applyRegexLayersToBlobs(inputs), nil
 	}
 	cats := enabledCategories(cfg)
 	if len(cats) == 0 {
 		return nil, ErrOPFNoEnabledCategories
+	}
+	if cfg.runtime == nil {
+		return nil, errOPFNilRuntime
 	}
 	if opfBreakerTripped.Load() {
 		return applyRegexLayersToBlobs(inputs), nil

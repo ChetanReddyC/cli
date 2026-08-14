@@ -114,10 +114,14 @@ func (e *OPFRuntimeFailedError) Unwrap() error {
 // cannot run. Proceeding would stamp Entire-OPF-Applied on commits OPF
 // never saw, and later rewrites would skip them permanently — even
 // after the user fixes the config. Abort the push with remediation
-// instead. The rewrite-level gate is deliberately unconditional: it
-// aborts even a re-parent-only push (every unpushed commit already
-// tagged), keeping the invariant simple rather than poking a
-// no-new-stamping hole through it.
+// instead. Two gates enforce this: the decision gate in prePush runs
+// whenever OPF is enabled, with no knowledge of whether anything is
+// unpushed, so a misconfigured repo aborts every push — including one
+// with nothing to rewrite. The rewrite-level gate in
+// RewriteUnpushedV1WithOPF sits after the no-work early returns and
+// fires only when commits are unpushed; it deliberately aborts even a
+// re-parent-only push (every unpushed commit already tagged) rather
+// than poking a no-new-stamping hole through the invariant.
 type OPFNoCategoriesError struct{}
 
 func (e *OPFNoCategoriesError) Error() string {

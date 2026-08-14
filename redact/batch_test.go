@@ -513,6 +513,7 @@ func TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesWinsOverBreaker(t *testi
 	fake := &fakeRuntime{}
 	configureFakeOPF(t, fake, map[string]bool{})
 	opfBreakerTripped.Store(true)
+	t.Cleanup(func() { opfBreakerTripped.Store(false) })
 
 	inputs := []NamedBlob{
 		{Name: "x.jsonl", Content: []byte(`{"text":"Alice met Bob"}`)},
@@ -520,6 +521,33 @@ func TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesWinsOverBreaker(t *testi
 	out, err := BatchBytesWithPrivacyFilter(context.Background(), inputs)
 	if !errors.Is(err, ErrOPFNoEnabledCategories) {
 		t.Fatalf("want ErrOPFNoEnabledCategories despite tripped breaker, got %v", err)
+	}
+	if out != nil {
+		t.Errorf("want nil output on fail-closed error, got %d blobs", len(out))
+	}
+}
+
+// TestBatchBytesWithPrivacyFilter_NilRuntimeFailsClosed pins that an
+// enabled config with a nil runtime errors instead of silently
+// returning regex-only output — the caller stamps the
+// Entire-OPF-Applied trailer on any nil-error return. Unreachable
+// through ConfigurePrivacyFilter (it always constructs the shell-out
+// runtime), but the guarantee must hold by construction, not by that
+// property of the config lifecycle.
+func TestBatchBytesWithPrivacyFilter_NilRuntimeFailsClosed(t *testing.T) {
+	resetOPFConfig()
+	t.Cleanup(resetOPFConfig)
+	ConfigurePrivacyFilterWithRuntime(OPFConfig{
+		Enabled:    true,
+		Categories: map[string]bool{"private_person": true},
+	}, nil)
+
+	inputs := []NamedBlob{
+		{Name: "x.jsonl", Content: []byte(`{"text":"Alice met Bob"}`)},
+	}
+	out, err := BatchBytesWithPrivacyFilter(context.Background(), inputs)
+	if !errors.Is(err, errOPFNilRuntime) {
+		t.Fatalf("want errOPFNilRuntime, got %v", err)
 	}
 	if out != nil {
 		t.Errorf("want nil output on fail-closed error, got %d blobs", len(out))

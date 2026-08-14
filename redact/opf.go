@@ -112,6 +112,16 @@ var ErrOPFNoEnabledCategories = errors.New(
 		"redaction.openai_privacy_filter.categories in .entire/settings.json " +
 		"(or .entire/settings.local.json), or set enabled: false")
 
+// errOPFNilRuntime guards the trailer-stamping batch path against a
+// config that is enabled but carries no runtime. Unreachable through
+// ConfigurePrivacyFilter, which always constructs the shell-out
+// runtime; only ConfigurePrivacyFilterWithRuntime can produce it. The
+// no-silent-regex-only guarantee must hold by construction, not by
+// that property of the config lifecycle.
+var errOPFNilRuntime = errors.New(
+	"openai privacy filter is enabled but has no runtime; " +
+		"refusing regex-only output on the trailer-stamping path")
+
 // OPFMisconfiguredNoCategories reports whether OPF is enabled for this
 // process with an empty effective category set — the state described by
 // ErrOPFNoEnabledCategories. The pre-push flow checks this twice: when
