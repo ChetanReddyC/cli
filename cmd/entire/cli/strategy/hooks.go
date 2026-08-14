@@ -243,17 +243,38 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 		if !strings.Contains(content, entireHookMarker) {
 			return GitHooksAbsent
 		}
-		for _, launcher := range legacyGitHookLaunchers {
-			if strings.Contains(content, launcher) {
-				outdated = true
-				break
-			}
+		if entireHookLineRunsFromWorkingTree(content) {
+			outdated = true
 		}
 	}
 	if outdated {
 		return GitHooksOutdated
 	}
 	return GitHooksCurrent
+}
+
+// entireHookLineRunsFromWorkingTree reports whether the hook's OWN Entire
+// invocation names a legacy launcher.
+//
+// Scoped to the invocation line, not the whole file. A user may hand-edit a hook
+// Entire installed to append their own steps, and one of those steps containing
+// `go run ` must not make the file read as ours-but-stale: InstallGitHook only
+// backs up a hook that does NOT carry entireHookMarker, so a hand-edited hook is
+// rewritten with no backup and a false positive here would silently discard their
+// additions. Every generated invocation contains `hooks git `, so keying on that
+// line separates Entire's command from anything around it.
+func entireHookLineRunsFromWorkingTree(content string) bool {
+	for line := range strings.SplitSeq(content, "\n") {
+		if !strings.Contains(line, "hooks git ") {
+			continue
+		}
+		for _, launcher := range legacyGitHookLaunchers {
+			if strings.Contains(line, launcher) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // buildHookSpecs returns the hook specifications for all managed hooks.

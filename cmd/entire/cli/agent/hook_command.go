@@ -80,9 +80,17 @@ func MissingEntireWarning(format WarningFormat) string {
 	}
 }
 
-// currentHookCommandPrefix is what every agent's hook commands begin with today:
-// the entire binary, resolved through PATH at hook runtime.
-const currentHookCommandPrefix = "entire "
+// currentHookCommandPrefix is what every hook command Entire generates begins
+// with today: the entire binary resolved through PATH, then the `hooks`
+// subcommand.
+//
+// Scoped to `hooks ` rather than just `entire `, because this predicate decides
+// what gets DELETED. Every command Entire writes is `entire hooks <target>
+// <verb>`, so anything else invoking the binary — a user's own hook running
+// `entire search …` or `entire status --json` — is theirs, not ours to remove.
+// That distinction did not matter while removal only happened under --force; it
+// matters now that stale hooks are dropped on every install.
+const currentHookCommandPrefix = "entire hooks "
 
 // legacyHookCommandPrefixes are the command shapes Entire wrote in the past and
 // must still recognize as its own, so hooks installed by older versions are
@@ -102,11 +110,14 @@ const currentHookCommandPrefix = "entire "
 // Claude Code has ${CLAUDE_PROJECT_DIR}, everyone else shelled out to git.
 // The whole set is matched for every agent — a hook naming any of them is ours
 // regardless of which agent's config it turned up in.
+// Each ends with `hooks ` for the same reason as currentHookCommandPrefix: a
+// launcher invoking the CLI for something other than a generated hook is not
+// ours to delete.
 var legacyHookCommandPrefixes = []string{
-	`"$(git rev-parse --show-toplevel)"/scripts/entire-dev `,
-	"${CLAUDE_PROJECT_DIR}/scripts/entire-dev ",
-	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
-	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go ",
+	`"$(git rev-parse --show-toplevel)"/scripts/entire-dev hooks `,
+	"${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks ",
+	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks `,
+	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks ",
 }
 
 // WrapProductionSilentHookCommand exits successfully without output when the

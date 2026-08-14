@@ -216,7 +216,7 @@ func TestDropStaleManagedHooks(t *testing.T) {
 	t.Parallel()
 
 	current := WrapProductionSilentHookCommand("entire hooks x stop")
-	legacy := legacyHookCommandPrefixes[0] + "hooks x stop"
+	legacy := legacyHookCommandPrefixes[0] + "x stop"
 	foreign := "echo not ours"
 
 	id := func(s string) string { return s }
@@ -280,5 +280,42 @@ func TestDropStaleManagedHooks_NoOpReturnsInputSlice(t *testing.T) {
 	}
 	if &kept[0] != &entries[0] {
 		t.Error("no-op should hand back the input slice rather than a copy")
+	}
+}
+
+// TestIsManagedHookCommand_LeavesUserCommandsAlone pins that invoking the entire
+// binary for something other than a generated hook is NOT ours.
+//
+// This predicate decides what gets deleted, and stale hooks are now dropped on
+// every install rather than only under --force. A broad `entire ` prefix would
+// therefore silently delete a user's own hook that happens to shell out to the
+// CLI, on a routine `entire enable`.
+func TestIsManagedHookCommand_LeavesUserCommandsAlone(t *testing.T) {
+	t.Parallel()
+
+	notOurs := []string{
+		"entire search foo | notify-send",
+		"entire status --json > /tmp/status",
+		"entire why HEAD",
+		"entirely-different-tool run",
+		// A legacy launcher path, but not driving a generated hook.
+		strings.TrimSuffix(legacyHookCommandPrefixes[0], "hooks ") + "search foo",
+	}
+	for _, command := range notOurs {
+		if IsManagedHookCommand(command) {
+			t.Errorf("IsManagedHookCommand(%q) = true; a command Entire never generated must not be deletable", command)
+		}
+	}
+
+	ours := []string{
+		"entire hooks copilot-cli agent-stop",
+		"entire hooks git pre-push",
+		WrapProductionSilentHookCommand("entire hooks cursor stop"),
+		legacyHookCommandPrefixes[0] + "cursor stop",
+	}
+	for _, command := range ours {
+		if !IsManagedHookCommand(command) {
+			t.Errorf("IsManagedHookCommand(%q) = false; Entire generated this and must recognize it", command)
+		}
 	}
 }

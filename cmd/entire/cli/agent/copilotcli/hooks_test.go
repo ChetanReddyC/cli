@@ -689,3 +689,44 @@ func assertEntryComment(t *testing.T, entries []CopilotHookEntry, comment string
 	}
 	t.Errorf("hook with comment %q not found", comment)
 }
+
+// TestInstallHooks_PreservesUserCommandInvokingEntire pins that a hook the user
+// wrote themselves survives a plain install even though it shells out to the
+// entire binary.
+//
+// Stale Entire hooks are dropped on every install now, not only under --force, so
+// the ownership predicate is what stands between "replace our old hook" and
+// "delete the user's". A prefix as broad as `entire ` would silently remove this
+// on a routine `entire enable`.
+func TestInstallHooks_PreservesUserCommandInvokingEntire(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	ctx := context.Background()
+	ag := &CopilotCLIAgent{}
+
+	if _, err := ag.InstallHooks(ctx, false); err != nil {
+		t.Fatalf("first InstallHooks() error = %v", err)
+	}
+
+	const userCmd = "entire search 'flaky test' | tee /tmp/flaky.txt"
+	hooksFile := readHooksFile(t, tempDir)
+	hooksFile.Hooks.AgentStop = append(hooksFile.Hooks.AgentStop, CopilotHookEntry{
+		Type: "command", Bash: userCmd, Comment: "mine",
+	})
+	writeHooksFile(t, tempDir, hooksFile)
+
+	if _, err := ag.InstallHooks(ctx, false); err != nil {
+		t.Fatalf("second InstallHooks() error = %v", err)
+	}
+
+	after := readHooksFile(t, tempDir)
+	var found bool
+	for _, entry := range after.Hooks.AgentStop {
+		if entry.Bash == userCmd {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("a user-authored hook invoking the entire binary was deleted by a plain install:\n%+v", after.Hooks.AgentStop)
+	}
+}

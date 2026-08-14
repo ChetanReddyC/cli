@@ -800,6 +800,56 @@ func TestCheckGitHookState(t *testing.T) {
 	})
 }
 
+// TestCheckGitHookState_UserAdditionsAreNotDrift pins that a hook Entire
+// installed and the user then hand-edited is not classified as stale just because
+// one of their own lines mentions `go run` or the old launcher path.
+//
+// The classification decides whether EnsureSetup rewrites the file, and
+// InstallGitHook only backs up a hook that does NOT carry entireHookMarker — so a
+// hand-edited hook is overwritten with no backup. A whole-file substring match
+// would therefore silently discard the user's additions.
+func TestCheckGitHookState_UserAdditionsAreNotDrift(t *testing.T) {
+	t.Parallel()
+
+	for _, userLine := range []string{
+		"go run ./tools/mylint.go",
+		"sh ./scripts/entire-dev-notes.sh",
+	} {
+		dir := t.TempDir()
+		for _, hook := range gitHookNames {
+			content := "#!/bin/sh\n# " + entireHookMarker + "\n" +
+				"if command -v entire >/dev/null 2>&1; then entire hooks git " + hook + "; else :; fi\n" +
+				userLine + "\n"
+			if err := os.WriteFile(filepath.Join(dir, hook), []byte(content), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+			t.Errorf("a hook whose own Entire line is current must read Current despite the user line %q, got %v", userLine, got)
+		}
+	}
+}
+
+// TestCheckGitHookState_LegacyEntireLineIsStillDrift is the other half: when the
+// legacy launcher is on Entire's OWN invocation line, that is genuinely our stale
+// hook and must be replaced, user additions around it notwithstanding.
+func TestCheckGitHookState_LegacyEntireLineIsStillDrift(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	for _, hook := range gitHookNames {
+		content := "#!/bin/sh\n# " + entireHookMarker + "\n" +
+			"./scripts/entire-dev hooks git " + hook + "\n" +
+			"echo my own step\n"
+		if err := os.WriteFile(filepath.Join(dir, hook), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
+		t.Errorf("a legacy launcher on Entire's own invocation line must read Outdated, got %v", got)
+	}
+}
+
 // writeCurrentManagedHooks writes every managed hook in the shape this version
 // installs. Tests that need a variant overwrite an individual hook afterwards.
 func writeCurrentManagedHooks(t *testing.T, dir string) {
