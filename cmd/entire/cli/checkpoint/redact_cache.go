@@ -51,10 +51,14 @@ import (
 // split on.
 
 const (
-	// redactCacheDirName sits in the git common dir, NOT under .entire/, because
+	// RedactCacheDirName sits in the git common dir, NOT under .entire/, because
 	// anything inside the worktree metadata directory would be walked into the
 	// checkpoint tree and committed.
-	redactCacheDirName = "entire-redact-cache"
+	//
+	// Exported so `entire clean` can reclaim it: every entry is derived data that
+	// is rebuilt on the next checkpoint, so the whole directory is safe to delete
+	// at any time.
+	RedactCacheDirName = "entire-redact-cache"
 
 	// redactCacheMinBytes is the file size below which incremental reuse is not
 	// worth its bookkeeping; a small file redacts in milliseconds.
@@ -90,7 +94,7 @@ func newRedactCache(gitCommonDir string) *redactCache {
 	if gitCommonDir == "" {
 		return nil
 	}
-	dir := filepath.Join(gitCommonDir, redactCacheDirName)
+	dir := filepath.Join(gitCommonDir, RedactCacheDirName)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil
 	}

@@ -317,7 +317,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	}
 
 	// Group items by type for display
-	var branches, states, checkpoints []strategy.CleanupItem
+	var branches, states, checkpoints, redactCaches []strategy.CleanupItem
 	for _, item := range items {
 		switch item.Type {
 		case strategy.CleanupTypeShadowBranch:
@@ -326,6 +326,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 			states = append(states, item)
 		case strategy.CleanupTypeCheckpoint:
 			checkpoints = append(checkpoints, item)
+		case strategy.CleanupTypeRedactCache:
+			redactCaches = append(redactCaches, item)
 		}
 	}
 
@@ -337,6 +339,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printSection(w, "Shadow branches", cleanupItemIDs(branches))
 		printSection(w, "Session states", cleanupItemIDs(states))
 		printSection(w, "Checkpoint metadata", cleanupItemIDs(checkpoints))
+		printSection(w, "Redaction cache", cleanupItemIDs(redactCaches))
 		printSection(w, "Temp files", tempFiles)
 
 		if dryRun {
