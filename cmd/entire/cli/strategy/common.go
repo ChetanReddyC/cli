@@ -788,6 +788,19 @@ func healPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Repository, 
 		logging.Debug(ctx, "checkpoint-remote: skipping empty-orphan heal outside explicit enable flow")
 		return false, nil
 	}
+	if primaryIsGitRefs(ctx) {
+		// Same reasoning as the bootstrap: under git-refs nothing writes v1, so a
+		// data-free orphan cannot diverge from the remote and there is nothing to
+		// protect at enable time. Healing it here would make `entire enable` pull
+		// the whole transcript archive — the exact cost this backend's gating
+		// exists to avoid — for a branch only legacy reads consult.
+		//
+		// The orphan does hide those legacy reads (it makes the ref resolve), so
+		// the read path treats a data-free branch as a miss and recovers it on
+		// demand; see checkpoint.getSessionsBranchTree.
+		logging.Debug(ctx, "checkpoint-remote: skipping empty-orphan heal under git-refs primary")
+		return false, nil
+	}
 	return healEmptyOrphanFromCheckpointRemote(ctx, repo, primary)
 }
 

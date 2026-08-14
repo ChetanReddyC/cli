@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 )
 
 // dropV1Branch removes the local v1 ref after capturing its hash, modelling a
@@ -129,4 +133,83 @@ func TestGetSessionsBranchTree_FetchFailureKeepsOriginalError(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, wantErr.Error(), err.Error(),
 		"a failed fetch should leave the original not-found error intact")
+}
+
+// TestGetSessionsBranchTree_RecoversFromDataFreeOrphan pins that a branch which
+// resolves but carries no checkpoint data triggers recovery just like a missing
+// one.
+//
+// This is the case a ref-missing trigger cannot see. A repo left holding an
+// un-initialized v1 orphan — created before the primary was switched to
+// git-refs, where enable no longer heals it — resolves the ref cleanly, so
+// without this the miss is masked and the real checkpoints on the checkpoint
+// remote stay permanently unreachable.
+func TestGetSessionsBranchTree_RecoversFromDataFreeOrphan(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	seedBranchCheckpoint(t, store, cid, "s1")
+	realHash := dropV1Branch(t, repo)
+
+	// Stand up an orphan carrying nothing but init artifacts, the shape enable
+	// used to leave behind, and point v1 at it.
+	orphan := emptyOrphanCommit(t, repo)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(DefaultV1Refs().Primary, orphan)))
+
+	// It resolves, so the ref-missing trigger stays silent...
+	tree, err := store.getSessionsBranchTree(t.Context())
+	require.NoError(t, err, "a data-free orphan still resolves")
+	assert.False(t, treeHasCheckpointData(tree), "precondition: the orphan carries no checkpoint data")
+
+	// ...but with a fetcher wired, the data-free branch is treated as a miss.
+	store.metadataBranchFetchTried = false
+	calls := 0
+	store.SetMetadataBranchFetcher(func(_ context.Context) error {
+		calls++
+		return repo.Storer.SetReference(plumbing.NewHashReference(DefaultV1Refs().Primary, realHash))
+	})
+
+	recovered, err := store.getSessionsBranchTree(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 1, calls, "a data-free branch should trigger recovery")
+	_, err = recovered.Tree(cid.Path())
+	require.NoError(t, err, "recovered tree should carry the real checkpoint")
+}
+
+// emptyOrphanCommit creates a commit whose tree holds only the vercel.json init
+// artifact — the "un-initialized orphan" shape strategy.metadataBranchHasData
+// treats as data-free.
+func emptyOrphanCommit(t *testing.T, repo *git.Repository) plumbing.Hash {
+	t.Helper()
+	blob := repo.Storer.NewEncodedObject()
+	blob.SetType(plumbing.BlobObject)
+	w, err := blob.Writer()
+	require.NoError(t, err)
+	_, err = w.Write([]byte("{}\n"))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	blobHash, err := repo.Storer.SetEncodedObject(blob)
+	require.NoError(t, err)
+
+	tree := &object.Tree{Entries: []object.TreeEntry{
+		{Name: vercelconfig.FileName, Mode: filemode.Regular, Hash: blobHash},
+	}}
+	treeObj := repo.Storer.NewEncodedObject()
+	require.NoError(t, tree.Encode(treeObj))
+	treeHash, err := repo.Storer.SetEncodedObject(treeObj)
+	require.NoError(t, err)
+
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	commit := &object.Commit{
+		Message:   "init orphan",
+		TreeHash:  treeHash,
+		Author:    object.Signature{Name: "t", Email: "t@example.com", When: when},
+		Committer: object.Signature{Name: "t", Email: "t@example.com", When: when},
+	}
+	commitObj := repo.Storer.NewEncodedObject()
+	require.NoError(t, commit.Encode(commitObj))
+	commitHash, err := repo.Storer.SetEncodedObject(commitObj)
+	require.NoError(t, err)
+	return commitHash
 }

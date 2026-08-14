@@ -2232,29 +2232,61 @@ func (s *GitStore) getFetchingTree(ctx context.Context) (*FetchingTree, error) {
 // dedicated checkpoint_remote: the branch is absent locally, and origin does not
 // carry it either (checkpoints were never pushed there), so without the fetch
 // every committed checkpoint reads as "not found" with no way to recover.
+//
+// Recovery triggers on a data-free branch as well as a missing one. A local
+// orphan carrying nothing but initialization artifacts is, to a reader,
+// indistinguishable from no branch at all — but it makes the ref resolve, which
+// would otherwise mask the miss and leave the real checkpoints on the remote
+// permanently unreachable.
 func (s *GitStore) getSessionsBranchTree(ctx context.Context) (*object.Tree, error) {
-	ref, err := s.resolveSessionsBranchRef()
-	if err != nil && s.tryFetchMetadataBranch(ctx) {
-		// Recovered: re-resolve. On failure keep the original not-found error —
-		// callers such as List treat not-found as an empty result, so surfacing a
-		// transport error here would turn an offline read into a hard failure.
-		ref, err = s.resolveSessionsBranchRef()
+	tree, err := s.resolveSessionsBranchTree()
+	if err != nil || !treeHasCheckpointData(tree) {
+		if s.tryFetchMetadataBranch(ctx) {
+			if fetched, fetchedErr := s.resolveSessionsBranchTree(); fetchedErr == nil {
+				return fetched, nil
+			}
+		}
 	}
+	// Unrecovered: return what we resolved locally. Keeping the original error
+	// matters — callers such as List treat not-found as an empty result, so
+	// surfacing a transport error here would turn an offline read into a hard
+	// failure — and so does keeping a data-free tree, which reads as empty.
+	return tree, err
+}
+
+// resolveSessionsBranchTree resolves the read ref and loads its root tree.
+// Purely local: no network.
+func (s *GitStore) resolveSessionsBranchTree() (*object.Tree, error) {
+	ref, err := s.resolveSessionsBranchRef()
 	if err != nil {
 		return nil, err
 	}
-
 	commit, err := s.repo.CommitObject(ref.Hash())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get commit object: %w", err)
 	}
-
 	tree, err := commit.Tree()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get commit tree: %w", err)
 	}
-
 	return tree, nil
+}
+
+// treeHasCheckpointData reports whether a metadata branch root tree holds
+// anything beyond orphan-initialization artifacts. It mirrors
+// strategy.metadataBranchHasData, which decides the same question when healing
+// an un-initialized orphan; the two must agree on what "un-initialized" means or
+// enable and read disagree about whether a branch is worth recovering.
+func treeHasCheckpointData(tree *object.Tree) bool {
+	if tree == nil {
+		return false
+	}
+	for _, entry := range tree.Entries {
+		if entry.Name != vercelconfig.FileName {
+			return true
+		}
+	}
+	return false
 }
 
 // tryFetchMetadataBranch runs the injected metadata-branch fetcher at most once

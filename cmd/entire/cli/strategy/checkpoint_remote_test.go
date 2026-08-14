@@ -1650,3 +1650,43 @@ func TestFetchBranchIfMissing_ReportsUnreachableRemote(t *testing.T) {
 	// change the fail-soft outcome, only its visibility.
 	assert.False(t, testutil.BranchExists(t, localDir, paths.MetadataBranchName))
 }
+
+// TestEnsurePrimaryRef_SkipsEmptyOrphanHealUnderGitRefsPrimary pins the third
+// checkpoint-remote fetch path against the same rule as the other two.
+//
+// healPrimaryFromCheckpointRemote runs whenever a local v1 ref already exists and
+// carries no data — the shape a repo enabled before the git-refs switch is left
+// in. It was the one fetch path not gated on the backend, so `entire enable` on
+// such a repo still pulled the whole transcript archive, on the raised foreground
+// budget, for a branch git-refs never writes.
+//
+// Reads are unaffected: a data-free branch is treated as a miss by the read path,
+// which recovers it on demand (checkpoint.TestGetSessionsBranchTree_RecoversFromDataFreeOrphan).
+func TestEnsurePrimaryRef_SkipsEmptyOrphanHealUnderGitRefsPrimary(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := checkpointRemoteWithV1(ctx, t)
+	localDir := gitRefsPrimaryLocalRepo(ctx, t, remoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	// Stand up the data-free orphan the heal exists to replace.
+	workBranch := checkpointRemoteCurrentBranch(ctx, t, localDir)
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, localDir, "rm", "-rf", ".")
+	runCheckpointRemoteGit(ctx, t, localDir, "commit", "--allow-empty", "-m", "init orphan")
+	orphanTip := checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, localDir, "checkout", workBranch)
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	require.NoError(t, EnsurePrimaryRef(WithCheckpointRemoteBootstrap(ctx), repo))
+
+	// The redirect would have served the branch, so an unchanged tip proves the
+	// heal fetch was skipped rather than attempted and failed.
+	assert.Equal(t, orphanTip, checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName),
+		"enable must not heal the v1 orphan from the checkpoint remote under git-refs primary")
+}
