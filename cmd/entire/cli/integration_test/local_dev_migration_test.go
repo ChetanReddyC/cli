@@ -278,3 +278,63 @@ func TestLocalDevMigration_DoctorWarnsWithoutPromptingNonInteractively(t *testin
 		t.Errorf("hooks should be left alone by a non-interactive doctor, got %v", got)
 	}
 }
+
+// TestDoctor_LeavesNeverEnabledRepoAlone pins that doctor does not install hooks
+// into a repository that never opted into Entire.
+//
+// doctor runs in any git repo, and `--force` means "don't ask me", not "take
+// over this repo". Without a prior-setup guard it backed up the user's own
+// pre-push hook and installed all five of Entire's — the loudest possible
+// surprise from a command whose job is to report problems. Missing hooks are only
+// a problem where Entire was set up; a stale hook, by contrast, is always ours to
+// fix (covered by TestLocalDevMigration_DoctorRepairsLegacyGitHooks).
+func TestDoctor_LeavesNeverEnabledRepoAlone(t *testing.T) {
+	t.Parallel()
+
+	// NewBareRepoEnv-style setup would still call InitEntire, so build the repo
+	// without any .entire/ at all.
+	env := NewRepoWithCommit(t)
+	entireDir := filepath.Join(env.RepoDir, ".entire")
+	if err := os.RemoveAll(entireDir); err != nil {
+		t.Fatalf("failed to remove .entire: %v", err)
+	}
+	hooksDir := filepath.Join(env.RepoDir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("failed to create hooks dir: %v", err)
+	}
+	for _, hookName := range strategy.ManagedGitHookNames() {
+		if err := os.Remove(filepath.Join(hooksDir, hookName)); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("failed to clear hook %s: %v", hookName, err)
+		}
+	}
+
+	// A hook this repo owns, which Entire must not displace.
+	ownHook := "#!/bin/sh\necho my own pre-push\n"
+	prePush := filepath.Join(hooksDir, "pre-push")
+	if err := os.WriteFile(prePush, []byte(ownHook), 0o755); err != nil {
+		t.Fatalf("failed to write the repo's own hook: %v", err)
+	}
+
+	out, err := env.RunCLIWithError("doctor", "--force")
+	if err != nil {
+		t.Fatalf("doctor --force failed: %v\noutput: %s", err, out)
+	}
+
+	if strings.Contains(out, "Git hooks: NOT INSTALLED") {
+		t.Errorf("doctor should not report missing hooks for a repo that never enabled Entire, got:\n%s", out)
+	}
+	if strings.Contains(out, "git hooks reinstalled") {
+		t.Errorf("doctor must not install hooks into a repo that never enabled Entire, got:\n%s", out)
+	}
+
+	got, readErr := os.ReadFile(prePush)
+	if readErr != nil {
+		t.Fatalf("the repo's own hook should still be there: %v", readErr)
+	}
+	if string(got) != ownHook {
+		t.Errorf("the repo's own pre-push hook was replaced:\n%s", got)
+	}
+	if _, statErr := os.Stat(prePush + ".pre-entire"); statErr == nil {
+		t.Error("doctor backed up the repo's own hook, so it installed over it")
+	}
+}

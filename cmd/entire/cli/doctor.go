@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
@@ -466,19 +467,36 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
-	state := strategy.CheckGitHookState(ctx)
-	if state == strategy.GitHooksCurrent {
+	switch strategy.CheckGitHookState(ctx) {
+	case strategy.GitHooksCurrent:
 		fmt.Fprintln(w, "✓ Git hooks: OK")
 		return nil
-	}
 
-	if state == strategy.GitHooksOutdated {
+	case strategy.GitHooksAbsent:
+		// Missing hooks are only a problem where Entire was actually set up.
+		// doctor runs in any git repo, so treating this as actionable would let
+		// `entire doctor --force` install hooks into — and back up the existing
+		// hooks of — a repo that never opted in. That is the loudest possible
+		// surprise from a diagnostic command. The sibling checks already hold this
+		// line: checkHookDrift stays silent on HooksAbsent, and
+		// checkCodexHookTrust returns early when there is no codex hooks file.
+		//
+		// IsSetUpAny rather than IsSetUpAndEnabled: a repo that ran `entire
+		// disable` still wants working hooks, because the hooks themselves are
+		// what no-op while disabled.
+		if !settings.IsSetUpAny(ctx) {
+			return nil
+		}
+		fmt.Fprintln(w, "Git hooks: NOT INSTALLED")
+		fmt.Fprintln(w, "  Commits in this repository are not captured as checkpoints.")
+
+	case strategy.GitHooksOutdated:
+		// Actionable whatever the settings say: a hook carrying Entire's marker
+		// means this repo opted in at some point, and a stale one is actively
+		// broken rather than merely missing.
 		fmt.Fprintln(w, "Git hooks: OUT OF DATE")
 		fmt.Fprintln(w, "  A hook still runs Entire from the working tree instead of the installed")
 		fmt.Fprintln(w, "  binary. This can reject `git push`, because the path it names is gone.")
-	} else {
-		fmt.Fprintln(w, "Git hooks: NOT INSTALLED")
-		fmt.Fprintln(w, "  Commits in this repository are not captured as checkpoints.")
 	}
 	fmt.Fprintln(w, "  Fix: reinstall the managed git hooks (any non-Entire hook is backed up).")
 
