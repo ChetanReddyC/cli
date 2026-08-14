@@ -1631,3 +1631,32 @@ func TestEnsurePrimaryRef_BootstrapFetchIsBlobFiltered(t *testing.T) {
 	assert.Contains(t, missing, "?"+metadataBlob,
 		"bootstrap must fetch the commit graph blob-filtered, not the full transcript history")
 }
+
+// TestFetchBranchIfMissing_ReportsUnreachableRemote pins that a checkpoint remote
+// we could not talk to is reported to the caller rather than swallowed. It used
+// to return nil on every fetch failure, which made an unreachable, timing-out, or
+// auth-refusing remote indistinguishable from one that was never contacted — so
+// resolvePushSettings' warning could never fire and the failure left no trace.
+//
+// Contrast TestFetchBranchIfMissing_NoOpWhenBranchNotOnRemote: a reachable remote
+// that simply lacks the branch is still a quiet no-op.
+func TestFetchBranchIfMissing_ReportsUnreachableRemote(t *testing.T) {
+	ctx := context.Background()
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+
+	t.Chdir(localDir)
+
+	// A path that is not a git repository at all: git fails to connect rather
+	// than reporting the ref as absent.
+	err := fetchMetadataBranchIfMissing(ctx, filepath.Join(t.TempDir(), "nonexistent"))
+	require.Error(t, err, "an unreachable checkpoint remote must surface to the caller")
+
+	// The branch must still not exist locally — reporting the failure does not
+	// change the fail-soft outcome, only its visibility.
+	assert.False(t, testutil.BranchExists(t, localDir, paths.MetadataBranchName))
+}

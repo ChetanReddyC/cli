@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -15,8 +16,20 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
-// checkpointRemoteFetchTimeout is the timeout for fetching branches from the checkpoint URL.
+// checkpointRemoteFetchTimeout bounds checkpoint-remote fetches made from the
+// push hot path, where the user's own `git push` is blocked for the duration.
 const checkpointRemoteFetchTimeout = 30 * time.Second
+
+// checkpointRemoteForegroundFetchTimeout bounds checkpoint-remote fetches made
+// by user-initiated foreground commands (enable, resume, explain). It matches
+// the origin-side metadata fetch budget in the cli package.
+//
+// Splitting the two fixes a backwards asymmetry: origin-side fetches already had
+// two minutes while the checkpoint remote — which by definition holds strictly
+// more checkpoint history than origin does — was held to the push hot path's 30
+// seconds. A checkpoint archive too large to transfer in 30s was therefore
+// unreadable, and each attempt failed the same way with nothing to show for it.
+const checkpointRemoteForegroundFetchTimeout = 2 * time.Minute
 
 // pushSettings holds the resolved push configuration from a single settings load.
 type pushSettings struct {
@@ -113,8 +126,14 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 // where the local branch may be stale).
 //
 // The fetch is unfiltered (NoFilter: true) because resume needs blob content
-// (transcripts, metadata JSON) — not just tree objects.
+// (transcripts, metadata JSON) — not just tree objects, and it runs on the
+// foreground budget for the same reason: it is the call that actually moves the
+// transcript archive.
 func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
+	return fetchMetadataBranchWithin(ctx, remoteURL, checkpointRemoteForegroundFetchTimeout)
+}
+
+func fetchMetadataBranchWithin(ctx context.Context, remoteURL string, timeout time.Duration) error {
 	refs := checkpoint.ResolveRefs(ctx)
 	if !refs.Primary.IsBranch() {
 		return fmt.Errorf("primary metadata ref %s is not a branch", refs.Primary)
@@ -123,7 +142,7 @@ func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
 	tmpRef := FetchTmpRefPrefix + branchName
 	srcRef := refs.Primary.String()
 
-	if err := fetchURLIntoTmpRef(ctx, "", remoteURL, srcRef, tmpRef, "metadata branch", true); err != nil {
+	if err := fetchURLIntoTmpRef(ctx, "", remoteURL, srcRef, tmpRef, "metadata branch", true, timeout); err != nil {
 		return err
 	}
 	if err := PromoteTmpRefSafely(ctx, plumbing.ReferenceName(tmpRef), refs.Primary, branchName); err != nil {
@@ -146,8 +165,10 @@ func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
 // distinction matters: v1's blobs are the full transcript archive, so an
 // unfiltered fetch costs the whole history where a filtered one costs the
 // commit graph.
-func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool) error {
-	fetchCtx, cancel := context.WithTimeout(ctx, checkpointRemoteFetchTimeout)
+// timeout bounds the fetch: pass checkpointRemoteFetchTimeout on the push hot
+// path and checkpointRemoteForegroundFetchTimeout from user-initiated commands.
+func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool, timeout time.Duration) error {
+	fetchCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	refSpec := fmt.Sprintf("+%s:%s", srcRef, tmpRef)
@@ -172,8 +193,19 @@ func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, lab
 
 // fetchMetadataBranchIfMissing fetches the primary metadata ref from a URL only if it doesn't exist locally.
 // This avoids network calls on every push — once the branch exists locally, this is a no-op.
-// Fetch failures are silently swallowed (returns nil): the push will handle creating the
-// branch on the remote. Only fatal errors (opening repo, creating local branch) are returned.
+// It runs on the push hot path, so it uses the short fetch budget.
+//
+// A fetch failure is not fatal — the push will create the branch on the remote
+// when it succeeds — but it is returned rather than swallowed so the caller can
+// log it. Returning nil unconditionally meant a checkpoint remote that was
+// unreachable, too slow, or refusing auth looked identical to one that was never
+// contacted, and resolvePushSettings' warning could never fire.
+//
+// A remote that simply does not carry the branch yet (the normal state of a
+// brand-new checkpoint repo) is not a failure and stays quiet. That case is
+// established by probing with ls-remote first — positive evidence, matching
+// remote.FetchCheckpointRef's absence-vs-failure contract — rather than by
+// treating every fetch error as absence.
 func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -187,10 +219,19 @@ func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
 		return nil // Branch exists locally, skip fetch
 	}
 
-	// Branch doesn't exist locally - try to fetch it from the URL.
-	// Fetch failures are not fatal: push will create it on the remote when it succeeds.
-	if err := FetchMetadataBranch(ctx, remoteURL); err != nil {
+	probeCtx, cancel := context.WithTimeout(ctx, checkpointRemoteFetchTimeout)
+	defer cancel()
+	out, probeErr := remote.LsRemoteInDir(probeCtx, "", remoteURL, refs.Primary.String())
+	if probeErr != nil {
+		return fmt.Errorf("probe %s on %s: %w", refs.Primary, remote.RedactURL(remoteURL), probeErr)
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		// Remote reachable, branch not there yet. The first push creates it.
 		return nil
+	}
+
+	if err := fetchMetadataBranchWithin(ctx, remoteURL, checkpointRemoteFetchTimeout); err != nil {
+		return err
 	}
 
 	logging.Info(ctx, "checkpoint-remote: fetched metadata branch from URL")
