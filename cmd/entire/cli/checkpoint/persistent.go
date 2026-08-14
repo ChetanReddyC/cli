@@ -1613,7 +1613,7 @@ func (s *GitStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		return nil, err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	trees, err := s.getSessionsBranchTrees()
+	trees, err := s.getSessionsBranchTrees(ctx)
 	if err != nil {
 		return []CheckpointInfo{}, nil //nolint:nilerr // No sessions branch means empty list
 	}
@@ -2213,7 +2213,7 @@ func (s *GitStore) maybeMergeVercelConfig(ctx context.Context, rootTreeHash plum
 // by ref existence—lets a local orphan or partial elected-remote history fall
 // through to a legacy remote that still contains the requested checkpoint.
 func (s *GitStore) getCheckpointFetchingTree(ctx context.Context, checkpointID id.CheckpointID) (*FetchingTree, error) {
-	trees, err := s.getSessionsBranchTrees()
+	trees, err := s.getSessionsBranchTrees(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2227,23 +2227,84 @@ func (s *GitStore) getCheckpointFetchingTree(ctx context.Context, checkpointID i
 	return nil, ErrCheckpointNotFound
 }
 
-// getSessionsBranchTree returns the tree object at refs.Read. Falls back to
-// the read-candidate remotes' tracking refs for Primary (first existing wins;
-// legacy origin-only when no chain was injected) when
-// ReadBootstrappableFromRemote is true. The fallback is a pure read — it
-// never writes local refs.
-func (s *GitStore) getSessionsBranchTree() (*object.Tree, error) {
-	trees, err := s.getSessionsBranchTrees()
+// getSessionsBranchTree returns the first available committed metadata tree. See
+// getSessionsBranchTrees for the precedence and recovery it delegates to.
+func (s *GitStore) getSessionsBranchTree(ctx context.Context) (*object.Tree, error) {
+	trees, err := s.getSessionsBranchTrees(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return trees[0], nil
 }
 
-// getSessionsBranchTrees returns every available committed metadata tree in
-// read precedence: local first, then the configured remote candidates. Trees
-// pointing at the same commit are deduplicated.
-func (s *GitStore) getSessionsBranchTrees() ([]*object.Tree, error) {
+// getSessionsBranchTrees returns every available committed metadata tree in read
+// precedence: refs.Read first, then each checkpoint read candidate's
+// remote-tracking ref for Primary when ReadBootstrappableFromRemote is true
+// (legacy origin-only when no chain was injected). Trees pointing at the same
+// commit are deduplicated. Resolving several — and selecting by requested
+// checkpoint downstream — lets a local orphan or a partial elected-remote history
+// fall through to a candidate that still holds the checkpoint. The candidate reads
+// are pure: the chain never seeds or advances local refs.
+//
+// When no candidate carries checkpoint data and a metadata-branch fetcher is
+// wired, the branch is fetched once from the configured checkpoint remote and the
+// candidates are resolved again. That tier matters for a fresh clone of a repo
+// whose checkpoints live on a dedicated checkpoint_remote: the branch is absent
+// locally and origin never received it, so without the fetch every committed
+// checkpoint reads as "not found" with no way to recover.
+//
+// The trigger is "no candidate holds data", not merely "no candidate resolved": a
+// local orphan carrying nothing but initialization artifacts is, to a reader,
+// indistinguishable from no branch at all, but it makes a ref resolve and would
+// otherwise mask the miss and leave the real checkpoints permanently unreachable.
+//
+// Ordering is local-then-network by construction — candidates are free ref reads,
+// the fetch is not — and tryFetchMetadataBranch latches one attempt per store, so
+// N candidates across repeated entries still pay at most one fetch.
+func (s *GitStore) getSessionsBranchTrees(ctx context.Context) ([]*object.Tree, error) {
+	trees, firstErr := s.resolveSessionsBranchTrees()
+	if anyTreeHasCheckpointData(trees) {
+		return trees, nil
+	}
+	if s.tryFetchMetadataBranch(ctx) {
+		fetched, fetchedErr := s.resolveSessionsBranchTrees()
+		if len(fetched) > 0 {
+			return fetched, nil
+		}
+		if firstErr == nil {
+			firstErr = fetchedErr
+		}
+	}
+	if len(trees) == 0 {
+		if !s.refs.ReadBootstrappableFromRemote() {
+			return nil, fmt.Errorf("sessions ref %s not found: %w", s.refs.Read, firstErr)
+		}
+		return nil, fmt.Errorf("sessions branch not found: %w", firstErr)
+	}
+	// Unrecovered but resolvable: return what is there rather than firstErr.
+	// Callers such as List treat a data-free tree as an empty result, so
+	// surfacing a transport error here would turn an offline read into a hard
+	// failure.
+	return trees, nil
+}
+
+// anyTreeHasCheckpointData reports whether any candidate tree holds checkpoint
+// data, generalizing treeHasCheckpointData's single-tree question to the
+// candidate chain.
+func anyTreeHasCheckpointData(trees []*object.Tree) bool {
+	for _, tree := range trees {
+		if treeHasCheckpointData(tree) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveSessionsBranchTrees resolves each read candidate's ref and loads its root
+// tree, deduplicated by commit. Purely local: no network. The returned error is
+// advisory — the first resolution failure — and is only fatal to the caller when
+// no tree resolved at all.
+func (s *GitStore) resolveSessionsBranchTrees() ([]*object.Tree, error) {
 	refNames := []plumbing.ReferenceName{s.refs.Read}
 	if s.refs.ReadBootstrappableFromRemote() {
 		remotes := s.readRemotes
@@ -2286,13 +2347,45 @@ func (s *GitStore) getSessionsBranchTrees() ([]*object.Tree, error) {
 		seen[ref.Hash()] = struct{}{}
 		trees = append(trees, tree)
 	}
-	if len(trees) == 0 {
-		if !s.refs.ReadBootstrappableFromRemote() {
-			return nil, fmt.Errorf("sessions ref %s not found: %w", s.refs.Read, firstErr)
-		}
-		return nil, fmt.Errorf("sessions branch not found: %w", firstErr)
+	return trees, firstErr
+}
+
+// treeHasCheckpointData reports whether a metadata branch root tree holds
+// anything beyond orphan-initialization artifacts. It mirrors
+// strategy.metadataBranchHasData, which decides the same question when healing
+// an un-initialized orphan; the two must agree on what "un-initialized" means or
+// enable and read disagree about whether a branch is worth recovering.
+func treeHasCheckpointData(tree *object.Tree) bool {
+	if tree == nil {
+		return false
 	}
-	return trees, nil
+	for _, entry := range tree.Entries {
+		if entry.Name != vercelconfig.FileName {
+			return true
+		}
+	}
+	return false
+}
+
+// tryFetchMetadataBranch runs the injected metadata-branch fetcher at most once
+// per store, reporting whether it succeeded. The once-per-store latch matters:
+// a single command re-enters getSessionsBranchTree several times (List, then
+// getFetchingTree for each read), so without it a repo the fetch cannot recover
+// — remote has no v1, is unreachable, or refuses auth — would re-pay the whole
+// fetch budget on every entry.
+func (s *GitStore) tryFetchMetadataBranch(ctx context.Context) bool {
+	if s.metadataBranchFetcher == nil || s.metadataBranchFetchTried {
+		return false
+	}
+	s.metadataBranchFetchTried = true
+	if err := s.metadataBranchFetcher(ctx); err != nil {
+		logging.Debug(ctx, "sessions branch: checkpoint remote fetch failed",
+			slog.String("ref", s.refs.Read.String()),
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	return true
 }
 
 // CreateBlobFromContent creates a blob object from in-memory content.
