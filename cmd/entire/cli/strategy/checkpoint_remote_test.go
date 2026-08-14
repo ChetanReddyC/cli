@@ -1453,3 +1453,112 @@ func checkpointRemoteMetadataFiles(ctx context.Context, t *testing.T, dir string
 	require.NoError(t, err)
 	return string(out)
 }
+
+// checkpointRemoteWithV1 builds a checkpoint remote holding entire/checkpoints/v1
+// with one real checkpoint, and returns its directory. Used by the git-refs
+// bootstrap-skip tests, where the remote must be genuinely fetchable so a
+// passing assertion proves the fetch was skipped rather than that it failed.
+func checkpointRemoteWithV1(ctx context.Context, t *testing.T) string {
+	t.Helper()
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	defaultBranch := checkpointRemoteCurrentBranch(ctx, t, remoteDir)
+
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(ctx, t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(ctx, t, remoteDir, "aaaaaaaaaaaa", "device-a")
+	runCheckpointRemoteGit(ctx, t, remoteDir, "checkout", defaultBranch)
+	return remoteDir
+}
+
+// gitRefsPrimaryLocalRepo builds a local repo configured with a github
+// checkpoint_remote and the git-refs primary backend, with the derived
+// checkpoint URL redirected at remoteDir so any fetch would succeed.
+func gitRefsPrimaryLocalRepo(ctx context.Context, t *testing.T, remoteDir string) string {
+	t.Helper()
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	runCheckpointRemoteGit(ctx, t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}, "checkpoints": {"primary": {"type": "git-refs"}}}`),
+		0o644,
+	))
+
+	// A hermetic redirect that WOULD serve the branch: a passing test therefore
+	// proves the fetch never ran, not that it ran and failed.
+	redirectGitURL(t, localDir, "git@github.com:org/checkpoints.git", "file://"+remoteDir)
+	return localDir
+}
+
+// TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapUnderGitRefsPrimary pins that
+// `entire enable` does not eagerly clone the v1 metadata branch when the git-refs
+// backend is primary. That backend never writes v1, so there is no local orphan
+// that could diverge from the remote — the only thing the bootstrap exists to
+// prevent — while v1 carries the full legacy transcript history, making the fetch
+// arbitrarily expensive on a real checkpoint remote.
+//
+// Note this is an explicit enable flow (WithCheckpointRemoteBootstrap), unlike
+// TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapOutsideEnableFlow: the
+// backend, not the calling context, is what suppresses the fetch here.
+func TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapUnderGitRefsPrimary(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := checkpointRemoteWithV1(ctx, t)
+	localDir := gitRefsPrimaryLocalRepo(ctx, t, remoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	require.NoError(t, EnsurePrimaryRef(WithCheckpointRemoteBootstrap(ctx), repo))
+
+	// A bootstrap fetch would have created the local v1 ref at the remote's tip.
+	// Under git-refs no v1 ref should exist at all: not fetched, and not seeded
+	// as an empty orphan either.
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"EnsurePrimaryRef must not fetch or seed v1 under the git-refs primary backend")
+}
+
+// TestResolvePushSettings_SkipsMetadataFetchUnderGitRefsPrimary pins that the
+// pre-push path does not fetch the v1 metadata branch under the git-refs primary
+// backend. fetchMetadataBranchIfMissing is written as a one-time cost that stops
+// once the branch exists locally, but git-refs pushes per-checkpoint refs and
+// never creates v1 locally — so without this gate the "one-time" fetch would run
+// on every single `git push`.
+func TestResolvePushSettings_SkipsMetadataFetchUnderGitRefsPrimary(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := checkpointRemoteWithV1(ctx, t)
+	localDir := gitRefsPrimaryLocalRepo(ctx, t, remoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	ps := resolvePushSettings(ctx, "origin")
+
+	// The checkpoint URL still resolves — only the eager fetch is suppressed.
+	assert.True(t, ps.hasCheckpointURL(), "checkpoint_remote should still resolve under git-refs")
+	assert.Equal(t, "git@github.com:org/checkpoints.git", ps.pushTarget())
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"resolvePushSettings must not fetch v1 under the git-refs primary backend")
+}

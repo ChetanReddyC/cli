@@ -681,6 +681,23 @@ func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Reposit
 		return false
 	}
 
+	if primaryIsGitRefs(ctx) {
+		// The whole point of this bootstrap is to stop a fresh local orphan from
+		// diverging from the real v1 branch. Under the git-refs primary backend
+		// no orphan is ever created (see skipEmptyOrphan in EnsurePrimaryRef) and
+		// nothing is ever written to v1, so there is no divergence to prevent and
+		// the fetch buys nothing at enable time.
+		//
+		// It is not free, either: v1 holds the full legacy transcript history, so
+		// this would make every `entire enable` on a fresh clone download the
+		// entire checkpoint archive before doing anything else. Legacy hex-ID
+		// checkpoints stay readable — the read paths fetch v1 from the checkpoint
+		// remote when a read actually needs it, and fetch individual blobs by
+		// hash rather than the whole branch.
+		logging.Debug(ctx, "checkpoint-remote: skipping bootstrap fetch under git-refs primary")
+		return false
+	}
+
 	worktreeRoot, err := getRepoPath(repo)
 	if err != nil {
 		logging.Debug(ctx, "checkpoint-remote: cannot resolve worktree root for enable bootstrap",

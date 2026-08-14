@@ -89,10 +89,19 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 	// This is a one-time operation — once the branch exists locally, subsequent pushes
 	// skip the fetch entirely. Only fetch the metadata branch; trails are always pushed
 	// to the user's push remote, not the checkpoint remote.
-	if err := fetchMetadataBranchIfMissing(ctx, checkpointURL); err != nil {
-		logging.Warn(ctx, "checkpoint-remote: failed to fetch metadata branch",
-			slog.String("error", err.Error()),
-		)
+	//
+	// Skipped entirely under the git-refs primary backend, where the "one-time"
+	// framing does not hold: that backend pushes per-checkpoint refs and never
+	// writes the local v1 branch (see prePush), so the branch stays missing
+	// forever and every single push would re-pay the fetch. On a large checkpoint
+	// remote that is a multi-second stall on each `git push` for a branch this
+	// push will not touch.
+	if !primaryIsGitRefs(ctx) {
+		if err := fetchMetadataBranchIfMissing(ctx, checkpointURL); err != nil {
+			logging.Warn(ctx, "checkpoint-remote: failed to fetch metadata branch",
+				slog.String("error", err.Error()),
+			)
+		}
 	}
 
 	return ps
