@@ -117,6 +117,10 @@ func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote string) bool
 // alphabetical and unsuitable). Remotes configured with only pushurl are
 // deliberately invisible (spec Unit 1). Errors yield an empty list.
 func configuredRemotesInConfigOrder(ctx context.Context) []string {
+	return cachedRemotesInConfigOrder(ctx, readRemotesInConfigOrder)
+}
+
+func readRemotesInConfigOrder(ctx context.Context) []string {
 	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get-regexp", `^remote\..*\.url$`)
 	if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
 		cmd.Dir = worktreeRoot

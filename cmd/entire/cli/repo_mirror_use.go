@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -180,6 +181,10 @@ func applyMirrorRemotePlan(ctx context.Context, dir string, plan mirrorRemotePla
 	if _, err := gitRunner(ctx, dir, "remote", verb, plan.remote, plan.mirrorURL); err != nil {
 		return fmt.Errorf("point remote %q at the mirror: %w", plan.remote, err)
 	}
+	// Both writes above are remote mutations, so this runs once after the last of
+	// them; it is the only place in the CLI that mutates remotes, and so the only
+	// place the invocation's memoized remote reads can go stale.
+	strategy.InvalidateGitRemoteCache(ctx)
 	return nil
 }
 
