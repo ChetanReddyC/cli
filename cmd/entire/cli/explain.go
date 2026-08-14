@@ -822,7 +822,11 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		}
 		// Reload to get the updated summary.
 		stopLoad = startSpinner(errW, fmt.Sprintf("Reloading checkpoint %s", fullCheckpointID))
-		reopened, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+		reopened, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{
+			BlobFetcher:           FetchBlobsByHash,
+			RefFetcher:            FetchCheckpointRef,
+			MetadataBranchFetcher: FetchMetadataFromCheckpointRemote,
+		})
 		if openErr != nil {
 			stopLoad(false)
 			return fmt.Errorf("open checkpoint store: %w", openErr)
@@ -998,7 +1002,15 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 	// `git fetch` fails against partial-clone repos with "did not send all
 	// necessary objects"). Falls back to a full metadata-branch fetch if
 	// fetch-pack also can't reach the blobs.
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		BlobFetcher: FetchBlobsByHash,
+		RefFetcher:  FetchCheckpointRef,
+		// Legacy hex-ID checkpoints live on the v1 branch, which a fresh clone
+		// with a dedicated checkpoint_remote does not have — and cannot get from
+		// origin, which never received it. Without this, explain reports every
+		// such checkpoint as unreadable.
+		MetadataBranchFetcher: FetchMetadataFromCheckpointRemote,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -2502,9 +2514,10 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	// fetchers hydrate each on read. WithRemoteListDiscovery keeps this off the
 	// per-turn hook hot path.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
-		BlobFetcher:     FetchBlobsByHash,
-		RefFetcher:      FetchCheckpointRef,
-		RemoteRefLister: ListCheckpointRefsOnRemote,
+		BlobFetcher:           FetchBlobsByHash,
+		RefFetcher:            FetchCheckpointRef,
+		RemoteRefLister:       ListCheckpointRefsOnRemote,
+		MetadataBranchFetcher: FetchMetadataFromCheckpointRemote,
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("open checkpoint store: %w", err)

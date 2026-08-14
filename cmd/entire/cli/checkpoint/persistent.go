@@ -1624,7 +1624,7 @@ func (s *GitStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		return nil, err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	tree, err := s.getSessionsBranchTree()
+	tree, err := s.getSessionsBranchTree(ctx)
 	if err != nil {
 		return []CheckpointInfo{}, nil //nolint:nilerr // No sessions branch means empty list
 	}
@@ -2216,7 +2216,7 @@ func (s *GitStore) maybeMergeVercelConfig(ctx context.Context, rootTreeHash plum
 // If a blob fetcher is configured on the store, File() calls on the returned
 // tree will automatically fetch missing blobs from the remote.
 func (s *GitStore) getFetchingTree(ctx context.Context) (*FetchingTree, error) {
-	tree, err := s.getSessionsBranchTree()
+	tree, err := s.getSessionsBranchTree(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2225,17 +2225,29 @@ func (s *GitStore) getFetchingTree(ctx context.Context) (*FetchingTree, error) {
 
 // getSessionsBranchTree returns the tree object at refs.Read. Falls back to
 // origin's remote-tracking ref for Primary when ReadBootstrappableFromOrigin
-// is true.
-func (s *GitStore) getSessionsBranchTree() (*object.Tree, error) {
-	ref, err := s.repo.Reference(s.refs.Read, true)
+// is true, then — if a metadata branch fetcher is wired — to fetching the branch
+// from the configured checkpoint remote.
+//
+// That last tier matters for a fresh clone of a repo whose checkpoints live on a
+// dedicated checkpoint_remote: the branch is absent locally, and origin does not
+// carry it either (checkpoints were never pushed there), so without the fetch
+// every committed checkpoint reads as "not found" with no way to recover.
+func (s *GitStore) getSessionsBranchTree(ctx context.Context) (*object.Tree, error) {
+	ref, err := s.resolveSessionsBranchRef()
 	if err != nil {
-		if !s.refs.ReadBootstrappableFromOrigin() {
-			return nil, fmt.Errorf("sessions ref %s not found: %w", s.refs.Read, err)
+		if s.metadataBranchFetcher == nil {
+			return nil, err
 		}
-		remoteRefName := plumbing.NewRemoteReferenceName("origin", s.refs.Primary.Short())
-		ref, err = s.repo.Reference(remoteRefName, true)
+		if fetchErr := s.metadataBranchFetcher(ctx); fetchErr != nil {
+			logging.Debug(ctx, "sessions branch: checkpoint remote fetch failed",
+				slog.String("ref", s.refs.Read.String()),
+				slog.String("error", fetchErr.Error()),
+			)
+			return nil, err
+		}
+		ref, err = s.resolveSessionsBranchRef()
 		if err != nil {
-			return nil, fmt.Errorf("sessions branch not found: %w", err)
+			return nil, err
 		}
 	}
 
@@ -2250,6 +2262,25 @@ func (s *GitStore) getSessionsBranchTree() (*object.Tree, error) {
 	}
 
 	return tree, nil
+}
+
+// resolveSessionsBranchRef resolves refs.Read, falling back to origin's
+// remote-tracking ref for Primary when ReadBootstrappableFromOrigin is true.
+// Purely local: no network.
+func (s *GitStore) resolveSessionsBranchRef() (*plumbing.Reference, error) {
+	ref, err := s.repo.Reference(s.refs.Read, true)
+	if err == nil {
+		return ref, nil
+	}
+	if !s.refs.ReadBootstrappableFromOrigin() {
+		return nil, fmt.Errorf("sessions ref %s not found: %w", s.refs.Read, err)
+	}
+	remoteRefName := plumbing.NewRemoteReferenceName("origin", s.refs.Primary.Short())
+	ref, err = s.repo.Reference(remoteRefName, true)
+	if err != nil {
+		return nil, fmt.Errorf("sessions branch not found: %w", err)
+	}
+	return ref, nil
 }
 
 // CreateBlobFromContent creates a blob object from in-memory content.
