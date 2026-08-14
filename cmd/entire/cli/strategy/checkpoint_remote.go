@@ -141,9 +141,12 @@ func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
 //
 // When noFilter is true, --filter=blob:none is suppressed even if filtered
 // fetches are globally enabled. Use noFilter for operations that need blob
-// content (resume, explain) as opposed to sync operations (push recovery)
-// that only need tree structure.
-func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool) error { //nolint:unparam // noFilter distinguishes blob-content fetches (true) from tree-only sync fetches (false); kept for the documented fetch-filtering contract even though current callers all need blob content
+// content (resume, explain) as opposed to operations that only need the ref
+// and its tree structure (enable bootstrap/heal, push recovery). The
+// distinction matters: v1's blobs are the full transcript archive, so an
+// unfiltered fetch costs the whole history where a filtered one costs the
+// commit graph.
+func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool) error {
 	fetchCtx, cancel := context.WithTimeout(ctx, checkpointRemoteFetchTimeout)
 	defer cancel()
 

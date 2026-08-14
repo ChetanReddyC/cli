@@ -1562,3 +1562,72 @@ func TestResolvePushSettings_SkipsMetadataFetchUnderGitRefsPrimary(t *testing.T)
 	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound,
 		"resolvePushSettings must not fetch v1 under the git-refs primary backend")
 }
+
+// checkpointRemoteGitOutput runs a git command in dir and returns trimmed stdout.
+func checkpointRemoteGitOutput(ctx context.Context, t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	return strings.TrimSpace(string(out))
+}
+
+// TestEnsurePrimaryRef_BootstrapFetchIsBlobFiltered pins that the enable-time
+// bootstrap fetches the commit graph but not v1's blobs. The bootstrap only has
+// to land the ref so a later orphan cannot diverge from it; v1's blobs are the
+// full transcript archive, so fetching them makes `entire enable` on a fresh
+// clone pay for the entire checkpoint history before doing anything else.
+//
+// Uses the git-branch primary backend: under git-refs the bootstrap is skipped
+// outright (see TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapUnderGitRefsPrimary).
+func TestEnsurePrimaryRef_BootstrapFetchIsBlobFiltered(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := checkpointRemoteWithV1(ctx, t)
+	// --filter is only honored over the smart protocol with allowFilter set
+	// server-side; the redirect below already makes this a file:// URL.
+	runCheckpointRemoteGit(ctx, t, remoteDir, "config", "uploadpack.allowFilter", "true")
+
+	remoteTip := checkpointRemoteRevParse(ctx, t, remoteDir, paths.MetadataBranchName)
+	metadataBlob := checkpointRemoteGitOutput(ctx, t, remoteDir,
+		"rev-parse", "refs/heads/"+paths.MetadataBranchName+":aa/aaaaaaaaaa/"+paths.MetadataFileName)
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	runCheckpointRemoteGit(ctx, t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}, "filtered_fetches": true}}`),
+		0o644,
+	))
+	redirectGitURL(t, localDir, "git@github.com:org/checkpoints.git", "file://"+remoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	require.NoError(t, EnsurePrimaryRef(WithCheckpointRemoteBootstrap(ctx), repo))
+
+	// The bootstrap still did its job: the local ref tracks the remote tip, so
+	// no divergent orphan can be created on top of it.
+	assert.Equal(t, remoteTip, checkpointRemoteRevParse(ctx, t, localDir, paths.MetadataBranchName),
+		"bootstrap must still land the local ref at the checkpoint remote's tip")
+
+	// ...but the transcript blobs were not downloaded. rev-list --missing=print
+	// reports them without triggering the lazy fetch that `git cat-file` would.
+	missing := checkpointRemoteGitOutput(ctx, t, localDir,
+		"rev-list", "--objects", "--missing=print", "refs/heads/"+paths.MetadataBranchName)
+	assert.Contains(t, missing, "?"+metadataBlob,
+		"bootstrap must fetch the commit graph blob-filtered, not the full transcript history")
+}

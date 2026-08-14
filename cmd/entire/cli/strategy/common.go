@@ -719,7 +719,13 @@ func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Reposit
 
 	branchName := primary.Short()
 	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + branchName)
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true); err != nil {
+	// Blob-filtered: this bootstrap only has to land the ref at the remote's tip
+	// so a later orphan cannot diverge from it. Nothing here reads blob content
+	// (SafelyAdvanceLocalRef takes the ref-not-found path and just sets the
+	// hash), while v1's blobs are the entire transcript archive — fetching them
+	// would make `entire enable` on a fresh clone pay for the full history up
+	// front. Reads pull the blobs they need on demand via BlobFetcher.
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", false); err != nil {
 		logging.Debug(ctx, "checkpoint-remote: enable bootstrap fetch failed; creating empty orphan",
 			slog.String("url", remote.RedactURL(url)),
 			slog.String("error", err.Error()),
@@ -805,7 +811,10 @@ func healEmptyOrphanFromCheckpointRemote(ctx context.Context, repo *git.Reposito
 	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + primary.Short())
 	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
 
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true); err != nil {
+	// Blob-filtered, for the same reason as the bootstrap fetch above: this heal
+	// replaces a data-free orphan with the real branch tip, and the only content
+	// it inspects is metadataBranchHasData's walk of the root tree's entry names.
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", false); err != nil {
 		logging.Debug(ctx, "checkpoint-remote: empty-orphan heal fetch failed; keeping local orphan",
 			slog.String("url", remote.RedactURL(url)),
 			slog.String("error", err.Error()),
