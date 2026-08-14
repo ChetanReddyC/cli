@@ -475,13 +475,108 @@ func TestResolveTrailReviewPatchAnchorErrors(t *testing.T) {
 	}
 }
 
+// TestParseTrailReviewPatchTargetSkipsHunkBodies covers diff *content* that
+// looks like a diff *header*. Deleting a line that itself starts with "-- "
+// (SQL, Lua and Haskell comments, CLI flag docs) serializes as "--- ...", and
+// an added line starting with "++ " serializes as "+++ ...". Neither is a file
+// header, and treating them as one rejected valid single-file patches.
+func TestParseTrailReviewPatchTargetSkipsHunkBodies(t *testing.T) {
+	t.Parallel()
+	patch := "--- a/schema.sql\n+++ b/schema.sql\n" +
+		"@@ -10,4 +10,4 @@\n" +
+		" CREATE TABLE t (\n" +
+		"--- legacy column, drop after migration\n" +
+		"+++ replacement column\n" +
+		" );\n"
+	target, err := parseTrailReviewPatchTarget(patch)
+	if err != nil {
+		t.Fatalf("parseTrailReviewPatchTarget: %v", err)
+	}
+	if target.Path != "schema.sql" {
+		t.Fatalf("Path = %q, want schema.sql", target.Path)
+	}
+	if target.StartLine != 10 || target.EndLine != 13 {
+		t.Fatalf("range = %d-%d, want 10-13", target.StartLine, target.EndLine)
+	}
+}
+
+// TestParseTrailReviewPatchTargetKeepsRealPathPrefix guards a file genuinely
+// living under b/ (or a/): the diff header "--- a/b/pkg.go" must resolve to
+// b/pkg.go, not pkg.go. Stripping both prefixes in sequence read the wrong file.
+func TestParseTrailReviewPatchTargetKeepsRealPathPrefix(t *testing.T) {
+	t.Parallel()
+	for _, dir := range []string{"a", "b"} {
+		t.Run(dir, func(t *testing.T) {
+			t.Parallel()
+			want := dir + "/pkg.go"
+			patch := "--- a/" + want + "\n+++ b/" + want + "\n@@ -1,2 +1,2 @@\n-old\n+new\n"
+			target, err := parseTrailReviewPatchTarget(patch)
+			if err != nil {
+				t.Fatalf("parseTrailReviewPatchTarget: %v", err)
+			}
+			if target.Path != want {
+				t.Fatalf("Path = %q, want %q", target.Path, want)
+			}
+		})
+	}
+}
+
+// TestParseTrailReviewPatchTargetPrependToExistingFile covers "@@ -0,0 +1,N @@",
+// which `diff -u0` emits both for a brand-new file and for an insertion above
+// line 1 of an existing one. Only a /dev/null old path means creation; the
+// prepend anchors on the line it is inserted before.
+func TestParseTrailReviewPatchTargetPrependToExistingFile(t *testing.T) {
+	t.Parallel()
+	patch := "--- a/file.txt\n+++ b/file.txt\n@@ -0,0 +1,1 @@\n+added\n"
+	target, err := parseTrailReviewPatchTarget(patch)
+	if err != nil {
+		t.Fatalf("parseTrailReviewPatchTarget: %v", err)
+	}
+	if target.StartLine != 1 || target.EndLine != 1 {
+		t.Fatalf("range = %d-%d, want 1-1", target.StartLine, target.EndLine)
+	}
+}
+
+// TestParseTrailReviewPatchTargetAllowsDeletion keeps "delete this" a valid
+// suggestion: a /dev/null *new* side still has a real old file to anchor to,
+// unlike a /dev/null old side.
+func TestParseTrailReviewPatchTargetAllowsDeletion(t *testing.T) {
+	t.Parallel()
+	patch := "--- a/file.txt\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-hello\n-old\n"
+	target, err := parseTrailReviewPatchTarget(patch)
+	if err != nil {
+		t.Fatalf("parseTrailReviewPatchTarget: %v", err)
+	}
+	if target.Path != "file.txt" || target.StartLine != 1 || target.EndLine != 2 {
+		t.Fatalf("target = %+v, want file.txt 1-2", target)
+	}
+}
+
+// TestParseTrailReviewPatchTargetRejectsRename gives renames an actionable
+// message: the old path is gone from the worktree, so anchoring would otherwise
+// fail with a confusing "read <old path>" error.
+func TestParseTrailReviewPatchTargetRejectsRename(t *testing.T) {
+	t.Parallel()
+	patch := "diff --git a/old.go b/new.go\nrename from old.go\nrename to new.go\n" +
+		"--- a/old.go\n+++ b/new.go\n@@ -1,2 +1,2 @@\n-old\n+new\n"
+	_, err := parseTrailReviewPatchTarget(patch)
+	if err == nil {
+		t.Fatal("expected a rename patch to be rejected")
+	}
+	if !strings.Contains(err.Error(), "renames") {
+		t.Fatalf("error = %v, want it to mention the rename", err)
+	}
+}
+
 // TestParseTrailReviewPatchTargetSpansHunks checks that a multi-hunk patch
 // anchors to the full span it touches, not just its first hunk.
 func TestParseTrailReviewPatchTargetSpansHunks(t *testing.T) {
 	t.Parallel()
+	// Hunk bodies must match the counts their headers declare, exactly as git
+	// emits them — the parser consumes bodies by those counts.
 	patch := "--- a/file.txt\n+++ b/file.txt\n" +
-		"@@ -20,3 +20,3 @@\n old\n" +
-		"@@ -5,2 +5,2 @@\n old\n"
+		"@@ -20,3 +20,3 @@\n a\n-b\n+c\n g\n" +
+		"@@ -5,2 +5,2 @@\n d\n-e\n+f\n"
 	target, err := parseTrailReviewPatchTarget(patch)
 	if err != nil {
 		t.Fatalf("parseTrailReviewPatchTarget: %v", err)

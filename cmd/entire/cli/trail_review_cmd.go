@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -1274,21 +1273,19 @@ func combinedSafeUnifiedDiffPatch(comment api.TrailReviewComment, w io.Writer) (
 	return combined.String(), supported, nil
 }
 
+// validateUnifiedDiffPatchPaths checks every path a patch's headers name. It
+// walks headers only: diff content is not a path, and a deleted line such as
+// "-- ../legacy" serializes as "--- ../legacy", which read as a header would
+// reject a perfectly safe patch.
 func validateUnifiedDiffPatchPaths(patchText string) error {
-	scanner := bufio.NewScanner(strings.NewReader(patchText))
-	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for scanner.Scan() {
-		line := scanner.Text()
+	return forEachPatchHeaderLine(patchText, func(line string) error {
 		for _, p := range patchHeaderPaths(line) {
 			if err := validatePatchPath(p); err != nil {
 				return err
 			}
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan patch: %w", err)
-	}
-	return nil
+		return nil
+	})
 }
 
 func patchHeaderPaths(line string) []string {
@@ -1335,7 +1332,7 @@ func cleanPatchPath(raw string) string {
 
 func validatePatchPath(raw string) error {
 	p := strings.TrimSpace(raw)
-	if p == "" || p == "/dev/null" {
+	if p == "" || p == patchDevNull {
 		return nil
 	}
 	p = cleanPatchPath(p)

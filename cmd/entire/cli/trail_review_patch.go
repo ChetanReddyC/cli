@@ -95,10 +95,68 @@ type trailReviewPatchTarget struct {
 	EndLine   int
 }
 
-// trailReviewHunkRangePattern captures the old-side range of a unified-diff hunk
-// header: "@@ -12,7 +12,8 @@" yields start 12 and count 7, and an omitted count
-// means a single line.
-var trailReviewHunkRangePattern = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+`)
+// trailReviewHunkRangePattern captures both sides of a unified-diff hunk header:
+// "@@ -12,7 +12,8 @@" yields old 12,7 and new 12,8, and an omitted count means a
+// single line. Both sides are needed to know how long the hunk body is.
+var trailReviewHunkRangePattern = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
+
+// patchDevNull is the path a unified diff uses for "this side does not exist":
+// on the old side it means the patch creates the file, on the new side that it
+// deletes it.
+const patchDevNull = "/dev/null"
+
+// unifiedDiffHunk is the line accounting from one "@@" header.
+type unifiedDiffHunk struct {
+	OldStart int
+	OldCount int
+	NewCount int
+}
+
+// forEachPatchHeaderLine calls fn for every line of a unified diff that is a
+// header rather than hunk content, skipping each hunk body by consuming exactly
+// the line counts its "@@" header declares.
+//
+// Prefix matching alone cannot tell the two apart: deleting a line that starts
+// with "-- " (a SQL, Lua or Haskell comment, a CLI flag doc) serializes as
+// "--- ...", and adding one that starts with "++ " serializes as "+++ ...".
+// Reading those as file headers rejected valid single-file patches and let diff
+// content reach path validation. Counting the body is also exactly how git
+// itself decides where a hunk ends, so this agrees with what `git apply` will do.
+func forEachPatchHeaderLine(patchText string, fn func(line string) error) error {
+	scanner := bufio.NewScanner(strings.NewReader(patchText))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	var remainingOld, remainingNew int
+	for scanner.Scan() {
+		line := scanner.Text()
+		if remainingOld > 0 || remainingNew > 0 {
+			switch {
+			case strings.HasPrefix(line, `\`): // "\ No newline at end of file"
+			case strings.HasPrefix(line, "-"):
+				remainingOld--
+			case strings.HasPrefix(line, "+"):
+				remainingNew--
+			default: // context line, present on both sides
+				if remainingOld > 0 {
+					remainingOld--
+				}
+				if remainingNew > 0 {
+					remainingNew--
+				}
+			}
+			continue
+		}
+		if hunk, ok := parseUnifiedDiffHunkRange(line); ok {
+			remainingOld, remainingNew = hunk.OldCount, hunk.NewCount
+		}
+		if err := fn(line); err != nil {
+			return err
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan patch: %w", err)
+	}
+	return nil
+}
 
 // parseTrailReviewPatchTarget reads the file and line span a unified diff
 // targets. A suggestion anchors to exactly one file, so a multi-file patch is
@@ -111,41 +169,39 @@ func parseTrailReviewPatchTarget(patch string) (trailReviewPatchTarget, error) {
 		sawFile bool
 		sawHunk bool
 	)
-	scanner := bufio.NewScanner(strings.NewReader(patch))
-	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for scanner.Scan() {
-		line := scanner.Text()
+	err := forEachPatchHeaderLine(patch, func(line string) error {
 		switch {
 		case strings.HasPrefix(line, "--- "):
 			if sawFile {
-				return target, errors.New("patch targets multiple files; attach one suggested change per file")
+				return errors.New("patch targets multiple files; attach one suggested change per file")
 			}
 			sawFile = true
-			oldPath = patchHeaderPath(line[4:])
+			oldPath = patchSidePath(line[4:], "a/")
 		case strings.HasPrefix(line, "+++ "):
-			newPath = patchHeaderPath(line[4:])
-		case strings.HasPrefix(line, "@@ "):
-			start, count, ok := parseUnifiedDiffHunkRange(line)
+			newPath = patchSidePath(line[4:], "b/")
+		default:
+			hunk, ok := parseUnifiedDiffHunkRange(line)
 			if !ok {
-				continue
+				return nil
 			}
-			end := start + count - 1
-			if count == 0 {
-				// A zero-length old range is a pure insertion (git -U0 output);
-				// it anchors on the line the new text is inserted after.
-				end = start
+			end := hunk.OldStart + hunk.OldCount - 1
+			if hunk.OldCount == 0 {
+				// A zero-length old range is a pure insertion (diff -u0 output);
+				// it anchors on the line the new text is inserted next to.
+				end = hunk.OldStart
 			}
-			if !sawHunk || start < target.StartLine {
-				target.StartLine = start
+			if !sawHunk || hunk.OldStart < target.StartLine {
+				target.StartLine = hunk.OldStart
 			}
 			if end > target.EndLine {
 				target.EndLine = end
 			}
 			sawHunk = true
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return target, fmt.Errorf("scan patch: %w", err)
+		return nil
+	})
+	if err != nil {
+		return target, err
 	}
 	if !sawFile {
 		return target, errors.New("patch has no '--- <file>' header naming the file it changes")
@@ -153,12 +209,24 @@ func parseTrailReviewPatchTarget(patch string) (trailReviewPatchTarget, error) {
 	if !sawHunk {
 		return target, errors.New("patch has no '@@' hunk header")
 	}
-	if strings.TrimSpace(oldPath) == "/dev/null" || target.StartLine < 1 {
-		// A suggestion is anchored to lines that already exist, so a patch that
-		// creates a file has nothing to pin to. Say so rather than letting the
-		// API reject expected_start_line 0.
+	// Only a /dev/null old side means creation. A zero start line does not: an
+	// insertion above line 1 of an existing file is also "@@ -0,0 +1,N @@".
+	if oldPath == patchDevNull {
 		return target, fmt.Errorf("patch creates %s; a suggested change must modify an existing file (use --instruction instead)",
-			strings.TrimSpace(cleanPatchPath(newPath)))
+			newPath)
+	}
+	if newPath != "" && newPath != patchDevNull && newPath != oldPath {
+		// The old path is gone from the worktree, so anchoring would otherwise
+		// fail with an unhelpful "read <old path>" error.
+		return target, fmt.Errorf("patch renames %s to %s; a suggested change must modify a single existing file (use --instruction instead)",
+			oldPath, newPath)
+	}
+	// A prepend anchors on the line the new text goes before.
+	if target.StartLine < 1 {
+		target.StartLine = 1
+	}
+	if target.EndLine < target.StartLine {
+		target.EndLine = target.StartLine
 	}
 	// The same whole-patch check the apply path runs, so a patch is held to one
 	// path-safety standard whether it is being written or applied: this covers
@@ -167,28 +235,58 @@ func parseTrailReviewPatchTarget(patch string) (trailReviewPatchTarget, error) {
 	if err := validateUnifiedDiffPatchPaths(patch); err != nil {
 		return target, fmt.Errorf("unsafe patch path: %w", err)
 	}
-	target.Path = path.Clean(cleanPatchPath(oldPath))
+	target.Path = path.Clean(oldPath)
 	return target, nil
 }
 
-// parseUnifiedDiffHunkRange extracts the old-side start line and line count from
-// a hunk header.
-func parseUnifiedDiffHunkRange(line string) (start, count int, ok bool) {
+// patchSidePath normalizes one side of a diff header. git prefixes the old side
+// with a/ and the new side with b/, and only that one prefix may be stripped: a
+// file genuinely living at b/pkg.go is written "--- a/b/pkg.go", so stripping
+// both in sequence resolved it to pkg.go and read the wrong file.
+func patchSidePath(raw, prefix string) string {
+	p := patchHeaderPath(raw)
+	if unquoted, err := strconv.Unquote(p); err == nil {
+		p = unquoted
+	}
+	p = strings.ReplaceAll(p, `\`, "/")
+	if p == patchDevNull {
+		return p
+	}
+	return strings.TrimPrefix(p, prefix)
+}
+
+// parseUnifiedDiffHunkRange extracts the line accounting from a hunk header.
+func parseUnifiedDiffHunkRange(line string) (unifiedDiffHunk, bool) {
 	match := trailReviewHunkRangePattern.FindStringSubmatch(line)
 	if match == nil {
-		return 0, 0, false
+		return unifiedDiffHunk{}, false
 	}
-	start, err := strconv.Atoi(match[1])
+	oldStart, err := strconv.Atoi(match[1])
 	if err != nil {
-		return 0, 0, false
+		return unifiedDiffHunk{}, false
 	}
-	count = 1
-	if match[2] != "" {
-		if count, err = strconv.Atoi(match[2]); err != nil {
-			return 0, 0, false
-		}
+	oldCount, ok := patchHunkCount(match[2])
+	if !ok {
+		return unifiedDiffHunk{}, false
 	}
-	return start, count, true
+	newCount, ok := patchHunkCount(match[4])
+	if !ok {
+		return unifiedDiffHunk{}, false
+	}
+	return unifiedDiffHunk{OldStart: oldStart, OldCount: oldCount, NewCount: newCount}, true
+}
+
+// patchHunkCount reads one side's line count, which defaults to 1 when the hunk
+// header omits it.
+func patchHunkCount(raw string) (int, bool) {
+	if raw == "" {
+		return 1, true
+	}
+	count, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false
+	}
+	return count, true
 }
 
 // patchAnchorLines returns the file's bytes for lines [start, end] with their
