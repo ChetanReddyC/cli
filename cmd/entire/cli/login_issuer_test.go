@@ -350,7 +350,7 @@ func TestPersistLogin_DispatchedLoginNamesTheRegion(t *testing.T) {
 
 	var out bytes.Buffer
 	token := loginTestJWT(t, testRegionalIssuer)
-	if err := persistLogin(&out, "https://auth.entire.io", token, "refresh-token"); err != nil {
+	if err := persistLogin(&out, "https://auth.entire.io", testRegionalIssuer, token, "refresh-token"); err != nil {
 		t.Fatalf("persistLogin() = %v, want nil", err)
 	}
 	if !strings.Contains(out.String(), testRegionalIssuer) {
@@ -375,5 +375,37 @@ func TestPersistLogin_DispatchedLoginNamesTheRegion(t *testing.T) {
 	}
 	if got != testRegionalIssuer {
 		t.Fatalf("active context CoreURL = %q, want the issuing region (contexts=%+v, active=%q)", got, ctxs, active)
+	}
+}
+
+// iss names the signer, and a verifier resolves JWKS from it — so only the
+// region that answered the handoff can legitimately claim it. A token arriving
+// from us.auth.entire.io but claiming a sibling region is misconfiguration, and
+// validating against the dialled apex alone would wave it through because both
+// sit under it. The account's own home region travels in home_jurisdiction, not
+// in iss, so a cross-region mint needs no leniency here.
+func TestPersistLogin_RejectsATokenFromAnotherRegion(t *testing.T) {
+	// Not parallel: mutates the process-global tokenstore backend.
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+
+	var out bytes.Buffer
+	// Handed off to us.auth.entire.io; token claims eu.auth.entire.io.
+	token := loginTestJWT(t, "https://eu.auth.entire.io")
+	err := persistLogin(&out, "https://auth.entire.io", testRegionalIssuer, token, "refresh-token")
+	if err == nil {
+		t.Fatal("persistLogin() = nil, want an iss-mismatch rejection")
+	}
+	if !strings.Contains(err.Error(), "iss mismatch") {
+		t.Fatalf("persistLogin() = %v, want an iss-mismatch error", err)
+	}
+	// Nothing may be persisted from a rejected token.
+	ctxs, _, cerr := auth.Contexts()
+	if cerr != nil {
+		t.Fatalf("auth.Contexts() = %v, want nil", cerr)
+	}
+	if len(ctxs) != 0 {
+		t.Fatalf("contexts = %+v, want none recorded for a rejected token", ctxs)
 	}
 }

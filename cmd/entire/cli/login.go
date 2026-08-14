@@ -297,7 +297,7 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 		return fmt.Errorf("complete login: %w", err)
 	}
 
-	return persistLogin(outW, client.BaseURL(), result.accessToken, result.refreshToken)
+	return persistLogin(outW, client.BaseURL(), issuer, result.accessToken, result.refreshToken)
 }
 
 type loginTokens struct {
@@ -420,25 +420,36 @@ func runBrowserLogin(ctx context.Context, outW, errW io.Writer, flow browserAuth
 		return fmt.Errorf("complete login: %w", err)
 	}
 
-	return persistLogin(outW, baseURL, token, refreshToken)
+	return persistLogin(outW, baseURL, issuer, token, refreshToken)
 }
 
 // persistLogin validates the freshly-issued access token and records it in
 // the shared contexts.json credential model. Shared by the device-code and
 // browser flows.
 //
-// baseURL is the host the user dialled, NOT the region the flow was handed off
-// to, and the token's iss is checked against it deliberately. Do not "tighten"
-// this to require iss == the adopted issuer: the region that answers a handoff
-// is not necessarily the region that mints. The apex geo-routes
-// POST /device_authorization, so an account homed in one region can legitimately
-// be served by another, which then issues with iss set to the home region — the
-// dialled apex is the only origin both are guaranteed to sit under. Pinning the
-// token request to one region answers "where may this code go?"; issMatches
-// against the apex answers "is this issuer acceptable at all?". Conflating them
-// would reject correct cross-region logins.
-func persistLogin(outW io.Writer, baseURL, token, refreshToken string) error {
-	if err := validateReceivedToken(token, baseURL, time.Now()); err != nil {
+// dialled is the host the user asked for; adoptedIssuer is the origin a
+// dispatching login server handed the flow off to, or "" when there was no
+// handoff. The token's iss is validated against the handoff target when there
+// was one, and against the dialled host otherwise — the same rule that gated
+// the handoff, now applied to the token it produced.
+//
+// Scoping to the handoff target matters because iss names the *signer*, and a
+// verifier resolves JWKS from it. Only the region that minted the token can
+// claim it, and that is the region that answered the handoff — so a token
+// arriving from us.auth.entire.io while claiming eu.auth.entire.io is
+// misconfiguration, even though both sit under the dialled apex. Validating
+// against the apex alone would wave that through and leave a context whose
+// every later refresh fails against a region that never issued it.
+//
+// A jurisdiction the account is not homed in can legitimately mint (the apex
+// geo-routes the device flow, so an AU-homed account can be served by EU); the
+// home region travels in the home_jurisdiction claim, not in iss.
+func persistLogin(outW io.Writer, dialled, adoptedIssuer, token, refreshToken string) error {
+	expected := dialled
+	if adoptedIssuer != "" {
+		expected = adoptedIssuer
+	}
+	if err := validateReceivedToken(token, expected, time.Now()); err != nil {
 		return fmt.Errorf("reject login token: %w", err)
 	}
 
@@ -449,7 +460,7 @@ func persistLogin(outW io.Writer, baseURL, token, refreshToken string) error {
 		return fmt.Errorf("save login: %w", withHeadlessStoreHint(err))
 	}
 
-	fmt.Fprintln(outW, loginCompleteLine(token, baseURL))
+	fmt.Fprintln(outW, loginCompleteLine(token, dialled))
 	return nil
 }
 
