@@ -5,6 +5,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
@@ -28,7 +29,7 @@ func extractTranscriptMetadata(data []byte) transcriptMetadata {
 			if line.Type == transcript.TypeUser {
 				if prompt := transcript.ExtractUserContent(line.Message); prompt != "" {
 					meta.TurnCount++
-					if meta.FirstPrompt == "" {
+					if meta.FirstPrompt == "" && !strategy.IsInjectedInstructionPrompt(prompt) {
 						meta.FirstPrompt = prompt
 					}
 				}
@@ -66,7 +67,15 @@ func extractTranscriptMetadataForAgent(ag agent.Agent, sessionRef string, data [
 
 	if extractor, ok := agent.AsPromptExtractor(ag); ok {
 		if prompts, err := extractor.ExtractPrompts(sessionRef, 0); err == nil && len(prompts) > 0 {
-			meta.FirstPrompt = prompts[0]
+			// Native extractors return prompts in transcript order; agents that
+			// inject an instruction preamble (Codex's environment context) put it
+			// first, so use the first genuine user prompt for the title — the
+			// same filter the rewind display path applies.
+			if first := strategy.FirstDisplayPrompt(prompts); first != "" {
+				meta.FirstPrompt = first
+			} else {
+				meta.FirstPrompt = prompts[0]
+			}
 			meta.TurnCount = len(prompts)
 		}
 	}

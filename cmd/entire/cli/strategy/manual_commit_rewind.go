@@ -816,18 +816,35 @@ func restoredPromptPreview(sessionAgent agent.Agent, promptContent string, trans
 	if err != nil || len(prompts) == 0 {
 		return ""
 	}
-	return firstRestoredDisplayPrompt(prompts)
+	if first := FirstDisplayPrompt(prompts); first != "" {
+		return TruncateDescription(first, MaxDescriptionLength)
+	}
+	return ""
 }
 
-func firstRestoredDisplayPrompt(prompts []string) string {
+// FirstDisplayPrompt returns the first prompt in the list worth showing as a
+// title/preview: the first entry that is non-empty, not separator-only, and
+// not an agent-injected instruction preamble (Codex's environment context,
+// AGENTS.md injection blocks). Returns "" if none qualifies. Exported so
+// import paths that select a prompt from a transcript (attach) apply the same
+// filter as the rewind display path.
+func FirstDisplayPrompt(prompts []string) string {
 	for _, prompt := range prompts {
 		cleaned := strings.TrimSpace(prompt)
 		if cleaned == "" || isOnlySeparators(cleaned) || isInjectedInstructionPrompt(cleaned) {
 			continue
 		}
-		return TruncateDescription(cleaned, MaxDescriptionLength)
+		return cleaned
 	}
 	return ""
+}
+
+// IsInjectedInstructionPrompt reports whether prompt is an agent-injected
+// instruction preamble (AGENTS.md injection, Codex's environment context) rather
+// than a genuine user prompt. Display paths that pick a prompt to show as a
+// title/preview skip these (see FirstDisplayPrompt).
+func IsInjectedInstructionPrompt(prompt string) bool {
+	return isInjectedInstructionPrompt(prompt)
 }
 
 func isInjectedInstructionPrompt(prompt string) bool {
