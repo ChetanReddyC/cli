@@ -301,7 +301,7 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 		styles:         styles,
 		browseVP:       viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
 		darkBg:         termenv.HasDarkBackground(),
-		filterType:     typeFilterCheckpoints,      // default the results table to checkpoints
+		filterType:     typeFilterSessions,         // default the results table to sessions (checkpoints fold into sessions server-side)
 		semanticSearch: newSemanticSearcher(false), // command layer overrides with its session searcher
 	}
 	if codeOpts != nil {
@@ -516,27 +516,20 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	// Type tab keys (1/2/3)
 	switch msg.String() {
 	case "1":
-		m.filterType = typeFilterCheckpoints
-		m.cursor = 0
-		m.page = 0
-		m.browseVP.GotoTop()
-		m = m.refreshBrowseContent()
-		return m, nil
-	case "2":
 		m.filterType = typeFilterSessions
 		m.cursor = 0
 		m.page = 0
 		m.browseVP.GotoTop()
 		m = m.refreshBrowseContent()
 		return m, nil
-	case "3":
+	case "2":
 		m.filterType = typeFilterCommits
 		m.cursor = 0
 		m.page = 0
 		m.browseVP.GotoTop()
 		m = m.refreshBrowseContent()
 		return m, nil
-	case "4":
+	case "3":
 		m.filterType = typeFilterCode
 		m.cursor = 0
 		m.page = 0
@@ -800,7 +793,7 @@ func (m searchModel) viewSearchMode() string {
 
 // viewTypeTabs renders the type filter tabs with counts.
 func (m searchModel) viewTypeTabs() string {
-	cpCount, cmCount, ssCount := m.computeTypeCounts()
+	_, cmCount, ssCount := m.computeTypeCounts()
 
 	renderTab := func(label string, filter typeFilter, count int, keyHint string) string {
 		text := fmt.Sprintf("[%s] %s %d", keyHint, label, count)
@@ -810,11 +803,15 @@ func (m searchModel) viewTypeTabs() string {
 		return m.styles.render(m.styles.tabInactive, text)
 	}
 
+	// No Checkpoints tab: the search service folds checkpoint hits into their
+	// owning sessions (ENT-1595), so a checkpoint surfaces as its session. This
+	// matches the web, which dropped its Checkpoints tab. Raw checkpoints stay
+	// reachable by ID via `entire checkpoint explain <id>` (folded session rows
+	// route there).
 	tabs := []string{
-		renderTab("Checkpoints", typeFilterCheckpoints, cpCount, "1"),
-		renderTab("Sessions", typeFilterSessions, ssCount, "2"),
-		renderTab("Commits", typeFilterCommits, cmCount, "3"),
-		renderTab("Code", typeFilterCode, len(m.codeResults), "4"),
+		renderTab("Sessions", typeFilterSessions, ssCount, "1"),
+		renderTab("Commits", typeFilterCommits, cmCount, "2"),
+		renderTab("Code", typeFilterCode, len(m.codeResults), "3"),
 	}
 
 	return strings.Join(tabs, "  ")
@@ -1558,7 +1555,7 @@ func (m searchModel) viewHelp() string {
 	if pages > 1 {
 		left += dot + m.styles.helpItem("n/p", "page")
 	}
-	left += dot + m.styles.helpItem("1-4", "type") + dot +
+	left += dot + m.styles.helpItem("1-3", "type") + dot +
 		m.styles.helpItem(keys.Quit.Help().Key, keys.Quit.Help().Desc)
 
 	// The page / results count lives on the status row beneath the list
