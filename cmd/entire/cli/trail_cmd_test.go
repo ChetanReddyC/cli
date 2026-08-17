@@ -995,6 +995,16 @@ func TestTrailListQueryWithOffsetIncludesOffset(t *testing.T) {
 	}
 }
 
+func TestListTrailResourcesRejectsNonPositiveLimit(t *testing.T) {
+	t.Parallel()
+	for _, limit := range []int{0, -1} {
+		_, _, err := listTrailResources(t.Context(), nil, "gh", "acme", "repo", nil, "", limit)
+		if err == nil || err.Error() != "limit must be greater than 0" {
+			t.Fatalf("limit %d error = %v, want limit validation error", limit, err)
+		}
+	}
+}
+
 func TestListTrailResourcesUsesLegacyQueryByDefault(t *testing.T) {
 	t.Parallel()
 	var gotQuery string

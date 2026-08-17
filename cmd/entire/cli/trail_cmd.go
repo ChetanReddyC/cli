@@ -564,6 +564,9 @@ func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Cli
 }
 
 func listTrailResources(ctx context.Context, client *api.Client, forge, owner, repo string, statuses []trail.Status, author string, limit int) ([]api.TrailResource, int, error) {
+	if limit <= 0 {
+		return nil, 0, errors.New("limit must be greater than 0")
+	}
 	if !isEntireAPITrailClient(client) {
 		return listLegacyTrailResources(ctx, client, forge, owner, repo, statuses, author, limit)
 	}
