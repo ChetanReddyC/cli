@@ -2,11 +2,14 @@
 //
 // Usage:
 //
-//	// Initialize logger for a session (typically at the cobra entry point);
-//	// the returned context carries the logger for downstream injection.
-//	ctx, err := logging.Init(ctx, sessionID)
+//	// Initialize logging (typically at the cobra entry point) and inject the
+//	// logger it returns, so downstream code receives it from the context.
+//	l, err := logging.Init(ctx, sessionID)
 //	if err != nil {
 //	    // handle error
+//	}
+//	if l != nil {
+//	    ctx = logging.WithLogger(ctx, l)
 //	}
 //	defer logging.Close()
 //
@@ -118,17 +121,19 @@ func SetLogLevelGetter(getter func() string) {
 // If the log file cannot be created, falls back to stderr.
 // Log level is controlled by ENTIRE_LOG_LEVEL environment variable.
 //
-// The returned context carries the initialized logger (see LoggerFromContext),
-// already stamped with session_id when one was given. Entry points pass it
-// down so downstream code — and packages that take an injected *slog.Logger,
-// like redact — never need to ask whether logging is ready. On error, and on
-// the stderr fallback paths, the input context is returned without a logger:
-// a context logger means "writes go to .entire/logs/", never to the terminal.
-func Init(ctx context.Context, sessionID string) (context.Context, error) {
+// Returns the initialized logger, already stamped with session_id when one was
+// given, for the caller to put in its context with WithLogger — Init sets up
+// the sink, the caller decides where the handle lives. Packages that take an
+// injected *slog.Logger, like redact, then receive it from that context.
+//
+// A nil logger with a nil error means logging is not file-backed: Init fell
+// back to stderr. Callers must not inject that, because a logger in the
+// context asserts "writes go to .entire/logs/", never to the terminal.
+func Init(ctx context.Context, sessionID string) (*slog.Logger, error) {
 	// Validate session ID if provided (used only for the slog attribute, not the filename)
 	if sessionID != "" {
 		if err := validation.ValidateSessionID(sessionID); err != nil {
-			return ctx, fmt.Errorf("invalid session ID for logging: %w", err)
+			return nil, fmt.Errorf("invalid session ID for logging: %w", err)
 		}
 	}
 
@@ -166,20 +171,24 @@ func Init(ctx context.Context, sessionID string) (context.Context, error) {
 
 	logsPath := filepath.Join(repoRoot, LogsDir)
 	if err := os.MkdirAll(logsPath, 0o750); err != nil {
-		// Fall back to stderr. Deliberately no context logger: a context
-		// logger asserts "file-backed logging is ready", and gates like the
-		// redaction summary use its presence to decide whether an INFO line
-		// lands in .entire/logs/ or would splash JSON onto the terminal.
+		// Fall back to stderr for the package-level helpers, but hand the
+		// caller nothing to inject.
 		logger = createLogger(os.Stderr, level)
-		return ctx, nil
+		//nolint:nilnil // Documented signal, not an oversight: no logger and no
+		// error means "initialized, but not file-backed". It cannot be an error
+		// — callers must still proceed (the hook path configures redaction here
+		// regardless) — and it must not be the stderr logger, which callers
+		// would then inject and splash INFO lines onto the terminal.
+		return nil, nil
 	}
 
 	logFilePath := filepath.Join(logsPath, "entire.log")
 	f, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // fixed filename, not user-controlled
 	if err != nil {
-		// Fall back to stderr (see the fallback above: no context logger).
+		// Fall back to stderr (see the fallback above for why nil, nil).
 		logger = createLogger(os.Stderr, level)
-		return ctx, nil
+		//nolint:nilnil // see above
+		return nil, nil
 	}
 
 	logFile = f
@@ -187,17 +196,14 @@ func Init(ctx context.Context, sessionID string) (context.Context, error) {
 	logger = createLogger(liveWriter{}, level)
 	currentSessionID = sessionID
 
-	return contextWithInitLogger(ctx, logger, sessionID), nil
-}
-
-// contextWithInitLogger attaches the logger Init built to the context,
-// pre-stamped with session_id so direct consumers emit lines filterable the
-// same way as the package-level Debug/Info/Warn/Error functions.
-func contextWithInitLogger(ctx context.Context, l *slog.Logger, sessionID string) context.Context {
+	// Stamp session_id here rather than at the injection site: it is part of
+	// initializing this logger, so every holder emits lines filterable the same
+	// way as the package-level Debug/Info/Warn/Error functions.
+	initialized := logger
 	if sessionID != "" {
-		l = l.With(slog.String("session_id", sessionID))
+		initialized = initialized.With(slog.String("session_id", sessionID))
 	}
-	return WithLogger(ctx, l)
+	return initialized, nil
 }
 
 // Close closes the log file if one is open.

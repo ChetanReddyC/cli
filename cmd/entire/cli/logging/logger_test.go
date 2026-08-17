@@ -93,22 +93,26 @@ func TestInit_CreatesLogFile(t *testing.T) {
 // TestInit_ReturnedContextCarriesSessionStampedLogger pins the injection
 // contract downstream consumers rely on (strategy hands
 // LoggerFromContext(ctx) to the redact package, and gates the redaction
-// summary on it being non-nil): the context Init returns must carry a
-// logger that writes to .entire/logs/entire.log with session_id stamped.
-func TestInit_ReturnedContextCarriesSessionStampedLogger(t *testing.T) {
+// summary on it being non-nil): the logger Init returns must write to
+// .entire/logs/entire.log with session_id stamped, and must survive the
+// round trip through WithLogger/LoggerFromContext.
+func TestInit_ReturnsSessionStampedLoggerForInjection(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
 	initGitRepo(t, tmpDir)
 
-	logCtx, err := Init(context.Background(), testSessionID)
+	initialized, err := Init(context.Background(), testSessionID)
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
+	if initialized == nil {
+		t.Fatal("Init() returned no logger for a writable log directory")
+	}
 
-	l := LoggerFromContext(logCtx)
+	l := LoggerFromContext(WithLogger(context.Background(), initialized))
 	if l == nil {
-		t.Fatal("LoggerFromContext() = nil for the context Init returned")
+		t.Fatal("LoggerFromContext() = nil for a context holding the initialized logger")
 	}
 	l.Warn("injected logger writes to the log file")
 
@@ -131,12 +135,12 @@ func TestInit_ReturnedContextCarriesSessionStampedLogger(t *testing.T) {
 	}
 }
 
-// TestInit_StderrFallbackAttachesNoContextLogger pins the summary-gate
-// contract for the fallback path: when Init cannot open .entire/logs/ and
-// falls back to stderr, the returned context must NOT carry a logger —
-// otherwise the redaction summary gate (logger != nil) fires and hooks
-// splash a JSON INFO line onto the user's terminal on every commit.
-func TestInit_StderrFallbackAttachesNoContextLogger(t *testing.T) {
+// TestInit_StderrFallbackReturnsNoLogger pins the summary-gate contract for the
+// fallback path: when Init cannot open .entire/logs/ and falls back to stderr,
+// it must return a nil logger so callers have nothing to inject. Injecting one
+// would fire the redaction summary gate (logger != nil) and splash a JSON INFO
+// line onto the user's terminal on every commit.
+func TestInit_StderrFallbackReturnsNoLogger(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
@@ -148,14 +152,14 @@ func TestInit_StderrFallbackAttachesNoContextLogger(t *testing.T) {
 		t.Fatalf("failed to block .entire dir: %v", err)
 	}
 
-	logCtx, err := Init(context.Background(), testSessionID)
+	l, err := Init(context.Background(), testSessionID)
 	if err != nil {
 		t.Fatalf("Init() error = %v (fallback must not be an error)", err)
 	}
 	defer Close()
 
-	if LoggerFromContext(logCtx) != nil {
-		t.Error("LoggerFromContext() must be nil on the stderr fallback path")
+	if l != nil {
+		t.Error("Init() must return a nil logger on the stderr fallback path")
 	}
 }
 
@@ -603,12 +607,12 @@ func TestLog_ContextLoggerDoesNotDoubleStampSessionID(t *testing.T) {
 	t.Chdir(tmpDir)
 	initGitRepo(t, tmpDir)
 
-	logCtx, err := Init(context.Background(), testSessionID)
+	l, err := Init(context.Background(), testSessionID)
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 
-	Warn(logCtx, "stamped once")
+	Warn(WithLogger(context.Background(), l), "stamped once")
 	Close()
 
 	content, err := os.ReadFile(testLogFilePath(tmpDir))
@@ -642,13 +646,12 @@ func TestContextLogger_SurvivesReInit(t *testing.T) {
 	t.Chdir(tmpDir)
 	initGitRepo(t, tmpDir)
 
-	firstCtx, err := Init(context.Background(), "")
+	captured, err := Init(context.Background(), "")
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
-	captured := LoggerFromContext(firstCtx)
 	if captured == nil {
-		t.Fatal("LoggerFromContext() = nil for the context Init returned")
+		t.Fatal("Init() returned no logger for a writable log directory")
 	}
 
 	if _, err := Init(context.Background(), testSessionID); err != nil {

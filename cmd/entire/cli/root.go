@@ -77,9 +77,11 @@ func initRootLogging(cmd *cobra.Command) {
 		return
 	}
 	logging.SetLogLevelGetter(GetLogLevel)
-	if logCtx, err := logging.Init(ctx, ""); err == nil {
-		cmd.SetContext(logCtx)
+	l, err := logging.Init(ctx, "")
+	if err != nil || l == nil {
+		return
 	}
+	cmd.SetContext(logging.WithLogger(ctx, l))
 }
 
 func NewRootCmd() *cobra.Command {

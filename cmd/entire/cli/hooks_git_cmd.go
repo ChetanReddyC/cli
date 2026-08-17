@@ -142,19 +142,25 @@ func initHookLogging(ctx context.Context) (context.Context, func()) {
 
 	// Read session ID for the slog attribute (empty string is fine - log file is fixed)
 	sessionID := strategy.FindMostRecentSession(ctx)
-	logCtx, err := logging.Init(ctx, sessionID)
+	l, err := logging.Init(ctx, sessionID)
 	if err != nil {
 		// Init failed - logging will use stderr fallback
 		return ctx, func() {}
 	}
+	// Re-initialized with the session ID the root hook could not know, so
+	// replace the logger it injected with this session-stamped one. A nil
+	// logger means Init fell back to stderr; leave the context alone.
+	if l != nil {
+		ctx = logging.WithLogger(ctx, l)
+	}
 
 	// Configure redaction once at startup: PII (opt-in), inline custom_redactions,
 	// and rule packs discovered under .entire/redactors/. No-op if nothing is
-	// configured. Receives logCtx so redaction diagnostics and the load-time
-	// summary route through the injected logger into .entire/logs/.
-	strategy.EnsureRedactionConfigured(logCtx)
+	// configured. Receives the logger-carrying ctx so redaction diagnostics and
+	// the load-time summary route into .entire/logs/.
+	strategy.EnsureRedactionConfigured(ctx)
 
-	return logCtx, logging.Close
+	return ctx, logging.Close
 }
 
 // hookLogCleanup stores the cleanup function for hook logging.
