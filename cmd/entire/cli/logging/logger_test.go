@@ -561,3 +561,108 @@ func TestInit_RejectsInvalidSessionIDs(t *testing.T) {
 		})
 	}
 }
+
+// TestLog_ResolvesLoggerFromContextFirst pins the resolution order the
+// package-level helpers use: a logger in the context wins over the package
+// global, so a caller holding an initialized context logs exactly where
+// downstream packages that received the same logger by injection log.
+func TestLog_ResolvesLoggerFromContextFirst(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	initGitRepo(t, tmpDir)
+
+	if _, err := Init(context.Background(), ""); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	// A logger distinguishable from the file-backed global.
+	var buf bytes.Buffer
+	ctx := WithLogger(context.Background(), slog.New(slog.NewJSONHandler(&buf, nil)))
+	Warn(ctx, "routed by context")
+
+	Close() // flush the global's file so the negative assertion is meaningful
+
+	if !strings.Contains(buf.String(), "routed by context") {
+		t.Errorf("line did not reach the context logger: %s", buf.String())
+	}
+	content, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+	if strings.Contains(string(content), "routed by context") {
+		t.Errorf("line also went to the package global; context must win: %s", content)
+	}
+}
+
+// TestLog_ContextLoggerDoesNotDoubleStampSessionID guards the seam between the
+// two session_id sources: Init stamps it onto the logger it puts in the context,
+// and log() prepends it from package state. Taking the context path must not do
+// both, or every line in a hook run carries session_id twice.
+func TestLog_ContextLoggerDoesNotDoubleStampSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	initGitRepo(t, tmpDir)
+
+	logCtx, err := Init(context.Background(), testSessionID)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	Warn(logCtx, "stamped once")
+	Close()
+
+	content, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+	var line string
+	for _, l := range strings.Split(string(content), "\n") {
+		if strings.Contains(l, "stamped once") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("log line missing from file: %s", content)
+	}
+	if got := strings.Count(line, `"session_id"`); got != 1 {
+		t.Errorf("session_id appears %d times, want 1: %s", got, line)
+	}
+}
+
+// TestContextLogger_SurvivesReInit pins why loggers are bound to liveWriter
+// rather than to the *bufio.Writer directly. Re-initializing with a resolved
+// session ID is routine on the hook path (the root PersistentPreRunE inits
+// first, then the hook re-inits), and Init flushes and drops the previous
+// buffer. A logger captured before that must keep reaching the log file; bound
+// to the old bufio.Writer it would write into an orphaned buffer nothing
+// flushes, losing the line silently.
+func TestContextLogger_SurvivesReInit(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	initGitRepo(t, tmpDir)
+
+	firstCtx, err := Init(context.Background(), "")
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	captured := LoggerFromContext(firstCtx)
+	if captured == nil {
+		t.Fatal("LoggerFromContext() = nil for the context Init returned")
+	}
+
+	if _, err := Init(context.Background(), testSessionID); err != nil {
+		t.Fatalf("second Init() error = %v", err)
+	}
+
+	captured.Warn("written through the pre-reinit logger")
+	Close()
+
+	content, err := os.ReadFile(testLogFilePath(tmpDir))
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+	if !strings.Contains(string(content), "written through the pre-reinit logger") {
+		t.Errorf("line written through the pre-reinit logger was lost: %s", content)
+	}
+}

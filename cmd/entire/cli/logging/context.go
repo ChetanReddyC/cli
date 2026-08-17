@@ -22,10 +22,10 @@ const (
 // context down so downstream code receives the logger by injection instead
 // of probing package state for readiness.
 //
-// The logger is a snapshot bound to the log file Init opened: it stays valid
-// until the next Init or Close, after which its writes land on a closed file
-// and are silently discarded. Entry points initialize once per process, so
-// don't stash this logger anywhere that outlives the command.
+// The logger writes through an indirection onto whichever log file Init most
+// recently opened (see liveWriter), so it stays valid across a re-Init and is
+// safe to hold and to write to concurrently. After Close there is no file and
+// its writes are dropped, so don't stash it anywhere that outlives the command.
 func WithLogger(ctx context.Context, l *slog.Logger) context.Context {
 	return context.WithValue(ctx, loggerKey, l)
 }

@@ -55,13 +55,52 @@ var (
 	// currentSessionID stores the session ID from Init() to include in all logs
 	currentSessionID string
 
-	// mu protects logger, logFile, logBufWriter, and currentSessionID
+	// mu protects logger, logFile, logBufWriter, and currentSessionID, and
+	// serializes writes to logBufWriter (see liveWriter)
 	mu sync.RWMutex
 
 	// logLevelGetter is an optional callback to get log level from settings.
 	// Set by SetLogLevelGetter before Init is called.
 	logLevelGetter func() string
 )
+
+// liveWriter routes each write to whichever buffered log file Init most
+// recently opened, resolved per write under the read lock. Loggers Init hands
+// out — the package-level one and the copy it puts in the context — are bound
+// to this indirection rather than straight to a *bufio.Writer, which buys two
+// things:
+//
+//   - They survive a second Init. Re-initializing with a resolved session ID is
+//     routine on the hook path, and Init flushes and drops the previous
+//     bufio.Writer; a logger holding that object directly would keep writing
+//     into an orphaned buffer nothing ever flushes, silently losing every line.
+//   - Writes are serialized. bufio.Writer is not goroutine-safe, so two
+//     goroutines logging at once — or one logging while Close flushes — corrupt
+//     the buffer. The lock is exclusive, not a read lock, precisely because
+//     concurrent writers are the problem; a read lock would admit them all at
+//     once. This also covers holders of the logger that never go through log(),
+//     which is how the redact package uses the injected one.
+//
+// After Close there is no writer, and writes are dropped rather than erroring:
+// losing a log line must never surface as a failure in the caller.
+//
+// Init and Close hold the same lock, so nothing they call may log through here.
+// Today neither does — Init's invalid-level warning goes straight to os.Stderr.
+type liveWriter struct{}
+
+func (liveWriter) Write(p []byte) (int, error) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if logBufWriter == nil {
+		return len(p), nil
+	}
+	n, err := logBufWriter.Write(p)
+	if err != nil {
+		return n, fmt.Errorf("write to log buffer: %w", err)
+	}
+	return n, nil
+}
 
 // SetLogLevelGetter sets a callback function to get the log level from settings.
 // This allows the logging package to read settings without a circular dependency.
@@ -145,7 +184,7 @@ func Init(ctx context.Context, sessionID string) (context.Context, error) {
 
 	logFile = f
 	logBufWriter = bufio.NewWriterSize(f, 8192) // 8KB buffer for batched writes
-	logger = createLogger(logBufWriter, level)
+	logger = createLogger(liveWriter{}, level)
 	currentSessionID = sessionID
 
 	return contextWithInitLogger(ctx, logger, sessionID), nil
@@ -253,23 +292,38 @@ func Error(ctx context.Context, msg string, attrs ...any) {
 
 // log is the internal logging function that extracts context values and logs.
 //
-// The read lock is held across l.Log so Init/Close cannot close logBufWriter
-// mid-write; do not shrink the lock scope to a snapshot pattern.
+// The logger comes from the context when the entry point put one there
+// (logging.Init → WithLogger), which is the same logger downstream packages
+// receive by injection — one resolution path, so a caller cannot log somewhere
+// other than where redact does. The package-level logger is the fallback for
+// contexts built before Init or derived from context.Background(), and
+// slog.Default() the last resort when nothing initialized logging at all.
+//
+// No lock is held across l.Log: writes reach the log file through liveWriter,
+// which takes the read lock per write, so Init/Close cannot flush the buffer
+// mid-write. Only the globals read below need synchronizing.
 func log(ctx context.Context, level slog.Level, msg string, attrs ...any) {
 	mu.RLock()
-	defer mu.RUnlock()
-
 	l := logger
+	globalSessionID := currentSessionID
+	mu.RUnlock()
+
+	// Init already stamped session_id onto the logger it put in the context, so
+	// taking that path must not add it again or every line carries it twice.
+	stampSessionID := true
+	if ctxLogger := LoggerFromContext(ctx); ctxLogger != nil {
+		l = ctxLogger
+		stampSessionID = false
+	}
 	if l == nil {
 		l = slog.Default()
 	}
-	globalSessionID := currentSessionID
 
 	// Build attributes slice with session ID first (if set)
 	var allAttrs []any
 
 	// Add session ID from Init() if set (always first for consistency)
-	if globalSessionID != "" {
+	if stampSessionID && globalSessionID != "" {
 		allAttrs = append(allAttrs, slog.String("session_id", globalSessionID))
 	}
 
