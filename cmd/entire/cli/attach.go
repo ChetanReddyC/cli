@@ -764,7 +764,7 @@ func resolveAgentAndTranscript(ctx context.Context, w io.Writer, sessionID strin
 		return nil, "", err
 	}
 
-	transcriptPath, err := resolveAndValidateTranscript(ctx, sessionID, ag)
+	transcriptPath, err := resolveAndValidateTranscript(ctx, sessionID, ag, lookupAllowFetch)
 	if err != nil {
 		// Auto-detect: try all other agents.
 		detectedAg, detectedPath, detectErr := detectAgentByTranscript(ctx, sessionID, ag.Name())
@@ -774,7 +774,12 @@ func resolveAgentAndTranscript(ctx context.Context, w io.Writer, sessionID strin
 				logging.Debug(ctx, "auto-detection also failed after transcript fetch", "error", detectErr)
 				return nil, "", err
 			}
-			return nil, "", fmt.Errorf("%w (also tried auto-detecting other agents: %w)", err, detectErr)
+			// Auto-detection never asks an agent to materialize a transcript, so
+			// name the agents that could have, rather than leaving the user with
+			// "is the session ID correct?" for a session that is simply owned by
+			// an agent they did not name.
+			return nil, "", fmt.Errorf("%w (also tried auto-detecting other agents: %w)%s",
+				err, detectErr, unprobedFetcherHint(ag.Name()))
 		}
 		ag = detectedAg
 		transcriptPath = detectedPath
@@ -783,6 +788,31 @@ func resolveAgentAndTranscript(ctx context.Context, w io.Writer, sessionID strin
 	}
 
 	return ag, transcriptPath, nil
+}
+
+// unprobedFetcherHint names the registered agents that can materialize a
+// transcript on demand but were not asked to during auto-detection, so a user
+// who named the wrong agent learns the one-flag fix. Returns "" when the only
+// such agent is the one already tried.
+func unprobedFetcherHint(tried types.AgentName) string {
+	var names []string
+	for _, name := range agent.List() {
+		if name == tried {
+			continue
+		}
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		if _, ok := agent.AsTranscriptFetcher(ag); ok {
+			names = append(names, string(name))
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; %s can export transcripts on demand — retry with --agent %s",
+		strings.Join(names, " and "), names[0])
 }
 
 // transcriptFetchError keeps secondary auto-detection failures from obscuring
@@ -811,9 +841,27 @@ func resolveAgent(existingState *session.State, agentName types.AgentName) (agen
 	return ag, nil
 }
 
+// transcriptLookup says how hard resolveAndValidateTranscript may work to produce
+// a transcript.
+//
+// Auto-detection probes every registered agent, so it must stay cheap and free of
+// side effects — the same reason PrepareTranscript below is gated behind an
+// os.Stat. Agent-side materialization is neither: OpenCode's FetchTranscript
+// spawns `opencode export` (up to openCodeCommandTimeout) and creates
+// <repo>/.entire/tmp, which is only warranted for the agent the user named.
+type transcriptLookup int
+
+const (
+	// lookupLocalOnly reads what is already on disk. Used while probing agents
+	// the user did not ask for.
+	lookupLocalOnly transcriptLookup = iota
+	// lookupAllowFetch may ask the agent to materialize the transcript.
+	lookupAllowFetch
+)
+
 // resolveAndValidateTranscript finds the transcript file for a session, searching alternative
 // project directories if needed.
-func resolveAndValidateTranscript(ctx context.Context, sessionID string, ag agent.Agent) (string, error) {
+func resolveAndValidateTranscript(ctx context.Context, sessionID string, ag agent.Agent, lookup transcriptLookup) (string, error) {
 	transcriptPath, err := resolveTranscriptPath(ctx, sessionID, ag)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve transcript path: %w", err)
@@ -834,7 +882,7 @@ func resolveAndValidateTranscript(ctx context.Context, sessionID string, ag agen
 	// `opencode export`) can conjure one even when no hook-cached file exists,
 	// e.g. sessions spawned by an external host rather than a hooked terminal.
 	var fetchErr error
-	if fetcher, ok := agent.AsTranscriptFetcher(ag); ok {
+	if fetcher, ok := agent.AsTranscriptFetcher(ag); ok && lookup == lookupAllowFetch {
 		var fetched string
 		fetched, fetchErr = fetcher.FetchTranscript(ctx, sessionID)
 		if fetchErr == nil {
@@ -868,7 +916,7 @@ func detectAgentByTranscript(ctx context.Context, sessionID string, skip types.A
 		if err != nil {
 			continue
 		}
-		path, resolveErr := resolveAndValidateTranscript(ctx, sessionID, ag)
+		path, resolveErr := resolveAndValidateTranscript(ctx, sessionID, ag, lookupLocalOnly)
 		if resolveErr != nil {
 			logging.Debug(ctx, "auto-detect: agent did not match", "agent", string(name), "error", resolveErr)
 			continue

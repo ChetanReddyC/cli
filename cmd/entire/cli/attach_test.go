@@ -72,6 +72,23 @@ func TestAttach_TranscriptNotFound(t *testing.T) {
 	if !strings.Contains(err.Error(), `transcript not found for agent "claude-code"`) {
 		t.Fatalf("runAttach error = %v, want existing transcript-not-found error", err)
 	}
+	// Auto-detection does not export on the user's behalf, so the error has to
+	// point at the agent that could have.
+	if !strings.Contains(err.Error(), "--agent opencode") {
+		t.Errorf("runAttach error = %v, want a hint naming the on-demand-export agent", err)
+	}
+}
+
+func TestUnprobedFetcherHint(t *testing.T) {
+	t.Parallel()
+
+	hint := unprobedFetcherHint(agent.AgentNameClaudeCode)
+	if !strings.Contains(hint, "--agent opencode") {
+		t.Errorf("unprobedFetcherHint(claude-code) = %q, want it to name opencode", hint)
+	}
+	if got := unprobedFetcherHint(agent.AgentNameOpenCode); got != "" {
+		t.Errorf("unprobedFetcherHint(opencode) = %q, want empty (nothing left to suggest)", got)
+	}
 }
 
 type failingTranscriptFetcher struct {
@@ -80,9 +97,11 @@ type failingTranscriptFetcher struct {
 	baseDir    string
 	baseDirErr error
 	err        error
+	calls      int
 }
 
 func (a *failingTranscriptFetcher) FetchTranscript(context.Context, string) (string, error) {
+	a.calls++
 	return "", a.err
 }
 
@@ -104,12 +123,40 @@ func TestResolveAndValidateTranscript_PreservesFetchFailureAfterFallback(t *test
 		err:        wantErr,
 	}
 
-	_, err = resolveAndValidateTranscript(context.Background(), "test-fetch-failure", ag)
+	_, err = resolveAndValidateTranscript(context.Background(), "test-fetch-failure", ag, lookupAllowFetch)
 	if err == nil || err.Error() != wantErr.Error() {
 		t.Fatalf("resolveAndValidateTranscript error = %v, want %q", err, wantErr)
 	}
 	if !errors.Is(err, wantErr) {
 		t.Fatal("final error does not retain the fetch failure")
+	}
+}
+
+// TestResolveAndValidateTranscript_LocalOnlyDoesNotFetch pins the gate that keeps
+// auto-detection cheap: probing an agent the user did not name must not spawn its
+// export subprocess or write into the repo.
+func TestResolveAndValidateTranscript_LocalOnlyDoesNotFetch(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	baseAgent, err := agent.Get(agent.AgentNameClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := &failingTranscriptFetcher{
+		Agent:      baseAgent,
+		baseDirErr: errors.New("fallback unavailable"),
+		err:        errors.New("fetch must not run"),
+	}
+
+	_, err = resolveAndValidateTranscript(context.Background(), "test-local-only", ag, lookupLocalOnly)
+	if err == nil {
+		t.Fatal("expected transcript-not-found error")
+	}
+	if ag.calls != 0 {
+		t.Errorf("FetchTranscript called %d times during a local-only lookup, want 0", ag.calls)
+	}
+	if !strings.Contains(err.Error(), "transcript not found for agent") {
+		t.Errorf("error = %v, want the generic transcript-not-found error", err)
 	}
 }
 
@@ -136,7 +183,7 @@ func TestResolveAndValidateTranscript_FallbackWinsAfterFetchFailure(t *testing.T
 		err:     errors.New("fetch failed"),
 	}
 
-	got, err := resolveAndValidateTranscript(context.Background(), sessionID, ag)
+	got, err := resolveAndValidateTranscript(context.Background(), sessionID, ag, lookupAllowFetch)
 	if err != nil {
 		t.Fatalf("expected fallback transcript to win, got: %v", err)
 	}
