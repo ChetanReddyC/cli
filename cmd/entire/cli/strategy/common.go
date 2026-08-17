@@ -549,17 +549,27 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 	// holds the checkpoint store. Local-ref seeding and healing are confined
 	// to that elected remote: the legacy origin read tier is strictly
 	// read-only, so a stale refs/remotes/origin/... tracking ref must never
-	// seed or update the local primary when the election points elsewhere or
-	// failed (a stale origin driving local-ref writes is the #1374-class
-	// hazard). When the elected remote's tracking ref is unavailable there is
-	// nothing to advance from — never substitute origin. The election result
-	// is passed explicitly (not inferred from the read-candidate chain, whose
-	// first entry can be the fail-open origin). A remote only tracks Primary
-	// when Primary is in Push.
+	// seed or update the local primary when the election points elsewhere (a
+	// stale origin driving local-ref writes is the #1374-class hazard). When
+	// the elected remote's tracking ref is unavailable there is nothing to
+	// advance from — never substitute origin. The election result is passed
+	// explicitly (not inferred from the read-candidate chain, whose first
+	// entry can be the fail-open origin). A remote only tracks Primary when
+	// Primary is in Push.
+	//
+	// A FAILED election is the one exception, and only for a MISSING local
+	// primary: checkpoint pushes are already fail-closed while the election
+	// is broken, so an orphan buys no safety — but it guarantees a disjoint
+	// history (non-fast-forward on every sync) the moment the user fixes the
+	// setting. Seeding the missing ref from origin's real history is the
+	// seeding counterpart of the read chain's fail-open; no existing local
+	// ref is advanced, so the #1374 replay hazard does not apply.
 	electedName := ""
+	electionFailed := false
 	if elected, electErr := ResolveCheckpointSyncRemote(ctx); electErr == nil {
 		electedName = elected.Name
 	} else {
+		electionFailed = true
 		logging.Debug(ctx, "primary metadata ref: checkpoint sync remote election failed; skipping remote-tracking seed",
 			slog.String("error", electErr.Error()))
 	}
@@ -605,6 +615,19 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		}
 		fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from %s\n", primaryName, electedName)
 		return nil
+	}
+
+	// Failed election + missing local primary: seed from origin's real
+	// history rather than a guaranteed-disjoint orphan (rationale above).
+	if electionFailed && refs.PrimaryFetchableFromRemote() {
+		originRef, originErr := repo.Reference(plumbing.NewRemoteReferenceName("origin", primaryName), true)
+		if originErr == nil {
+			if err := setRefHash(repo, refs.Primary, originRef.Hash()); err != nil {
+				return fmt.Errorf("failed to create metadata ref from origin under failed election: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from origin (checkpoint sync remote election failed; fix checkpoint_push_remote to resume syncing)\n", primaryName)
+			return nil
+		}
 	}
 
 	// No local ref and no elected-remote tracking ref — create an empty orphan.

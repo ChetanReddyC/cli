@@ -149,12 +149,15 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 // legacy origin tier), supplied by cli/strategy callers — this package cannot
 // resolve the election itself.
 //
-// Per-operation candidate semantics: candidates are tried in order; a
-// candidate lacking the ref and a candidate failing at the transport level
-// both advance to the next candidate (transport failures logged at debug);
-// when every candidate fails, the first non-absence error is surfaced so a
-// transport failure cannot be masked by another candidate's not-found result.
-// Only positive absence from every candidate wraps
+// Per-operation candidate semantics: candidates are tried in order, and only
+// AUTHORITATIVE ABSENCE advances the chain. A transport-level failure aborts
+// it: unlike the pure remote-tracking reads elsewhere in the read chain, this
+// fetch installs the canonical LOCAL checkpoint ref (+ref:ref), checkpoint
+// refs advance (backfills parent onto the tip), and hydration only runs when
+// the local ref is absent — so serving from the legacy tier while the elected
+// remote (the only remote writes confine to, hence the newest tip) is merely
+// unreachable would permanently install a stale tip that later backfills
+// parent onto. Only positive absence from every candidate wraps
 // plumbing.ErrReferenceNotFound. A provably remoteless repository (below) also
 // wraps plumbing.ErrReferenceNotFound.
 //
@@ -200,7 +203,6 @@ func fetchCheckpointRefFrom(
 	}
 
 	var firstErr error
-	var firstUncertainErr error
 	for i, remoteName := range readRemotes {
 		candidateCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 		target, authoritative := checkpointFetchTargetFrom(candidateCtx, remoteName)
@@ -209,21 +211,21 @@ func fetchCheckpointRefFrom(
 		if err == nil {
 			return nil
 		}
+		if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+			// Transport uncertainty: a later (legacy) candidate must not
+			// install a possibly-stale tip as the canonical local ref while
+			// the authoritative candidate is merely unreachable.
+			return err
+		}
 		if firstErr == nil {
 			firstErr = err
 		}
-		if firstUncertainErr == nil && !errors.Is(err, plumbing.ErrReferenceNotFound) {
-			firstUncertainErr = err
-		}
 		if i+1 < len(readRemotes) {
-			logging.Debug(ctx, "checkpoint ref fetch: read candidate failed; trying next candidate",
+			logging.Debug(ctx, "checkpoint ref fetch: candidate reports absence; trying next candidate",
 				slog.String("ref", ref.String()),
 				slog.String("candidate", remoteName),
 				slog.String("error", err.Error()))
 		}
-	}
-	if firstUncertainErr != nil {
-		return firstUncertainErr
 	}
 	if electionErr != nil && errors.Is(firstErr, plumbing.ErrReferenceNotFound) {
 		return fmt.Errorf("checkpoint ref %s: checkpoint remote election failed; origin fallback cannot certify absence: %w", ref, electionErr)

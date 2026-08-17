@@ -2286,6 +2286,7 @@ func (s *GitStore) resolveSessionsBranchTrees() ([]*object.Tree, error) {
 	}
 
 	trees := make([]*object.Tree, 0, len(refNames))
+	kept := make([]*object.Commit, 0, len(refNames))
 	seen := make(map[plumbing.Hash]struct{}, len(refNames))
 	var firstErr error
 	for _, refName := range refNames {
@@ -2306,6 +2307,15 @@ func (s *GitStore) resolveSessionsBranchTrees() ([]*object.Tree, error) {
 			}
 			continue
 		}
+		// A candidate whose commit is an ancestor of an already-kept tree
+		// contributes nothing: every checkpoint in it is in the descendant.
+		// This is the common shape — the local branch ahead of a tracking
+		// ref — and skipping it saves consumers a full duplicate shard walk
+		// on every List. Best-effort: an ancestry-check error keeps the tree
+		// (a duplicate walk is cheaper than a missed checkpoint).
+		if treeIsAncestorOfKept(commit, kept) {
+			continue
+		}
 		tree, err := commit.Tree()
 		if err != nil {
 			if firstErr == nil {
@@ -2314,6 +2324,7 @@ func (s *GitStore) resolveSessionsBranchTrees() ([]*object.Tree, error) {
 			continue
 		}
 		seen[ref.Hash()] = struct{}{}
+		kept = append(kept, commit)
 		trees = append(trees, tree)
 	}
 	if len(trees) == 0 {
@@ -2330,6 +2341,17 @@ func (s *GitStore) resolveSessionsBranchTrees() ([]*object.Tree, error) {
 func anyTreeHasCheckpointData(trees []*object.Tree) bool {
 	for _, tree := range trees {
 		if treeHasCheckpointData(tree) {
+			return true
+		}
+	}
+	return false
+}
+
+// treeIsAncestorOfKept reports whether commit is an ancestor of (or equal to)
+// any already-kept candidate commit. Errors read as false — keep the tree.
+func treeIsAncestorOfKept(commit *object.Commit, kept []*object.Commit) bool {
+	for _, k := range kept {
+		if ancestor, err := commit.IsAncestor(k); err == nil && ancestor {
 			return true
 		}
 	}
@@ -2811,12 +2833,36 @@ type AuthorReader interface {
 	GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error)
 }
 
-// GetCheckpointAuthor retrieves the author of a checkpoint from the configured
-// committed-read ref history.
+// GetCheckpointAuthor retrieves the author of a checkpoint from the
+// committed-read history, consulting the same read-candidate chain as content
+// reads: the local read ref first, then the read remotes' tracking refs. A
+// checkpoint whose commit exists only on a remote tier (a legacy checkpoint
+// on origin, or one on the elected sync remote a stale local branch lacks)
+// would otherwise show an empty author in explain while its content resolves
+// fine through the chain.
 // Finds the commit whose subject matches "Checkpoint: <id>" and returns its author.
-// Returns empty Author if the checkpoint is not found or the sessions branch doesn't exist.
+// Returns empty Author if the checkpoint is not found on any candidate.
 func (s *GitStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error) {
-	return getCheckpointAuthorFromRef(ctx, s.repo, s.refs.Read, checkpointID)
+	refNames := []plumbing.ReferenceName{s.refs.Read}
+	if s.refs.ReadBootstrappableFromRemote() {
+		remotes := s.readRemotes
+		if len(remotes) == 0 {
+			remotes = []string{"origin"}
+		}
+		for _, remoteName := range remotes {
+			refNames = append(refNames, plumbing.NewRemoteReferenceName(remoteName, s.refs.Primary.Short()))
+		}
+	}
+	for _, refName := range refNames {
+		author, err := getCheckpointAuthorFromRef(ctx, s.repo, refName, checkpointID)
+		if err != nil {
+			return Author{}, err
+		}
+		if author != (Author{}) {
+			return author, nil
+		}
+	}
+	return Author{}, nil
 }
 
 func getCheckpointAuthorFromRef(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, checkpointID id.CheckpointID) (Author, error) {

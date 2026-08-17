@@ -97,18 +97,19 @@ func SyncFrom(ctx context.Context, repo *git.Repository, targets []Target) (Stat
 		return baseline, nil
 	}
 
-	setLocal := func(hash plumbing.Hash) error {
-		if winner.SkipLocalUpdate {
-			// Legacy-tier baseline: read/compare/report only — the local
-			// policy ref advances only from the elected remote (or a
-			// dedicated checkpoint_remote).
-			return nil
-		}
-		return SetRef(repo, RefName, hash)
-	}
-
+	// Legacy-tier baseline (SkipLocalUpdate): read/compare/report only — the
+	// local policy ref advances only from the elected remote (or a dedicated
+	// checkpoint_remote). Because the local ref did not move, the ENFORCED
+	// policy is still the local one, and that is what gets reported:
+	// returning the baseline as Source=remote here would print a policy the
+	// hooks never enforce. The unadopted baseline stays visible via
+	// RemoteHash so divergence can be surfaced.
 	if local.Hash.IsZero() {
-		if err := setLocal(baseline.Hash); err != nil {
+		if winner.SkipLocalUpdate {
+			local.RemoteHash = baseline.RemoteHash
+			return local, nil
+		}
+		if err := SetRef(repo, RefName, baseline.Hash); err != nil {
 			return State{}, err
 		}
 		baseline.Source = SourceRemote
@@ -119,7 +120,11 @@ func SyncFrom(ctx context.Context, repo *git.Repository, targets []Target) (Stat
 		return State{}, err
 	}
 	if localAncestor {
-		if err := setLocal(baseline.Hash); err != nil {
+		if winner.SkipLocalUpdate {
+			local.RemoteHash = baseline.RemoteHash
+			return local, nil
+		}
+		if err := SetRef(repo, RefName, baseline.Hash); err != nil {
 			return State{}, err
 		}
 		baseline.Source = SourceRemote

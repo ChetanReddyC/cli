@@ -76,8 +76,17 @@ func TestSyncFromPolicySkipLocalUpdateNeverAdvancesLocalRef(t *testing.T) {
 		{Remote: bareDir, Dir: localDir, SkipLocalUpdate: true},
 	})
 	require.NoError(t, err)
-	require.Equal(t, checkpointpolicy.SourceRemote, got.Source, "the baseline is still reported")
-	require.Equal(t, remoteHash, got.Hash)
+	// Regression (PR #1951 review): a read-only baseline used to be reported
+	// as Source=remote even though the local ref — the one hooks enforce —
+	// was deliberately not advanced, so `checkpoint policy` printed a policy
+	// nothing enforced. The reported state must be the ENFORCED (local)
+	// state, with the remote hash carried for divergence display.
+	require.NotEqual(t, checkpointpolicy.SourceRemote, got.Source,
+		"a baseline that did not advance the local ref must not be reported as adopted")
+	require.NotEqual(t, remoteHash, got.Hash,
+		"the reported hash must reflect the enforced local state, not the unadopted baseline")
+	require.Equal(t, remoteHash, got.RemoteHash,
+		"the unadopted baseline stays visible as the remote hash")
 
 	localState, err := checkpointpolicy.ReadLocal(t.Context(), localRepo)
 	require.NoError(t, err)

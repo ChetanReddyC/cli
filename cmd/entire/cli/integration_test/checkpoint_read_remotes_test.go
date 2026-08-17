@@ -226,11 +226,28 @@ func TestCheckpointReadRemotes_ElectedUnreachableLegacyStillServes(t *testing.T)
 
 		wipeLocalCheckpointState(t, env)
 
+		if env.usingGitRefs() {
+			// git-refs hydration INSTALLS the canonical local checkpoint ref,
+			// and only the elected remote holds the authoritative tip — so an
+			// unreachable elected remote must REFUSE rather than let origin
+			// install a possibly-stale tip that later backfills parent onto
+			// (PR #1951 review: stale canonical ref installation). The
+			// availability loss is confined to this outage window.
+			output, err := env.RunCLIWithError("checkpoint", "explain", "--checkpoint", checkpointID)
+			if err == nil && strings.Contains(output, "Add outage module") {
+				t.Errorf("git-refs reads must not serve via a legacy install while the elected remote is unreachable, got:\n%s", output)
+			}
+			return
+		}
+
+		// git-branch reads are pure remote-tracking tree reads — no local ref
+		// is installed — so the legacy tier may keep serving through the
+		// outage.
 		output := env.RunCLI("checkpoint", "explain", "--checkpoint", checkpointID)
 		if !strings.Contains(output, "Add outage module") {
 			t.Errorf("reads must survive an unreachable elected remote via the legacy tier, got:\n%s", output)
 		}
-		if !env.usingGitRefs() && localPrimaryExists(t, env) {
+		if localPrimaryExists(t, env) {
 			t.Error("a stale/legacy origin must never recreate the local primary, even with the elected remote unreachable")
 		}
 	})

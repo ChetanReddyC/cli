@@ -417,6 +417,18 @@ func fetchMetadataFromReadRemotes(ctx context.Context, noFilter bool) error {
 	var firstErr error
 	fetched := false
 	for i, remoteName := range candidates {
+		// After one successful fetch, later (legacy) candidates are fetched
+		// only to BOOTSTRAP a missing tracking ref — a fresh clone needs
+		// origin's legacy tier once for the union readers, but re-fetching an
+		// already-present legacy tier on every resume doubles the deep-fetch
+		// cost for data that writes no longer land on. The trade-off: a
+		// mixed-version teammate still pushing v1 to origin refreshes here
+		// only when the elected fetch fails or the tracking ref is absent.
+		if fetched && metadataTrackingRefExists(ctx, remoteName) {
+			logging.Debug(ctx, "metadata branch fetch: skipping already-present legacy candidate",
+				slog.String("candidate", remoteName))
+			continue
+		}
 		err := fetchMetadataFromRemote(ctx, remoteName, noFilter, resolution.ElectedName != "" && remoteName == resolution.ElectedName)
 		if err == nil {
 			fetched = true
@@ -434,6 +446,18 @@ func fetchMetadataFromReadRemotes(ctx context.Context, noFilter bool) error {
 		return nil
 	}
 	return firstErr
+}
+
+// metadataTrackingRefExists reports whether remoteName's tracking ref for the
+// primary metadata branch resolves locally. Best-effort: errors read as
+// "absent" so the caller falls back to fetching.
+func metadataTrackingRefExists(ctx context.Context, remoteName string) bool {
+	refs := checkpoint.ResolveRefs(ctx)
+	if !refs.Primary.IsBranch() {
+		return false
+	}
+	trackingRef := fmt.Sprintf("refs/remotes/%s/%s", remoteName, refs.Primary.Short())
+	return exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", trackingRef+"^{commit}").Run() == nil
 }
 
 // fetchMetadataFromRemote fetches the metadata branch from one remote into

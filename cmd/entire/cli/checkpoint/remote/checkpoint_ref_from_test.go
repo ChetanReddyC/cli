@@ -84,8 +84,19 @@ func TestFetchCheckpointRefFrom_FirstCandidateWins(t *testing.T) {
 	require.NotEqual(t, originHash, got)
 }
 
-func TestFetchCheckpointRefFrom_EachCandidateGetsItsOwnTimeout(t *testing.T) {
-	workDir, ref, _, originHash := candidatesFixture(t, false, true)
+// Regression (PR #1951 review): this fetch INSTALLS the canonical local
+// checkpoint ref (+ref:ref), and checkpoint refs advance (backfill parents
+// onto the tip). When the elected remote — the only remote writes confine to,
+// hence the holder of the newest tip — fails at the transport level, falling
+// through to the legacy origin tier could install an OLDER tip as canonical.
+// Nothing ever corrects it (hydration only runs when the local ref is
+// absent), and later backfills parent onto the stale tip. Transport
+// uncertainty on an earlier candidate must therefore abort the chain — only
+// authoritative absence lets a later candidate install. The hang is still
+// bounded by the per-candidate timeout: the caller gets an error, not a
+// stall.
+func TestFetchCheckpointRefFrom_ElectedTransportFailureRefusesLegacyInstall(t *testing.T) {
+	workDir, ref, _, _ := candidatesFixture(t, false, true)
 
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
 		<-request.Context().Done()
@@ -94,15 +105,25 @@ func TestFetchCheckpointRefFrom_EachCandidateGetsItsOwnTimeout(t *testing.T) {
 	out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "remote", "set-url", "upstream", server.URL+"/repo.git").CombinedOutput()
 	require.NoError(t, err, "%s", out)
 
-	require.NoError(t, fetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, time.Second, nil))
-	require.Equal(t, originHash, localRefHash(t, workDir, ref))
+	start := time.Now()
+	fetchErr := fetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, time.Second, nil)
+	require.Error(t, fetchErr, "an unreachable elected remote must surface, not fall through to a legacy install")
+	require.NotErrorIs(t, fetchErr, plumbing.ErrReferenceNotFound)
+	require.Less(t, time.Since(start), 10*time.Second, "the per-candidate timeout must still bound the hang")
+
+	_, revErr := exec.CommandContext(t.Context(), "git", "-C", workDir, "rev-parse", "--verify", ref.String()).Output()
+	require.Error(t, revErr, "origin's (potentially stale) tip must not be installed as the canonical local ref under elected-remote uncertainty")
 }
 
-// Note: simple advance-on-miss / advance-on-transport-error behavior (a
-// candidate lacking the ref or failing at the transport level moves to the
-// legacy origin tier) is covered end-to-end by the integration matrix
-// (integration_test/checkpoint_read_remotes_test.go: LegacyOriginTierServed,
-// ElectedUnreachableLegacyStillServes) via explain's RefFetcher wiring.
+// The healthy-absence shape of the same chain: the elected remote answers
+// authoritatively that it lacks the ref, so the legacy origin tier may serve
+// and install it — the pre-#1893 checkpoint that only ever landed on origin.
+func TestFetchCheckpointRefFrom_ElectedAbsenceLetsLegacyServe(t *testing.T) {
+	workDir, ref, _, originHash := candidatesFixture(t, false, true)
+
+	require.NoError(t, FetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, nil))
+	require.Equal(t, originHash, localRefHash(t, workDir, ref))
+}
 
 // Any unresolved transport failure makes aggregate absence uncertain,
 // regardless of which candidate failed first.

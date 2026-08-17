@@ -35,52 +35,81 @@ func electionRevParse(t *testing.T, dir, ref string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// A read-only origin must never seed the local primary.
+// A read-only origin must never seed the local primary while another remote
+// is elected: the elected remote is authoritative for the store's state, and
+// a stale origin driving local-ref writes is the #1374-class hazard.
 func TestEnsurePrimaryRef_NonElectedOriginNeverSeedsLocal(t *testing.T) {
-	tests := []struct {
-		name      string
-		configure func(t *testing.T, dir string)
-	}{
-		{
-			name: "another remote is elected",
-			configure: func(t *testing.T, dir string) {
-				t.Helper()
-				testutil.AddRemote(t, dir, "upstream", "https://example.com/upstream.git")
-				testutil.WriteCheckpointPushRemoteSetting(t, dir, "upstream")
-			},
-		},
-		{
-			name: "election fails closed",
-			configure: func(t *testing.T, dir string) {
-				t.Helper()
-				testutil.WriteCheckpointPushRemoteSetting(t, dir, "gone")
-			},
-		},
-	}
+	tmpDir := initRemoteElectionRepo(t)
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, tmpDir, "upstream", "https://example.com/upstream.git")
+	testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "upstream")
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tmpDir := initRemoteElectionRepo(t)
-			testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-			tt.configure(t, tmpDir)
+	staleHash := electionRevParse(t, tmpDir, "HEAD")
+	testutil.GitUpdateRef(t, tmpDir, "refs/remotes/origin/"+paths.MetadataBranchName, staleHash)
 
-			staleHash := electionRevParse(t, tmpDir, "HEAD")
-			testutil.GitUpdateRef(t, tmpDir, "refs/remotes/origin/"+paths.MetadataBranchName, staleHash)
+	t.Chdir(tmpDir)
+	ctx := context.Background()
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
 
-			t.Chdir(tmpDir)
-			ctx := context.Background()
-			repo, err := OpenRepository(ctx)
-			require.NoError(t, err)
-			defer repo.Close()
+	require.NoError(t, EnsurePrimaryRef(ctx, repo))
 
-			require.NoError(t, EnsurePrimaryRef(ctx, repo))
+	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err, "an orphan primary ref should have been created")
+	assert.NotEqual(t, staleHash, localRef.Hash().String(),
+		"a non-elected origin must not seed the local primary")
+}
 
-			localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-			require.NoError(t, err, "an orphan primary ref should have been created")
-			assert.NotEqual(t, staleHash, localRef.Hash().String(),
-				"a non-elected origin must not seed the local primary")
-		})
-	}
+// Regression (PR #1951 review): a FAILED election (checkpoint_push_remote
+// names a missing remote) used to fall through to a fresh orphan even when
+// origin's tracking ref held the real v1 history. The orphan buys no safety —
+// checkpoint pushes are already fail-closed while the election is broken —
+// and it guarantees a diverged history the moment the user fixes the setting
+// (every later sync is non-fast-forward). Seeding a MISSING local primary
+// from origin under a failed election is the seeding counterpart of the read
+// chain's fail-open: no existing local ref is advanced (so this is not the
+// #1374 replay-on-divergence hazard), and a possibly-behind real history
+// reconciles far better than a guaranteed-disjoint orphan.
+func TestEnsurePrimaryRef_FailedElectionSeedsMissingPrimaryFromOrigin(t *testing.T) {
+	tmpDir := initRemoteElectionRepo(t)
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+	testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "gone")
+
+	originHash := electionRevParse(t, tmpDir, "HEAD")
+	testutil.GitUpdateRef(t, tmpDir, "refs/remotes/origin/"+paths.MetadataBranchName, originHash)
+
+	t.Chdir(tmpDir)
+	ctx := context.Background()
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	require.NoError(t, EnsurePrimaryRef(ctx, repo))
+
+	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	assert.Equal(t, originHash, localRef.Hash().String(),
+		"a failed election with real origin history must seed from origin, not create a disjoint orphan")
+}
+
+// The same failed election with NO origin history still creates the orphan —
+// fail-open seeding needs something real to seed from.
+func TestEnsurePrimaryRef_FailedElectionWithoutOriginHistoryCreatesOrphan(t *testing.T) {
+	tmpDir := initRemoteElectionRepo(t)
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+	testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "gone")
+
+	t.Chdir(tmpDir)
+	ctx := context.Background()
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	require.NoError(t, EnsurePrimaryRef(ctx, repo))
+
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err, "an orphan primary ref should have been created")
 }
 
 func TestEnsurePrimaryRef_ElectedUpstreamTrackingSeedsLocal(t *testing.T) {
