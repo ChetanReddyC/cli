@@ -176,10 +176,14 @@ session-state directory for zombies — ACTIVE sessions whose owning agent
 process has exited, and ENDED sessions that still hold uncondensed checkpoint
 data more than 24h after ending (younger ones are left alone so PostCommit
 carry-forward keeps its chance). When any exist it spawns a detached
-`__sweep_sessions` process that finalizes/condenses them using the same
-engines as `entire doctor --force`, condense-only: ended sessions without a
-shadow branch are doctor's discard case and are never touched automatically.
-See `cmd/entire/cli/session_sweep.go`.
+`__sweep_sessions` process (throttled to one spawn per repo per window via a
+flock-serialized marker in the git common dir) that finalizes/condenses them
+using the same engines as `entire doctor --force`, condense-only: the sweep
+never initiates a discard — ended sessions without a shadow branch are left to
+`entire doctor` (and the existing orphan cleanup). IDLE sessions with a dead
+owner are out of scope, matching doctor's boundary. The 7-day stale-session
+purge bounds the sweep's window: a zombie that stays unfixed past 7 days is
+removed by the purge, not the sweep. See `cmd/entire/cli/session_sweep.go`.
 
 ### Temporary Checkpoints
 

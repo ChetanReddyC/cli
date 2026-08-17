@@ -129,20 +129,24 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 // uncondensed checkpoint data AND has its shadow branch — i.e. it can be
 // salvaged by condensing (CondenseSessionByID). ENDED sessions with steps but
 // no shadow branch are NOT condensable; fixing those means discarding state,
-// which is reserved for `entire doctor` where a human decides. Used by the
-// PostCommit stale-session warning and the background zombie sweep.
+// which the background sweep never initiates — those sessions are left to
+// `entire doctor` (and the existing orphan cleanup in listAllSessionStates).
+// Used by the PostCommit stale-session warning and the background zombie
+// sweep.
 func IsCondensableEndedSession(repo *git.Repository, state *SessionState) bool {
 	if state.Phase != session.PhaseEnded || state.FullyCondensed || state.StepCount <= 0 {
 		return false
 	}
 
-	// Re-check shadow branch existence even though listAllSessionStates already
-	// filters orphaned sessions. This is intentional: condensation deletes
-	// shadow branches, so a branch that existed at list-load time may be gone
-	// by the time either caller re-checks here. For the PostCommit warning
-	// that means we'd otherwise warn about a session this commit (or a
-	// concurrent condense) just cleaned up; for the background zombie sweep it
-	// means there is nothing left to condense.
+	// Check shadow branch existence. For PostCommit this is a re-check —
+	// its list arrives via listAllSessionStates, which already filters
+	// orphaned sessions — and it is intentional even there: condensation
+	// deletes shadow branches, so a branch that existed at list-load time may
+	// be gone by the time the warning re-checks here, and we'd otherwise warn
+	// about a session this commit (or a concurrent condense) just cleaned up.
+	// The background zombie sweep, by contrast, arrives via the raw
+	// ListSessionStates, so for the sweep this is the PRIMARY shadow-branch
+	// check, not a re-check — it is what keeps the sweep condense-only.
 	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	refName := plumbing.NewBranchReferenceName(shadowBranch)
 	_, err := repo.Reference(refName, true)

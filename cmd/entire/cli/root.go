@@ -216,8 +216,9 @@ func newSweepSessionsCmd() *cobra.Command {
 			// Detached child with discarded stdout/stderr: initialize file
 			// logging so a failing background sweep (e.g. a zombie that can't
 			// self-heal) is diagnosable in .entire/logs/entire.log rather than
-			// vanishing. Guard on WorktreeRoot first — matching resume/rewind/
-			// reset/explain — so a child whose worktree was removed or relocated
+			// vanishing. Guard on WorktreeRoot first — matching resume/
+			// checkpoint resume/explain/clean — so a child whose worktree was
+			// removed or relocated
 			// between spawn and exec (or a manual invocation outside a repo)
 			// doesn't create a stray .entire/logs/ in an arbitrary directory;
 			// logging.Init falls back to cwd when WorktreeRoot fails.

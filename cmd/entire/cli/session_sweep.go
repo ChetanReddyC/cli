@@ -36,6 +36,13 @@ func isSweepableZombie(st *session.State, now time.Time) bool {
 	if st.Phase.IsActive() {
 		return st.OwnerExited()
 	}
+	// Imported sessions are historical records: complete by design, never
+	// condensable (no BaseCommit), and exempt from the stale purge — so they
+	// look like ENDED zombies forever. Nominating one would spawn a doomed
+	// sweep on every session start, forever.
+	if st.Kind.IsImported() {
+		return false
+	}
 	if st.Phase != session.PhaseEnded || st.FullyCondensed || st.StepCount <= 0 {
 		return false
 	}
@@ -64,9 +71,13 @@ func isSweepableZombie(st *session.State, now time.Time) bool {
 // the window in which a resumed (ENDED→ACTIVE) session gets condensed
 // anyway: acceptable, because the precondition is >24h idle (a seconds-wide
 // race against a day-old zombie) and a condense of a just-resumed session is
-// coherent. If the shadow branch vanishes between our check and the engine's
-// lock, the engine clears the state — correct cleanup, since in practice that
-// only happens when a concurrent condense already succeeded. The reverse
+// coherent. The cost of losing that race: the resumed turn's phase is reset to
+// IDLE and its pending prompt attribution is lost — recoverable, and
+// acceptable at a seconds-vs-24h race. If the shadow branch vanishes between
+// our check and the engine's lock, the engine clears the state — correct
+// cleanup, since in practice that typically happens when a concurrent condense
+// already succeeded; an out-of-band branch deletion (git branch -D,
+// entire clean) in the window also lands here. The reverse
 // direction is also safe: an ACTIVE session with a dead owner that is being
 // resumed right now can be finalized by the sweep mid-resume, because
 // finalizeExitedSessions re-validates under the per-session lock and the
@@ -125,7 +136,12 @@ func runSessionSweep(ctx context.Context) error {
 			continue
 		}
 		if !strategy.IsCondensableEndedSession(repo, fresh) {
-			continue // no shadow branch → doctor's discard case, never automatic
+			// Uncondensed steps but no shadow branch: fixing this means
+			// discarding state, which the sweep never initiates — it is
+			// doctor's discard case.
+			logging.Info(logCtx, "sweep skipping non-condensable ended session: uncondensed steps but no shadow branch — run `entire doctor` to resolve",
+				slog.String("session_id", fresh.SessionID))
+			continue
 		}
 		if condErr := GetStrategy(ctx).CondenseSessionByID(ctx, fresh.SessionID); condErr != nil {
 			logging.Warn(logCtx, "sweep condense failed",
@@ -139,15 +155,49 @@ func runSessionSweep(ctx context.Context) error {
 	return nil
 }
 
-// sessionSweepNeeded reports whether any session in states nominates a
+// countSweepableZombies counts the sessions in states that nominate a
 // background sweep. Pure so the spawn decision is unit-testable.
-func sessionSweepNeeded(states []*session.State, now time.Time) bool {
+func countSweepableZombies(states []*session.State, now time.Time) int {
+	n := 0
 	for _, st := range states {
 		if isSweepableZombie(st, now) {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
+}
+
+// sweepSpawn is the process-spawn seam used by maybeSpawnSessionSweep.
+// Swapped in tests so they can assert the spawn decision (including the
+// throttle) without forking a real subprocess (a real `go test` binary doesn't
+// understand `__sweep_sessions` as an argument). Production code always uses
+// spawnDetachedSessionSweepProcess.
+var sweepSpawn = spawnDetachedSessionSweepProcess
+
+// spawnDetachedSessionSweepProcess starts `entire __sweep_sessions` as a
+// detached child so the sweep's repo work can't add latency to the
+// session-start hook that spawned it. The child runs from the worktree root
+// because the sweep resolves the repo and session-state directory from its
+// working directory.
+func spawnDetachedSessionSweepProcess(worktreeRoot string) {
+	execx.SpawnDetached(worktreeRoot, "__sweep_sessions")
+}
+
+// sessionSweepSpawnThrottle bounds how often the session-start hook forks a
+// detached sweep child for a given repo. A zombie that persistently fails to
+// condense re-nominates a spawn on every session start; without this guard a
+// burst of hooks (or an agent that restarts sessions rapidly) would fork one
+// child per hook, each re-opening the repo just to fail the same way. 15
+// minutes comfortably covers a burst and a slow in-flight sweep while still
+// retrying a transient failure within the same working session.
+const sessionSweepSpawnThrottle = 15 * time.Minute
+
+// sweepRecentlySpawned reports whether a detached sweep was spawned for this
+// repo within sessionSweepSpawnThrottle and, when it wasn't, records now as
+// the most recent spawn. Same flock-serialized marker mechanism as the
+// trail-enablement refresh (see recentlySpawnedMarker), with its own marker.
+func sweepRecentlySpawned(commonDir string, now time.Time) bool {
+	return recentlySpawnedMarker(commonDir, "session-sweep-spawn", sessionSweepSpawnThrottle, now)
 }
 
 // maybeSpawnSessionSweep fires one detached __sweep_sessions child when the
@@ -156,26 +206,34 @@ func sessionSweepNeeded(states []*session.State, now time.Time) bool {
 // itself runs detached, so the hook's latency budget is untouched. Best-effort
 // throughout — a failure here must never fail the hook.
 //
-// A zombie that persistently fails to condense re-nominates a spawn on every
-// session start; this is accepted, by design, with no debounce — per-session
-// locks make the redundant sweeps idempotent no-ops.
+// Spawns are throttled through a flock-serialized marker in the shared
+// git-common-dir (sweepRecentlySpawned), so a burst of concurrent or rapid
+// session starts collapses to one child per sessionSweepSpawnThrottle window.
+// Redundant sweeps re-check under the per-session lock and no-op once one has
+// succeeded; a zombie that persistently fails to condense is retried — and
+// fails — once per throttle window, which we accept.
 func maybeSpawnSessionSweep(ctx context.Context) {
-	states, err := strategy.ListSessionStates(ctx)
-	if err != nil {
-		logging.Debug(logging.WithComponent(ctx, "session-sweep"),
-			"skipping sweep check", slog.String("error", err.Error()))
-		return
-	}
-	if !sessionSweepNeeded(states, time.Now()) {
-		return
-	}
+	logCtx := logging.WithComponent(ctx, "session-sweep")
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		logging.Debug(logging.WithComponent(ctx, "session-sweep"),
-			"skipping sweep spawn: could not resolve worktree root", slog.String("error", err.Error()))
+		logging.Debug(logCtx, "skipping sweep spawn: could not resolve worktree root",
+			slog.String("error", err.Error()))
 		return
 	}
-	logging.Info(logging.WithComponent(ctx, "session-sweep"),
-		"zombie session detected, spawning detached sweep")
-	execx.SpawnDetached(root, "__sweep_sessions")
+	states, err := strategy.ListSessionStates(ctx)
+	if err != nil {
+		logging.Warn(logCtx, "skipping sweep check", slog.String("error", err.Error()))
+		return
+	}
+	n := countSweepableZombies(states, time.Now())
+	if n == 0 {
+		return
+	}
+	if commonDir, cerr := session.GetGitCommonDir(ctx); cerr == nil &&
+		sweepRecentlySpawned(commonDir, time.Now()) {
+		return
+	}
+	sweepSpawn(root)
+	logging.Info(logCtx, "zombie sessions detected, spawned detached sweep",
+		slog.Int("count", n))
 }
