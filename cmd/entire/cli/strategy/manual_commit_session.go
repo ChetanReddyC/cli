@@ -137,10 +137,12 @@ func IsCondensableEndedSession(repo *git.Repository, state *SessionState) bool {
 	}
 
 	// Re-check shadow branch existence even though listAllSessionStates already
-	// filters orphaned sessions. This is intentional: PostCommit deletes shadow
-	// branches during condensation, so a branch that existed at list-load time
-	// may be gone by the time we reach the warning check. Without this re-check
-	// we would warn about sessions that this commit just cleaned up.
+	// filters orphaned sessions. This is intentional: condensation deletes
+	// shadow branches, so a branch that existed at list-load time may be gone
+	// by the time either caller re-checks here. For the PostCommit warning
+	// that means we'd otherwise warn about a session this commit (or a
+	// concurrent condense) just cleaned up; for the background zombie sweep it
+	// means there is nothing left to condense.
 	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	refName := plumbing.NewBranchReferenceName(shadowBranch)
 	_, err := repo.Reference(refName, true)
