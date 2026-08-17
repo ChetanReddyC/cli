@@ -101,10 +101,10 @@ func runSessionSweep(ctx context.Context) error {
 	now := time.Now()
 	for _, st := range states {
 		// ENDED-only here: ACTIVE zombies were finalizeExitedSessions' job
-		// above. This keeps sessions whose finalize failed out of the
-		// condense path — condensing an ACTIVE session's ended predicate
-		// would never even fire, but the explicit phase check documents the
-		// boundary.
+		// above. isSweepableZombie returns true for a still-ACTIVE dead-owner
+		// session (its finalize failed above), so this phase check is what
+		// keeps those out of the condense path — and skips their pointless
+		// re-load.
 		if st.Phase != session.PhaseEnded || !isSweepableZombie(st, now) {
 			continue
 		}

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"log/slog"
 	"runtime"
 
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
@@ -226,7 +227,14 @@ func newSweepSessionsCmd() *cobra.Command {
 					defer logging.Close()
 				}
 			}
-			return runSessionSweep(ctx)
+			// Log the top-level error too: main.go prints RunE errors to
+			// stderr, which is io.Discard for a detached child — without this
+			// line a sweep that fails before its loop leaves no trace.
+			if err := runSessionSweep(ctx); err != nil {
+				logging.Error(ctx, "session sweep failed", slog.String("error", err.Error()))
+				return err
+			}
+			return nil
 		},
 	}
 }
