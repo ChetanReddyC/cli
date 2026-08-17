@@ -61,7 +61,7 @@ func TestInit_CreatesLogDirectory(t *testing.T) {
 	// Initialize git repo so WorktreeRoot works
 	initGitRepo(t, tmpDir)
 
-	_, err := Init(context.Background(), testSessionID)
+	_, err := Init(context.Background())
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -79,7 +79,7 @@ func TestInit_CreatesLogFile(t *testing.T) {
 
 	initGitRepo(t, tmpDir)
 
-	_, err := Init(context.Background(), testSessionID)
+	_, err := Init(context.Background())
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -94,15 +94,15 @@ func TestInit_CreatesLogFile(t *testing.T) {
 // contract downstream consumers rely on (strategy hands
 // LoggerFromContext(ctx) to the redact package, and gates the redaction
 // summary on it being non-nil): the logger Init returns must write to
-// .entire/logs/entire.log with session_id stamped, and must survive the
-// round trip through WithLogger/LoggerFromContext.
-func TestInit_ReturnsSessionStampedLoggerForInjection(t *testing.T) {
+// .entire/logs/entire.log and must survive the round trip through
+// WithLogger/LoggerFromContext, with WithSessionID stamping the session on top.
+func TestInit_ReturnsLoggerForInjection(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
 	initGitRepo(t, tmpDir)
 
-	initialized, err := Init(context.Background(), testSessionID)
+	initialized, err := Init(context.Background())
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -110,7 +110,11 @@ func TestInit_ReturnsSessionStampedLoggerForInjection(t *testing.T) {
 		t.Fatal("Init() returned no logger for a writable log directory")
 	}
 
-	l := LoggerFromContext(WithLogger(context.Background(), initialized))
+	ctx, err := WithSessionID(WithLogger(context.Background(), initialized), testSessionID)
+	if err != nil {
+		t.Fatalf("WithSessionID() error = %v", err)
+	}
+	l := LoggerFromContext(ctx)
 	if l == nil {
 		t.Fatal("LoggerFromContext() = nil for a context holding the initialized logger")
 	}
@@ -152,7 +156,7 @@ func TestInit_StderrFallbackReturnsNoLogger(t *testing.T) {
 		t.Fatalf("failed to block .entire dir: %v", err)
 	}
 
-	l, err := Init(context.Background(), testSessionID)
+	l, err := Init(context.Background())
 	if err != nil {
 		t.Fatalf("Init() error = %v (fallback must not be an error)", err)
 	}
@@ -169,8 +173,7 @@ func TestInit_WritesJSONLogs(t *testing.T) {
 
 	initGitRepo(t, tmpDir)
 
-	sessionID := "2025-01-15-json-test"
-	_, err := Init(context.Background(), sessionID)
+	_, err := Init(context.Background())
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -217,8 +220,7 @@ func TestInit_RespectsLogLevel(t *testing.T) {
 	// Set log level to WARN
 	t.Setenv(LogLevelEnvVar, "WARN")
 
-	sessionID := "2025-01-15-level-test"
-	_, err := Init(context.Background(), sessionID)
+	_, err := Init(context.Background())
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -269,8 +271,7 @@ func TestInit_InvalidLogLevelWarns(t *testing.T) {
 
 	t.Setenv(LogLevelEnvVar, "INVALID_LEVEL")
 
-	sessionID := "2025-01-15-invalid-level"
-	_, err = Init(context.Background(), sessionID)
+	_, err = Init(context.Background())
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -308,7 +309,7 @@ func TestInit_FallsBackToStderrOnError(t *testing.T) {
 	}
 
 	// Init should not return error, but fall back to stderr
-	_, err := Init(context.Background(), testSessionID)
+	_, err := Init(context.Background())
 	if err != nil {
 		t.Errorf("Init() should not error, but got: %v", err)
 	}
@@ -325,8 +326,7 @@ func TestClose_SafeToCallMultipleTimes(t *testing.T) {
 
 	initGitRepo(t, tmpDir)
 
-	sessionID := "2025-01-15-close-test"
-	_, err := Init(context.Background(), sessionID)
+	_, err := Init(context.Background())
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -375,12 +375,17 @@ func TestLogging_IncludesContextValues(t *testing.T) {
 	initGitRepo(t, tmpDir)
 
 	sessionID := "2025-01-15-context-test"
-	_, err := Init(context.Background(), sessionID)
+	_, err := Init(context.Background())
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 
-	// Create context with values
+	// Create context with values. WithSessionID is discarded on purpose: this
+	// context carries no injected logger, so the stamp lands in package state
+	// and log() picks it up from there.
+	if _, sErr := WithSessionID(context.Background(), sessionID); sErr != nil {
+		t.Fatalf("WithSessionID() error = %v", sErr)
+	}
 	ctx := context.Background()
 	ctx = WithComponent(ctx, testComponent)
 	ctx = WithAgent(ctx, testAgent)
@@ -402,9 +407,9 @@ func TestLogging_IncludesContextValues(t *testing.T) {
 		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, content)
 	}
 
-	// session_id comes from Init()
+	// session_id comes from WithSessionID
 	if logEntry["session_id"] != sessionID {
-		t.Errorf("Expected session_id='%s' (from Init), got %v", sessionID, logEntry["session_id"])
+		t.Errorf("Expected session_id='%s' (from WithSessionID), got %v", sessionID, logEntry["session_id"])
 	}
 	if logEntry["component"] != testComponent {
 		t.Errorf("Expected component='%s', got %v", testComponent, logEntry["component"])
@@ -421,9 +426,13 @@ func TestLogging_AdditionalAttrs(t *testing.T) {
 	initGitRepo(t, tmpDir)
 
 	sessionID := "2025-01-15-attrs-test"
-	_, err := Init(context.Background(), sessionID)
+	_, err := Init(context.Background())
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
+	}
+	// Discarded on purpose — see TestLogging_IncludesContextValues.
+	if _, sErr := WithSessionID(context.Background(), sessionID); sErr != nil {
+		t.Fatalf("WithSessionID() error = %v", sErr)
 	}
 
 	ctx := context.Background()
@@ -449,9 +458,9 @@ func TestLogging_AdditionalAttrs(t *testing.T) {
 		t.Fatalf("Log output is not valid JSON: %v\nContent: %s", err, content)
 	}
 
-	// session_id comes from Init(), additional attrs work alongside
+	// session_id comes from WithSessionID, additional attrs work alongside
 	if logEntry["session_id"] != sessionID {
-		t.Errorf("Expected session_id='%s' (from Init), got %v", sessionID, logEntry["session_id"])
+		t.Errorf("Expected session_id='%s' (from WithSessionID), got %v", sessionID, logEntry["session_id"])
 	}
 	if logEntry["hook"] != "pre-push" {
 		t.Errorf("Expected hook='pre-push', got %v", logEntry["hook"])
@@ -469,7 +478,7 @@ func TestLogging_ConcurrentInitAndLog(t *testing.T) {
 	t.Chdir(tmpDir)
 	initGitRepo(t, tmpDir)
 
-	if _, err := Init(context.Background(), ""); err != nil {
+	if _, err := Init(context.Background()); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	defer Close()
@@ -501,7 +510,7 @@ func TestLogging_ConcurrentInitAndLog(t *testing.T) {
 			defer wg.Done()
 			<-start
 			for range iterations {
-				if _, err := Init(context.Background(), ""); err != nil {
+				if _, err := Init(context.Background()); err != nil {
 					t.Errorf("Init() error = %v", err)
 					return
 				}
@@ -524,7 +533,9 @@ func TestLogging_ConcurrentInitAndLog(t *testing.T) {
 	wg.Wait()
 }
 
-func TestInit_RejectsInvalidSessionIDs(t *testing.T) {
+func TestWithSessionID_RejectsInvalidSessionIDs(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		sessionID string
@@ -541,27 +552,20 @@ func TestInit_RejectsInvalidSessionIDs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Reset logger state before each test
-			resetLogger()
+			t.Parallel()
 
-			// Set up git repo for cases that we expect to succeed
-			if !tt.wantErr {
-				tmpDir := t.TempDir()
-				t.Chdir(tmpDir)
-				initGitRepo(t, tmpDir)
-			}
-
-			_, err := Init(context.Background(), tt.sessionID)
+			// No Init and no repo: validation is WithSessionID's own business,
+			// independent of whether a log file was ever opened.
+			_, err := WithSessionID(context.Background(), tt.sessionID)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("Init(%q) error = %v, wantErr %v", tt.sessionID, err, tt.wantErr)
+				t.Errorf("WithSessionID(%q) error = %v, wantErr %v", tt.sessionID, err, tt.wantErr)
 			}
 			if err != nil && tt.wantErr {
 				// Verify error message mentions session ID
 				if !strings.Contains(err.Error(), "session ID") {
-					t.Errorf("Init(%q) error should mention 'session ID', got: %v", tt.sessionID, err)
+					t.Errorf("WithSessionID(%q) error should mention 'session ID', got: %v", tt.sessionID, err)
 				}
 			}
-			Close()
 		})
 	}
 }
@@ -575,7 +579,7 @@ func TestLog_ResolvesLoggerFromContextFirst(t *testing.T) {
 	t.Chdir(tmpDir)
 	initGitRepo(t, tmpDir)
 
-	if _, err := Init(context.Background(), ""); err != nil {
+	if _, err := Init(context.Background()); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 
@@ -599,7 +603,7 @@ func TestLog_ResolvesLoggerFromContextFirst(t *testing.T) {
 }
 
 // TestLog_ContextLoggerDoesNotDoubleStampSessionID guards the seam between the
-// two session_id sources: Init stamps it onto the logger it puts in the context,
+// two session_id sources: WithSessionID stamps it onto the context logger,
 // and log() prepends it from package state. Taking the context path must not do
 // both, or every line in a hook run carries session_id twice.
 func TestLog_ContextLoggerDoesNotDoubleStampSessionID(t *testing.T) {
@@ -607,12 +611,16 @@ func TestLog_ContextLoggerDoesNotDoubleStampSessionID(t *testing.T) {
 	t.Chdir(tmpDir)
 	initGitRepo(t, tmpDir)
 
-	l, err := Init(context.Background(), testSessionID)
+	l, err := Init(context.Background())
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 
-	Warn(WithLogger(context.Background(), l), "stamped once")
+	ctx, err := WithSessionID(WithLogger(context.Background(), l), testSessionID)
+	if err != nil {
+		t.Fatalf("WithSessionID() error = %v", err)
+	}
+	Warn(ctx, "stamped once")
 	Close()
 
 	content, err := os.ReadFile(testLogFilePath(tmpDir))
@@ -646,7 +654,7 @@ func TestContextLogger_SurvivesReInit(t *testing.T) {
 	t.Chdir(tmpDir)
 	initGitRepo(t, tmpDir)
 
-	captured, err := Init(context.Background(), "")
+	captured, err := Init(context.Background())
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -654,7 +662,7 @@ func TestContextLogger_SurvivesReInit(t *testing.T) {
 		t.Fatal("Init() returned no logger for a writable log directory")
 	}
 
-	if _, err := Init(context.Background(), testSessionID); err != nil {
+	if _, err := Init(context.Background()); err != nil {
 		t.Fatalf("second Init() error = %v", err)
 	}
 

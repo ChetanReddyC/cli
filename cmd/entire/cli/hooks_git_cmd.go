@@ -123,8 +123,8 @@ func (g *gitHookContext) skipUnreadableCheckpointPolicy(err error) bool {
 	return true
 }
 
-// initHookLogging initializes logging for hooks by finding the most recent
-// session. Returns the context carrying the initialized logger — cobra
+// initHookLogging initializes logging for hooks and stamps it with the most
+// recent session. Returns the context carrying the initialized logger — cobra
 // PreRun/RunE callers must pass it down (cmd.SetContext) so downstream hook
 // handlers receive the logger by injection — plus a cleanup function that
 // should be deferred.
@@ -140,18 +140,26 @@ func initHookLogging(ctx context.Context) (context.Context, func()) {
 	// Set up log level getter so logging can read from settings
 	logging.SetLogLevelGetter(GetLogLevel)
 
-	// Read session ID for the slog attribute (empty string is fine - log file is fixed)
-	sessionID := strategy.FindMostRecentSession(ctx)
-	l, err := logging.Init(ctx, sessionID)
+	l, err := logging.Init(ctx)
 	if err != nil {
 		// Init failed - logging will use stderr fallback
 		return ctx, func() {}
 	}
-	// Re-initialized with the session ID the root hook could not know, so
-	// replace the logger it injected with this session-stamped one. A nil
-	// logger means Init fell back to stderr; leave the context alone.
 	if l != nil {
 		ctx = logging.WithLogger(ctx, l)
+	}
+
+	// Stamp the session the root entry point could not know yet. This does not
+	// re-Init: the log path is fixed, so reopening the same file to add one
+	// attribute would be pure waste. A rejected ID must not abort — redaction
+	// still has to be configured below — so warn and carry on unstamped.
+	sessionID := strategy.FindMostRecentSession(ctx)
+	sessionCtx, sessionErr := logging.WithSessionID(ctx, sessionID)
+	if sessionErr != nil {
+		logging.Warn(ctx, "ignoring unusable session ID for logging",
+			slog.String("error", sessionErr.Error()))
+	} else {
+		ctx = sessionCtx
 	}
 
 	// Configure redaction once at startup: PII (opt-in), inline custom_redactions,

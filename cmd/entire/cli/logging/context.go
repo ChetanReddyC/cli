@@ -2,9 +2,11 @@ package logging
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // Context keys for logging values.
@@ -42,6 +44,43 @@ func LoggerFromContext(ctx context.Context) *slog.Logger {
 		return l
 	}
 	return nil
+}
+
+// WithSessionID returns ctx carrying a logger stamped with sessionID, so both
+// the package-level helpers and direct holders of the injected logger (the
+// redact package) emit lines filterable by session.
+//
+// Use this when the session ID becomes known — the hook path resolves it after
+// the entry point has already initialized logging — rather than calling Init
+// again. The log file path is fixed, so a re-Init would close and reopen the
+// same file and rebuild its 8KB buffer purely to add this one attribute.
+//
+// Unlike WithComponent and WithAgent, this stamps the logger rather than
+// storing a context value: redact holds the logger directly and would
+// otherwise lose session_id from exactly the diagnostics where it matters
+// most. Package state is updated too, so code that logs through a context with
+// no injected logger is still stamped.
+//
+// Returns ctx unchanged when logging is not file-backed — there is no logger to
+// stamp, and injecting the stderr one would break the invariant that a context
+// logger means "writes go to .entire/logs/".
+func WithSessionID(ctx context.Context, sessionID string) (context.Context, error) {
+	if sessionID == "" {
+		return ctx, nil
+	}
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return ctx, fmt.Errorf("invalid session ID for logging: %w", err)
+	}
+
+	mu.Lock()
+	currentSessionID = sessionID
+	mu.Unlock()
+
+	l := LoggerFromContext(ctx)
+	if l == nil {
+		return ctx, nil
+	}
+	return WithLogger(ctx, l.With(slog.String("session_id", sessionID))), nil
 }
 
 // WithComponent adds a component name to the context.

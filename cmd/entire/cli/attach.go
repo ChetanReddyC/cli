@@ -203,10 +203,15 @@ func attachPrompts(meta transcriptMetadata) []string {
 
 func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentName types.AgentName, opts attachOptions) error {
 	// Initialize structured logger so logging.Warn/Info write to .entire/logs/
-	// not stderr, stamped with this session's ID. A nil logger (or an error)
-	// means the stderr fallback — non-fatal, and nothing to inject.
-	if l, err := logging.Init(ctx, sessionID); err == nil && l != nil {
+	// not stderr. A nil logger (or an error) means the stderr fallback —
+	// non-fatal, and nothing to inject.
+	if l, err := logging.Init(ctx); err == nil && l != nil {
 		ctx = logging.WithLogger(ctx, l)
+	}
+	// Stamp this attach's session so its lines are filterable. A rejected ID is
+	// non-fatal: attach still runs, its lines just carry no session_id.
+	if sessionCtx, err := logging.WithSessionID(ctx, sessionID); err == nil {
+		ctx = sessionCtx
 	}
 	// Flush the 8KB buffered log writer on exit. Without this, any
 	// Warn/Info calls during attach (including the overwrite tripwire)

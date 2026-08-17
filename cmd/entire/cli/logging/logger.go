@@ -4,7 +4,7 @@
 //
 //	// Initialize logging (typically at the cobra entry point) and inject the
 //	// logger it returns, so downstream code receives it from the context.
-//	l, err := logging.Init(ctx, sessionID)
+//	l, err := logging.Init(ctx)
 //	if err != nil {
 //	    // handle error
 //	}
@@ -12,6 +12,9 @@
 //	    ctx = logging.WithLogger(ctx, l)
 //	}
 //	defer logging.Close()
+//
+//	// Later, once the session ID is known (no need to re-Init)
+//	ctx, err = logging.WithSessionID(ctx, sessionID)
 //
 //	// Add context values
 //	ctx = logging.WithComponent(ctx, "hooks")
@@ -36,7 +39,6 @@ import (
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // LogLevelEnvVar is the environment variable that controls log level.
@@ -55,7 +57,8 @@ var (
 	// logBufWriter wraps logFile with buffered I/O for performance
 	logBufWriter *bufio.Writer
 
-	// currentSessionID stores the session ID from Init() to include in all logs
+	// currentSessionID stores the session ID from WithSessionID to include in
+	// log lines whose context carries no injected logger
 	currentSessionID string
 
 	// mu protects logger, logFile, logBufWriter, and currentSessionID, and
@@ -73,10 +76,12 @@ var (
 // to this indirection rather than straight to a *bufio.Writer, which buys two
 // things:
 //
-//   - They survive a second Init. Re-initializing with a resolved session ID is
-//     routine on the hook path, and Init flushes and drops the previous
-//     bufio.Writer; a logger holding that object directly would keep writing
+//   - They survive a second Init. Init flushes and drops the previous
+//     bufio.Writer, so a logger holding that object directly would keep writing
 //     into an orphaned buffer nothing ever flushes, silently losing every line.
+//     Nothing re-initializes in a live process today — attaching a session ID
+//     goes through WithSessionID precisely so it need not — but the indirection
+//     keeps that from being a landmine for whoever calls Init twice next.
 //   - Writes are serialized. bufio.Writer is not goroutine-safe, so two
 //     goroutines logging at once — or one logging while Close flushes — corrupt
 //     the buffer. The lock is exclusive, not a read lock, precisely because
@@ -114,29 +119,24 @@ func SetLogLevelGetter(getter func() string) {
 	logLevelGetter = getter
 }
 
-// Init initializes the logger for a session, writing JSON logs to
-// .entire/logs/entire.log.
+// Init opens the log sink, writing JSON logs to .entire/logs/entire.log.
 //
-// If sessionID is non-empty, it is stored as an slog attribute on every log line for filtering.
 // If the log file cannot be created, falls back to stderr.
 // Log level is controlled by ENTIRE_LOG_LEVEL environment variable.
 //
-// Returns the initialized logger, already stamped with session_id when one was
-// given, for the caller to put in its context with WithLogger — Init sets up
-// the sink, the caller decides where the handle lives. Packages that take an
-// injected *slog.Logger, like redact, then receive it from that context.
+// Returns the initialized logger for the caller to put in its context with
+// WithLogger — Init sets up the sink, the caller decides where the handle
+// lives. Packages that take an injected *slog.Logger, like redact, then
+// receive it from that context.
+//
+// Init takes no session ID: the log path is fixed, so there is nothing about a
+// session for it to act on. Attach one with WithSessionID when it becomes
+// known, which on the hook path is after this has already run.
 //
 // A nil logger with a nil error means logging is not file-backed: Init fell
 // back to stderr. Callers must not inject that, because a logger in the
 // context asserts "writes go to .entire/logs/", never to the terminal.
-func Init(ctx context.Context, sessionID string) (*slog.Logger, error) {
-	// Validate session ID if provided (used only for the slog attribute, not the filename)
-	if sessionID != "" {
-		if err := validation.ValidateSessionID(sessionID); err != nil {
-			return nil, fmt.Errorf("invalid session ID for logging: %w", err)
-		}
-	}
-
+func Init(ctx context.Context) (*slog.Logger, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -194,16 +194,10 @@ func Init(ctx context.Context, sessionID string) (*slog.Logger, error) {
 	logFile = f
 	logBufWriter = bufio.NewWriterSize(f, 8192) // 8KB buffer for batched writes
 	logger = createLogger(liveWriter{}, level)
-	currentSessionID = sessionID
+	// A fresh sink carries no session yet; WithSessionID sets this.
+	currentSessionID = ""
 
-	// Stamp session_id here rather than at the injection site: it is part of
-	// initializing this logger, so every holder emits lines filterable the same
-	// way as the package-level Debug/Info/Warn/Error functions.
-	initialized := logger
-	if sessionID != "" {
-		initialized = initialized.With(slog.String("session_id", sessionID))
-	}
-	return initialized, nil
+	return logger, nil
 }
 
 // Close closes the log file if one is open.
