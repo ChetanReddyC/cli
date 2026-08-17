@@ -106,7 +106,7 @@ func TestFetchCheckpointRefFrom_ElectedTransportFailureRefusesLegacyInstall(t *t
 	require.NoError(t, err, "%s", out)
 
 	start := time.Now()
-	fetchErr := fetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, time.Second, nil)
+	fetchErr := fetchCheckpointRefFrom(context.Background(), ref, []string{"upstream", "origin"}, time.Second, 10*time.Second, nil)
 	require.Error(t, fetchErr, "an unreachable elected remote must surface, not fall through to a legacy install")
 	require.NotErrorIs(t, fetchErr, plumbing.ErrReferenceNotFound)
 	require.Less(t, time.Since(start), 10*time.Second, "the per-candidate timeout must still bound the hang")

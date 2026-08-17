@@ -414,6 +414,12 @@ func fetchMetadataFromReadRemotes(ctx context.Context, noFilter bool) error {
 		return errors.New("no git remotes configured to fetch checkpoint metadata from")
 	}
 
+	// Per-candidate budgets (inside fetchMetadataFromRemote) nested in one chain
+	// ceiling, so a stalled candidate cannot starve the rest and the total stays
+	// bounded — these read paths have no outer deadline above them.
+	chainCtx, cancelChain := remote.WithReadChainBudget(ctx)
+	defer cancelChain()
+
 	var firstErr error
 	fetched := false
 	for i, remoteName := range candidates {
@@ -421,15 +427,17 @@ func fetchMetadataFromReadRemotes(ctx context.Context, noFilter bool) error {
 		// only to BOOTSTRAP a missing tracking ref — a fresh clone needs
 		// origin's legacy tier once for the union readers, but re-fetching an
 		// already-present legacy tier on every resume doubles the deep-fetch
-		// cost for data that writes no longer land on. The trade-off: a
-		// mixed-version teammate still pushing v1 to origin refreshes here
-		// only when the elected fetch fails or the tracking ref is absent.
+		// cost for data that writes no longer land on. Content availability
+		// is preserved: the union readers consult the existing tracking ref.
+		// The trade-off: a mixed-version teammate still pushing v1 to origin
+		// refreshes here only when the elected fetch fails or the tracking
+		// ref is absent.
 		if fetched && metadataTrackingRefExists(ctx, remoteName) {
 			logging.Debug(ctx, "metadata branch fetch: skipping already-present legacy candidate",
 				slog.String("candidate", remoteName))
 			continue
 		}
-		err := fetchMetadataFromRemote(ctx, remoteName, noFilter, resolution.ElectedName != "" && remoteName == resolution.ElectedName)
+		err := fetchMetadataFromRemote(chainCtx, remoteName, noFilter, resolution.ElectedName != "" && remoteName == resolution.ElectedName)
 		if err == nil {
 			fetched = true
 			continue
@@ -472,7 +480,18 @@ func fetchMetadataFromRemote(ctx context.Context, remoteName string, noFilter, a
 	}
 	branchName := refs.Primary.Short()
 
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	// Bounded by whichever is tighter: this candidate's own window, or what the
+	// chain ceiling has left. The message below reports the effective deadline
+	// rather than ReadFetchTimeout — a later candidate is often capped by the
+	// remainder, and naming the wrong number misleads on exactly the path (an
+	// unreachable elected remote) this is meant to make debuggable.
+	budget := remote.ReadFetchTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < budget {
+			budget = remaining
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	fetchTarget, err := remote.ResolveFetchTarget(ctx, remoteName)
@@ -497,7 +516,7 @@ func fetchMetadataFromRemote(ctx context.Context, remoteName string, noFilter, a
 	})
 	if fetchErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return errors.New("fetch timed out after 2 minutes")
+			return fmt.Errorf("fetch timed out after %s", budget.Round(time.Second))
 		}
 		return formatFilteredFetchError("failed to fetch "+branchName, fetchTarget, output, fetchErr)
 	}
@@ -712,18 +731,34 @@ func parseCheckpointRefNames(output []byte) []plumbing.ReferenceName {
 // If fetching by hash fails on every target, falls back to a full metadata
 // branch fetch.
 func FetchBlobsByHash(ctx context.Context, hashes []plumbing.Hash) error {
-	return fetchBlobsByHash(ctx, hashes, 2*time.Minute, remote.FetchBlobs)
+	return fetchBlobsByHash(ctx, hashes, remote.ReadFetchTimeout, remote.ReadChainBudget, remote.FetchBlobs)
 }
 
 func fetchBlobsByHash(
 	ctx context.Context,
 	hashes []plumbing.Hash,
 	fetchTimeout time.Duration,
+	chainBudget time.Duration,
 	fetchBlobs func(context.Context, string, []string) error,
 ) error {
 	if len(hashes) == 0 {
 		return nil
 	}
+
+	// One ceiling over the whole operation — the per-target loop AND the
+	// fallback fetches below. Before the read-candidate chain this function was
+	// wrapped in a single 2-minute budget that covered its fallbacks; moving to
+	// per-target budgets dropped that, leaving the fallbacks on the caller's
+	// uncapped context, so a fully-stalled hydration could run per-target
+	// budgets and then a fresh per-candidate metadata chain on top.
+	ctx, cancelChain := context.WithTimeout(ctx, chainBudget)
+	defer cancelChain()
+
+	// The loop is bounded below the ceiling so a fully-stalled set of targets
+	// cannot spend the fallbacks' window too — "covered by the ceiling" has to
+	// mean funded, not merely inside it.
+	loopCtx, cancelLoop := context.WithTimeout(ctx, remote.ReadChainLoopBudget(chainBudget))
+	defer cancelLoop()
 
 	targets := checkpointBlobFetchTargets(ctx)
 
@@ -734,7 +769,7 @@ func fetchBlobsByHash(
 
 	var firstErr error
 	for i, fetchTarget := range targets {
-		candidateCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+		candidateCtx, cancel := context.WithTimeout(loopCtx, fetchTimeout)
 		fetchErr := fetchBlobs(candidateCtx, fetchTarget, hashStrs)
 		cancel()
 		if fetchErr == nil {

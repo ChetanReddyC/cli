@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -117,13 +118,29 @@ func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote string) bool
 // alphabetical and unsuitable). Remotes configured with only pushurl are
 // deliberately invisible (spec Unit 1). Errors yield an empty list.
 func configuredRemotesInConfigOrder(ctx context.Context) []string {
+	return cachedRemotesInConfigOrder(ctx, readRemotesInConfigOrder)
+}
+
+// readRemotesInConfigOrder lists remote names, distinguishing "this repo has no
+// remotes" from "the read failed". Both used to collapse to nil, which was
+// harmless while every caller re-ran the command — but the per-invocation cache
+// would memoize a failure's nil as a legitimately empty list and then skip
+// checkpoint sync for the rest of the process. `git config --get-regexp` exits 1
+// for no match, so that exit code alone is the empty answer; anything else (a
+// fork failure under load, a cancelled context, a locked config) is an error the
+// cache must not keep.
+func readRemotesInConfigOrder(ctx context.Context) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get-regexp", `^remote\..*\.url$`)
 	if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
 		cmd.Dir = worktreeRoot
 	}
 	out, err := cmd.Output()
 	if err != nil {
-		return nil
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil, nil // no remote.*.url keys: a real, cacheable answer
+		}
+		return nil, fmt.Errorf("list configured remotes: %w", err)
 	}
 	var names []string
 	seen := map[string]bool{}
@@ -141,5 +158,5 @@ func configuredRemotesInConfigOrder(ctx context.Context) []string {
 		seen[name] = true
 		names = append(names, name)
 	}
-	return names
+	return names, nil
 }
