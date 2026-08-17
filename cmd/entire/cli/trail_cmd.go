@@ -434,29 +434,37 @@ func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner
 	if err := checkTrailResponse(resp); err != nil {
 		return "", err
 	}
-	var raw json.RawMessage
-	if err := api.DecodeJSON(resp, &raw); err != nil {
+	detail, err := decodeTrailResource(resp)
+	if err != nil {
 		return "", fmt.Errorf("failed to decode trail detail: %w", err)
-	}
-	// entire-api returns the detail resource directly. Accept the former BFF's
-	// {trail:{...}} envelope as a compatibility fallback for older fixtures.
-	var detail api.TrailResource
-	if err := json.Unmarshal(raw, &detail); err != nil {
-		return "", fmt.Errorf("failed to decode trail detail: %w", err)
-	}
-	if detail.ID == "" && detail.Number == 0 {
-		var envelope struct {
-			Trail api.TrailResource `json:"trail"`
-		}
-		if err := json.Unmarshal(raw, &envelope); err != nil {
-			return "", fmt.Errorf("failed to decode trail detail: %w", err)
-		}
-		detail = envelope.Trail
 	}
 	if detail.BodyDocument == nil {
 		return "", nil
 	}
 	return strings.TrimSpace(detail.BodyDocument.TextSnapshot), nil
+}
+
+// decodeTrailResource accepts entire-api's direct detail resource and the
+// legacy BFF's {trail:{...}} envelope.
+func decodeTrailResource(resp *http.Response) (api.TrailResource, error) {
+	var raw json.RawMessage
+	if err := api.DecodeJSON(resp, &raw); err != nil {
+		return api.TrailResource{}, fmt.Errorf("decode trail resource response: %w", err)
+	}
+	var resource api.TrailResource
+	if err := json.Unmarshal(raw, &resource); err != nil {
+		return api.TrailResource{}, fmt.Errorf("decode trail resource: %w", err)
+	}
+	if resource.ID != "" || resource.Number != 0 {
+		return resource, nil
+	}
+	var envelope struct {
+		Trail api.TrailResource `json:"trail"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return api.TrailResource{}, fmt.Errorf("decode legacy trail envelope: %w", err)
+	}
+	return envelope.Trail, nil
 }
 
 func newTrailListCmd() *cobra.Command {
@@ -2134,22 +2142,9 @@ func findTrailByNumber(ctx context.Context, client *api.Client, forge, owner, re
 		return nil, err
 	}
 
-	var raw json.RawMessage
-	if err := api.DecodeJSON(resp, &raw); err != nil {
+	found, err := decodeTrailResource(resp)
+	if err != nil {
 		return nil, fmt.Errorf("decode trail %d: %w", number, err)
-	}
-	var found api.TrailResource
-	if err := json.Unmarshal(raw, &found); err != nil {
-		return nil, fmt.Errorf("decode trail %d: %w", number, err)
-	}
-	if found.ID == "" && found.Number == 0 {
-		var envelope struct {
-			Trail api.TrailResource `json:"trail"`
-		}
-		if err := json.Unmarshal(raw, &envelope); err != nil {
-			return nil, fmt.Errorf("decode trail %d: %w", number, err)
-		}
-		found = envelope.Trail
 	}
 	return &found, nil
 }

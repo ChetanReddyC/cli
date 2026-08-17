@@ -586,6 +586,28 @@ func TestTrailDescriptionForDisplay(t *testing.T) {
 	}
 }
 
+func TestDecodeTrailResourceAcceptsDirectAndLegacyShapes(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, payload string
+	}{
+		{name: "direct", payload: `{"id":"trl_direct","number":7,"branch":"feat/direct"}`},
+		{name: "legacy envelope", payload: `{"trail":{"id":"trl_legacy","number":8,"branch":"feat/legacy"}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			resp := &http.Response{Body: io.NopCloser(strings.NewReader(tt.payload))}
+			got, err := decodeTrailResource(resp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ID == "" || got.Number == 0 || got.Branch == "" {
+				t.Fatalf("decoded resource = %#v", got)
+			}
+		})
+	}
+}
+
 func TestFetchTrailDescription_ReadsNestedBodyDocument(t *testing.T) {
 	t.Parallel()
 	var gotPath string
