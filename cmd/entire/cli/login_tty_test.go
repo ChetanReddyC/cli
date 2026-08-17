@@ -191,22 +191,21 @@ func TestReadLoginURLActionFromTTY_ControlCRecordsInterrupt(t *testing.T) {
 	assertLoginPromptTTYRestored(t, observer, before)
 }
 
-// TestReadLoginURLActionFromTTY_CancelledLeavesDescriptorOpen pins the one
-// exception to this function owning the descriptor it is handed.
+// TestReadLoginURLActionFromTTY_CancelledClosesDescriptor pins that the
+// cancelled path owns and closes the descriptor like every other path.
 //
-// When the program is killed by context cancellation, Bubble Tea's
-// shutdown(kill=true) skips waitForReadLoop(), so its input reader goroutine can
-// outlive Run. Closing the descriptor there races that reader (on Linux
-// cancelreader's epoll wait loop reads tty.Fd()) and frees an fd number the live
-// reader still holds, so the cancelled path must leave the descriptor alone.
-func TestReadLoginURLActionFromTTY_CancelledLeavesDescriptorOpen(t *testing.T) {
+// It used to be the one exception: cancellation reached Bubble Tea as a context,
+// which makes Run a *killed* Run, and shutdown(kill=true) skips
+// waitForReadLoop(), so the input reader could outlive Run and still be reading
+// tty.Fd(). Closing underneath it was a data race. Driving shutdown with Quit
+// instead takes the graceful path, which joins the read loop first, so there is
+// no live reader left to race and nothing to leak.
+func TestReadLoginURLActionFromTTY_CancelledClosesDescriptor(t *testing.T) {
 	t.Parallel()
 
 	ptmx, tty, observer, _ := openLoginPromptPTY(t)
 	defer ptmx.Close()
 	defer observer.Close()
-	// Ownership stays with us on this path, so this close is the real one.
-	defer tty.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -219,10 +218,12 @@ func TestReadLoginURLActionFromTTY_CancelledLeavesDescriptorOpen(t *testing.T) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
 
-	// A closed *os.File reports Fd() as -1, so this fails if the descriptor was
-	// reclaimed while a killed reader could still be holding it.
-	if _, err := term.GetState(int(tty.Fd())); err != nil {
-		t.Errorf("descriptor was closed on the cancelled path: %v", err)
+	// Close sets Sysfd to -1 (internal/poll (*FD).destroy), so the descriptor
+	// number is the platform-independent signal that the function closed it.
+	// Terminal state is not: tcgetattr here would report EIO on Linux merely
+	// because ptmx is still open, saying nothing about ownership.
+	if int(tty.Fd()) >= 0 {
+		t.Error("cancelled path did not close the descriptor")
 	}
 }
 
