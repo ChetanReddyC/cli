@@ -165,6 +165,74 @@ func TrackPluginDetached(pluginName string, isEntireEnabled bool, version string
 	}
 }
 
+// SkillInvocation is the content-free view of one recorded skill event: which
+// skill fired, on which agent, and how it was detected. Deliberately no prompt
+// text, arguments, or transcript content — mirroring BuildPluginEventPayload's
+// name-only rule.
+type SkillInvocation struct {
+	// Skill is the invoked skill's name (e.g. "search").
+	Skill string
+	// Agent is the agent that surfaced the signal (e.g. "claude-code").
+	Agent string
+	// Signal is the detection signal (e.g. "prompt_slash_command",
+	// "skill_tool_use").
+	Signal string
+	// EventType is the skill event type ("prompt_invocation" or
+	// "tool_invocation").
+	EventType string
+}
+
+// BuildSkillEventPayload constructs the telemetry payload for one skill
+// invocation. Exported for testing. Returns nil if the payload cannot be built.
+func BuildSkillEventPayload(inv SkillInvocation, isEntireEnabled bool, version string) *EventPayload {
+	if inv.Skill == "" {
+		return nil
+	}
+
+	machineID, err := machineid.ProtectedID("entire-cli")
+	if err != nil {
+		return nil
+	}
+
+	properties := map[string]any{
+		"skill":           inv.Skill,
+		"agent":           inv.Agent,
+		"signal":          inv.Signal,
+		"event_type":      inv.EventType,
+		"isEntireEnabled": isEntireEnabled,
+		"cli_version":     version,
+		"os":              runtime.GOOS,
+		"arch":            runtime.GOARCH,
+	}
+
+	return &EventPayload{
+		Event:      "cli_skill_invoked",
+		DistinctID: machineID,
+		Properties: properties,
+		Timestamp:  time.Now(),
+	}
+}
+
+// TrackSkillInvocationsDetached records skill invocations surfaced by agent
+// hooks, one event per invocation. Like TrackPluginDetached, it only honors
+// the env opt-out itself — call sites must gate on the user's opt-in telemetry
+// setting.
+func TrackSkillInvocationsDetached(invocations []SkillInvocation, isEntireEnabled bool, version string) {
+	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+		return
+	}
+
+	for _, inv := range invocations {
+		payload := BuildSkillEventPayload(inv, isEntireEnabled, version)
+		if payload == nil {
+			continue
+		}
+		if payloadJSON, err := json.Marshal(payload); err == nil {
+			spawnDetachedAnalytics(string(payloadJSON))
+		}
+	}
+}
+
 // SendEvent processes an event payload in the detached subprocess.
 // This is called by the hidden __send_analytics command.
 func SendEvent(payloadJSON string) {

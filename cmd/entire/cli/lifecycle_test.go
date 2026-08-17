@@ -2537,7 +2537,7 @@ func writeCheckpoint(s *strategy.SessionState) int {
 // in between report the same count (deferred reset).
 func TestPromptWindowDeferredReset(t *testing.T) {
 	turn := func(s *strategy.SessionState) {
-		persistEventMetadataToState(&agent.Event{Type: agent.TurnEnd}, s)
+		persistEventMetadataToState(t.Context(), &agent.Event{Type: agent.TurnEnd}, s)
 	}
 
 	s := &strategy.SessionState{}
@@ -2575,7 +2575,7 @@ func TestPromptWindowDeferredReset(t *testing.T) {
 // TurnEnd increments.
 func TestPromptWindowExecModeCumulativeTurnCount(t *testing.T) {
 	exec := func(s *strategy.SessionState, cumulative int) {
-		persistEventMetadataToState(&agent.Event{Type: agent.TurnEnd, TurnCount: cumulative}, s)
+		persistEventMetadataToState(t.Context(), &agent.Event{Type: agent.TurnEnd, TurnCount: cumulative}, s)
 	}
 
 	s := &strategy.SessionState{}
@@ -2600,7 +2600,7 @@ func TestPromptWindowExecModeCumulativeTurnCount(t *testing.T) {
 // instead of matching the prior checkpoint's count.
 func TestPromptWindowStaleHookDoesNotResetEarly(t *testing.T) {
 	exec := func(s *strategy.SessionState, cumulative int) {
-		persistEventMetadataToState(&agent.Event{Type: agent.TurnEnd, TurnCount: cumulative}, s)
+		persistEventMetadataToState(t.Context(), &agent.Event{Type: agent.TurnEnd, TurnCount: cumulative}, s)
 	}
 
 	s := &strategy.SessionState{}
@@ -3899,4 +3899,37 @@ func TestCompleteLiveTaskRecords_CompletesEveryRecord(t *testing.T) {
 	require.NotNil(t, state)
 	require.Len(t, state.TaskRecords, taskCount, "records must persist after completion — the materializer reads them at condensation")
 	assert.Empty(t, state.LiveTaskRecords(), "the SessionEnd sweep must complete every record")
+}
+
+func TestAppendEventSkillEventsToState_ReturnsOnlyNewlyAppended(t *testing.T) {
+	t.Parallel()
+
+	first := agent.SkillEvent{
+		ID:        "evt-1",
+		EventType: agent.SkillEventTypePromptInvocation,
+		Skill:     agent.SkillEventSkill{Name: "search"},
+		Source:    agent.SkillEventSource{Agent: "claude-code", Signal: agent.SkillSignalPromptSlashCommand},
+	}
+	second := agent.SkillEvent{
+		ID:        "evt-2",
+		EventType: agent.SkillEventTypeToolInvocation,
+		Skill:     agent.SkillEventSkill{Name: "review"},
+		Source:    agent.SkillEventSource{Agent: "claude-code", Signal: agent.SkillSignalClaudeSkillToolUse},
+	}
+
+	state := &strategy.SessionState{TurnID: "turn-1"}
+
+	appended := appendEventSkillEventsToState(&agent.Event{SkillEvents: []agent.SkillEvent{first}}, state)
+	require.Len(t, appended, 1)
+	require.Equal(t, "search", appended[0].Skill.Name)
+	require.Equal(t, "turn-1", appended[0].TurnID, "TurnID should be backfilled before append")
+
+	// Re-delivering the first event appends nothing; only the new one comes back.
+	appended = appendEventSkillEventsToState(&agent.Event{SkillEvents: []agent.SkillEvent{first, second}}, state)
+	require.Len(t, appended, 1)
+	require.Equal(t, "review", appended[0].Skill.Name)
+	require.Len(t, state.SkillEvents, 2)
+
+	// Full re-delivery is a no-op.
+	require.Nil(t, appendEventSkillEventsToState(&agent.Event{SkillEvents: []agent.SkillEvent{first, second}}, state))
 }

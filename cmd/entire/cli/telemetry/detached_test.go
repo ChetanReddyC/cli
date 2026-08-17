@@ -179,3 +179,52 @@ func TestParseGitVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildSkillEventPayload(t *testing.T) {
+	t.Parallel()
+	payload := BuildSkillEventPayload(SkillInvocation{
+		Skill:     "search",
+		Agent:     "claude-code",
+		Signal:    "prompt_slash_command",
+		EventType: "prompt_invocation",
+	}, true, "1.2.3")
+	if payload == nil {
+		t.Fatal("BuildSkillEventPayload returned nil")
+		return
+	}
+	if payload.Event != "cli_skill_invoked" {
+		t.Errorf("Event = %q, want %q", payload.Event, "cli_skill_invoked")
+	}
+	if got := payload.Properties["skill"]; got != "search" {
+		t.Errorf("skill property = %v, want %q", got, "search")
+	}
+	if got := payload.Properties["agent"]; got != "claude-code" {
+		t.Errorf("agent property = %v, want %q", got, "claude-code")
+	}
+	if got := payload.Properties["signal"]; got != "prompt_slash_command" {
+		t.Errorf("signal property = %v, want %q", got, "prompt_slash_command")
+	}
+	if got := payload.Properties["event_type"]; got != "prompt_invocation" {
+		t.Errorf("event_type property = %v, want %q", got, "prompt_invocation")
+	}
+	if got := payload.Properties["cli_version"]; got != "1.2.3" {
+		t.Errorf("cli_version property = %v, want %q", got, "1.2.3")
+	}
+	if got := payload.Properties["isEntireEnabled"]; got != true {
+		t.Errorf("isEntireEnabled property = %v, want true", got)
+	}
+	// The payload must stay content-free: skill/plugin names only, never
+	// prompt text, arguments, or flags.
+	for _, forbidden := range []string{"prompt", "args", "flags"} {
+		if _, ok := payload.Properties[forbidden]; ok {
+			t.Errorf("skill payload must not include %q", forbidden)
+		}
+	}
+}
+
+func TestBuildSkillEventPayload_EmptySkill(t *testing.T) {
+	t.Parallel()
+	if got := BuildSkillEventPayload(SkillInvocation{Agent: "claude-code"}, true, "1.0.0"); got != nil {
+		t.Errorf("expected nil for empty skill name, got %+v", got)
+	}
+}

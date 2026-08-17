@@ -29,7 +29,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/perf"
 )
 
@@ -249,7 +251,7 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 				slog.String("adopted_into_worktree", state.AdoptedIntoWorktreePath))
 			return strategy.ErrMutationSkip
 		}
-		persistEventMetadataToState(event, state)
+		persistEventMetadataToState(ctx, event, state)
 		if transErr := strategy.TransitionAndLog(ctx, state, session.EventSessionStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logCtx, "session start transition failed",
 				slog.String("error", transErr.Error()))
@@ -647,7 +649,9 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 				event.Timestamp,
 			)
 		}
-		skillEventsChanged := appendEventSkillEventsToState(&skillEventSource, state)
+		appendedSkillEvents := appendEventSkillEventsToState(&skillEventSource, state)
+		trackSkillInvocations(ctx, appendedSkillEvents)
+		skillEventsChanged := len(appendedSkillEvents) > 0
 		if state.Kind == before.Kind &&
 			state.ReviewPrompt == before.ReviewPrompt &&
 			slices.Equal(state.ReviewSkills, before.ReviewSkills) &&
@@ -1061,7 +1065,7 @@ func handleLifecycleCompaction(ctx context.Context, ag agent.Agent, event *agent
 
 	// Fire EventCompaction to trigger ActionCondenseIfFilesTouched (stays in ACTIVE)
 	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
-		persistEventMetadataToState(event, state)
+		persistEventMetadataToState(ctx, event, state)
 		if transErr := strategy.TransitionAndLog(ctx, state, session.EventCompaction, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logCtx, "compaction transition failed",
 				slog.String("error", transErr.Error()))
@@ -1900,7 +1904,7 @@ func recordCaptureDegraded(ctx context.Context, sessionID string, degraded bool)
 func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agent.Event) {
 	logCtx := logging.WithComponent(ctx, "lifecycle")
 	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
-		persistEventMetadataToState(event, state)
+		persistEventMetadataToState(ctx, event, state)
 		if err := strategy.TransitionAndLog(ctx, state, session.EventTurnEnd, session.TransitionContext{}, session.NoOpActionHandler{}); err != nil {
 			logging.Warn(logCtx, "turn-end transition failed",
 				slog.String("error", err.Error()))
@@ -1974,7 +1978,7 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 			return strategy.ErrMutationSkip
 		}
 		if event != nil {
-			persistEventMetadataToState(event, state)
+			persistEventMetadataToState(ctx, event, state)
 		}
 		// Resolved before the transition, which is not a read-only step: the
 		// SessionStop edge carries ActionUpdateLastInteraction and stamps
@@ -2012,12 +2016,12 @@ func logFileChanges(ctx context.Context, modified, newFiles, deleted []string) {
 		slog.Int("deleted", len(deleted)))
 }
 
-func persistEventMetadataToState(event *agent.Event, state *strategy.SessionState) {
+func persistEventMetadataToState(ctx context.Context, event *agent.Event, state *strategy.SessionState) {
 	// Update ModelName if provided (model is known by turn-end even on first turn)
 	if event.Model != "" {
 		state.ModelName = event.Model
 	}
-	appendEventSkillEventsToState(event, state)
+	trackSkillInvocations(ctx, appendEventSkillEventsToState(event, state))
 
 	// Persist hook-provided session metrics (e.g., from Cursor hooks)
 	if event.DurationMs > 0 {
@@ -2052,11 +2056,15 @@ func persistEventMetadataToState(event *agent.Event, state *strategy.SessionStat
 	}
 }
 
-func appendEventSkillEventsToState(event *agent.Event, state *strategy.SessionState) bool {
+// appendEventSkillEventsToState appends the event's skill events to state,
+// deduping against events already recorded, and returns the events that were
+// actually appended (nil when nothing changed) so callers can forward exactly
+// the new ones to telemetry.
+func appendEventSkillEventsToState(event *agent.Event, state *strategy.SessionState) []agent.SkillEvent {
 	if event == nil || state == nil || len(event.SkillEvents) == 0 {
-		return false
+		return nil
 	}
-	changed := false
+	var appended []agent.SkillEvent
 	for _, skillEvent := range event.SkillEvents {
 		if skillEvent.TurnID == "" {
 			skillEvent.TurnID = state.TurnID
@@ -2065,9 +2073,35 @@ func appendEventSkillEventsToState(event *agent.Event, state *strategy.SessionSt
 			continue
 		}
 		state.SkillEvents = append(state.SkillEvents, skillEvent)
-		changed = true
+		appended = append(appended, skillEvent)
 	}
-	return changed
+	return appended
+}
+
+// trackSkillInvocations forwards newly-recorded skill events to telemetry.
+// Gated on the same opt-in telemetry setting as command tracking (root.go's
+// PersistentPostRun). Hook-driven lifecycle paths never produce
+// cli_command_executed events — the hooks tree is hidden — so this is the only
+// telemetry signal that a skill fired. Skill names and signal kinds only,
+// never prompt text or transcript content.
+func trackSkillInvocations(ctx context.Context, appended []agent.SkillEvent) {
+	if len(appended) == 0 {
+		return
+	}
+	s, err := LoadEntireSettings(ctx)
+	if err != nil || s.Telemetry == nil || !*s.Telemetry {
+		return
+	}
+	invocations := make([]telemetry.SkillInvocation, 0, len(appended))
+	for _, ev := range appended {
+		invocations = append(invocations, telemetry.SkillInvocation{
+			Skill:     ev.Skill.Name,
+			Agent:     ev.Source.Agent,
+			Signal:    ev.Source.Signal,
+			EventType: ev.EventType,
+		})
+	}
+	telemetry.TrackSkillInvocationsDetached(invocations, s.Enabled, versioninfo.Version)
 }
 
 func skillEventExists(events []agent.SkillEvent, candidate agent.SkillEvent) bool {
