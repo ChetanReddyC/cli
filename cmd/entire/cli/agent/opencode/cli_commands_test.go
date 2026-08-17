@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -83,6 +85,89 @@ func TestClassifyOpenCodeExportError_Timeout(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal("timeout error does not retain context.DeadlineExceeded")
+	}
+}
+
+// TestRunOpenCodeExportToFile_FailedExportPreservesExistingFile is a regression
+// test for a failed export destroying the transcript it was asked to refresh.
+// The hook-cached export under .entire/tmp is the only local copy of the session
+// until the user commits, and both callers (PrepareTranscript on every turn end,
+// FetchTranscript on attach) re-export over it.
+func TestRunOpenCodeExportToFile_FailedExportPreservesExistingFile(t *testing.T) {
+	// No t.Parallel: t.Setenv.
+	dir := t.TempDir()
+	outputPath := filepath.Join(dir, "ses_cached.json")
+	const cached = `{"info":{"id":"ses_cached"},"messages":[]}`
+	if err := os.WriteFile(outputPath, []byte(cached), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Empty PATH makes the export fail deterministically without an opencode binary.
+	t.Setenv("PATH", "")
+
+	err := runOpenCodeExportToFile(context.Background(), "ses_cached", outputPath)
+	if err == nil {
+		t.Fatal("expected export to fail with no opencode on PATH")
+	}
+	if !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("runOpenCodeExportToFile error = %v, want exec.ErrNotFound", err)
+	}
+
+	got, readErr := os.ReadFile(outputPath)
+	if readErr != nil {
+		t.Fatalf("cached transcript was destroyed by the failed export: %v", readErr)
+	}
+	if string(got) != cached {
+		t.Fatalf("cached transcript = %q, want it left untouched (%q)", string(got), cached)
+	}
+	assertNoExportTempFiles(t, dir)
+}
+
+func TestRunOpenCodeExportToFile_ReplacesExistingFileOnSuccess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub opencode is a shell script")
+	}
+	// No t.Parallel: t.Setenv.
+	dir := t.TempDir()
+	outputPath := filepath.Join(dir, "ses_ok.json")
+	if err := os.WriteFile(outputPath, []byte(`{"stale":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	const export = `{"info":{"id":"ses_ok"},"messages":[]}`
+	stubDir := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s' '" + export + "'\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "opencode"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir)
+
+	if err := runOpenCodeExportToFile(context.Background(), "ses_ok", outputPath); err != nil {
+		t.Fatalf("runOpenCodeExportToFile failed: %v", err)
+	}
+
+	got, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != export {
+		t.Fatalf("exported transcript = %q, want %q", string(got), export)
+	}
+	assertNoExportTempFiles(t, dir)
+}
+
+// assertNoExportTempFiles fails if a staged export was left behind in dir.
+func assertNoExportTempFiles(t *testing.T, dir string) {
+	t.Helper()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".export-") {
+			t.Errorf("staged export left behind: %s", entry.Name())
+		}
 	}
 }
 
