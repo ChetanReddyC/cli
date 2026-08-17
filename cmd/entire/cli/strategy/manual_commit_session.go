@@ -125,9 +125,13 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 	return states, nil
 }
 
-// isWarnableStaleEndedSession reports whether an ENDED session is still both
-// expensive in PostCommit and actionable via 'entire doctor'.
-func isWarnableStaleEndedSession(repo *git.Repository, state *SessionState) bool {
+// IsCondensableEndedSession reports whether an ENDED session still carries
+// uncondensed checkpoint data AND has its shadow branch — i.e. it can be
+// salvaged by condensing (CondenseSessionByID). ENDED sessions with steps but
+// no shadow branch are NOT condensable; fixing those means discarding state,
+// which is reserved for `entire doctor` where a human decides. Used by the
+// PostCommit stale-session warning and the background zombie sweep.
+func IsCondensableEndedSession(repo *git.Repository, state *SessionState) bool {
 	if state.Phase != session.PhaseEnded || state.FullyCondensed || state.StepCount <= 0 {
 		return false
 	}
@@ -148,7 +152,7 @@ func isWarnableStaleEndedSession(repo *git.Repository, state *SessionState) bool
 func countWarnableStaleEndedSessions(repo *git.Repository, sessions []*SessionState) int {
 	n := 0
 	for _, state := range sessions {
-		if isWarnableStaleEndedSession(repo, state) {
+		if IsCondensableEndedSession(repo, state) {
 			n++
 		}
 	}
