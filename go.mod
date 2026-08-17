@@ -1,6 +1,6 @@
 module github.com/entireio/cli
 
-go 1.26.5
+go 1.26.6
 
 require (
 	charm.land/bubbles/v2 v2.1.1
@@ -13,7 +13,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/creack/pty v1.1.24
 	github.com/denisbrodbeck/machineid v1.0.1
-	github.com/entireio/auth-go v0.5.2
+	github.com/entireio/auth-go v0.5.3-0.20260814125012-86c083be00da
 	github.com/go-faster/errors v0.8.0
 	github.com/go-faster/jx v1.2.0
 	github.com/go-git/go-billy/v6 v6.0.0-alpha.2
