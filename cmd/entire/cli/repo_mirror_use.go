@@ -169,6 +169,10 @@ func applyMirrorRemotePlan(ctx context.Context, dir string, plan mirrorRemotePla
 	if plan.noop {
 		return nil
 	}
+	// Deferred, not tail-positioned: the preserve step below is itself a remote
+	// mutation, so a failure in the second write would otherwise leave the first
+	// one uninvalidated and the invocation's memoized remote reads stale.
+	defer strategy.InvalidateGitRemoteCache(ctx)
 	if plan.preserveAs != "" {
 		if _, err := gitRunner(ctx, dir, "remote", "add", plan.preserveAs, plan.replacedURL); err != nil {
 			return fmt.Errorf("preserve current %s URL as %q: %w", plan.remote, plan.preserveAs, err)
@@ -181,10 +185,6 @@ func applyMirrorRemotePlan(ctx context.Context, dir string, plan mirrorRemotePla
 	if _, err := gitRunner(ctx, dir, "remote", verb, plan.remote, plan.mirrorURL); err != nil {
 		return fmt.Errorf("point remote %q at the mirror: %w", plan.remote, err)
 	}
-	// Both writes above are remote mutations, so this runs once after the last of
-	// them; it is the only place in the CLI that mutates remotes, and so the only
-	// place the invocation's memoized remote reads can go stale.
-	strategy.InvalidateGitRemoteCache(ctx)
 	return nil
 }
 

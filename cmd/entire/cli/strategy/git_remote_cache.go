@@ -168,41 +168,64 @@ func (c *gitRemoteCache) snapshotFor(ctx context.Context) *remoteSnapshot {
 // cachedRemotesInConfigOrder returns the memoized remote list for this call's
 // repository, computing it via read on a miss. Without a cache installed, or when
 // the repository cannot be established, it just calls read.
-func cachedRemotesInConfigOrder(ctx context.Context, read func(context.Context) []string) []string {
+//
+// A read that FAILS is never memoized. read reports "no remotes" and "could not
+// tell" as distinct outcomes precisely so this can hold: caching a failure's empty
+// list would turn one transient git hiccup into a process-long "this repo has no
+// remotes", and the election answers that by silently skipping checkpoint sync.
+func cachedRemotesInConfigOrder(ctx context.Context, read func(context.Context) ([]string, error)) []string {
 	c := cacheFromContext(ctx)
 	if c == nil {
-		return read(ctx)
+		names, _ := read(ctx) //nolint:errcheck // uncached path keeps the historical best-effort contract
+		return names
 	}
 	snap := c.snapshotFor(ctx)
 	if snap == nil {
-		return read(ctx)
+		names, _ := read(ctx) //nolint:errcheck // unidentifiable repo: same best-effort contract
+		return names
 	}
 	snap.mu.Lock()
 	defer snap.mu.Unlock()
-	if !snap.orderedSet {
-		snap.ordered, snap.orderedSet = read(ctx), true
+	if snap.orderedSet {
+		return snap.ordered
 	}
+	names, err := read(ctx)
+	if err != nil {
+		// Transient: answer this call, leave the slot unset so the next one retries.
+		return nil
+	}
+	snap.ordered, snap.orderedSet = names, true
 	return snap.ordered
 }
 
 // cachedIsConfiguredRemote returns the memoized answer for name in this call's
 // repository, computing it via probe on a miss. Without a cache installed, or when
 // the repository cannot be established, it just calls probe.
-func cachedIsConfiguredRemote(ctx context.Context, name string, probe func() bool) bool {
+//
+// A probe that FAILS is never memoized, for the mirror-image reason: a memoized
+// false makes ResolveCheckpointSyncRemote fail closed on a configured
+// checkpoint_push_remote ("is not a configured git remote") for the rest of the
+// process, from one git that could not run.
+func cachedIsConfiguredRemote(ctx context.Context, name string, probe func() (bool, error)) bool {
 	c := cacheFromContext(ctx)
 	if c == nil {
-		return probe()
+		got, _ := probe() //nolint:errcheck // uncached path keeps the historical best-effort contract
+		return got
 	}
 	snap := c.snapshotFor(ctx)
 	if snap == nil {
-		return probe()
+		got, _ := probe() //nolint:errcheck // unidentifiable repo: same best-effort contract
+		return got
 	}
 	snap.mu.Lock()
 	defer snap.mu.Unlock()
 	if got, ok := snap.member[name]; ok {
 		return got
 	}
-	got := probe()
+	got, err := probe()
+	if err != nil {
+		return false // answer this call; the next one retries
+	}
 	snap.member[name] = got
 	return got
 }

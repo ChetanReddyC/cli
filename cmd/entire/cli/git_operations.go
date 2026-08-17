@@ -454,7 +454,18 @@ func fetchMetadataFromRemote(ctx context.Context, remoteName string, noFilter, a
 	}
 	branchName := refs.Primary.Short()
 
-	ctx, cancel := context.WithTimeout(ctx, remote.ReadFetchTimeout)
+	// Bounded by whichever is tighter: this candidate's own window, or what the
+	// chain ceiling has left. The message below reports the effective deadline
+	// rather than ReadFetchTimeout — a later candidate is often capped by the
+	// remainder, and naming the wrong number misleads on exactly the path (an
+	// unreachable elected remote) this is meant to make debuggable.
+	budget := remote.ReadFetchTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < budget {
+			budget = remaining
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	fetchTarget, err := remote.ResolveFetchTarget(ctx, remoteName)
@@ -479,7 +490,7 @@ func fetchMetadataFromRemote(ctx context.Context, remoteName string, noFilter, a
 	})
 	if fetchErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return errors.New("fetch timed out after 2 minutes")
+			return fmt.Errorf("fetch timed out after %s", budget.Round(time.Second))
 		}
 		return formatFilteredFetchError("failed to fetch "+branchName, fetchTarget, output, fetchErr)
 	}

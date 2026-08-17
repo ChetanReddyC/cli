@@ -241,12 +241,23 @@ func isConfiguredRemote(ctx context.Context, name string) bool {
 	if name == "" {
 		return false
 	}
-	return cachedIsConfiguredRemote(ctx, name, func() bool {
+	return cachedIsConfiguredRemote(ctx, name, func() (bool, error) {
 		cmd := exec.CommandContext(ctx, "git", "remote", "get-url", name)
 		if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
 			cmd.Dir = worktreeRoot
 		}
-		return cmd.Run() == nil
+		err := cmd.Run()
+		if err == nil {
+			return true, nil
+		}
+		// git ran and said no: a real answer worth caching. git failing to run at
+		// all says nothing about the remote, and memoizing that false would
+		// fail-close checkpoint_push_remote for the rest of the process.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return false, nil
+		}
+		return false, fmt.Errorf("probe remote %q: %w", name, err)
 	})
 }
 

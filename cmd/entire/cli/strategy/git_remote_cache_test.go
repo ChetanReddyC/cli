@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -11,6 +12,62 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
+
+// repoScopedCache installs a cache and pins the repository explicitly. Without the
+// pin, gitReadRepo falls back to resolving the repo from the test process's cwd, so
+// whether caching happens at all would depend on `go test` running inside a git
+// worktree — and these assertions would fail for reasons unrelated to the cache.
+func repoScopedCache(t *testing.T) context.Context {
+	t.Helper()
+	return settings.WithWorktreeRoot(WithGitRemoteCache(context.Background()), t.TempDir())
+}
+
+// okRead / okProbe are counting callbacks that succeed, for the memoization
+// assertions. Failure is covered separately by
+// TestGitRemoteCache_FailedReadsAreNotMemoized.
+func okRead(calls *int, names []string) func(context.Context) ([]string, error) {
+	return func(context.Context) ([]string, error) { *calls++; return names, nil }
+}
+
+func okProbe(calls *int, got bool) func() (bool, error) {
+	return func() (bool, error) { *calls++; return got, nil }
+}
+
+// TestGitRemoteCache_FailedReadsAreNotMemoized is the regression guard for the
+// sticky-wrong-answer hazard: both underlying git reads used to erase failure to
+// nil/false, so caching one transient fork failure or cancelled context made the
+// election answer "this repo has no remotes" — and silently skip checkpoint sync —
+// for the rest of the process.
+func TestGitRemoteCache_FailedReadsAreNotMemoized(t *testing.T) {
+	t.Parallel()
+
+	ctx := repoScopedCache(t)
+	boom := errors.New("git could not run")
+
+	listCalls := 0
+	flakyList := func(context.Context) ([]string, error) {
+		listCalls++
+		if listCalls == 1 {
+			return nil, boom
+		}
+		return []string{"origin"}, nil
+	}
+	assert.Empty(t, cachedRemotesInConfigOrder(ctx, flakyList), "a failed read answers empty for this call")
+	assert.Equal(t, []string{"origin"}, cachedRemotesInConfigOrder(ctx, flakyList),
+		"the failure must not be memoized; the next call retries and sees the real list")
+
+	probeCalls := 0
+	flakyProbe := func() (bool, error) {
+		probeCalls++
+		if probeCalls == 1 {
+			return false, boom
+		}
+		return true, nil
+	}
+	assert.False(t, cachedIsConfiguredRemote(ctx, "origin", flakyProbe))
+	assert.True(t, cachedIsConfiguredRemote(ctx, "origin", flakyProbe),
+		"a failed probe must not fail-close checkpoint_push_remote for the rest of the process")
+}
 
 // TestGitRemoteCache_OnlyMemoizesWhenInstalled pins the opt-in property that
 // makes this safe: an uninstrumented context reads git every time, exactly as
@@ -22,8 +79,8 @@ func TestGitRemoteCache_OnlyMemoizesWhenInstalled(t *testing.T) {
 	t.Run("no cache installed: every call reads", func(t *testing.T) {
 		t.Parallel()
 		calls := 0
-		probe := func() bool { calls++; return true }
-		ctx := context.Background()
+		probe := okProbe(&calls, true)
+		ctx := settings.WithWorktreeRoot(context.Background(), t.TempDir())
 
 		assert.True(t, cachedIsConfiguredRemote(ctx, "origin", probe))
 		assert.True(t, cachedIsConfiguredRemote(ctx, "origin", probe))
@@ -33,8 +90,8 @@ func TestGitRemoteCache_OnlyMemoizesWhenInstalled(t *testing.T) {
 	t.Run("cache installed: one read per remote name", func(t *testing.T) {
 		t.Parallel()
 		calls := 0
-		probe := func() bool { calls++; return true }
-		ctx := WithGitRemoteCache(context.Background())
+		probe := okProbe(&calls, true)
+		ctx := repoScopedCache(t)
 
 		assert.True(t, cachedIsConfiguredRemote(ctx, "origin", probe))
 		assert.True(t, cachedIsConfiguredRemote(ctx, "origin", probe))
@@ -47,8 +104,8 @@ func TestGitRemoteCache_OnlyMemoizesWhenInstalled(t *testing.T) {
 	t.Run("negative answers are cached too", func(t *testing.T) {
 		t.Parallel()
 		calls := 0
-		probe := func() bool { calls++; return false }
-		ctx := WithGitRemoteCache(context.Background())
+		probe := okProbe(&calls, false)
+		ctx := repoScopedCache(t)
 
 		assert.False(t, cachedIsConfiguredRemote(ctx, "gone", probe))
 		assert.False(t, cachedIsConfiguredRemote(ctx, "gone", probe))
@@ -69,19 +126,19 @@ func TestGitRemoteCache_PartitionsByRepository(t *testing.T) {
 	repoB := settings.WithWorktreeRoot(ctx, t.TempDir())
 
 	// Same remote name, opposite answers, one shared cache.
-	assert.True(t, cachedIsConfiguredRemote(repoA, "origin", func() bool { return true }))
-	assert.False(t, cachedIsConfiguredRemote(repoB, "origin", func() bool { return false }),
+	assert.True(t, cachedIsConfiguredRemote(repoA, "origin", func() (bool, error) { return true, nil }))
+	assert.False(t, cachedIsConfiguredRemote(repoB, "origin", func() (bool, error) { return false, nil }),
 		"repo B must not inherit repo A's membership answer")
 
-	listA := func(context.Context) []string { return []string{"origin"} }
-	listB := func(context.Context) []string { return []string{"fork", "upstream"} }
+	listA := func(context.Context) ([]string, error) { return []string{"origin"}, nil }
+	listB := func(context.Context) ([]string, error) { return []string{"fork", "upstream"}, nil }
 	assert.Equal(t, []string{"origin"}, cachedRemotesInConfigOrder(repoA, listA))
 	assert.Equal(t, []string{"fork", "upstream"}, cachedRemotesInConfigOrder(repoB, listB),
 		"repo B must not inherit repo A's remote list")
 
 	// Each repo still memoizes within itself.
 	calls := 0
-	countingA := func(context.Context) []string { calls++; return nil }
+	countingA := okRead(&calls, nil)
 	cachedRemotesInConfigOrder(repoA, countingA)
 	assert.Equal(t, 0, calls, "repo A's list was already cached; the partition must not defeat memoization")
 }
@@ -109,18 +166,18 @@ func TestGitRemoteCache_CrossRepoReadsDoNotSerialize(t *testing.T) {
 	done := make(chan struct{}, 2)
 
 	go func() {
-		cachedRemotesInConfigOrder(repoA, func(context.Context) []string {
+		cachedRemotesInConfigOrder(repoA, func(context.Context) ([]string, error) {
 			close(aInside)
 			<-bStarted // A cannot finish until B is inside its own read
-			return []string{"origin"}
+			return []string{"origin"}, nil
 		})
 		done <- struct{}{}
 	}()
 	go func() {
 		<-aInside // B starts only once A is demonstrably inside its read
-		cachedRemotesInConfigOrder(repoB, func(context.Context) []string {
+		cachedRemotesInConfigOrder(repoB, func(context.Context) ([]string, error) {
 			close(bStarted)
-			return []string{"fork"}
+			return []string{"fork"}, nil
 		})
 		done <- struct{}{}
 	}()
@@ -140,8 +197,8 @@ func TestGitRemoteCache_EmptyListIsCached(t *testing.T) {
 	t.Parallel()
 
 	calls := 0
-	read := func(context.Context) []string { calls++; return nil }
-	ctx := WithGitRemoteCache(context.Background())
+	read := okRead(&calls, nil)
+	ctx := repoScopedCache(t)
 
 	assert.Empty(t, cachedRemotesInConfigOrder(ctx, read))
 	assert.Empty(t, cachedRemotesInConfigOrder(ctx, read))
@@ -152,9 +209,9 @@ func TestGitRemoteCache_Invalidate(t *testing.T) {
 	t.Parallel()
 
 	listCalls, probeCalls := 0, 0
-	read := func(context.Context) []string { listCalls++; return []string{"origin"} }
-	probe := func() bool { probeCalls++; return true }
-	ctx := WithGitRemoteCache(context.Background())
+	read := okRead(&listCalls, []string{"origin"})
+	probe := okProbe(&probeCalls, true)
+	ctx := repoScopedCache(t)
 
 	cachedRemotesInConfigOrder(ctx, read)
 	cachedIsConfiguredRemote(ctx, "origin", probe)
