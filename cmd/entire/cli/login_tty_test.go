@@ -191,6 +191,42 @@ func TestReadLoginURLActionFromTTY_ControlCRecordsInterrupt(t *testing.T) {
 	assertLoginPromptTTYRestored(t, observer, before)
 }
 
+// TestReadLoginURLActionFromTTY_CancelledClosesDescriptor pins that the
+// cancelled path owns and closes the descriptor like every other path.
+//
+// It used to be the one exception: cancellation reached Bubble Tea as a context,
+// which makes Run a *killed* Run, and shutdown(kill=true) skips
+// waitForReadLoop(), so the input reader could outlive Run and still be reading
+// tty.Fd(). Closing underneath it was a data race. Driving shutdown with Quit
+// instead takes the graceful path, which joins the read loop first, so there is
+// no live reader left to race and nothing to leak.
+func TestReadLoginURLActionFromTTY_CancelledClosesDescriptor(t *testing.T) {
+	t.Parallel()
+
+	ptmx, tty, observer, _ := openLoginPromptPTY(t)
+	defer ptmx.Close()
+	defer observer.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	action, err := readLoginURLActionFromTTY(ctx, io.Discard, tty)
+	if action != loginURLNone {
+		t.Errorf("action = %v, want loginURLNone", action)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+
+	// Close sets Sysfd to -1 (internal/poll (*FD).destroy), so the descriptor
+	// number is the platform-independent signal that the function closed it.
+	// Terminal state is not: tcgetattr here would report EIO on Linux merely
+	// because ptmx is still open, saying nothing about ownership.
+	if int(tty.Fd()) >= 0 {
+		t.Error("cancelled path did not close the descriptor")
+	}
+}
+
 func openLoginPromptPTY(t *testing.T) (ptmx, tty, observer *os.File, before *term.State) {
 	t.Helper()
 
