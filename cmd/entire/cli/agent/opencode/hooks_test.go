@@ -440,9 +440,11 @@ func TestCommittedDogfoodPluginIsCurrent(t *testing.T) {
 }
 
 // TestPlugin_SpawnsHooksUnderNode is the #2014 canary: load the installed plugin
-// under Node (Desktop's runtime) and assert a turn-end hook actually spawns.
-// Before the child_process fix this threw ReferenceError: Bun is not defined
-// inside a swallowed catch, so hooks silently never ran.
+// under Node (Desktop's runtime) and assert hooks actually spawn. Covers both
+// async spawn (session-start via session.created) and sync spawnSync (turn-end
+// via session.status). Before the child_process fix this threw
+// ReferenceError: Bun is not defined inside a swallowed catch, so hooks
+// silently never ran.
 func TestPlugin_SpawnsHooksUnderNode(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not installed")
@@ -456,7 +458,10 @@ func TestPlugin_SpawnsHooksUnderNode(t *testing.T) {
 		t.Fatalf("install failed: %v", err)
 	}
 
-	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	pluginPath, err := filepath.Abs(filepath.Join(dir, ".opencode", "plugins", "entire.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	markerPath := filepath.Join(dir, "hook-ran.txt")
 	binDir := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -474,25 +479,28 @@ func TestPlugin_SpawnsHooksUnderNode(t *testing.T) {
 	driverPath := filepath.Join(dir, "canary.mjs")
 	driver := `
 import { pathToFileURL } from "node:url"
-import { readFileSync } from "node:fs"
 
-const pluginURL = process.argv[2]
-const { EntirePlugin } = await import(pluginURL)
+const pluginPath = process.argv[2]
+const { EntirePlugin } = await import(pathToFileURL(pluginPath).href)
 const handlers = await EntirePlugin({ directory: process.cwd() })
+await handlers.event({
+  event: {
+    type: "session.created",
+    properties: { info: { id: "sess-canary" } },
+  },
+})
 await handlers.event({
   event: {
     type: "session.status",
     properties: { status: { type: "idle" }, sessionID: "sess-canary" },
   },
 })
-// Ensure the plugin module actually loaded (not a silent import failure).
-readFileSync(new URL(pluginURL).pathname, "utf8")
 `
 	if err := os.WriteFile(driverPath, []byte(driver), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	cmd := exec.CommandContext(t.Context(), "node", "--experimental-strip-types", driverPath, pathToFileURL(pluginPath))
+	cmd := exec.CommandContext(t.Context(), "node", "--experimental-strip-types", driverPath, pluginPath)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
@@ -504,18 +512,13 @@ readFileSync(new URL(pluginURL).pathname, "utf8")
 	if err != nil {
 		t.Fatalf("hook never spawned (marker missing): %v\nnode output:\n%s", err, out)
 	}
-	if !strings.Contains(string(got), "turn-end") {
-		t.Fatalf("expected turn-end in marker, got %q\nnode output:\n%s", got, out)
+	marker := string(got)
+	if !strings.Contains(marker, "session-start") {
+		t.Fatalf("expected session-start (async spawn) in marker, got %q\nnode output:\n%s", marker, out)
 	}
-}
-
-func pathToFileURL(p string) string {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return "file://" + p
+	if !strings.Contains(marker, "turn-end") {
+		t.Fatalf("expected turn-end (sync spawnSync) in marker, got %q\nnode output:\n%s", marker, out)
 	}
-	// Node's pathToFileURL on Unix: file:///abs/path
-	return "file://" + filepath.ToSlash(abs)
 }
 
 // legacyLocalDevRender reproduces the plugin the removed local-dev mode wrote: the
