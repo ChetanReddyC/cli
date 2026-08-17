@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -83,6 +84,54 @@ func TestGitRemoteCache_PartitionsByRepository(t *testing.T) {
 	countingA := func(context.Context) []string { calls++; return nil }
 	cachedRemotesInConfigOrder(repoA, countingA)
 	assert.Equal(t, 0, calls, "repo A's list was already cached; the partition must not defeat memoization")
+}
+
+// TestGitRemoteCache_CrossRepoReadsDoNotSerialize pins that a git read for one
+// repository never blocks another's. `entire dispatch --repos a,b` fans out over
+// repositories with an errgroup (dispatch/mode_local.go), so a single lock held
+// across the subprocess would serialize work that ran concurrently before this
+// cache existed.
+//
+// Deterministic rather than timing-based, and ordered so the outcome cannot depend
+// on which goroutine wins the start: A enters its read FIRST and only then is B
+// allowed to call. With per-repository locks B proceeds and releases A; with one
+// global lock held across the read B blocks, A waits forever on B, and the test
+// fails on the deadline instead of hanging.
+func TestGitRemoteCache_CrossRepoReadsDoNotSerialize(t *testing.T) {
+	t.Parallel()
+
+	ctx := WithGitRemoteCache(context.Background())
+	repoA := settings.WithWorktreeRoot(ctx, t.TempDir())
+	repoB := settings.WithWorktreeRoot(ctx, t.TempDir())
+
+	aInside := make(chan struct{})
+	bStarted := make(chan struct{})
+	done := make(chan struct{}, 2)
+
+	go func() {
+		cachedRemotesInConfigOrder(repoA, func(context.Context) []string {
+			close(aInside)
+			<-bStarted // A cannot finish until B is inside its own read
+			return []string{"origin"}
+		})
+		done <- struct{}{}
+	}()
+	go func() {
+		<-aInside // B starts only once A is demonstrably inside its read
+		cachedRemotesInConfigOrder(repoB, func(context.Context) []string {
+			close(bStarted)
+			return []string{"fork"}
+		})
+		done <- struct{}{}
+	}()
+
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("cross-repository reads serialized: one repository's git read blocked another's")
+		}
+	}
 }
 
 // TestGitRemoteCache_EmptyListIsCached: an empty remote list is a real answer,

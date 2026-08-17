@@ -40,16 +40,29 @@ type gitRemoteCacheKey struct{}
 // which fixed exactly this). A cache keyed only by remote name would answer
 // repo B's election from repo A's remote list and silently re-break that fix.
 //
-// Guarded by a mutex because a single command may resolve the chain from several
-// goroutines (checkpoint hydration fans out).
+// Locking is two-level, and deliberately so. gitRemoteCache.mu guards only the
+// byDir map — never a git subprocess. Each repository's answers sit behind their
+// own mutex, so `entire dispatch --repos a,b`, which fans out over repositories
+// with an errgroup (dispatch/mode_local.go), keeps running their git reads in
+// parallel. Holding one global lock across the exec would have made this cache
+// serialize cross-repository work that ran concurrently before it existed.
+//
+// Within one repository callers still serialize, which is the point for two
+// racing reads of the same key — the second waits and takes the memoized answer
+// instead of shelling out again. Two reads of different keys in one repository
+// serialize too; the key set is tiny (the remote list, plus membership for the
+// elected remote and origin), so that is a bounded cost for a much simpler
+// invariant than per-key locking.
 type gitRemoteCache struct {
 	mu sync.Mutex
 	// byDir maps the repository root to its memoized answers.
 	byDir map[string]*remoteSnapshot
 }
 
-// remoteSnapshot holds one repository's memoized .git/config answers.
+// remoteSnapshot holds one repository's memoized .git/config answers, behind its
+// own mutex so a git read for one repository never blocks another's.
 type remoteSnapshot struct {
+	mu sync.Mutex
 	// ordered is configuredRemotesInConfigOrder's result; orderedSet
 	// distinguishes "not yet read" from a legitimately empty remote list.
 	ordered    []string
@@ -100,6 +113,9 @@ func InvalidateGitRemoteCache(ctx context.Context) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Dropping the map is enough: a goroutine already holding a snapshot finishes
+	// against it and its result is simply discarded with the old map, rather than
+	// being observed by anyone after the mutation.
 	c.byDir = map[string]*remoteSnapshot{}
 }
 
@@ -139,6 +155,8 @@ func (c *gitRemoteCache) snapshotFor(ctx context.Context) *remoteSnapshot {
 	if !ok {
 		return nil
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	snap := c.byDir[repoRoot]
 	if snap == nil {
 		snap = &remoteSnapshot{member: map[string]bool{}}
@@ -155,12 +173,12 @@ func cachedRemotesInConfigOrder(ctx context.Context, read func(context.Context) 
 	if c == nil {
 		return read(ctx)
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	snap := c.snapshotFor(ctx)
 	if snap == nil {
 		return read(ctx)
 	}
+	snap.mu.Lock()
+	defer snap.mu.Unlock()
 	if !snap.orderedSet {
 		snap.ordered, snap.orderedSet = read(ctx), true
 	}
@@ -175,12 +193,12 @@ func cachedIsConfiguredRemote(ctx context.Context, name string, probe func() boo
 	if c == nil {
 		return probe()
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	snap := c.snapshotFor(ctx)
 	if snap == nil {
 		return probe()
 	}
+	snap.mu.Lock()
+	defer snap.mu.Unlock()
 	if got, ok := snap.member[name]; ok {
 		return got
 	}
