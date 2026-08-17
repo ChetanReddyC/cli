@@ -6,6 +6,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -157,6 +158,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newSendAnalyticsCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
 	cmd.AddCommand(newRefreshTrailEnablementCmd())
+	cmd.AddCommand(newSweepSessionsCmd())
 
 	// Experimental command (developer-only visibility; setup/tune runners).
 	experimental.Register(cmd, newRunnerCmd()) // 'runner' (experimental)
@@ -195,6 +197,36 @@ func newSendAnalyticsCmd() *cobra.Command {
 		Args:   cobra.ExactArgs(1),
 		Run: func(_ *cobra.Command, args []string) {
 			telemetry.SendEvent(args[0])
+		},
+	}
+}
+
+// newSweepSessionsCmd creates the hidden command the session-start hook
+// spawns detached to fix zombie sessions in the background (see
+// runSessionSweep). Not for direct use; `entire doctor` is the interactive
+// surface for the same repairs.
+func newSweepSessionsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "__sweep_sessions",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			// Detached child with discarded stdout/stderr: initialize file
+			// logging so a failing background sweep (e.g. a zombie that can't
+			// self-heal) is diagnosable in .entire/logs/entire.log rather than
+			// vanishing. Guard on WorktreeRoot first — matching resume/rewind/
+			// reset/explain — so a child whose worktree was removed or relocated
+			// between spawn and exec (or a manual invocation outside a repo)
+			// doesn't create a stray .entire/logs/ in an arbitrary directory;
+			// logging.Init falls back to cwd when WorktreeRoot fails.
+			if _, err := paths.WorktreeRoot(ctx); err == nil {
+				logging.SetLogLevelGetter(GetLogLevel)
+				if err := logging.Init(ctx, ""); err == nil {
+					defer logging.Close()
+				}
+			}
+			return runSessionSweep(ctx)
 		},
 	}
 }
