@@ -59,15 +59,6 @@ fails even with --dry-run.`, imp.AgentType()),
 			}
 			defer repo.Close()
 
-			// Best-effort file logging (like explain/resume): without Init,
-			// logging.Debug below is a no-op. WorktreeRoot already succeeded,
-			// so this cannot create .entire/logs/ outside a repo.
-			logging.SetLogLevelGetter(GetLogLevel)
-			if logCtx, err := logging.Init(ctx, ""); err == nil {
-				ctx = logCtx
-				defer logging.Close()
-			}
-
 			if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, repo); err != nil {
 				return err
 			}

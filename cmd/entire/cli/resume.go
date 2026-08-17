@@ -79,16 +79,6 @@ most recent commit with a checkpoint.  You'll be prompted to confirm resuming in
 }
 
 func runResume(ctx context.Context, cmd *cobra.Command, branchName string, force bool) error {
-	// Only initialize logging when inside a git worktree to avoid
-	// creating .entire/logs/ in arbitrary directories.
-	if _, err := paths.WorktreeRoot(ctx); err == nil {
-		logging.SetLogLevelGetter(GetLogLevel)
-		if logCtx, err := logging.Init(ctx, ""); err == nil {
-			ctx = logCtx
-			defer logging.Close()
-		}
-	}
-
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
@@ -172,14 +162,6 @@ func switchToBranchForResume(ctx context.Context, w, errW io.Writer, branchName 
 // branch. The interactive picker uses this so that selecting one of several
 // sessions on the same branch resumes exactly that session.
 func resumeSessionOnBranch(ctx context.Context, cmd *cobra.Command, branchName string, checkpointID id.CheckpointID, force bool) error {
-	if _, err := paths.WorktreeRoot(ctx); err == nil {
-		logging.SetLogLevelGetter(GetLogLevel)
-		if logCtx, err := logging.Init(ctx, ""); err == nil {
-			ctx = logCtx
-			defer logging.Close()
-		}
-	}
-
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 

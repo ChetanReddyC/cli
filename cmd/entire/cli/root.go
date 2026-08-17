@@ -6,6 +6,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -49,7 +50,49 @@ func inGroup(c *cobra.Command, groupID string) *cobra.Command {
 	return c
 }
 
+// initRootLogging routes every command's logging.* calls into
+// .entire/logs/entire.log and attaches the initialized logger to the
+// command's context, so downstream packages that take a *slog.Logger (redact)
+// receive it by injection via logging.LoggerFromContext instead of each RunE
+// re-initializing logging for itself.
+//
+// Both gates are load-bearing, because Init CREATES .entire/logs/:
+//   - WorktreeRoot: never write into a non-repository directory.
+//   - IsSetUpAny: a repo that has never enabled Entire must stay untouched.
+//     Otherwise `entire version` in someone else's clone seeds an untracked
+//     .entire/ that no gitignore entry covers yet. This is also why `enable`
+//     keeps its own Init: during setup the repo is by definition not set up
+//     yet, and that call is deliberately placed after every check that can
+//     still reject the invocation.
+//
+// Failure is non-fatal and deliberately silent — logging.Init falls back to
+// stderr internally, and a command must not die because a log file could not
+// be opened.
+func initRootLogging(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	if _, err := paths.WorktreeRoot(ctx); err != nil {
+		return
+	}
+	if !settings.IsSetUpAny(ctx) {
+		return
+	}
+	logging.SetLogLevelGetter(GetLogLevel)
+	if logCtx, err := logging.Init(ctx, ""); err == nil {
+		cmd.SetContext(logCtx)
+	}
+}
+
 func NewRootCmd() *cobra.Command {
+	// Run every ancestor's persistent hooks, root first, instead of only the
+	// closest one cobra picks by default. This is what makes the root
+	// PersistentPreRunE below the single logging.Init site: `hooks`,
+	// `checkpoint`, `session`, and `agent` all define their own
+	// PersistentPreRunE, and under the default behaviour each of those would
+	// shadow the root hook — silently, since a skipped Init only shows up as
+	// missing log lines. Cobra runs pre-runs root→leaf, so the logger is in
+	// the context before any group hook or RunE observes it.
+	cobra.EnableTraverseRunHooks = true
+
 	cmd := &cobra.Command{
 		Use:     "entire",
 		Short:   "Entire CLI",
@@ -62,7 +105,19 @@ func NewRootCmd() *cobra.Command {
 		CompletionOptions: cobra.CompletionOptions{
 			HiddenDefaultCmd: true,
 		},
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			initRootLogging(cmd)
+			return nil
+		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
+			// Flush the buffered .entire/logs writer the root PersistentPreRunE
+			// opened. Deferred so it runs after everything else in this hook —
+			// the telemetry and version-check calls below log too — and so the
+			// hidden-command early return below still flushes. main.go closes
+			// again for the RunE-returned-an-error path, which cobra never
+			// reaches this hook on; Close is idempotent.
+			defer logging.Close()
+
 			// Skip for hidden commands (walk parent chain — Cobra doesn't propagate Hidden)
 			for c := cmd; c != nil; c = c.Parent() {
 				if c.Hidden {

@@ -379,14 +379,16 @@ var initRedactionOnce sync.Once
 // redact package: PII detection (opt-in), inline custom_redactions, and rule
 // packs auto-discovered from .entire/redactors/.
 //
-// Must be called at each process entry point before checkpoint writes, with
-// the context that entry point built: when the entry point initialized
-// logging (logging.Init), the context carries the logger and the redact
-// package's diagnostics land in .entire/logs/ — hook contexts swallow
-// stderr, so without this users can't tell whether their rules loaded.
+// Must be called before checkpoint writes with a context descended from the
+// root PersistentPreRunE, which is where logging is initialized: that context
+// carries the logger, so the redact package's diagnostics land in
+// .entire/logs/ — hook contexts swallow stderr, so without this users grepping
+// for component=redaction find nothing and conclude their rules never ran.
+//
 // Without a context logger, diagnostics fall back to the process-default
-// stderr logger (fine for interactive commands like doctor) and the
-// load-time summary is skipped.
+// stderr logger and the load-time summary is skipped. That happens when the
+// root hook declined to initialize logging — outside a repository, or in a
+// repo that never enabled Entire — and for callers outside the cobra tree.
 //
 // sync.Once: the first caller's context wins. Every caller is a process
 // entry point that just built its context, so later calls are no-ops by
@@ -468,10 +470,14 @@ func EnsureRedactionConfigured(ctx context.Context) {
 		}
 
 		// Load-time summary so "are my rules active?" is answerable from the
-		// log alone. Only when the entry point injected an initialized logger:
-		// in commands that never call logging.Init, logging.Info falls through
-		// to the process-default stderr logger and this line would surface as
-		// terminal noise instead of landing in .entire/logs/.
+		// log alone — the happy path used to log nothing, which is why a user
+		// whose rules were fine still had no way to confirm it.
+		//
+		// Gated on an initialized logger: without one, logging.Info falls
+		// through to the process-default stderr logger, and an INFO line the
+		// user did not ask for would surface as terminal noise. WARN
+		// diagnostics are deliberately not gated — a broken rule is worth
+		// showing wherever it can be shown.
 		if logger != nil {
 			packRules := 0
 			for _, p := range packs {
