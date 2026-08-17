@@ -374,7 +374,7 @@ var (
 If your agent uses a JSON config file for hooks (like Claude Code's `.claude/settings.json`, Gemini's `.gemini/settings.json`, Cursor's `.cursor/hooks.json`, Factory AI Droid's `.factory/settings.json`, or Copilot CLI's `.github/hooks/entire.json`), implement `HookSupport`:
 
 ```go
-func (a *YourAgent) InstallHooks(localDev bool, force bool) (int, error) {
+func (a *YourAgent) InstallHooks(force bool) (int, error) {
     // 1. Find repo root
     repoRoot, err := paths.RepoRoot()
     if err != nil {
@@ -385,21 +385,18 @@ func (a *YourAgent) InstallHooks(localDev bool, force bool) (int, error) {
     settingsPath := filepath.Join(repoRoot, ".youragent", "settings.json")
     // ... read and parse ...
 
-    // 3. Build hook commands
-    // localDev mode delegates to scripts/entire-dev (agent.LocalDevHookScript),
-    // which compiles the CLI on demand and falls back to the entire binary on
-    // PATH when the tree does not build. It uses $(git rev-parse --show-toplevel)
-    // to resolve the repo root at runtime, so it works regardless of where the
-    // repo is checked out on disk.
-    // Note: Only Claude Code provides a PROJECT_DIR env var (CLAUDE_PROJECT_DIR);
-    // its prefix uses ${CLAUDE_PROJECT_DIR}/scripts/entire-dev instead. Other
-    // agents should use agent.LocalDevHookScript as shown here.
-    var cmdPrefix string
-    if localDev {
-        cmdPrefix = agent.LocalDevHookScript + " hooks your-agent "
-    } else {
-        cmdPrefix = "entire hooks your-agent "
-    }
+    // 3. Build hook commands.
+    // Always name the "entire" binary, resolved through PATH. Never build a
+    // hook command from a path inside the working tree: the hook would then run
+    // whatever the checked-out branch contains, on every agent turn. Wrap it so
+    // a missing binary exits cleanly instead of failing the agent's operation.
+    const cmdPrefix = "entire hooks your-agent "
+    hookCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "stop")
+
+    // Drop Entire-owned hooks carrying any other command before adding this
+    // one, even without force — otherwise a hook written by an older version
+    // survives alongside it and both fire. agent.LegacyLocalDevHookScript is
+    // matched for exactly this reason; see entireHookPrefixes in any agent.
 
     // 4. Add hooks if they don't exist (idempotent)
     // 5. Write settings back (preserving unknown fields)
@@ -673,7 +670,7 @@ Claude Code, Gemini CLI, Cursor, Factory AI Droid, and Copilot CLI use a JSON se
 Key principles:
 - **Preserve unknown fields** - don't destroy user's custom hooks or settings
 - **Idempotent installs** - running `entire enable` twice doesn't duplicate hooks
-- **Support `localDev` mode** - use `go run "$(git rev-parse --show-toplevel)"/...` for development (only Claude Code provides a `PROJECT_DIR` env var; other agents use `git rev-parse` to resolve the repo root at runtime)
+- **Never point a hook at repository content** - hook commands must name the `entire` binary (via PATH), not a path inside the working tree. Recognize the legacy shapes in `entireHookPrefixes` (including `agent.LegacyLocalDevHookScript`) so hooks written by older versions are replaced rather than left in place
 - **Identify Entire hooks** by command prefix (e.g., `"entire "` or `go run "$(git rev-parse --show-toplevel)"/...`)
 
 ### Example: Claude Code Hook Config
