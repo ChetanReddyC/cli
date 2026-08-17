@@ -2537,7 +2537,7 @@ func writeCheckpoint(s *strategy.SessionState) int {
 // in between report the same count (deferred reset).
 func TestPromptWindowDeferredReset(t *testing.T) {
 	turn := func(s *strategy.SessionState) {
-		persistEventMetadataToState(t.Context(), &agent.Event{Type: agent.TurnEnd}, s)
+		persistEventMetadataToState(&agent.Event{Type: agent.TurnEnd}, s)
 	}
 
 	s := &strategy.SessionState{}
@@ -2575,7 +2575,7 @@ func TestPromptWindowDeferredReset(t *testing.T) {
 // TurnEnd increments.
 func TestPromptWindowExecModeCumulativeTurnCount(t *testing.T) {
 	exec := func(s *strategy.SessionState, cumulative int) {
-		persistEventMetadataToState(t.Context(), &agent.Event{Type: agent.TurnEnd, TurnCount: cumulative}, s)
+		persistEventMetadataToState(&agent.Event{Type: agent.TurnEnd, TurnCount: cumulative}, s)
 	}
 
 	s := &strategy.SessionState{}
@@ -2600,7 +2600,7 @@ func TestPromptWindowExecModeCumulativeTurnCount(t *testing.T) {
 // instead of matching the prior checkpoint's count.
 func TestPromptWindowStaleHookDoesNotResetEarly(t *testing.T) {
 	exec := func(s *strategy.SessionState, cumulative int) {
-		persistEventMetadataToState(t.Context(), &agent.Event{Type: agent.TurnEnd, TurnCount: cumulative}, s)
+		persistEventMetadataToState(&agent.Event{Type: agent.TurnEnd, TurnCount: cumulative}, s)
 	}
 
 	s := &strategy.SessionState{}

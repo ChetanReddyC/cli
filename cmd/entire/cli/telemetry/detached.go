@@ -194,9 +194,16 @@ func BuildSkillEventPayload(inv SkillInvocation, isEntireEnabled bool, version s
 		return nil
 	}
 
+	// Match BuildEventPayload's defaulting so the agent property is always a
+	// non-empty, queryable value.
+	agentName := inv.Agent
+	if agentName == "" {
+		agentName = "auto"
+	}
+
 	properties := map[string]any{
 		"skill":           inv.Skill,
-		"agent":           inv.Agent,
+		"agent":           agentName,
 		"signal":          inv.Signal,
 		"event_type":      inv.EventType,
 		"isEntireEnabled": isEntireEnabled,
@@ -213,8 +220,14 @@ func BuildSkillEventPayload(inv SkillInvocation, isEntireEnabled bool, version s
 	}
 }
 
+// maxSkillInvocationsPerTrack caps how many detached senders one call can
+// spawn. Real turns carry at most a few skill events; the cap only guards
+// against a pathological transcript producing a process storm.
+const maxSkillInvocationsPerTrack = 10
+
 // TrackSkillInvocationsDetached records skill invocations surfaced by agent
-// hooks, one event per invocation. Like TrackPluginDetached, it only honors
+// hooks, one event per invocation (capped at maxSkillInvocationsPerTrack per
+// call; excess events are dropped). Like TrackPluginDetached, it only honors
 // the env opt-out itself — call sites must gate on the user's opt-in telemetry
 // setting.
 func TrackSkillInvocationsDetached(invocations []SkillInvocation, isEntireEnabled bool, version string) {
@@ -222,6 +235,9 @@ func TrackSkillInvocationsDetached(invocations []SkillInvocation, isEntireEnable
 		return
 	}
 
+	if len(invocations) > maxSkillInvocationsPerTrack {
+		invocations = invocations[:maxSkillInvocationsPerTrack]
+	}
 	for _, inv := range invocations {
 		payload := BuildSkillEventPayload(inv, isEntireEnabled, version)
 		if payload == nil {
