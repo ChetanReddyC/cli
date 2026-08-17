@@ -50,6 +50,7 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |
 | `TokenCalculator` | `CalculateTokenUsage` | Agent's transcript contains token usage data |
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
+| `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers) |
 | `HookResponseWriter` | `WriteHookResponse` | Agent can display messages from hook responses (e.g., session start banner). Claude Code uses JSON `systemMessage` on stdout; Factory AI Droid uses plain text on stdout. |
 | `ContextInjector` | `InjectionEvent`, `RenderContextInjection` | Agent can inject text into the **model's** context window (distinct from `HookResponseWriter`, which targets the *user*). The agent declares which lifecycle event it injects at and renders a native stdout payload. The dispatcher (`emitContextInjection`) emits it once per normal session via `session.State.ContextInjectionDecided`, skipping review/investigate sessions, and only when fresh clone-local preferences say trails are enabled for the current repo/API/auth target. The API check happens before the prompt path (`entire enable`, successful `entire trail ...` commands, and stale/missing cache refresh on SessionStart all refresh `ClonePreferences.TrailsEnabled` using `api.Client.TrailsEnabled`); TurnStart performs no auth/network work and leaves unknown/stale caches undecided so a later refresh can still inject. Claude Code / Codex / Gemini inject at `TurnStart` using `hookSpecificOutput.additionalContext` (UserPromptSubmit / BeforeAgent); Pi and OpenCode emit a `{"inject_context":...}` envelope that their embedded extension applies (Pi via a `before_agent_start` message, OpenCode via `experimental.chat.system.transform`). |
 | `FileWatcher` | `GetWatchPaths`, `OnFileChange` | Agent doesn't support hooks; uses file-based detection instead |
@@ -498,6 +499,34 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 **Methods:**
 - `ExtractAllModifiedFiles(sessionRef, fromOffset, subagentsDir) ([]string, error)` - Deduplicated file list from main + subagent transcripts.
 - `CalculateTotalTokenUsage(sessionRef, fromOffset, subagentsDir) (*TokenUsage, error)` - Aggregated usage including subagents.
+
+### `SubagentSessionResolver`
+
+**What it enables:** Attributing a detached subagent session's turn to the parent
+task invocation, as a task checkpoint under `.entire/metadata/<parent>/tasks/<tool-use-id>/`.
+
+**Without it:** Turn-end treats the subagent's session as an ordinary top-level
+session and mints a session checkpoint for it — the subagent's files land on the
+shadow branch under a session the user never drove, and no task checkpoint exists.
+
+**Implement when:** Your agent dispatches subagents as sessions of their own,
+firing a full SessionStart/UserPromptSubmit/Stop cycle for each. Factory AI
+Droid does this for Workers: its `PostToolUse` fires when the Worker is
+*dispatched*, not when it finishes, so the worktree is still untouched at
+`SubagentEnd` and only the Worker's own session boundary delimits its work.
+
+**Do NOT implement** when subagents block the parent's turn (Claude Code's Task
+tool) — the `SubagentEnd` path already bounds that work correctly.
+
+**Method:**
+- `ResolveSubagentSession(sessionRef) (SubagentSessionLink, bool)` — returns the
+  parent session ID, the parent's tool-use ID, and (optionally) the parent's
+  transcript path. Must return `false` for ordinary sessions and whenever the
+  link cannot be read; the caller then keeps the session on the normal path.
+
+Resolve the link from data the agent itself persists (Droid records
+`callingSessionId`/`callingToolUseId` on its transcript's `session_start` line)
+rather than from hook ordering, so it survives asynchronous dispatch.
 
 ### `HookSupport`
 
