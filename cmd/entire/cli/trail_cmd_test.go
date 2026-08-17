@@ -1160,6 +1160,43 @@ func TestFindTrailPaginatesPastServerMax(t *testing.T) {
 	}
 }
 
+func TestFindTrailPaginatesPastLegacyPageCount(t *testing.T) {
+	t.Parallel()
+	const targetPage = trailFindLegacyMaxPages + 1
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		page := int(atomic.AddInt32(&requests, 1))
+		response := api.TrailListResponse{}
+		if page == targetPage {
+			response.Trails = []api.TrailResource{{ID: "trl_target", Number: 1001, Branch: "target"}}
+		} else {
+			response.Trails = make([]api.TrailResource, trailListServerMaxLimit)
+			for i := range response.Trails {
+				number := (page-1)*trailListServerMaxLimit + i + 1
+				response.Trails[i] = api.TrailResource{ID: "trl_" + strconv.Itoa(number), Number: number, Branch: "old/" + strconv.Itoa(number)}
+			}
+			next := "page-" + strconv.Itoa(page+1)
+			response.NextPageToken = &next
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
+	found, err := findTrailByBranch(t.Context(), client, "gh", "acme", "repo", "target")
+	if err != nil {
+		t.Fatalf("findTrailByBranch: %v", err)
+	}
+	if found == nil || found.ID != "trl_target" {
+		t.Fatalf("found = %#v, want trl_target", found)
+	}
+	if got := atomic.LoadInt32(&requests); got != targetPage {
+		t.Fatalf("requests = %d, want %d", got, targetPage)
+	}
+}
+
 func TestFindTrailStopsWhenServerRepeatsUnpaginatedFullPage(t *testing.T) {
 	t.Parallel()
 	var requests int32
@@ -1214,8 +1251,8 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 	if found != nil {
 		t.Fatalf("found = %#v, want nil", found)
 	}
-	if got := atomic.LoadInt32(&requests); got != trailFindMaxPages {
-		t.Fatalf("requests = %d, want %d", got, trailFindMaxPages)
+	if got := atomic.LoadInt32(&requests); got != trailFindEntireAPIMaxPages {
+		t.Fatalf("requests = %d, want %d", got, trailFindEntireAPIMaxPages)
 	}
 }
 

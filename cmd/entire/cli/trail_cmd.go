@@ -36,7 +36,10 @@ const (
 	// trailListServerMaxLimit is entire-api's maximum pageSize.
 	trailListServerMaxLimit       = 100
 	trailListLegacyServerMaxLimit = 200
-	trailFindMaxPages             = 10
+	trailFindLegacyMaxPages       = 10
+	// Keep entire-api branch/ID lookups at the legacy path's 2,000-trail
+	// search budget despite its smaller page size.
+	trailFindEntireAPIMaxPages = trailFindLegacyMaxPages * trailListLegacyServerMaxLimit / trailListServerMaxLimit
 )
 
 func trailContextBlurb() string {
@@ -2156,7 +2159,7 @@ func findTrail(ctx context.Context, client *api.Client, forge, owner, repo strin
 	// trails beyond the first entire-api page.
 	pageToken := ""
 	seenTokens := map[string]bool{}
-	for range trailFindMaxPages {
+	for range trailFindEntireAPIMaxPages {
 		resp, err := client.Get(ctx, trailsBasePath(forge, owner, repo)+trailListPageQuery(nil, trailListServerMaxLimit, pageToken))
 		if err != nil {
 			return nil, fmt.Errorf("list trails: %w", err)
@@ -2197,7 +2200,7 @@ func findTrail(ctx context.Context, client *api.Client, forge, owner, repo strin
 func findLegacyTrail(ctx context.Context, client *api.Client, forge, owner, repo string, match func(api.TrailResource) bool) (*api.TrailResource, error) {
 	offset := 0
 	previousPageSignature := ""
-	for range trailFindMaxPages {
+	for range trailFindLegacyMaxPages {
 		resp, err := client.Get(ctx, trailsBasePath(forge, owner, repo)+trailListQueryWithOffset(nil, "", trailListLegacyServerMaxLimit, offset))
 		if err != nil {
 			return nil, fmt.Errorf("list trails: %w", err)
