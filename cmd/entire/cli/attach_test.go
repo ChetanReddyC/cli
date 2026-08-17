@@ -15,7 +15,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode" // register agent
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/codex"      // register agent
 	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"         // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid" // register agent
@@ -810,8 +809,9 @@ func TestExtractTranscriptMetadataForAgent_CodexSkipsEnvironmentContext(t *testi
 	if got.FirstPrompt != "Review this trail for correctness" {
 		t.Errorf("FirstPrompt = %q, want the genuine user prompt, not the injected environment context", got.FirstPrompt)
 	}
-	if got.TurnCount != 2 {
-		t.Errorf("TurnCount = %d, want 2", got.TurnCount)
+	// One genuine prompt, so one step: the injected preamble is not a user turn.
+	if got.TurnCount != 1 {
+		t.Errorf("TurnCount = %d, want 1 (injected preamble is not a user turn)", got.TurnCount)
 	}
 }
 
@@ -863,8 +863,31 @@ follow the repo conventions
 	if got.FirstPrompt != "fix the crash" {
 		t.Errorf("FirstPrompt = %q, want %q", got.FirstPrompt, "fix the crash")
 	}
-	if got.TurnCount != 2 {
-		t.Errorf("TurnCount = %d, want 2", got.TurnCount)
+	if got.TurnCount != 1 {
+		t.Errorf("TurnCount = %d, want 1 (injected preamble is not a user turn)", got.TurnCount)
+	}
+}
+
+// TestExtractTranscriptMetadata_JSONLOnlyInjectedPreamble is the generic-JSONL
+// twin of TestExtractTranscriptMetadata_CodexOnlyEnvironmentContext: when every
+// user message is injected, the raw preamble must still be recorded as the
+// title. Returning an empty FirstPrompt here would write a checkpoint with no
+// prompt.txt at all, and — because TurnCount would also be non-zero —
+// warnEmptyTranscriptMetadata would stay silent about it.
+func TestExtractTranscriptMetadata_JSONLOnlyInjectedPreamble(t *testing.T) {
+	t.Parallel()
+
+	preamble := "# AGENTS.md instructions for /repo\n\nfollow the repo conventions"
+	preambleJSON, err := json.Marshal(preamble)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"type":"user","message":{"role":"user","content":` + string(preambleJSON) + `},"uuid":"u1"}
+`)
+
+	got := extractTranscriptMetadata(data)
+	if got.FirstPrompt != preamble {
+		t.Errorf("FirstPrompt = %q, want the raw preamble as fallback", got.FirstPrompt)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 
@@ -823,35 +824,22 @@ func restoredPromptPreview(sessionAgent agent.Agent, promptContent string, trans
 }
 
 // FirstDisplayPrompt returns the first prompt in the list worth showing as a
-// title/preview: the first entry that is non-empty, not separator-only, and
-// not an agent-injected instruction preamble (Codex's environment context,
-// AGENTS.md injection blocks). Returns "" if none qualifies. Exported so
-// import paths that select a prompt from a transcript (attach) apply the same
-// filter as the rewind display path.
+// title/preview: the first entry that is non-empty, not separator-only, and not
+// agent-injected (runtime preambles, AGENTS.md dumps — see
+// textutil.IsInjectedPrompt). Returns "" if none qualifies, which callers that
+// must show something should treat as "fall back to the raw first prompt".
+//
+// The returned text is not truncated; callers that render it into a fixed-width
+// display are responsible for that (see restoredPromptPreview).
 func FirstDisplayPrompt(prompts []string) string {
 	for _, prompt := range prompts {
 		cleaned := strings.TrimSpace(prompt)
-		if cleaned == "" || isOnlySeparators(cleaned) || isInjectedInstructionPrompt(cleaned) {
+		if cleaned == "" || isOnlySeparators(cleaned) || textutil.IsInjectedPrompt(cleaned) {
 			continue
 		}
 		return cleaned
 	}
 	return ""
-}
-
-// IsInjectedInstructionPrompt reports whether prompt is an agent-injected
-// instruction preamble (AGENTS.md injection, Codex's environment context) rather
-// than a genuine user prompt. Display paths that pick a prompt to show as a
-// title/preview skip these (see FirstDisplayPrompt).
-func IsInjectedInstructionPrompt(prompt string) bool {
-	return isInjectedInstructionPrompt(prompt)
-}
-
-func isInjectedInstructionPrompt(prompt string) bool {
-	trimmed := strings.TrimSpace(prompt)
-	return strings.HasPrefix(trimmed, "# AGENTS.md instructions for ") ||
-		strings.HasPrefix(trimmed, "<environment_context>") ||
-		(strings.Contains(trimmed, "<INSTRUCTIONS>") && strings.Contains(trimmed, "AGENTS.md instructions"))
 }
 
 func extractPromptsFromTranscriptBytes(extractor agent.PromptExtractor, transcript []byte) ([]string, error) {
