@@ -10,11 +10,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/internal/proctree"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -122,6 +124,15 @@ type State struct {
 	// WorktreeID is the internal git worktree identifier (empty for main worktree)
 	// Derived from .git/worktrees/<name>/, stable across git worktree move
 	WorktreeID string `json:"worktree_id,omitempty"`
+
+	// AgentAncestry records the session-start hook process's nearest
+	// ancestors (pid + start time) — the agent process is among them, since
+	// agents run hooks as child processes. Commit hooks match their own
+	// ancestry against these refs to attribute a commit to the session whose
+	// agent made it, regardless of which worktree the commit happens in.
+	// Best-effort: empty when ancestry could not be resolved, in which case
+	// attribution falls back to worktree-path matching.
+	AgentAncestry []proctree.ProcessRef `json:"agent_ancestry,omitempty"`
 
 	// AdoptedIntoWorktreePath marks a source-side tombstone left behind after
 	// `entire session adopt` moves this session into another repository/worktree.
@@ -561,9 +572,81 @@ func NewStateStore(ctx context.Context) (*StateStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get git common dir: %w", err)
 	}
+	if err := ensureTestIsolatedStateDir(commonDir); err != nil {
+		return nil, err
+	}
 	return &StateStore{
 		stateDir: filepath.Join(commonDir, SessionStateDirName),
 	}, nil
+}
+
+// NewStateStoreForWorktree returns the state store for the repository at
+// worktreeRoot, independent of the process's working directory. Callers that
+// operate on a repo passed as an argument (e.g. agent import) must use this:
+// the CWD-resolved NewStateStore writes session state into whatever repo the
+// process happens to run in, which is how test fixtures once leaked into a
+// developer's real .git/entire-sessions and hijacked commit linking.
+func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateStore, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
+	cmd.Dir = worktreeRoot
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("resolve git common dir for %s: %w", worktreeRoot, err)
+	}
+	commonDir := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(worktreeRoot, commonDir)
+	}
+	return &StateStore{
+		stateDir: filepath.Join(filepath.Clean(commonDir), SessionStateDirName),
+	}, nil
+}
+
+// ensureTestIsolatedStateDir fails loud when `go test` code reaches a
+// session state directory outside the temp root: the test is missing repo
+// isolation (testutil.InitRepo + t.Chdir, or NewStateStoreForWorktree /
+// NewStateStoreWithDir with a temp repo). Silence here is how fixture
+// sessions once landed in a real repo's .git/entire-sessions and were then
+// picked up by commit-to-session linking. Spawned binaries are unaffected:
+// testing.Testing() is false in subprocesses, and integration/e2e harnesses
+// isolate via environment instead.
+func ensureTestIsolatedStateDir(commonDir string) error {
+	if !testing.Testing() {
+		return nil
+	}
+	// getGitCommonDir can return a cwd-relative ".git"; the temp-root
+	// comparison needs the absolute location.
+	if abs, err := filepath.Abs(commonDir); err == nil {
+		commonDir = abs
+	}
+	if underTempRoot(commonDir) {
+		return nil
+	}
+	return fmt.Errorf(
+		"session state dir %q escapes test isolation; give the test an isolated repo (testutil.InitRepo + t.Chdir) or scope the store explicitly",
+		filepath.Join(commonDir, SessionStateDirName))
+}
+
+// underTempRoot reports whether path is inside the OS temp root, comparing
+// both the literal and symlink-resolved forms (macOS presents /var/folders
+// and /private/var/folders for the same tree).
+func underTempRoot(path string) bool {
+	roots := []string{filepath.Clean(os.TempDir())}
+	if resolved, err := filepath.EvalSymlinks(roots[0]); err == nil && resolved != roots[0] {
+		roots = append(roots, resolved)
+	}
+	candidates := []string{filepath.Clean(path)}
+	if resolved, err := filepath.EvalSymlinks(candidates[0]); err == nil && resolved != candidates[0] {
+		candidates = append(candidates, resolved)
+	}
+	for _, root := range roots {
+		for _, c := range candidates {
+			if c == root || strings.HasPrefix(c, root+string(os.PathSeparator)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // NewStateStoreWithDir creates a new state store with a custom directory.

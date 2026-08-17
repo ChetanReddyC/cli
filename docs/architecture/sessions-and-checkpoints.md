@@ -171,6 +171,42 @@ the session's branch/worktree/base metadata to the target, clears target-local
 checkpoint windows and checkpoint IDs, and snapshots the target's current file
 changes so the next commit can link to the adopted session.
 
+#### Commit-to-session linking
+
+The commit hooks (prepare-commit-msg / post-commit) resolve which sessions a
+commit belongs to via `findSessionsForCommitLinking`
+(`strategy/session_identity.go`): the **worktree-matched set** (every session
+with pending content in the commit's worktree — concurrent sessions interleave
+by design) **plus the identity-matched session** when the committing process's
+ancestry names one that path matching missed.
+
+**Identity matching**: at session start the hook records its nearest process
+ancestors (pid + start time; the agent process is among them, since agents run
+hooks as children) in `SessionState.AgentAncestry`. At commit time the hook
+walks its own ancestry (git ← tool shell ← agent) and matches those refs —
+nearest ancestor wins, ties go to the most recently interacting session, and
+start times guard against PID reuse. This makes an agent-made commit link to
+its own session **in any worktree**, with no bookkeeping to drift. A commit
+identity-matched outside the session's home worktree is **guest-linked**: it
+condenses and links, but never mutates worktree-coupled state (`BaseCommit`,
+shadow-branch realignment) — those follow only the session's own worktree HEAD.
+
+**Worktree matching** (the fallback, for commits with no recorded agent in
+their ancestry — human commits, detached runners): exact `WorktreePath` match
+first, then sessions from a sibling worktree of the same repo, provided they
+resolve to a single worktree. Imported sessions (`Kind=imported`) never link —
+they are historical records. When candidates span several worktrees, sessions
+that interacted within the last 15 minutes are preferred; if a single live
+worktree remains it links, otherwise the hook declines with a stderr hint
+naming `entire session adopt` (two genuinely live sessions in different
+worktrees are never guessed between).
+
+Under `go test`, the session state store refuses to open outside the temp
+root (`session.NewStateStore`), so a test missing repo isolation fails loudly
+instead of leaking fixture sessions into a real repo's `.git/entire-sessions`
+— leaked fixtures once hijacked commit linking and produced a dangling
+`Entire-Checkpoint` trailer.
+
 ### Temporary Checkpoints
 
 Branch: `entire/<commit[:7]>-<worktreeHash[:6]>`

@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/internal/proctree"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -171,6 +172,13 @@ func (s *ManualCommitStrategy) findExactSessionsForWorktree(ctx context.Context,
 func exactWorktreeMatches(states []*SessionState, worktreePath string) []*SessionState {
 	var exact []*SessionState
 	for _, state := range states {
+		// Imported sessions are historical records reconstructed from
+		// transcripts; a fresh commit must never link to one (a leaked
+		// imported fixture once hijacked a commit's trailer — the sessC
+		// incident).
+		if state.Kind.IsImported() {
+			continue
+		}
 		if state.WorktreePath == worktreePath {
 			exact = append(exact, state)
 		}
@@ -201,7 +209,7 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 	var commonDirMatches []*SessionState
 	commonDirByPath := make(map[string]string)
 	for _, state := range allStates {
-		if state.WorktreePath == "" {
+		if state.WorktreePath == "" || state.Kind.IsImported() {
 			continue
 		}
 
@@ -223,17 +231,50 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 	}
 
 	if len(parentWorktreeMatches) > 0 {
-		matches := sessionsFromSingleWorktree(parentWorktreeMatches)
-		if matches == nil {
-			warnAmbiguousWorktreeSessions(ctx, worktreePath, parentWorktreeMatches)
-		}
+		matches := resolveWorktreeCandidates(ctx, worktreePath, parentWorktreeMatches)
 		return matches, nil
 	}
-	matches := sessionsFromSingleWorktree(commonDirMatches)
-	if matches == nil && len(commonDirMatches) > 0 {
-		warnAmbiguousWorktreeSessions(ctx, worktreePath, commonDirMatches)
-	}
+	matches := resolveWorktreeCandidates(ctx, worktreePath, commonDirMatches)
 	return matches, nil
+}
+
+// recentSessionWindow bounds the liveness filter below: a session that
+// interacted within this window is plausibly the one whose work is being
+// committed right now; one idle for days is not. Commits follow agent
+// activity by seconds to minutes.
+const recentSessionWindow = 15 * time.Minute
+
+// resolveWorktreeCandidates reduces fallback candidates to a linkable set.
+// All from one worktree: linked (the supported concurrent-session case).
+// Spanning several worktrees: filter to recently-interacting sessions and
+// link only if a single worktree remains — days-idle stragglers must not
+// veto the obviously-live session, but between two live worktrees there is
+// no safe guess. A refusal is announced on stderr with the remedy, not just
+// buried at log level (#1852): without it, commits made here silently lose
+// their Entire-Checkpoint linkage.
+func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candidates []*SessionState) []*SessionState {
+	if len(candidates) == 0 {
+		return nil
+	}
+	if matches := sessionsFromSingleWorktree(candidates); matches != nil {
+		return matches
+	}
+	cutoff := time.Now().Add(-recentSessionWindow)
+	var live []*SessionState
+	for _, state := range candidates {
+		if state.LastInteractionTime != nil && state.LastInteractionTime.After(cutoff) {
+			live = append(live, state)
+		}
+	}
+	if len(live) > 0 {
+		if matches := sessionsFromSingleWorktree(live); matches != nil {
+			return matches
+		}
+	}
+	warnAmbiguousWorktreeSessions(ctx, worktreePath, candidates)
+	fmt.Fprintln(stderrWriter,
+		"[entire] Agent sessions in several other worktrees could match this commit; none was linked. Run 'entire session adopt' in this worktree to link future commits to your session.")
+	return nil
 }
 
 // warnAmbiguousWorktreeSessions surfaces refused fallback matches: live
@@ -578,6 +619,7 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		AttributionBaseCommit: headHash,
 		WorktreePath:          worktreePath,
 		WorktreeID:            worktreeID,
+		AgentAncestry:         proctree.Ancestors(agentAncestryDepth),
 		StartedAt:             now,
 		LastInteractionTime:   &now,
 		TurnID:                turnID.String(),

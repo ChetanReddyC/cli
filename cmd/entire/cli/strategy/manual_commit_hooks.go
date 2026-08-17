@@ -403,10 +403,11 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		return nil
 	}
 
-	// Find all active sessions for this worktree
-	// We match by worktree (not BaseCommit) because the user may have made
-	// intermediate commits without entering new prompts, causing HEAD to diverge
-	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
+	// Identity first (the committing process's ancestry), then worktree
+	// matching. We match by worktree (not BaseCommit) in the fallback because
+	// the user may have made intermediate commits without entering new
+	// prompts, causing HEAD to diverge
+	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
 	if err != nil || len(sessions) == 0 {
 		findSessionsSpan.RecordError(err)
 		findSessionsSpan.End()
@@ -924,8 +925,10 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		return nil
 	}
 
-	// Find all active sessions for this worktree
-	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
+	// Identity first (committing process's ancestry), then worktree matching —
+	// must resolve the same way PrepareCommitMsg did, or the stamped trailer
+	// and the condensed session diverge (a dangling trailer).
+	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
 	findSessionsSpan.RecordError(err)
 	findSessionsSpan.End()
 
@@ -1412,8 +1415,20 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 
 	// Update session state for the new base commit
 	newHead := head.Hash().String()
-	state.BaseCommit = newHead
-	state.RealignAttributionBase(newHead)
+	if isSessionHomeWorktree(ctx, state) {
+		state.BaseCommit = newHead
+		state.RealignAttributionBase(newHead)
+	} else {
+		// Guest-linked commit (identity-matched in a sibling worktree): the
+		// session's BaseCommit tracks the HEAD of ITS worktree, which this
+		// commit did not move. Rewriting it to a foreign head would orphan
+		// the session's shadow branch (keyed by BaseCommit + WorktreeID) and
+		// break linking on the session's next home-worktree commit.
+		logging.Debug(logCtx, "condensed guest-linked session; BaseCommit stays on its home worktree",
+			slog.String("session_id", state.SessionID),
+			slog.String("home_worktree", state.WorktreePath),
+		)
+	}
 	resetCheckpointWindow(state)
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
 	state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
@@ -1457,6 +1472,12 @@ func (s *ManualCommitStrategy) updateBaseCommitIfChanged(ctx context.Context, st
 			slog.String("session_id", state.SessionID),
 			slog.String("phase", string(state.Phase)),
 		)
+		return
+	}
+	// Guest-linked sessions (identity-matched from a sibling worktree) keep
+	// their BaseCommit on their home worktree's HEAD — see
+	// condenseAndUpdateState for the shadow-branch rationale.
+	if !isSessionHomeWorktree(ctx, state) {
 		return
 	}
 	if state.BaseCommit != newHead {

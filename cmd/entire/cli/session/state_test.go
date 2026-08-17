@@ -14,6 +14,50 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Regression: a test missing repo isolation once wrote fixture session states
+// (sessC and friends) into the developer's real .git/entire-sessions via the
+// CWD-resolved store, and a leaked fixture then hijacked commit-to-session
+// linking, producing a dangling Entire-Checkpoint trailer. Under `go test`,
+// a CWD-resolved store outside the temp root must refuse to open.
+func TestNewStateStore_RefusesRealRepoUnderGoTest(t *testing.T) {
+	// Deliberately NO t.Chdir: the test process's cwd is the package source
+	// dir inside the real repository — exactly the leak shape.
+	_, err := NewStateStore(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "isolation", "the error must tell the test author what to fix")
+}
+
+// Not parallel: uses t.Chdir()
+func TestNewStateStore_AllowsTempRepoUnderGoTest(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	ClearGitCommonDirCache()
+	t.Cleanup(ClearGitCommonDirCache)
+
+	store, err := NewStateStore(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, store)
+}
+
+// NewStateStoreForWorktree scopes the store to the repo being operated on,
+// for callers (like agent import) that take a target repo as an argument and
+// must not write session state wherever the process happens to be running.
+func TestNewStateStoreForWorktree_ScopesToGivenRepo(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+
+	store, err := NewStateStoreForWorktree(context.Background(), dir)
+	require.NoError(t, err)
+
+	state := &State{SessionID: "scoped-store-test", Kind: KindImported}
+	require.NoError(t, store.Save(context.Background(), state))
+	if _, statErr := os.Stat(filepath.Join(dir, ".git", SessionStateDirName, "scoped-store-test.json")); statErr != nil {
+		t.Fatalf("session state must land in the given repo's git dir: %v", statErr)
+	}
+}
+
 func TestState_NormalizeAfterLoad(t *testing.T) {
 	t.Parallel()
 

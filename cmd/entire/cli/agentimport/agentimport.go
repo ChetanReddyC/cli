@@ -286,7 +286,7 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		// the read-only checkpoints above are the primary artifact, so a
 		// state-write failure must not abort the import.
 		if !opts.DryRun {
-			if serr := writeSessionState(ctx, imp, sf, turns); serr != nil {
+			if serr := writeSessionState(ctx, imp, sf, turns, opts.RepoRoot); serr != nil {
 				logging.Debug(ctx, "import: failed to write imported session state",
 					"sessionID", sf.SessionID, "error", serr.Error())
 			}
@@ -300,12 +300,13 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 // BaseCommit (imports are commit-less and must not be pinned to HEAD), and uses
 // the transcript's own timestamps — the forward-compat contract that keeps a
 // later commit-SHA link purely additive. It never clobbers a live or
-// manually-attached session that happens to share the ID.
-func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns []Turn) error {
+// manually-attached session that happens to share the ID. The store is scoped
+// to repoRoot — the repo being imported into — never the process CWD.
+func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns []Turn, repoRoot string) error {
 	if len(turns) == 0 {
 		return nil
 	}
-	store, err := session.NewStateStore(ctx)
+	store, err := session.NewStateStoreForWorktree(ctx, repoRoot)
 	if err != nil {
 		return fmt.Errorf("open session state store: %w", err)
 	}
