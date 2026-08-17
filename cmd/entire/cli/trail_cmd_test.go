@@ -1601,6 +1601,44 @@ func TestRunTrailShowJSONEmitsOneTrailObject(t *testing.T) {
 	require.NotContains(t, out.String(), "Trail: ")
 }
 
+// A numeric selector resolves through the detail route, which already returns
+// bodyDocument — so `trail show <number>` must hit that URL once, not twice.
+func TestRunTrailShowNumericSelectorFetchesDetailOnce(t *testing.T) {
+	t.Parallel()
+
+	const number = 7
+	detailPath := trailTestBasePath + "/" + strconv.Itoa(number)
+	var detailHits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != detailPath {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		atomic.AddInt32(&detailHits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(api.TrailResource{
+			ID: "trl_1", Number: number, Branch: "feature/x", Title: "T",
+			Status:       string(trail.StatusOpen),
+			BodyDocument: &api.TrailBodyDocument{TextSnapshot: "detail body"},
+		}); err != nil {
+			t.Errorf("encode detail response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
+
+	require.NoError(t, err)
+	require.Empty(t, errOut.String())
+	require.EqualValues(t, 1, atomic.LoadInt32(&detailHits), "the detail route must be requested exactly once")
+
+	var got trail.Metadata
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	require.Equal(t, "detail body", got.Body, "the description must come from the resolved resource")
+}
+
 func TestRunTrailShowJSONLeavesBodyEmptyWithoutDescription(t *testing.T) {
 	t.Parallel()
 

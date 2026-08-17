@@ -232,7 +232,17 @@ func runTrailShowWithClient(ctx context.Context, w, errW io.Writer, client *api.
 	// supersedes it with the richer body_document text below.
 	bodyText := found.Body
 	descriptionLoaded := strings.TrimSpace(found.Body) != ""
-	if found.Number > 0 {
+	switch {
+	case found.BodyDocument != nil:
+		// A numeric selector already resolved through the detail route, so the
+		// description is in hand — re-requesting the same URL would double the
+		// round trips for every `trail show <number>`. Same precedence as the
+		// fetch below: authoritative, but only supersedes a non-empty snapshot.
+		descriptionLoaded = true
+		if snapshot := strings.TrimSpace(found.BodyDocument.TextSnapshot); snapshot != "" {
+			bodyText = snapshot
+		}
+	case found.Number > 0:
 		if bt, derr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number); derr == nil {
 			// A successful fetch means we authoritatively consulted the
 			// description, but it only supersedes the seeded list body when
