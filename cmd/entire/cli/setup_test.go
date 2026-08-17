@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -132,8 +133,22 @@ func copyExecutable(src, dst string) error {
 
 func writeExternalAgentBinary(t *testing.T, dir, name string) {
 	t.Helper()
+	writeExternalAgentBinaryEx(t, dir, name, false)
+}
 
+// writeExternalAgentBinaryEx writes a mock external-agent binary whose
+// are-hooks-installed subcommand reports hooksInstalled, so callers can
+// simulate both installed and available (uninstalled) external plugins.
+func writeExternalAgentBinaryEx(t *testing.T, dir, name string, hooksInstalled bool) {
+	t.Helper()
+
+	installed := strconv.FormatBool(hooksInstalled)
+
+	// When ENTIRE_TEST_EXEC_LOG is set, record every invocation's subcommand so a
+	// test can assert which subcommands the CLI actually invoked. Unset in other
+	// tests, so they are undisturbed.
 	script := `#!/bin/sh
+[ -n "$ENTIRE_TEST_EXEC_LOG" ] && echo "$1" >> "$ENTIRE_TEST_EXEC_LOG"
 case "$1" in
   info)
     echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External test agent","is_preview":false,"protected_dirs":[],"hook_names":["stop"],"capabilities":{"hooks":true}}'
@@ -152,7 +167,7 @@ case "$1" in
     exit 0
     ;;
   are-hooks-installed)
-    echo '{"installed": false}'
+    echo '{"installed": ` + installed + `}'
     ;;
   *)
     echo '{}'
@@ -1220,6 +1235,87 @@ func TestRunUninstall_Force_RemovesGitHooks(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "Removed git hooks") {
 		t.Errorf("Expected output to mention removed git hooks, got: %s", output)
+	}
+}
+
+// installExternalAgentPluginForUninstall prepares a repo whose $PATH carries a
+// mock external agent plugin reporting its hooks as installed, with
+// external_agents enabled — the state `entire agent add <plugin>` leaves behind,
+// and the only state in which uninstall has an external agent to deal with.
+//
+// setupTestRepo scrubs $PATH down to git and sh, so a real entire-agent-* binary
+// on the developer's machine cannot leak in.
+//
+// The mock does stay in the process-global registry after the test, matching
+// what the other external-agent tests in this package already do — there is no
+// registry-restore helper to hang it on yet. The name is unique per test, and
+// its binary is gone once TempDir cleanup runs, so a later AreHooksInstalled on
+// the leaked entry fails and reports false rather than a stale "installed".
+func installExternalAgentPluginForUninstall(t *testing.T, agentName string) {
+	t.Helper()
+
+	// The mock is a #!/bin/sh script.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true,"external_agents":true}`)
+
+	externalDir := t.TempDir()
+	writeExternalAgentBinaryEx(t, externalDir, agentName, true)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestRunUninstall_RemovesExternalAgentHooks pins that `entire disable
+// --uninstall` actually uninstalls an external agent's hooks. The uninstall
+// path reaches the plugin only through the registry, so without discovery the
+// plugin is invisible: its UninstallHooks is never called and its hooks survive
+// an uninstall that reports success.
+func TestRunUninstall_RemovesExternalAgentHooks(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-test"
+	installExternalAgentPluginForUninstall(t, agentName)
+
+	execLog := filepath.Join(t.TempDir(), "exec.log")
+	t.Setenv("ENTIRE_TEST_EXEC_LOG", execLog)
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
+	}
+
+	data, err := os.ReadFile(execLog)
+	if err != nil {
+		t.Fatalf("reading exec log: %v (uninstall never executed the plugin)", err)
+	}
+	if !strings.Contains(string(data), "uninstall-hooks") {
+		t.Errorf("uninstall must invoke the external plugin's uninstall-hooks, exec log:\n%s\nstdout:\n%s", data, stdout.String())
+	}
+}
+
+// TestRunUninstall_SummaryNamesExternalAgent pins the other half: the
+// confirmation summary must name the external agent whose hooks are about to be
+// removed, or the user approves an uninstall whose scope they cannot see.
+func TestRunUninstall_SummaryNamesExternalAgent(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-summary-test"
+	installExternalAgentPluginForUninstall(t, agentName)
+
+	// force=false prints the summary and then prompts. Whether the prompt fails
+	// or answers no in a non-interactive test does not matter here: the summary
+	// is written before either happens.
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, false); err != nil {
+		t.Logf("uninstall did not complete (expected without a terminal): %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Agent hooks") {
+		t.Fatalf("expected the summary to list agent hooks, got:\n%s", out)
+	}
+	if !strings.Contains(out, agentName) {
+		t.Errorf("summary must name the external agent %q whose hooks will be removed, got:\n%s", agentName, out)
 	}
 }
 

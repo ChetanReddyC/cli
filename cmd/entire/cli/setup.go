@@ -2356,6 +2356,19 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		return NewSilentError(errors.New("not a git repository"))
 	}
 
+	// Uninstall reaches an agent only through the registry, and an external
+	// agent's hooks can only be removed by calling back into its plugin. Without
+	// discovery the plugin is invisible here: it is absent from the confirmation
+	// summary, and its UninstallHooks never runs, so its hooks survive an
+	// uninstall that reports success.
+	//
+	// Gated, not Always: enabling an external agent (`entire agent add <plugin>`
+	// or `entire enable --agent <plugin>`) persists external_agents=true, so an
+	// installed external agent implies the gate is on. The gate is the user's
+	// authorization for the CLI to execute their plugins, and uninstalling is not
+	// a reason to start executing ones they never authorized.
+	external.DiscoverAndRegister(ctx)
+
 	// Gather counts for display
 	sessionStateCount := countSessionStates(ctx)
 	shadowBranchCount := countShadowBranches(ctx)
