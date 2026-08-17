@@ -253,6 +253,23 @@ func TestFindSessionsForWorktree_AmbiguityResolvedByLiveness(t *testing.T) {
 	})
 }
 
+// Regression (Cursor bugbot on PR #2013): recording the raw ancestor chain
+// captured the user's shell and terminal above the agent, so a human commit
+// typed in the same terminal identity-matched the agent's session. Shell-like
+// processes must be skipped (agents interpose `sh -c` below themselves) and
+// everything above the first non-shell ancestor must stay unrecorded.
+func TestIsShellLikeExe(t *testing.T) {
+	t.Parallel()
+	shellLike := []string{"sh", "bash", "zsh", "fish", "-fish", "dash", "tmux", "cmd.exe", "powershell.exe", "pwsh", "/bin/sh", "-bash"}
+	for _, exe := range shellLike {
+		assert.True(t, isShellLikeExe(exe), "%q hosts arbitrary children; matching it proves plumbing, not authorship", exe)
+	}
+	notShell := []string{"claude", "node", "codex", "gemini", "entire", "go", "gotestsum", "strategy.test", "Cursor.exe"}
+	for _, exe := range notShell {
+		assert.False(t, isShellLikeExe(exe), "%q must remain recordable as an agent process", exe)
+	}
+}
+
 // Not parallel: uses t.Chdir()
 func TestFindSessionsForCommitLinking_FallsBackToWorktree(t *testing.T) {
 	ctx := context.Background()

@@ -319,9 +319,11 @@ func TestInitializeSession_RecordsAgentAncestry(t *testing.T) {
 	state, err := LoadSessionState(context.Background(), "sess-ancestry-test")
 	require.NoError(t, err)
 	require.NotNil(t, state)
-	require.NotEmpty(t, state.AgentAncestry, "session start must record the hook process's ancestor refs")
-	assert.Equal(t, os.Getppid(), state.AgentAncestry[0].PID,
-		"nearest recorded ancestor is the session-start process's parent — the agent side of the tree")
+	require.Len(t, state.AgentAncestry, 1,
+		"session start records exactly ONE ref — the agent process; recording the chain above it (user shell, terminal, IDE) made same-terminal human commits falsely identity-match")
+	// Under go test the hook's first non-shell ancestor is the test runner —
+	// this process's parent (go/gotestsum are not shell-like).
+	assert.Equal(t, os.Getppid(), state.AgentAncestry[0].PID)
 	assert.NotZero(t, state.AgentAncestry[0].StartTime, "refs without start times cannot guard against PID reuse")
 }
 

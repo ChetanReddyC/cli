@@ -180,12 +180,15 @@ with pending content in the commit's worktree — concurrent sessions interleave
 by design) **plus the identity-matched session** when the committing process's
 ancestry names one that path matching missed.
 
-**Identity matching**: at session start the hook records its nearest process
-ancestors (pid + start time; the agent process is among them, since agents run
-hooks as children) in `SessionState.AgentAncestry`. At commit time the hook
-walks its own ancestry (git ← tool shell ← agent) and matches those refs —
-nearest ancestor wins, ties go to the most recently interacting session, and
-start times guard against PID reuse. This makes an agent-made commit link to
+**Identity matching**: at session start the hook records **the agent process
+only** — its first non-shell ancestor (pid + start time; agents run hooks as
+children, possibly via `sh -c`) — in `SessionState.AgentAncestry`. Everything
+above the agent (user shell, tmux, terminal emulator, IDE) is deliberately
+unrecorded: it is shared with unrelated processes, and matching it would
+falsely attribute a human commit typed in the same terminal. At commit time
+the hook walks its own ancestry (git ← tool shell ← agent) and matches that
+ref — nearest ancestor wins, ties go to the most recently interacting
+session, and start times guard against PID reuse. This makes an agent-made commit link to
 its own session **in any worktree**, with no bookkeeping to drift. A commit
 identity-matched outside the session's home worktree is **guest-linked**: it
 condenses and links, but never mutates worktree-coupled state (`BaseCommit`,

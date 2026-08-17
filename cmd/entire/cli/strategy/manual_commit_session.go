@@ -14,7 +14,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/internal/proctree"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -619,7 +618,7 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		AttributionBaseCommit: headHash,
 		WorktreePath:          worktreePath,
 		WorktreeID:            worktreeID,
-		AgentAncestry:         proctree.Ancestors(agentAncestryDepth),
+		AgentAncestry:         recordAgentAncestry(),
 		StartedAt:             now,
 		LastInteractionTime:   &now,
 		TurnID:                turnID.String(),

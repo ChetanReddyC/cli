@@ -125,13 +125,16 @@ type State struct {
 	// Derived from .git/worktrees/<name>/, stable across git worktree move
 	WorktreeID string `json:"worktree_id,omitempty"`
 
-	// AgentAncestry records the session-start hook process's nearest
-	// ancestors (pid + start time) — the agent process is among them, since
-	// agents run hooks as child processes. Commit hooks match their own
-	// ancestry against these refs to attribute a commit to the session whose
-	// agent made it, regardless of which worktree the commit happens in.
-	// Best-effort: empty when ancestry could not be resolved, in which case
-	// attribution falls back to worktree-path matching.
+	// AgentAncestry records the agent process that owns this session: the
+	// session-start hook's first NON-SHELL ancestor (agents run hooks as
+	// children, possibly via `sh -c`). Deliberately only that one ref — the
+	// chain above the agent (user shell, tmux, terminal emulator, IDE) is
+	// shared with unrelated processes, and recording it would falsely
+	// identity-match a human commit typed in the same terminal. Commit hooks
+	// match their own ancestry against this ref to attribute a commit to the
+	// session whose agent made it, regardless of which worktree the commit
+	// happens in. Best-effort: empty when ancestry could not be resolved, in
+	// which case attribution falls back to worktree-path matching.
 	AgentAncestry []proctree.ProcessRef `json:"agent_ancestry,omitempty"`
 
 	// AdoptedIntoWorktreePath marks a source-side tombstone left behind after

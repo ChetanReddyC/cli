@@ -3,19 +3,19 @@ package strategy
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/internal/proctree"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// agentAncestryDepth is how many ancestors the session-start hook records in
-// SessionState.AgentAncestry. The chain above the hook is (shell that ran the
-// hook) → agent → (terminal shell / supervisor); three levels reliably
-// includes the agent process while staying below system-wide ancestors
-// (terminal multiplexers, init) that would make unrelated processes look
-// related.
-const agentAncestryDepth = 3
+// agentAncestryWalkDepth is how far the session-start hook walks its
+// ancestry looking for the agent process. The chain above the hook is
+// (sh -c wrapper(s)) → agent → user shell; a few levels of slack cover
+// agents that interpose more than one wrapper.
+const agentAncestryWalkDepth = 6
 
 // commitAncestryDepth is how far the commit hook walks its own ancestry when
 // matching — deeper than the recording depth because agents interpose shells
@@ -125,4 +125,43 @@ func interactedAfter(a, b *SessionState) bool {
 		return true
 	}
 	return a.LastInteractionTime.After(*b.LastInteractionTime)
+}
+
+// recordAgentAncestry resolves the ref recorded in SessionState.AgentAncestry:
+// the first NON-SHELL ancestor of the session-start hook, and only that one.
+// Skipping shells handles agents that spawn hooks via `sh -c`; STOPPING at the
+// first non-shell process is what keeps shared user-side infrastructure — the
+// terminal shell, tmux, the terminal emulator, an IDE — out of the recorded
+// set. Anything above the agent is shared with unrelated processes: a human
+// commit typed in the same terminal (or IDE terminal) has the same shell and
+// emulator in ITS ancestry, and recording those would falsely identity-match
+// it to this session. The residual accepted here: an agent that is itself a
+// shell script records the user's shell's parent instead and is documented as
+// unsupported for identity matching (no shipped agent is one) — worktree
+// matching still covers it.
+func recordAgentAncestry() []proctree.ProcessRef {
+	for _, ref := range proctree.Ancestors(agentAncestryWalkDepth) {
+		if !isShellLikeExe(ref.Exe) {
+			return []proctree.ProcessRef{ref}
+		}
+	}
+	return nil
+}
+
+// shellLikeExes names executables that host arbitrary child processes rather
+// than being one: matching on them proves shared plumbing, not authorship.
+// Compared against the basename, lowercased, with a trailing ".exe" trimmed.
+var shellLikeExes = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "fish": true, "dash": true,
+	"ksh": true, "csh": true, "tcsh": true, "ash": true, "busybox": true,
+	"cmd": true, "powershell": true, "pwsh": true,
+	"tmux": true, "screen": true, "login": true,
+}
+
+func isShellLikeExe(exe string) bool {
+	name := strings.ToLower(filepath.Base(exe))
+	name = strings.TrimSuffix(name, ".exe")
+	// A login shell's comm is prefixed with "-" (e.g. "-fish").
+	name = strings.TrimPrefix(name, "-")
+	return shellLikeExes[name]
 }
