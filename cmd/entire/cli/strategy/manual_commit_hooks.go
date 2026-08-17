@@ -1460,6 +1460,13 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 		return false, nil
 	}
 
+	// Content-free adoption signal (opt-in telemetry gated inside). Emitted
+	// before the guest-worktree branch below: a guest-linked commit is still a
+	// commit — the transcript was condensed and the trailer stamped — so the
+	// payload describes something real, and skipping it would under-count
+	// exactly the cross-worktree sessions.
+	emitCheckpointCondensedTelemetry(ctx, state, result)
+
 	// Guest-linked commit (identity-matched from a sibling worktree): the
 	// transcript is condensed and the trailer stamped, but every mutation of
 	// worktree-coupled state below is skipped. The session's BaseCommit

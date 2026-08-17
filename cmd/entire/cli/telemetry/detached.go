@@ -311,6 +311,71 @@ func TrackSkillInvocationsDetached(invocations []SkillInvocation, isEntireEnable
 	spawnDetachedAnalyticsBatch(payloads)
 }
 
+// CheckpointCondensedSignal is the content-free adoption signal emitted when a
+// commit condenses a session checkpoint: whether the session consulted entire
+// search, and whether the committed files already carried AI checkpoint
+// history. Together these give the "sessions that edited history-dense files
+// without searching" denominator that raw command counts cannot. Booleans and
+// counts only — no file paths, prompts, or transcript content.
+type CheckpointCondensedSignal struct {
+	// Agent is the session-owning agent type (e.g. "claude-code").
+	Agent string
+	// UsedSearch reports whether the session's transcript shows an
+	// `entire search` invocation.
+	UsedSearch bool
+	// PriorAIHistory reports whether any committed file was touched by a
+	// recent AI checkpoint commit before this one.
+	PriorAIHistory bool
+	// FilesCommitted is the number of files this checkpoint touched.
+	FilesCommitted int
+}
+
+// BuildCheckpointCondensedPayload constructs the telemetry payload for one
+// condensed checkpoint. Exported for testing. Returns nil if the payload
+// cannot be built.
+func BuildCheckpointCondensedPayload(sig CheckpointCondensedSignal, isEntireEnabled bool, version string) *EventPayload {
+	machineID, err := telemetryMachineID()
+	if err != nil {
+		return nil
+	}
+
+	properties := map[string]any{
+		"agent":            sig.Agent,
+		"used_search":      sig.UsedSearch,
+		"prior_ai_history": sig.PriorAIHistory,
+		"files_committed":  sig.FilesCommitted,
+		"isEntireEnabled":  isEntireEnabled,
+		"cli_version":      version,
+		"os":               runtime.GOOS,
+		"arch":             runtime.GOARCH,
+	}
+
+	return &EventPayload{
+		Event:      "cli_checkpoint_condensed",
+		DistinctID: machineID,
+		Properties: properties,
+		Timestamp:  time.Now(),
+	}
+}
+
+// TrackCheckpointCondensedDetached records one condensed checkpoint's adoption
+// signal. Like TrackPluginDetached, it only honors the env opt-out itself —
+// call sites must gate on the user's opt-in telemetry setting.
+func TrackCheckpointCondensedDetached(sig CheckpointCondensedSignal, isEntireEnabled bool, version string) {
+	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+		return
+	}
+
+	payload := BuildCheckpointCondensedPayload(sig, isEntireEnabled, version)
+	if payload == nil {
+		return
+	}
+
+	if payloadJSON, err := json.Marshal(payload); err == nil {
+		spawnDetachedAnalytics(string(payloadJSON))
+	}
+}
+
 // SendEvents processes one or more event payloads in the detached subprocess.
 // This is called by the hidden __send_analytics command.
 //

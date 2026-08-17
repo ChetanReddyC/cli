@@ -649,6 +649,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TotalTranscriptLines:   sessionData.FullTranscriptLines,
 		TranscriptSizeBaseline: transcriptSizeBaseline,
 		NewSkillEvents:         newSkillEvents,
+		UsedSearch:             transcriptMentionsEntireSearch(sessionData.Transcript),
 	}, nil
 }
 

@@ -53,6 +53,7 @@ type CondenseResult struct {
 	Prompts              []string // User prompts from the condensed session
 	TotalTranscriptLines int      // Total transcript units after this condensation (JSONL line count or message count by agent format)
 	Skipped              bool     // True if condensation was skipped (no transcript or files to condense)
+	UsedSearch           bool     // True if the session transcript shows an `entire search` invocation (telemetry signal)
 
 	// TranscriptSizeBaseline is the byte size to record as
 	// SessionState.CheckpointTranscriptSize. It must be measured on the SANITIZED,
