@@ -260,6 +260,16 @@ func fetchCheckpointRefFrom(
 		err := probeAndFetchCheckpointRef(candidateCtx, ref, target, authoritative)
 		cancel()
 		if err == nil {
+			if i > 0 {
+				// Tier observability: a hydration served by a later (legacy)
+				// candidate installed the canonical local ref from somewhere
+				// other than the elected remote — legitimate under
+				// authoritative elected-absence, but must be diagnosable.
+				logging.Debug(ctx, "checkpoint ref hydrated from a later read candidate",
+					slog.String("ref", ref.String()),
+					slog.String("candidate", remoteName),
+					slog.Int("candidate_index", i))
+			}
 			return nil
 		}
 		if !errors.Is(err, plumbing.ErrReferenceNotFound) {

@@ -1622,8 +1622,9 @@ func (s *GitStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 	seen := make(map[id.CheckpointID]struct{})
 
 	// Scan sharded structure: <2-char-prefix>/<remaining-id>/metadata.json
-	for _, tree := range trees {
-		_ = WalkCheckpointShards(ctx, s.repo, tree, func(checkpointID id.CheckpointID, cpTreeHash plumbing.Hash) error { //nolint:errcheck // callback never returns errors
+	for _, entry := range trees {
+		before := len(checkpoints)
+		_ = WalkCheckpointShards(ctx, s.repo, entry.tree, func(checkpointID id.CheckpointID, cpTreeHash plumbing.Hash) error { //nolint:errcheck // callback never returns errors
 			if _, ok := seen[checkpointID]; ok {
 				return nil
 			}
@@ -1636,6 +1637,15 @@ func (s *GitStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 			checkpoints = append(checkpoints, readCommittedInfoFromCheckpointTree(checkpointID, checkpointTree))
 			return nil
 		})
+		if contributed := len(checkpoints) - before; contributed > 0 && !entry.local(s.refs.Read) {
+			// Tier observability: checkpoints visible only through a
+			// remote-tracking tier are expected for legacy data, but must be
+			// diagnosable when they are a symptom (stale local branch,
+			// mis-elected remote).
+			logging.Debug(ctx, "checkpoint list: remote-tracking tier contributed checkpoints",
+				slog.String("ref", entry.ref.String()),
+				slog.Int("contributed", contributed))
+		}
 	}
 
 	sortCheckpointInfosByRecency(checkpoints) // most recent first
@@ -2217,10 +2227,19 @@ func (s *GitStore) getCheckpointFetchingTree(ctx context.Context, checkpointID i
 	if err != nil {
 		return nil, err
 	}
-	for _, tree := range trees {
-		fetchingTree := NewFetchingTree(ctx, tree, s.repo.Storer, s.blobFetcher)
+	for _, entry := range trees {
+		fetchingTree := NewFetchingTree(ctx, entry.tree, s.repo.Storer, s.blobFetcher)
 		checkpointTree, treeErr := fetchingTree.Tree(checkpointID.Path())
 		if treeErr == nil {
+			if !entry.local(s.refs.Read) {
+				// The wrong-tier hazard made observable: a read served by a
+				// remote-tracking tier instead of the local primary is
+				// legitimate (legacy data, stale local branch) but must be
+				// diagnosable when it is not.
+				logging.Debug(ctx, "checkpoint read served from a remote-tracking tier",
+					slog.String("checkpoint_id", checkpointID.String()),
+					slog.String("ref", entry.ref.String()))
+			}
 			return checkpointTree, nil
 		}
 	}
@@ -2234,7 +2253,7 @@ func (s *GitStore) getSessionsBranchTree(ctx context.Context) (*object.Tree, err
 	if err != nil {
 		return nil, err
 	}
-	return trees[0], nil
+	return trees[0].tree, nil
 }
 
 // getSessionsBranchTrees returns every available committed metadata tree in read
@@ -2261,7 +2280,7 @@ func (s *GitStore) getSessionsBranchTree(ctx context.Context) (*object.Tree, err
 // Ordering is local-then-network by construction — candidates are free ref reads,
 // the fetch is not — and tryFetchMetadataBranch latches one attempt per store, so
 // N candidates across repeated entries still pay at most one fetch.
-func (s *GitStore) getSessionsBranchTrees(ctx context.Context) ([]*object.Tree, error) {
+func (s *GitStore) getSessionsBranchTrees(ctx context.Context) ([]metadataTree, error) {
 	trees, firstErr := s.resolveSessionsBranchTrees()
 	if anyTreeHasCheckpointData(trees) {
 		return trees, nil
@@ -2291,9 +2310,9 @@ func (s *GitStore) getSessionsBranchTrees(ctx context.Context) ([]*object.Tree, 
 // anyTreeHasCheckpointData reports whether any candidate tree holds checkpoint
 // data, generalizing treeHasCheckpointData's single-tree question to the
 // candidate chain.
-func anyTreeHasCheckpointData(trees []*object.Tree) bool {
-	for _, tree := range trees {
-		if treeHasCheckpointData(tree) {
+func anyTreeHasCheckpointData(trees []metadataTree) bool {
+	for _, entry := range trees {
+		if treeHasCheckpointData(entry.tree) {
 			return true
 		}
 	}
@@ -2304,7 +2323,22 @@ func anyTreeHasCheckpointData(trees []*object.Tree) bool {
 // tree, deduplicated by commit. Purely local: no network. The returned error is
 // advisory — the first resolution failure — and is only fatal to the caller when
 // no tree resolved at all.
-func (s *GitStore) resolveSessionsBranchTrees() ([]*object.Tree, error) {
+// metadataTree is one resolved read-candidate tree together with the ref it
+// came from, so consumers can report WHICH tier served a read — the risk the
+// chain carries is a wrong-tier read going unnoticed, and "silently" is the
+// part observability removes.
+type metadataTree struct {
+	tree *object.Tree
+	ref  plumbing.ReferenceName
+}
+
+// local reports whether this tree came from the local read ref rather than a
+// remote-tracking tier.
+func (m metadataTree) local(readRef plumbing.ReferenceName) bool {
+	return m.ref == readRef
+}
+
+func (s *GitStore) resolveSessionsBranchTrees() ([]metadataTree, error) {
 	refNames := []plumbing.ReferenceName{s.refs.Read}
 	if s.refs.ReadBootstrappableFromRemote() {
 		remotes := s.readRemotes
@@ -2316,7 +2350,7 @@ func (s *GitStore) resolveSessionsBranchTrees() ([]*object.Tree, error) {
 		}
 	}
 
-	trees := make([]*object.Tree, 0, len(refNames))
+	trees := make([]metadataTree, 0, len(refNames))
 	kept := make([]*object.Commit, 0, len(refNames))
 	seen := make(map[plumbing.Hash]struct{}, len(refNames))
 	var firstErr error
@@ -2356,7 +2390,7 @@ func (s *GitStore) resolveSessionsBranchTrees() ([]*object.Tree, error) {
 		}
 		seen[ref.Hash()] = struct{}{}
 		kept = append(kept, commit)
-		trees = append(trees, tree)
+		trees = append(trees, metadataTree{tree: tree, ref: refName})
 	}
 	return trees, firstErr
 }
@@ -2874,6 +2908,11 @@ func (s *GitStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.Chec
 			return Author{}, err
 		}
 		if author != (Author{}) {
+			if refName != s.refs.Read {
+				logging.Debug(ctx, "checkpoint author served from a remote-tracking tier",
+					slog.String("checkpoint_id", checkpointID.String()),
+					slog.String("ref", refName.String()))
+			}
 			return author, nil
 		}
 	}
