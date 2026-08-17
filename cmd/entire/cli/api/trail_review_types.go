@@ -192,6 +192,18 @@ type TrailReviewLocationCreateRequest struct {
 }
 
 // TrailReviewSuggestedChangeCreateRequest attaches a suggested fix to a new finding.
+//
+// Every change_type other than manual_instruction requires the full expected_*
+// anchor — the API rejects a patch that arrives without it. The anchor describes
+// the pre-image the patch was written against, so a later apply can tell whether
+// the file has moved on:
+//
+//   - ExpectedFileHash is the git blob OID of the whole file as it stood in the
+//     author's worktree, i.e. what `git hash-object <file>` prints in that repo.
+//     The server stores it opaquely, so this is the CLI's convention; keep
+//     producers in agreement before relying on it for staleness checks.
+//   - ExpectedLines is the byte-exact content of ExpectedStartLine..ExpectedEndLine
+//     with line endings intact — not CRLF-normalized display text.
 type TrailReviewSuggestedChangeCreateRequest struct {
 	ChangeType        string  `json:"changeType"`
 	Patch             *string `json:"patch,omitempty"`
