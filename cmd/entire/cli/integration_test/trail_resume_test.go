@@ -127,20 +127,22 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
-			writeTrailResumeIntegrationJSON(t, w, http.StatusOK, map[string]any{
+			writeTrailResumeIntegrationJSON(t, w, map[string]any{
 				"access_token": "trail-resume-data-token",
 				"token_type":   "Bearer",
 				"expires_in":   3600,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli":
-			writeTrailResumeIntegrationJSON(t, w, http.StatusOK, api.TrailListResponse{
+			writeTrailResumeIntegrationJSON(t, w, api.TrailListResponse{
 				Trails:       []api.TrailResource{trail},
 				Total:        1,
 				Limit:        200,
 				RepoFullName: "entireio/cli",
 			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/321":
+			writeTrailResumeIntegrationJSON(t, w, trail)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/321/reviews/comments":
-			writeTrailResumeIntegrationJSON(t, w, http.StatusOK, map[string]any{
+			writeTrailResumeIntegrationJSON(t, w, map[string]any{
 				"comments": []any{},
 				"hasMore":  false,
 			})
@@ -150,10 +152,10 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 	}))
 }
 
-func writeTrailResumeIntegrationJSON(t *testing.T, w http.ResponseWriter, status int, body any) {
+func writeTrailResumeIntegrationJSON(t *testing.T, w http.ResponseWriter, body any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		t.Fatalf("encode JSON response: %v", err)
 	}

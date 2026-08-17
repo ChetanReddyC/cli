@@ -49,8 +49,8 @@ func (r *TrailListResponse) UnmarshalJSON(data []byte) error {
 }
 
 // TrailResource represents a trail returned by entire-api. The backend uses
-// camelCase and nullable branch fields; OriginalBranch preserves the last
-// linked branch when Branch is null.
+// camelCase and nullable branch fields. Branch is empty when the trail is
+// currently unlinked; OriginalBranch separately preserves its last link.
 type TrailResource struct {
 	ID                 string             `json:"id,omitempty"`
 	Number             int                `json:"number,omitempty"`
@@ -81,13 +81,7 @@ type TrailResource struct {
 
 func (r *TrailResource) UnmarshalJSON(data []byte) error {
 	type plain TrailResource
-	if err := decodeNormalizedTrailJSON(data, (*plain)(r)); err != nil {
-		return err
-	}
-	if r.Branch == "" {
-		r.Branch = r.OriginalBranch
-	}
-	return nil
+	return decodeNormalizedTrailJSON(data, (*plain)(r))
 }
 
 // TrailBodyDocument is the trail's description editor document. TextSnapshot

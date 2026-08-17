@@ -64,7 +64,7 @@ func TestTrailListResponseDecodesEntireAPIContract(t *testing.T) {
 	if got.Total != 12 || got.NextPageToken == nil || *got.NextPageToken != "cursor-2" {
 		t.Fatalf("pagination = total %d token %v", got.Total, got.NextPageToken)
 	}
-	if len(got.Trails) != 1 || got.Trails[0].Branch != "feature/native" || got.Trails[0].Phase != "reviewing" {
+	if len(got.Trails) != 1 || got.Trails[0].Branch != "" || got.Trails[0].OriginalBranch != "feature/native" || got.Trails[0].Phase != "reviewing" {
 		t.Fatalf("trail = %#v", got.Trails)
 	}
 }
