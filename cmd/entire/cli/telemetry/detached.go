@@ -15,6 +15,10 @@ import (
 	"github.com/spf13/pflag"
 )
 
+// autoAgentName is the default value for the agent property when no agent
+// was selected or reported.
+const autoAgentName = "auto"
+
 var (
 	// PostHogAPIKey is set at build time for production
 	PostHogAPIKey = "phc_development_key"
@@ -61,7 +65,7 @@ func BuildEventPayload(cmd *cobra.Command, agent string, isEntireEnabled bool, v
 
 	selectedAgent := agent
 	if selectedAgent == "" {
-		selectedAgent = "auto"
+		selectedAgent = autoAgentName
 	}
 
 	properties := map[string]any{
@@ -265,7 +269,7 @@ func BuildSkillEventPayload(inv SkillInvocation, isEntireEnabled bool, version s
 	// non-empty, queryable value.
 	agentName := inv.Agent
 	if agentName == "" {
-		agentName = "auto"
+		agentName = autoAgentName
 	}
 
 	properties := map[string]any{
@@ -315,10 +319,12 @@ func TrackSkillInvocationsDetached(invocations []SkillInvocation, isEntireEnable
 // commit condenses a session checkpoint: whether the session consulted entire
 // search, and whether the committed files already carried AI checkpoint
 // history. Together these give the "sessions that edited history-dense files
-// without searching" denominator that raw command counts cannot. Booleans and
-// counts only — no file paths, prompts, or transcript content.
+// without searching" denominator that raw command counts cannot. Content-free
+// metadata only — booleans, a count, and the agent identifier; never file
+// paths, prompts, or transcript content.
 type CheckpointCondensedSignal struct {
-	// Agent is the session-owning agent type (e.g. "claude-code").
+	// Agent is the session-owning agent's registry key (e.g. "claude-code"),
+	// matching the agent property on skill and command events.
 	Agent string
 	// UsedSearch reports whether the session's transcript shows an
 	// `entire search` invocation.
@@ -339,8 +345,15 @@ func BuildCheckpointCondensedPayload(sig CheckpointCondensedSignal, isEntireEnab
 		return nil
 	}
 
+	// Match BuildEventPayload's defaulting so the agent property is always a
+	// non-empty, queryable value.
+	agentName := sig.Agent
+	if agentName == "" {
+		agentName = autoAgentName
+	}
+
 	properties := map[string]any{
-		"agent":            sig.Agent,
+		"agent":            agentName,
 		"used_search":      sig.UsedSearch,
 		"prior_ai_history": sig.PriorAIHistory,
 		"files_committed":  sig.FilesCommitted,

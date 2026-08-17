@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
@@ -95,8 +96,16 @@ func emitCheckpointCondensedTelemetry(ctx context.Context, state *SessionState, 
 	if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil {
 		priorAIHistory = priorAICommitTouchedFiles(ctx, root, result.FilesTouched)
 	}
+	// Report the registry key ("claude-code"), not the display name stored in
+	// state.AgentType ("Claude Code"), so the agent property lines up with the
+	// skill and command events. Unknown agent types fall back to the stored
+	// string rather than dropping the signal.
+	agentName := string(state.AgentType)
+	if ag, agErr := agent.GetByAgentType(state.AgentType); agErr == nil && ag != nil {
+		agentName = string(ag.Name())
+	}
 	telemetry.TrackCheckpointCondensedDetached(telemetry.CheckpointCondensedSignal{
-		Agent:          string(state.AgentType),
+		Agent:          agentName,
 		UsedSearch:     result.UsedSearch,
 		PriorAIHistory: priorAIHistory,
 		FilesCommitted: len(result.FilesTouched),
