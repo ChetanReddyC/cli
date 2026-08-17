@@ -2377,7 +2377,7 @@ func TestNewRefreshTrailEnablementCmd_APIFailureExitsZero(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	prevClient := trailRefreshAPIClient
-	trailRefreshAPIClient = func(context.Context, bool) (*api.Client, error) {
+	trailRefreshAPIClient = func(context.Context, bool, string) (*api.Client, error) {
 		return api.NewClientWithBaseURL("test-token", srv.URL), nil
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = prevClient })

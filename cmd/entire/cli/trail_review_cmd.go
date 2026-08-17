@@ -530,6 +530,14 @@ func resolveTrailReviewTarget(ctx context.Context, client *api.Client, selector,
 	if found.ID == "" {
 		return trailReviewTarget{}, errors.New("trail has no id yet")
 	}
+	if found.Number <= 0 {
+		return trailReviewTarget{}, errors.New("trail has no number yet")
+	}
+	// Review helpers carry the stable trail ID internally, but entire-api's
+	// public routes are repo/number addressed. Register that translation once
+	// when the target is resolved so findings, snapshots, and SSE all hit the
+	// owning cell's native route.
+	client.SetTrailRoute(found.ID, trailNumberPath(host, owner, repo, found.Number))
 	return trailReviewTarget{Host: host, Owner: owner, Repo: repo, Trail: *found}, nil
 }
 
@@ -630,6 +638,7 @@ func fetchAllTrailReviewComments(ctx context.Context, client *api.Client, trailI
 		opts.Limit = defaultTrailReviewLimit
 	}
 	var all []api.TrailReviewComment
+	seenPages := make(map[string]bool)
 	for {
 		comments, hasMore, err := fetchTrailReviewComments(ctx, client, trailID, opts)
 		if err != nil {
@@ -639,9 +648,24 @@ func fetchAllTrailReviewComments(ctx context.Context, client *api.Client, trailI
 		if !hasMore {
 			break
 		}
+		signature := trailReviewCommentPageSignature(comments)
+		if signature == "" {
+			return nil, errors.New("finding pagination returned hasMore with an empty page")
+		}
+		if seenPages[signature] {
+			return nil, fmt.Errorf("finding pagination repeated page at offset %d", opts.Offset)
+		}
+		seenPages[signature] = true
 		opts.Offset += opts.Limit
 	}
 	return all, nil
+}
+
+func trailReviewCommentPageSignature(comments []api.TrailReviewComment) string {
+	if len(comments) == 0 {
+		return ""
+	}
+	return comments[0].ID + ":" + comments[len(comments)-1].ID
 }
 
 func trailReviewSummaryOptions() trailReviewListOptions {
@@ -654,6 +678,9 @@ func trailReviewSummaryOptions() trailReviewListOptions {
 }
 
 func trailReviewCommentsPath(trailID string, opts trailReviewListOptions) string {
+	// These names intentionally remain the BFF-compatible query contract on
+	// both backends. entire-api's review reads use include_dismissed plus
+	// limit/offset and return hasMore/nextOffset; they are not pageSize/pageToken.
 	q := url.Values{}
 	if opts.Status != "" && opts.Status != trailReviewStatusAny {
 		q.Set("status", opts.Status)
@@ -1203,6 +1230,8 @@ func fetchTrailReviewState(ctx context.Context, client *api.Client, trailID, rev
 }
 
 func trailReviewStatePath(trailID, reviewID, cursor string) string {
+	// The entire-api snapshot route deliberately preserves the BFF's
+	// include_dismissed/limit/cursor contract rather than pageSize/pageToken.
 	q := url.Values{}
 	q.Set("include_dismissed", "true")
 	q.Set("stale", trailReviewFreshnessAny)
