@@ -88,51 +88,33 @@ func TestClassifyOpenCodeExportError_Timeout(t *testing.T) {
 	}
 }
 
-// TestRunOpenCodeExportToFile_FailedExportPreservesExistingFile is a regression
-// test for a failed export destroying the transcript it was asked to refresh.
-// The hook-cached export under .entire/tmp is the only local copy of the session
-// until the user commits, and both callers (PrepareTranscript on every turn end,
-// FetchTranscript on attach) re-export over it.
-func TestRunOpenCodeExportToFile_FailedExportPreservesExistingFile(t *testing.T) {
+// TestRunOpenCodeExportToFile_MissingBinary pins the classification of the most
+// common failure. The runner writes to a staging path the caller owns, so the
+// preservation of the live transcript is covered by the fetchAndCacheExport tests
+// in lifecycle_test.go, not here.
+func TestRunOpenCodeExportToFile_MissingBinary(t *testing.T) {
 	// No t.Parallel: t.Setenv.
 	dir := t.TempDir()
-	outputPath := filepath.Join(dir, "ses_cached.json")
-	const cached = `{"info":{"id":"ses_cached"},"messages":[]}`
-	if err := os.WriteFile(outputPath, []byte(cached), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	staged := filepath.Join(dir, ".export-ses_cached.json-1")
 
 	// Empty PATH makes the export fail deterministically without an opencode binary.
 	t.Setenv("PATH", "")
 
-	err := runOpenCodeExportToFile(context.Background(), "ses_cached", outputPath)
+	err := runOpenCodeExportToFile(context.Background(), "ses_cached", staged)
 	if err == nil {
 		t.Fatal("expected export to fail with no opencode on PATH")
 	}
 	if !errors.Is(err, exec.ErrNotFound) {
 		t.Fatalf("runOpenCodeExportToFile error = %v, want exec.ErrNotFound", err)
 	}
-
-	got, readErr := os.ReadFile(outputPath)
-	if readErr != nil {
-		t.Fatalf("cached transcript was destroyed by the failed export: %v", readErr)
-	}
-	if string(got) != cached {
-		t.Fatalf("cached transcript = %q, want it left untouched (%q)", string(got), cached)
-	}
-	assertNoExportTempFiles(t, dir)
 }
 
-func TestRunOpenCodeExportToFile_ReplacesExistingFileOnSuccess(t *testing.T) {
+func TestRunOpenCodeExportToFile_WritesStdoutToPath(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("stub opencode is a shell script")
 	}
 	// No t.Parallel: t.Setenv.
-	dir := t.TempDir()
-	outputPath := filepath.Join(dir, "ses_ok.json")
-	if err := os.WriteFile(outputPath, []byte(`{"stale":true}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	staged := filepath.Join(t.TempDir(), ".export-ses_ok.json-1")
 
 	const export = `{"info":{"id":"ses_ok"},"messages":[]}`
 	stubDir := t.TempDir()
@@ -142,32 +124,54 @@ func TestRunOpenCodeExportToFile_ReplacesExistingFileOnSuccess(t *testing.T) {
 	}
 	t.Setenv("PATH", stubDir)
 
-	if err := runOpenCodeExportToFile(context.Background(), "ses_ok", outputPath); err != nil {
+	if err := runOpenCodeExportToFile(context.Background(), "ses_ok", staged); err != nil {
 		t.Fatalf("runOpenCodeExportToFile failed: %v", err)
 	}
 
-	got, err := os.ReadFile(outputPath)
+	got, err := os.ReadFile(staged)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(got) != export {
 		t.Fatalf("exported transcript = %q, want %q", string(got), export)
 	}
-	assertNoExportTempFiles(t, dir)
 }
 
-// assertNoExportTempFiles fails if a staged export was left behind in dir.
-func assertNoExportTempFiles(t *testing.T, dir string) {
-	t.Helper()
+func TestRenameOverExisting_ReplacesDestination(t *testing.T) {
+	t.Parallel()
 
-	entries, err := os.ReadDir(dir)
+	dir := t.TempDir()
+	staged := filepath.Join(dir, ".export-ses_x.json-1")
+	dest := filepath.Join(dir, "ses_x.json")
+	if err := os.WriteFile(staged, []byte("fresh"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := renameOverExisting(staged, dest); err != nil {
+		t.Fatalf("renameOverExisting failed: %v", err)
+	}
+	got, err := os.ReadFile(dest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".export-") {
-			t.Errorf("staged export left behind: %s", entry.Name())
-		}
+	if string(got) != "fresh" {
+		t.Fatalf("destination = %q, want %q", string(got), "fresh")
+	}
+	if _, err := os.Stat(staged); !os.IsNotExist(err) {
+		t.Errorf("staged file still present after rename: %v", err)
+	}
+}
+
+func TestIsRenameContention_NonSharingErrorsAreNotRetried(t *testing.T) {
+	t.Parallel()
+
+	// On POSIX this is always false; on Windows only sharing/access violations
+	// qualify. A plain ENOENT must never be retried on either.
+	if isRenameContention(os.ErrNotExist) {
+		t.Error("isRenameContention(ErrNotExist) = true, want false")
 	}
 }
 

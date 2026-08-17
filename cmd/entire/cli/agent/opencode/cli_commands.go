@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -33,42 +32,28 @@ func (e *openCodeExportError) Unwrap() error { return e.cause }
 // runOpenCodeExportToFile runs `opencode export <sessionID>` and redirects stdout
 // to outputPath. This avoids pipe/stdout capture truncation bugs in some opencode versions.
 //
-// The export is staged in a sibling temp file and renamed over outputPath only on
-// success, so a failed export leaves any existing transcript untouched. That file
-// is often the ONLY local copy of the session: it is written by the turn-end hook
-// and is not condensed into a checkpoint until the user commits. Both callers
-// re-export over a possibly-populated path — PrepareTranscript on every turn end
-// (cli/lifecycle.go) and FetchTranscript on attach — so writing in place would let
-// a missing `opencode` binary, a rejected session, or a 30s timeout destroy the
-// transcript it was asked to refresh.
+// outputPath must be a staging path, never a live transcript: `opencode export`
+// can fail after writing a partial payload, and can exit 0 having written nothing
+// at all. Callers own the validate-then-install step — see fetchAndCacheExport,
+// which is the only caller and stages under .entire/tmp.
 //
-// The temp name deliberately starts with "." and does not end in ".json" so
-// concurrent .entire/tmp scanners (state files, pre-task files) skip it, mirroring
-// makeInstallTmpPath in cli/plugin_store.go. os.Rename replaces the destination on
-// both POSIX and Windows.
+// The fsync before close is what makes the caller's rename durable: without it
+// some filesystems can surface the rename as complete while the file is still
+// empty after a hard crash, which would destroy the transcript the staging exists
+// to protect. Same reasoning as jsonutil.WriteFileAtomic.
 func runOpenCodeExportToFile(ctx context.Context, sessionID, outputPath string) (retErr error) {
 	ctx, cancel := context.WithTimeout(ctx, openCodeCommandTimeout)
 	defer cancel()
 
-	file, err := os.CreateTemp(filepath.Dir(outputPath), ".export-"+filepath.Base(outputPath)+"-*")
+	//nolint:gosec // outputPath is a staging path the caller derives from .entire/tmp plus a validated session ID
+	file, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create export file: %w", err)
 	}
-	tmpPath := file.Name()
-	closed := false
-	closeFile := func() error {
-		if closed {
-			return nil
-		}
-		closed = true
-		return file.Close()
-	}
 	defer func() {
-		if closeErr := closeFile(); closeErr != nil && retErr == nil {
+		if closeErr := file.Close(); closeErr != nil && retErr == nil {
 			retErr = fmt.Errorf("failed to close export file: %w", closeErr)
 		}
-		// No-op once the rename below has moved the file into place.
-		_ = os.Remove(tmpPath)
 	}()
 
 	cmd := exec.CommandContext(ctx, "opencode", "export", sessionID)
@@ -79,13 +64,8 @@ func runOpenCodeExportToFile(ctx context.Context, sessionID, outputPath string) 
 		return classifyOpenCodeExportError(ctx, runErr, stderr.String(), sessionID)
 	}
 
-	// Close before renaming: on Windows a rename of an open file fails, and the
-	// close must be reported as an error here rather than after the file is live.
-	if closeErr := closeFile(); closeErr != nil {
-		return fmt.Errorf("failed to close export file: %w", closeErr)
-	}
-	if err := os.Rename(tmpPath, outputPath); err != nil {
-		return fmt.Errorf("failed to write export file: %w", err)
+	if syncErr := file.Sync(); syncErr != nil {
+		return fmt.Errorf("failed to flush export file: %w", syncErr)
 	}
 
 	return nil

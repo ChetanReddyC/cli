@@ -255,8 +255,13 @@ func TestHookNames(t *testing.T) {
 }
 
 func TestPrepareTranscript_AlwaysRefreshesTranscript(t *testing.T) {
-	tmpDir := t.TempDir()
-	transcriptPath := filepath.Join(tmpDir, "sess-123.json")
+	// t.Chdir, not just t.TempDir: fetchAndCacheExport resolves the repo root from
+	// CWD, so without this the export is staged in the developer's own repo.
+	t.Chdir(t.TempDir())
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	transcriptPath := filepath.Join(t.TempDir(), "sess-123.json")
 
 	// Create an existing file with stale data
 	if err := os.WriteFile(transcriptPath, []byte(`{"info":{},"messages":[]}`), 0o600); err != nil {
@@ -264,9 +269,7 @@ func TestPrepareTranscript_AlwaysRefreshesTranscript(t *testing.T) {
 	}
 
 	wantErr := errors.New("refresh attempted")
-	original := runOpenCodeExportToFileFn
-	runOpenCodeExportToFileFn = func(context.Context, string, string) error { return wantErr }
-	t.Cleanup(func() { runOpenCodeExportToFileFn = original })
+	stubExport(t, func(context.Context, string, string) error { return wantErr })
 
 	err := (&OpenCodeAgent{}).PrepareTranscript(context.Background(), transcriptPath)
 	if !errors.Is(err, wantErr) {
@@ -289,23 +292,30 @@ func TestPrepareTranscript_ErrorOnInvalidPath(t *testing.T) {
 	}
 }
 
-func TestPrepareTranscript_ErrorOnBrokenSymlink(t *testing.T) {
-	t.Parallel()
+// TestPrepareTranscript_BrokenSymlinkFallsThroughToExport documents what a broken
+// symlink actually does. The old name and comment claimed os.Stat returns a
+// non-IsNotExist error that PrepareTranscript surfaces as a stat error, but Stat
+// follows the link and reports ENOENT, so the guard does not fire and the path
+// falls through to the export — which is why this test used to spawn the real
+// `opencode` binary inside the developer's repository (and, per OpenCode's own
+// bootstrap behavior, could rewrite .opencode/package-lock.json there).
+func TestPrepareTranscript_BrokenSymlinkFallsThroughToExport(t *testing.T) {
+	// Not parallel: t.Chdir. See TestPrepareTranscript_AlwaysRefreshesTranscript.
+	t.Chdir(t.TempDir())
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
 
-	// Broken symlinks cause os.Stat to return a non-IsNotExist error.
-	// PrepareTranscript should surface this as a stat error.
-	tmpDir := t.TempDir()
-	transcriptPath := filepath.Join(tmpDir, "broken-link.json")
-
+	transcriptPath := filepath.Join(t.TempDir(), "broken-link.json")
 	if err := os.Symlink("/nonexistent/target", transcriptPath); err != nil {
 		t.Skipf("cannot create symlink (permission denied?): %v", err)
 	}
 
-	ag := &OpenCodeAgent{}
-	err := ag.PrepareTranscript(context.Background(), transcriptPath)
+	wantErr := errors.New("export attempted")
+	stubExport(t, func(context.Context, string, string) error { return wantErr })
 
-	if err == nil {
-		t.Fatal("expected error for broken symlink, got nil")
+	err := (&OpenCodeAgent{}).PrepareTranscript(context.Background(), transcriptPath)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("PrepareTranscript error = %v, want the export error %v", err, wantErr)
 	}
 }
 
@@ -382,6 +392,153 @@ func TestFetchAndCacheExport_WritesAndValidatesExportFile(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, json.Valid(content), "expected cached transcript to be valid JSON")
 	require.Contains(t, string(content), "\"ses_abc123\"")
+}
+
+// cachedTranscriptFixture sets up a repo whose .entire/tmp already holds a
+// hook-cached transcript for sessionID, and returns its path. This is the file
+// every export has to protect: nothing condenses it into a checkpoint until the
+// user commits, so until then it is the only local copy of the session.
+func cachedTranscriptFixture(t *testing.T, sessionID, content string) string {
+	t.Helper()
+
+	repo := t.TempDir()
+	t.Chdir(repo)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	tmpDir := filepath.Join(repo, paths.EntireTmpDir)
+	require.NoError(t, os.MkdirAll(tmpDir, 0o750))
+	cached := filepath.Join(tmpDir, sessionID+".json")
+	require.NoError(t, os.WriteFile(cached, []byte(content), 0o600))
+	return cached
+}
+
+// stubExport replaces the export runner for the duration of the test. The stub
+// receives the staging path, exactly as the real runner does.
+func stubExport(t *testing.T, fn func(ctx context.Context, sessionID, outputPath string) error) {
+	t.Helper()
+
+	original := runOpenCodeExportToFileFn
+	runOpenCodeExportToFileFn = fn
+	t.Cleanup(func() { runOpenCodeExportToFileFn = original })
+}
+
+// assertNoStagedExports fails if a staged export was left behind next to cached.
+func assertNoStagedExports(t *testing.T, cached string) {
+	t.Helper()
+
+	entries, err := os.ReadDir(filepath.Dir(cached))
+	require.NoError(t, err)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), exportStagePrefix) {
+			t.Errorf("staged export left behind: %s", entry.Name())
+		}
+	}
+}
+
+// TestFetchAndCacheExport_PartialFailurePreservesCachedTranscript covers an export
+// that writes some output and then fails — a rejected session mid-stream, or the
+// 30s timeout firing.
+func TestFetchAndCacheExport_PartialFailurePreservesCachedTranscript(t *testing.T) {
+	const (
+		sessionID = "ses_partial"
+		cached    = `{"info":{"id":"ses_partial"},"messages":[1,2,3]}`
+	)
+	cachedPath := cachedTranscriptFixture(t, sessionID, cached)
+
+	stubExport(t, func(_ context.Context, _, outputPath string) error {
+		if err := os.WriteFile(outputPath, []byte(`{"info":{"id":"ses_par`), 0o600); err != nil {
+			return err
+		}
+		return errors.New("export timed out")
+	})
+
+	_, err := (&OpenCodeAgent{}).fetchAndCacheExport(context.Background(), sessionID)
+	require.Error(t, err)
+
+	got, readErr := os.ReadFile(cachedPath)
+	require.NoError(t, readErr, "cached transcript was destroyed by a failed export")
+	require.JSONEq(t, cached, string(got), "cached transcript was modified by a failed export")
+	assertNoStagedExports(t, cachedPath)
+}
+
+// TestFetchAndCacheExport_TruncatedZeroExitPreservesCachedTranscript covers the
+// nastier variant: `opencode export` exits 0 having written truncated output. The
+// install must not happen, because attach's os.Stat branch would accept the
+// corrupt file and treat PrepareTranscript's failure as best-effort — using a
+// truncated transcript silently, where a missing one would be re-fetched.
+func TestFetchAndCacheExport_TruncatedZeroExitPreservesCachedTranscript(t *testing.T) {
+	const (
+		sessionID = "ses_truncated"
+		cached    = `{"info":{"id":"ses_truncated"},"messages":[1,2,3]}`
+	)
+	cachedPath := cachedTranscriptFixture(t, sessionID, cached)
+
+	stubExport(t, func(_ context.Context, _, outputPath string) error {
+		// Exit 0, truncated payload.
+		return os.WriteFile(outputPath, []byte(`{"info":{"id":"ses_trun`), 0o600)
+	})
+
+	_, err := (&OpenCodeAgent{}).fetchAndCacheExport(context.Background(), sessionID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid transcript data")
+
+	got, readErr := os.ReadFile(cachedPath)
+	require.NoError(t, readErr, "cached transcript was destroyed by a zero-exit truncated export")
+	require.JSONEq(t, cached, string(got), "cached transcript was replaced with truncated output")
+	assertNoStagedExports(t, cachedPath)
+}
+
+func TestFetchAndCacheExport_EmptyZeroExitPreservesCachedTranscript(t *testing.T) {
+	const (
+		sessionID = "ses_empty"
+		cached    = `{"info":{"id":"ses_empty"},"messages":[1,2,3]}`
+	)
+	cachedPath := cachedTranscriptFixture(t, sessionID, cached)
+
+	stubExport(t, func(_ context.Context, _, outputPath string) error {
+		return os.WriteFile(outputPath, nil, 0o600)
+	})
+
+	_, err := (&OpenCodeAgent{}).fetchAndCacheExport(context.Background(), sessionID)
+	require.Error(t, err)
+
+	got, readErr := os.ReadFile(cachedPath)
+	require.NoError(t, readErr, "cached transcript was destroyed by an empty export")
+	require.JSONEq(t, cached, string(got))
+	assertNoStagedExports(t, cachedPath)
+}
+
+func TestFetchAndCacheExport_InstallsValidExportOverCachedTranscript(t *testing.T) {
+	const (
+		sessionID = "ses_replace"
+		cached    = `{"info":{"id":"ses_replace"},"messages":[1]}`
+		fresh     = `{"info":{"id":"ses_replace"},"messages":[1,2,3,4]}`
+	)
+	cachedPath := cachedTranscriptFixture(t, sessionID, cached)
+
+	stubExport(t, func(_ context.Context, _, outputPath string) error {
+		// The staging path is not the live transcript, so the cached copy must
+		// still be intact at this point.
+		current, err := os.ReadFile(cachedPath)
+		if err != nil {
+			return err
+		}
+		if string(current) != cached {
+			return fmt.Errorf("export wrote through to the live transcript: %q", string(current))
+		}
+		return os.WriteFile(outputPath, []byte(fresh), 0o600)
+	})
+
+	got, err := (&OpenCodeAgent{}).fetchAndCacheExport(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, sessionID+".json", filepath.Base(got),
+		"should return the live transcript path, not the staging path")
+
+	content, err := os.ReadFile(cachedPath)
+	require.NoError(t, err)
+	require.JSONEq(t, fresh, string(content))
+	assertNoStagedExports(t, cachedPath)
 }
 
 func TestFetchTranscript_ValidatesSessionID(t *testing.T) {
