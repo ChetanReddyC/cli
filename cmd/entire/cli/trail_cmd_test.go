@@ -1016,6 +1016,37 @@ func TestListTrailResourcesUsesLegacyQueryByDefault(t *testing.T) {
 	}
 }
 
+func TestRunTrailListAllNotesLegacyLimitCapOnly(t *testing.T) {
+	t.Parallel()
+	for _, backend := range []string{"legacy", "entire-api"} {
+		t.Run(backend, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if backend == "legacy" {
+					_, _ = fmt.Fprint(w, `{"trails":[{"id":"trl_1","number":1,"branch":"feature/x","status":"open"}],"total":1033}`)
+					return
+				}
+				_, _ = fmt.Fprint(w, `{"items":[{"id":"trl_1","number":1,"branch":"feature/x","status":"open"}],"totalCount":1033}`)
+			}))
+			defer srv.Close()
+
+			client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend(backend)
+			var out bytes.Buffer
+			err := runTrailListAllWithClient(t.Context(), &out, client, trailListOptions{
+				Repo: "gh/acme/repo", Limit: 500,
+			}, []trail.Status{trail.StatusOpen})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantNote := backend == "legacy"
+			note := "Note: --limit 500 exceeds the server maximum of 200 trails per request."
+			if got := strings.Contains(out.String(), note); got != wantNote {
+				t.Fatalf("note present = %v, want %v; output:\n%s", got, wantNote, out.String())
+			}
+		})
+	}
+}
+
 func TestListTrailResourcesStopsWhenAuthorLimitIsSatisfied(t *testing.T) {
 	t.Parallel()
 	requests := 0

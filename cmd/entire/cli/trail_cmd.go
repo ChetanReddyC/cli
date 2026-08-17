@@ -552,6 +552,11 @@ func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Cli
 		TotalMatched:    totalMatched,
 	})
 
+	if !isEntireAPITrailClient(client) && opts.Limit > trailListLegacyServerMaxLimit && totalMatched > len(trails) {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "Note: --limit %d exceeds the server maximum of %d trails per request.\n", opts.Limit, trailListLegacyServerMaxLimit)
+	}
+
 	return nil
 }
 
