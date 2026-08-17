@@ -243,22 +243,21 @@ func (m searchModel) selectedResult() *search.Result {
 	return nil
 }
 
-// computeTypeCounts calculates per-type counts from the loaded results,
-// falling back to API-provided counts when available.
-func (m searchModel) computeTypeCounts() (checkpoints, commits, sessions int) {
+// computeTypeCounts calculates per-tab counts from the loaded results,
+// falling back to API-provided counts when available. Checkpoints have no tab
+// (they fold into sessions server-side), so they are not counted here.
+func (m searchModel) computeTypeCounts() (commits, sessions int) {
 	if m.counts != nil {
-		return m.counts.Checkpoints, m.counts.Commits, m.counts.Sessions
+		return m.counts.Commits, m.counts.Sessions
 	}
 	for _, r := range m.results {
 		switch typeFilter(r.Type) {
-		case typeFilterCheckpoints:
-			checkpoints++
 		case typeFilterCommits:
 			commits++
 		case typeFilterSessions:
 			sessions++
-		case typeFilterAll, typeFilterCode:
-			// not a valid result type; skip
+		case typeFilterAll, typeFilterCode, typeFilterCheckpoints:
+			// not shown as a tab; skip
 		}
 	}
 	return
@@ -793,7 +792,7 @@ func (m searchModel) viewSearchMode() string {
 
 // viewTypeTabs renders the type filter tabs with counts.
 func (m searchModel) viewTypeTabs() string {
-	_, cmCount, ssCount := m.computeTypeCounts()
+	cmCount, ssCount := m.computeTypeCounts()
 
 	renderTab := func(label string, filter typeFilter, count int, keyHint string) string {
 		text := fmt.Sprintf("[%s] %s %d", keyHint, label, count)

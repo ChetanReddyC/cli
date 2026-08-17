@@ -1502,10 +1502,7 @@ func TestSearchModel_ComputeTypeCounts(t *testing.T) {
 	t.Parallel()
 
 	m := testMultiTypeModel()
-	cp, cm, ss := m.computeTypeCounts()
-	if cp != 2 {
-		t.Errorf("checkpoints = %d, want 2", cp)
-	}
+	cm, ss := m.computeTypeCounts()
 	if cm != 1 {
 		t.Errorf("commits = %d, want 1", cm)
 	}
@@ -1519,10 +1516,7 @@ func TestSearchModel_ComputeTypeCounts_UsesAPICounts(t *testing.T) {
 
 	m := testMultiTypeModel()
 	m.counts = &search.TypeCounts{Checkpoints: 10, Commits: 5, Sessions: 3}
-	cp, cm, ss := m.computeTypeCounts()
-	if cp != 10 {
-		t.Errorf("checkpoints = %d, want 10", cp)
-	}
+	cm, ss := m.computeTypeCounts()
 	if cm != 5 {
 		t.Errorf("commits = %d, want 5", cm)
 	}
