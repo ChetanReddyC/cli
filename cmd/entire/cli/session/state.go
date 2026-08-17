@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -134,7 +135,10 @@ type State struct {
 	// match their own ancestry against this ref to attribute a commit to the
 	// session whose agent made it, regardless of which worktree the commit
 	// happens in. Best-effort: empty when ancestry could not be resolved, in
-	// which case attribution falls back to worktree-path matching.
+	// which case attribution falls back to worktree-path matching. The field
+	// is a slice only for serialization headroom — writers must never record
+	// more than the single agent ref, or shared user-side processes would
+	// creep back into the match set.
 	AgentAncestry []proctree.ProcessRef `json:"agent_ancestry,omitempty"`
 
 	// AdoptedIntoWorktreePath marks a source-side tombstone left behind after
@@ -590,6 +594,12 @@ func NewStateStore(ctx context.Context) (*StateStore, error) {
 // process happens to run in, which is how test fixtures once leaked into a
 // developer's real .git/entire-sessions and hijacked commit linking.
 func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateStore, error) {
+	// An empty root would silently degrade to the process CWD (cmd.Dir = ""),
+	// reproducing exactly the accidental-repo leak this constructor exists to
+	// prevent.
+	if worktreeRoot == "" {
+		return nil, errors.New("worktree root required to scope the session state store")
+	}
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
 	cmd.Dir = worktreeRoot
 	output, err := cmd.Output()
@@ -599,6 +609,12 @@ func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateS
 	commonDir := strings.TrimSpace(string(output))
 	if !filepath.IsAbs(commonDir) {
 		commonDir = filepath.Join(worktreeRoot, commonDir)
+	}
+	// Same go-test guard as NewStateStore: an explicit root computed from the
+	// process CWD in a non-isolated test is just as accidental as the CWD
+	// itself.
+	if err := ensureTestIsolatedStateDir(commonDir); err != nil {
+		return nil, err
 	}
 	return &StateStore{
 		stateDir: filepath.Join(filepath.Clean(commonDir), SessionStateDirName),

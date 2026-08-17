@@ -287,7 +287,11 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		// state-write failure must not abort the import.
 		if !opts.DryRun {
 			if serr := writeSessionState(ctx, imp, sf, turns, opts.RepoRoot); serr != nil {
-				logging.Debug(ctx, "import: failed to write imported session state",
+				// Warn, not Debug: the user-visible symptom is an imported
+				// session missing from `entire sessions list` after a
+				// successful-looking import. Not aborting is correct (the
+				// checkpoints are the primary artifact); not telling is not.
+				logging.Warn(ctx, "import: failed to write imported session state; session will not appear in 'entire sessions list'",
 					"sessionID", sf.SessionID, "error", serr.Error())
 			}
 		}

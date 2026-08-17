@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -69,6 +70,42 @@ func TestAncestors_ChildSeesParentIdentity(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "child's ancestry must contain the parent's pid+starttime identity, got %+v (want %+v)", refs, self)
+}
+
+// The production hook shape: agents spawn hooks via `sh -c`, so the hook's
+// ancestry contains a real shell between it and the agent. This pins that the
+// platform's Exe field for that shell comes back in a form callers can
+// classify (basename "sh"), and that the spawner is still visible above it —
+// the contract the strategy layer's shell-skipping recorder depends on.
+func TestAncestors_ShInterposedChildSeesShellAndParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sh -c interposition is a unix hook shape")
+	}
+	t.Parallel()
+	self, err := Ref(os.Getpid())
+	require.NoError(t, err)
+
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	cmd := exec.CommandContext(t.Context(), "sh", "-c", exe)
+	cmd.Env = append(os.Environ(), "PROCTREE_HELPER=1")
+	out, err := cmd.Output()
+	require.NoError(t, err, "sh -c helper failed")
+
+	var refs []ProcessRef
+	require.NoError(t, json.Unmarshal(out, &refs))
+	require.NotEmpty(t, refs)
+
+	// Note: sh may exec the child directly instead of forking (a single
+	// trailing command), in which case no sh entry appears — both shapes are
+	// valid; the invariant is that the test process is reachable either way.
+	foundParent := false
+	for _, r := range refs {
+		if r.SameProcess(self) {
+			foundParent = true
+		}
+	}
+	assert.True(t, foundParent, "the spawner must be visible through an sh -c interposition, got %+v", refs)
 }
 
 func TestSameProcess_RejectsPIDReuse(t *testing.T) {

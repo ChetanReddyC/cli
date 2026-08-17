@@ -8,20 +8,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func currentPID() int { return os.Getpid() }
+func currentPPID() int { return os.Getppid() }
 
-func kinfo(pid int) (*unix.KinfoProc, error) {
+// procInfo resolves pid's ref and parent PID in a single sysctl.
+func procInfo(pid int) (ProcessRef, int, error) {
 	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
-		return nil, fmt.Errorf("sysctl kern.proc.pid %d: %w", pid, err)
-	}
-	return kp, nil
-}
-
-func refOf(pid int) (ProcessRef, error) {
-	kp, err := kinfo(pid)
-	if err != nil {
-		return ProcessRef{}, err
+		return ProcessRef{}, 0, fmt.Errorf("sysctl kern.proc.pid %d: %w", pid, err)
 	}
 	start := kp.Proc.P_starttime
 	comm := kp.Proc.P_comm[:]
@@ -33,18 +26,10 @@ func refOf(pid int) (ProcessRef, error) {
 	for i := range n {
 		b[i] = comm[i]
 	}
-	exe := strings.ToValidUTF8(string(b), "")
-	return ProcessRef{
+	ref := ProcessRef{
 		PID:       pid,
 		StartTime: start.Sec*1_000_000 + int64(start.Usec),
-		Exe:       exe,
-	}, nil
-}
-
-func parentOf(pid int) int {
-	kp, err := kinfo(pid)
-	if err != nil {
-		return 0
+		Exe:       strings.ToValidUTF8(string(b), ""),
 	}
-	return int(kp.Eproc.Ppid)
+	return ref, int(kp.Eproc.Ppid), nil
 }

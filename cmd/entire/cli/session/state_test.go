@@ -58,6 +58,21 @@ func TestNewStateStoreForWorktree_ScopesToGivenRepo(t *testing.T) {
 	}
 }
 
+// The explicit-root constructor is guarded too: a test that computes its
+// "explicit" root from the process CWD is just as accidental as the CWD
+// itself, and would recreate the fixture leak through the new front door.
+// An empty root must also refuse rather than silently degrading to CWD.
+func TestNewStateStoreForWorktree_RefusesUnisolatedAndEmptyRoots(t *testing.T) {
+	t.Parallel()
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	_, err = NewStateStoreForWorktree(context.Background(), cwd)
+	require.Error(t, err, "the real repo the tests run from must be refused under go test")
+
+	_, err = NewStateStoreForWorktree(context.Background(), "")
+	require.Error(t, err, "an empty root silently resolves from CWD — the exact leak shape")
+}
+
 func TestState_NormalizeAfterLoad(t *testing.T) {
 	t.Parallel()
 

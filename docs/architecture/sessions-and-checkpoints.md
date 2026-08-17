@@ -194,10 +194,10 @@ identity-matched outside the session's home worktree is **guest-linked**: it
 condenses and links, but never mutates worktree-coupled state (`BaseCommit`,
 shadow-branch realignment) — those follow only the session's own worktree HEAD.
 
-**Worktree matching** (the fallback, for commits with no recorded agent in
-their ancestry — human commits, detached runners): exact `WorktreePath` match
-first, then sessions from a sibling worktree of the same repo, provided they
-resolve to a single worktree. Imported sessions (`Kind=imported`) never link —
+**Worktree matching** (always computed; the sole mechanism for commits with
+no recorded agent in their ancestry — human commits, detached runners): exact
+`WorktreePath` match first, then sessions from a sibling worktree of the same
+repo, provided they resolve to a single worktree. Imported sessions (`Kind=imported`) never link —
 they are historical records. When candidates span several worktrees, sessions
 that interacted within the last 15 minutes are preferred; if a single live
 worktree remains it links, otherwise the hook declines with a stderr hint
@@ -205,10 +205,10 @@ naming `entire session adopt` (two genuinely live sessions in different
 worktrees are never guessed between).
 
 Under `go test`, the session state store refuses to open outside the temp
-root (`session.NewStateStore`), so a test missing repo isolation fails loudly
-instead of leaking fixture sessions into a real repo's `.git/entire-sessions`
-— leaked fixtures once hijacked commit linking and produced a dangling
-`Entire-Checkpoint` trailer.
+root (both `session.NewStateStore` and `NewStateStoreForWorktree`), so a test
+missing repo isolation fails loudly instead of leaking fixture sessions into
+a real repo's `.git/entire-sessions` — leaked fixtures once hijacked commit
+linking and produced a dangling `Entire-Checkpoint` trailer.
 
 ### Temporary Checkpoints
 
