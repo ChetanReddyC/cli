@@ -415,12 +415,12 @@ func TestSearch_ResultAccessors(t *testing.T) {
 // a blank one. (Cross-cell dedupe uses DedupID, not ResultID; see below.)
 func TestResultID_SessionFallsBackToCheckpointID(t *testing.T) {
 	t.Parallel()
-	legacy := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", CheckpointID: "cp-9"}}
+	legacy := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", MatchedCheckpointID: "cp-9"}}
 	if got := legacy.ResultID(); got != "cp-9" {
 		t.Errorf("legacy session ResultID = %q, want checkpointId cp-9", got)
 	}
 	// A real session still keys on its sessionId even with a checkpoint anchor.
-	normal := Result{Type: TypeSession, Session: &SessionResult{SessionID: "sess-1", CheckpointID: "cp-1"}}
+	normal := Result{Type: TypeSession, Session: &SessionResult{SessionID: "sess-1", MatchedCheckpointID: "cp-1"}}
 	if got := normal.ResultID(); got != "sess-1" {
 		t.Errorf("real session ResultID = %q, want sess-1", got)
 	}
@@ -434,8 +434,8 @@ func TestResultID_SessionFallsBackToCheckpointID(t *testing.T) {
 func TestDedupID_RepoQualifiesCheckpointScopedIDs(t *testing.T) {
 	t.Parallel()
 	// Legacy session: same checkpoint id, different repos → distinct dedupe keys.
-	sa := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", CheckpointID: "cp-dup", Org: "acme", Repo: "backend"}}
-	sb := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", CheckpointID: "cp-dup", Org: "acme", Repo: "frontend"}}
+	sa := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", MatchedCheckpointID: "cp-dup", Org: "acme", Repo: "backend"}}
+	sb := Result{Type: TypeSession, Session: &SessionResult{SessionID: "", MatchedCheckpointID: "cp-dup", Org: "acme", Repo: "frontend"}}
 	if sa.DedupID() == sb.DedupID() {
 		t.Errorf("legacy sessions with same checkpointId in different repos collide: %q", sa.DedupID())
 	}

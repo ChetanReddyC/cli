@@ -105,7 +105,7 @@ func v4RepoScopedRow(typ, id, repo string, score float64) search.Result {
 	r := search.Result{Type: typ, Meta: search.Meta{Score: score}}
 	switch typ {
 	case search.TypeSession:
-		r.Session = &search.SessionResult{SessionID: "", CheckpointID: id, Org: "acme", Repo: repo}
+		r.Session = &search.SessionResult{SessionID: "", MatchedCheckpointID: id, Org: "acme", Repo: repo}
 	case search.TypeCheckpoint:
 		r.Checkpoint = &search.CheckpointResult{ID: id, Org: "acme", Repo: repo}
 	case search.TypeCommit:

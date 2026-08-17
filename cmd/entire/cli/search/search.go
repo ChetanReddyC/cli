@@ -118,23 +118,24 @@ type CommitResult struct {
 // SessionResult represents a session returned by the search service.
 type SessionResult struct {
 	SessionID string `json:"sessionId"`
-	// CheckpointID identifies a server-folded legacy session (ENT-1595) whose
-	// sessionId is empty (the checkpoint predates the sessionId attribute). The
-	// cross-cell dedupe (DedupID, not ResultID — which stays the raw display id)
-	// falls back to a repo-qualified form of it, so a repo mirrored across cells
-	// reports each legacy session once instead of twice. Drill-down is
-	// `entire checkpoint explain <checkpointId>`, not `entire session info`.
-	CheckpointID   string  `json:"checkpointId,omitempty"`
-	DisplayName    string  `json:"displayName"`
-	Prompt         *string `json:"prompt"`
-	Agent          *string `json:"agent"`
-	Model          *string `json:"model"`
-	StepCount      int     `json:"stepCount"`
-	Org            string  `json:"org"`
-	Repo           string  `json:"repo"`
-	Branch         *string `json:"branch"`
-	AuthorUsername *string `json:"authorUsername"`
-	CreatedAt      string  `json:"createdAt"`
+	// MatchedCheckpointID is the carrier checkpoint the search service anchors a
+	// session row to — present on every session row. For a server-folded legacy
+	// session (ENT-1595) the sessionId is empty and this IS the row's identity
+	// (the checkpoint predates the sessionId attribute), so ResultID and the
+	// cross-cell dedupe (DedupID) fall back to it, repo-qualified, and a mirrored
+	// repo reports the row once instead of twice. Drill-down is
+	// `entire checkpoint explain <id>`, not `entire session info`.
+	MatchedCheckpointID string  `json:"matchedCheckpointId,omitempty"`
+	DisplayName         string  `json:"displayName"`
+	Prompt              *string `json:"prompt"`
+	Agent               *string `json:"agent"`
+	Model               *string `json:"model"`
+	StepCount           int     `json:"stepCount"`
+	Org                 string  `json:"org"`
+	Repo                string  `json:"repo"`
+	Branch              *string `json:"branch"`
+	AuthorUsername      *string `json:"authorUsername"`
+	CreatedAt           string  `json:"createdAt"`
 }
 
 // Result wraps a search result with its type and ranking metadata.
@@ -374,7 +375,7 @@ func (r *Result) ResultID() string {
 			if s.SessionID != "" {
 				return s.SessionID
 			}
-			return s.CheckpointID // server-folded legacy session (ENT-1595)
+			return s.MatchedCheckpointID // server-folded legacy session (ENT-1595)
 		}); id != "" {
 		return id
 	}
@@ -386,7 +387,9 @@ func (r *Result) ResultID() string {
 // repo-qualifies so two repos' rows sharing an id don't collide in the deduper
 // and drop a valid result:
 //   - a raw checkpoint id, and the checkpoint id a server-folded legacy session
-//     (ENT-1595) falls back to — checkpoint ids are unique only within a repo;
+//     (ENT-1595) falls back to — checkpoint ids are a mixed space (legacy 12-hex
+//     ids repeat across repos; newer ULIDs are global), so qualifying by repo is
+//     safe for both and necessary for the legacy half;
 //   - a commit SHA — globally unique as a content address, but the SAME commit
 //     legitimately lives in many repos (a fork and its upstream), so a bare SHA
 //     would drop one repo's hit for every shared commit.
@@ -405,8 +408,8 @@ func (r *Result) DedupID() string {
 			return repoQualifiedKey(r.Commit.Org, r.Commit.Repo, r.Commit.CommitSHA)
 		}
 	case TypeSession:
-		if r.Session != nil && r.Session.SessionID == "" && r.Session.CheckpointID != "" {
-			return repoQualifiedKey(r.Session.Org, r.Session.Repo, r.Session.CheckpointID)
+		if r.Session != nil && r.Session.SessionID == "" && r.Session.MatchedCheckpointID != "" {
+			return repoQualifiedKey(r.Session.Org, r.Session.Repo, r.Session.MatchedCheckpointID)
 		}
 	}
 	return r.ResultID()
