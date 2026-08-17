@@ -98,7 +98,7 @@ func TestCodexHookTrustState_CoversEveryInstalledEvent(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir) // InstallHooks falls back to cwd when there's no worktree root
 
-	if _, err := (&codex.CodexAgent{}).InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := (&codex.CodexAgent{}).InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 

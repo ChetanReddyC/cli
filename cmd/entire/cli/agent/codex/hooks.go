@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -14,14 +15,6 @@ import (
 
 // HooksFileName is the hooks config file used by Codex.
 const HooksFileName = "hooks.json"
-
-// entireHookPrefixes identifies Entire hook commands. The "go run" prefix is
-// retained so hooks installed by older versions are still recognized.
-var entireHookPrefixes = []string{
-	"entire ",
-	agent.LocalDevHookScript + " ",
-	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
-}
 
 // defaultHookTimeoutSec is the timeout Entire configures for Codex hooks that
 // run between turns, where Codex allows up to its standard 600s.
@@ -61,7 +54,7 @@ var managedHooks = []managedHook{
 }
 
 // InstallHooks installs Codex hooks in .codex/hooks.json.
-func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
+func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests)
@@ -91,13 +84,8 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		rawHooks = make(map[string]json.RawMessage)
 	}
 
-	var cmdPrefix string
-	if localDev {
-		cmdPrefix = agent.LocalDevHookScript + " hooks codex "
-	} else {
-		cmdPrefix = "entire hooks codex "
-	}
-	useWindowsProductionHooks := agent.UseWindowsProductionHooks(ctx, localDev)
+	const cmdPrefix = "entire hooks codex "
+	useWindowsProductionHooks := agent.UseWindowsProductionHooks(ctx)
 
 	count := 0
 	updated := make([][]MatcherGroup, len(managedHooks))
@@ -109,10 +97,7 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		if force {
 			groups = removeEntireHooks(groups)
 		}
-		hookCmd := cmdPrefix + h.verb
-		if !localDev {
-			hookCmd = h.wrap(hookCmd, useWindowsProductionHooks)
-		}
+		hookCmd := h.wrap(cmdPrefix+h.verb, useWindowsProductionHooks)
 		if synced, changed := syncHookCommand(groups, hookCmd, h.timeout); changed {
 			groups = synced
 			count++
@@ -304,15 +289,59 @@ func hookCommandExists(groups []MatcherGroup, command string, timeoutSec int) bo
 	return false
 }
 
+// syncHookCommand ensures groups contains exactly the given Entire hook command
+// at the given timeout, and no other Entire-owned entry, reporting whether the
+// config changed.
+//
+// Stale entries are dropped even when command is already present. Checking
+// presence first (as this did before) left a hook written by an older version
+// sitting next to the current one, so both fired — for the removed local-dev mode
+// that meant a script inside the working tree kept running on every agent turn.
 func syncHookCommand(groups []MatcherGroup, command string, timeoutSec int) ([]MatcherGroup, bool) {
+	groups, dropped := dropStaleEntireHooks(groups, command, timeoutSec)
 	if hookCommandExists(groups, command, timeoutSec) {
-		return groups, false
-	}
-	if hasEntireHook(groups) {
-		groups = removeEntireHooks(groups)
+		return groups, dropped
 	}
 	return addHook(groups, command, timeoutSec), true
 }
+
+// dropStaleEntireHooks removes Entire-owned hooks that are not command at
+// timeoutSec, per matcher group, pruning groups left with no hooks. See
+// agent.DropStaleManagedHooks for why this runs on every install.
+//
+// The timeout is part of what counts as stale here, which the shared helper
+// cannot express: it matches on the command alone, and Codex budgets per event.
+// A SessionEnd hook left at the old 30s keeps its command but makes Codex print
+// a clamping warning at every startup — see SessionEndTimeoutSec.
+func dropStaleEntireHooks(groups []MatcherGroup, command string, timeoutSec int) ([]MatcherGroup, bool) {
+	staleTimeout := func(e HookEntry) bool { return e.Command == command && e.Timeout != timeoutSec }
+
+	result := make([]MatcherGroup, 0, len(groups))
+	dropped := false
+	for _, group := range groups {
+		kept, d := agent.DropStaleManagedHooks(group.Hooks, hookEntryCommand, []string{command})
+		if d {
+			dropped = true
+		}
+		// Clone before deleting: with nothing dropped above, kept still aliases
+		// the caller's slice.
+		if slices.ContainsFunc(kept, staleTimeout) {
+			kept = slices.DeleteFunc(slices.Clone(kept), staleTimeout)
+			dropped = true
+		}
+		if len(kept) > 0 {
+			group.Hooks = kept
+			result = append(result, group)
+		}
+	}
+	if !dropped {
+		return groups, false
+	}
+	return result, true
+}
+
+// hookEntryCommand reads the command off a hook entry for the shared helpers.
+func hookEntryCommand(e HookEntry) string { return e.Command }
 
 func addHook(groups []MatcherGroup, command string, timeoutSec int) []MatcherGroup {
 	entry := HookEntry{
@@ -335,7 +364,7 @@ func addHook(groups []MatcherGroup, command string, timeoutSec int) []MatcherGro
 }
 
 func isEntireHook(command string) bool {
-	return agent.IsManagedHookCommand(command, entireHookPrefixes)
+	return agent.IsManagedHookCommand(command)
 }
 
 func hasEntireHook(groups []MatcherGroup) bool {
