@@ -189,3 +189,22 @@ func TestRunSessionSweep_CondensesOldEndedZombie_LeavesFreshAlone(t *testing.T) 
 	}
 	// (absence from the list is also success: fully cleaned up)
 }
+
+// sessionSweepNeeded is the hook-side spawn decision. It must be a pure
+// function over the state list: SpawnDetached is untestable in-process (it
+// no-ops under `go test`), so correctness of "would we spawn?" lives here.
+func TestSessionSweepNeeded(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	old := now.Add(-48 * time.Hour)
+
+	assert.False(t, sessionSweepNeeded(nil, now), "no sessions → no sweep")
+
+	healthy := &session.State{Phase: session.PhaseIdle}
+	assert.False(t, sessionSweepNeeded([]*session.State{healthy}, now))
+
+	zombie := &session.State{Phase: session.PhaseEnded, StepCount: 1, EndedAt: &old}
+	assert.True(t, sessionSweepNeeded([]*session.State{healthy, zombie}, now),
+		"one zombie among healthy sessions → sweep")
+}

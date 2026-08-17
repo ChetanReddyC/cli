@@ -261,6 +261,12 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 			slog.String("error", mutErr.Error()))
 	}
 
+	// Opportunistic self-heal: if any session in this repo is a zombie
+	// (agent died without a stop hook, or ended >24h ago without condensing),
+	// spawn one detached sweep to fix it. Detached, so the hook's timeout
+	// budget is untouched; see runSessionSweep for the safety contract.
+	maybeSpawnSessionSweep(ctx)
+
 	return nil
 }
 

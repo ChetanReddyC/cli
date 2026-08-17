@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
@@ -54,8 +56,8 @@ func isSweepableZombie(st *session.State, now time.Time) bool {
 // carry-forward window with condensable data are condensed via the same
 // engine `entire doctor --force` uses.
 //
-// Safety contract (honest version — mirror this in the PR description):
-// condense-only, enforced by OUR pre-checks, not by the engine.
+// Safety contract: condense-only, enforced by OUR pre-checks, not by the
+// engine.
 // CondenseSessionByID's locked closure re-checks only shadow-branch
 // existence; we therefore re-load each candidate and re-run the full zombie
 // predicate immediately before condensing. That narrows — does not close —
@@ -63,8 +65,8 @@ func isSweepableZombie(st *session.State, now time.Time) bool {
 // anyway: acceptable, because the precondition is >24h idle (a seconds-wide
 // race against a day-old zombie) and a condense of a just-resumed session is
 // coherent. If the shadow branch vanishes between our check and the engine's
-// lock, the engine clears the state — correct cleanup, since that only
-// happens when a concurrent condense already succeeded. Everything is
+// lock, the engine clears the state — correct cleanup, since in practice that
+// only happens when a concurrent condense already succeeded. Everything is
 // best-effort: a failed session is logged and retried by the next sweep.
 func runSessionSweep(ctx context.Context) error {
 	logCtx := logging.WithComponent(ctx, "session-sweep")
@@ -93,6 +95,11 @@ func runSessionSweep(ctx context.Context) error {
 
 	now := time.Now()
 	for _, st := range states {
+		// ENDED-only here: ACTIVE zombies were finalizeExitedSessions' job
+		// above. This keeps sessions whose finalize failed out of the
+		// condense path — condensing an ACTIVE session's ended predicate
+		// would never even fire, but the explicit phase check documents the
+		// boundary.
 		if st.Phase != session.PhaseEnded || !isSweepableZombie(st, now) {
 			continue
 		}
@@ -100,8 +107,14 @@ func runSessionSweep(ctx context.Context) error {
 		// (a resumed session flips ENDED→ACTIVE; a concurrent sweep may have
 		// condensed it). See the safety contract above for the residual race.
 		fresh, lerr := store.Load(ctx, st.SessionID)
-		if lerr != nil || fresh == nil {
+		if lerr != nil {
+			logging.Debug(logCtx, "sweep re-load failed",
+				slog.String("session_id", st.SessionID),
+				slog.String("error", lerr.Error()))
 			continue
+		}
+		if fresh == nil {
+			continue // benign: state removed/cleaned up between list and load
 		}
 		if fresh.Phase != session.PhaseEnded || !isSweepableZombie(fresh, now) {
 			continue
@@ -119,4 +132,39 @@ func runSessionSweep(ctx context.Context) error {
 			slog.String("session_id", fresh.SessionID))
 	}
 	return nil
+}
+
+// sessionSweepNeeded reports whether any session in states nominates a
+// background sweep. Pure so the spawn decision is unit-testable.
+func sessionSweepNeeded(states []*session.State, now time.Time) bool {
+	for _, st := range states {
+		if isSweepableZombie(st, now) {
+			return true
+		}
+	}
+	return false
+}
+
+// maybeSpawnSessionSweep fires one detached __sweep_sessions child when the
+// session-state files nominate a zombie. Called from the session-start hook:
+// listing the state files is a small shared-directory read, and the sweep
+// itself runs detached, so the hook's latency budget is untouched. Best-effort
+// throughout — a failure here must never fail the hook.
+func maybeSpawnSessionSweep(ctx context.Context) {
+	states, err := strategy.ListSessionStates(ctx)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "session-sweep"),
+			"skipping sweep check", slog.String("error", err.Error()))
+		return
+	}
+	if !sessionSweepNeeded(states, time.Now()) {
+		return
+	}
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	logging.Info(logging.WithComponent(ctx, "session-sweep"),
+		"zombie session detected, spawning detached sweep")
+	execx.SpawnDetached(root, "__sweep_sessions")
 }
