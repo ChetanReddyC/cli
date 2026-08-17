@@ -515,14 +515,14 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	// Type tab keys (1/2/3)
 	switch msg.String() {
 	case "1":
-		m.filterType = typeFilterSessions
+		m.filterType = typeFilterCommits
 		m.cursor = 0
 		m.page = 0
 		m.browseVP.GotoTop()
 		m = m.refreshBrowseContent()
 		return m, nil
 	case "2":
-		m.filterType = typeFilterCommits
+		m.filterType = typeFilterSessions
 		m.cursor = 0
 		m.page = 0
 		m.browseVP.GotoTop()
@@ -808,8 +808,8 @@ func (m searchModel) viewTypeTabs() string {
 	// reachable by ID via `entire checkpoint explain <id>` (folded session rows
 	// route there).
 	tabs := []string{
-		renderTab("Sessions", typeFilterSessions, ssCount, "1"),
-		renderTab("Commits", typeFilterCommits, cmCount, "2"),
+		renderTab("Commits", typeFilterCommits, cmCount, "1"),
+		renderTab("Sessions", typeFilterSessions, ssCount, "2"),
 		renderTab("Code", typeFilterCode, len(m.codeResults), "3"),
 	}
 
