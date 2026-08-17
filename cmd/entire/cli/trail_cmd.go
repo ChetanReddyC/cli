@@ -1240,7 +1240,7 @@ func resolveTrailUpdateBody(ctx context.Context, client *api.Client, forge, owne
 
 func newTrailUpdateCmd() *cobra.Command {
 	var statusStr, title, body, branch, typeStr, priorityStr string
-	var labelAdd, labelRemove, assigneeAdd, assigneeRemove, reviewerAdd, reviewerRemove []string
+	var assigneeAdd, assigneeRemove, reviewerAdd, reviewerRemove []string
 
 	cmd := &cobra.Command{
 		Use:   "update",
@@ -1259,8 +1259,6 @@ func newTrailUpdateCmd() *cobra.Command {
 				BodyChanged:     cmd.Flags().Changed("body"),
 				Branch:          branch,
 				Repo:            trailRepoFlag(cmd),
-				LabelAdd:        labelAdd,
-				LabelRemove:     labelRemove,
 				AssigneeAdd:     assigneeAdd,
 				AssigneeRemove:  assigneeRemove,
 				ReviewerAdd:     reviewerAdd,
@@ -1277,8 +1275,6 @@ func newTrailUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&title, "title", "", "Update title")
 	cmd.Flags().StringVar(&body, "body", "", "Update body")
 	cmd.Flags().StringVar(&branch, "branch", "", "Branch to update trail for (defaults to current)")
-	cmd.Flags().StringSliceVar(&labelAdd, "add-label", nil, "Add label(s)")
-	cmd.Flags().StringSliceVar(&labelRemove, "remove-label", nil, "Remove label(s)")
 	cmd.Flags().StringSliceVar(&assigneeAdd, "add-assignee", nil, "Add assignee(s) by login")
 	cmd.Flags().StringSliceVar(&assigneeRemove, "remove-assignee", nil, "Remove assignee(s) by login")
 	cmd.Flags().StringSliceVar(&reviewerAdd, "add-reviewer", nil, "Request reviewer(s) by login")
@@ -1298,8 +1294,6 @@ type trailUpdateInputs struct {
 	BodyChanged     bool
 	Branch          string
 	Repo            string
-	LabelAdd        []string
-	LabelRemove     []string
 	AssigneeAdd     []string
 	AssigneeRemove  []string
 	ReviewerAdd     []string
@@ -1311,11 +1305,6 @@ type trailUpdateInputs struct {
 }
 
 func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, inputs trailUpdateInputs) error {
-	// Decided by the flags alone, so reject before authenticating and dialing the
-	// cell — a request that cannot succeed should not cost a round trip.
-	if len(inputs.LabelAdd) > 0 || len(inputs.LabelRemove) > 0 {
-		return errors.New("trail labels are not supported by the trails API")
-	}
 	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, inputs.Repo, func(ctx context.Context, client *api.Client) error {
 		forge, owner, repoName, err := resolveTrailRepoOrRemote(ctx, inputs.Repo)
 		if err != nil {
@@ -1352,7 +1341,6 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 	title := inputs.Title
 	body := inputs.Body
 	noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged &&
-		inputs.LabelAdd == nil && inputs.LabelRemove == nil &&
 		inputs.AssigneeAdd == nil && inputs.AssigneeRemove == nil &&
 		inputs.ReviewerAdd == nil && inputs.ReviewerRemove == nil &&
 		!inputs.TypeChanged && !inputs.PriorityChanged
@@ -1431,8 +1419,6 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 		TitleChanged:    inputs.TitleChanged,
 		Body:            body,
 		BodyChanged:     inputs.BodyChanged,
-		LabelAdd:        inputs.LabelAdd,
-		LabelRemove:     inputs.LabelRemove,
 		AssigneeAdd:     inputs.AssigneeAdd,
 		AssigneeRemove:  inputs.AssigneeRemove,
 		ReviewerAdd:     inputs.ReviewerAdd,
@@ -1574,10 +1560,6 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 		req.Priority = &priority
 	}
 	// Replace-set fields: compute the full new list from the current trail.
-	if len(inputs.LabelAdd) > 0 || len(inputs.LabelRemove) > 0 {
-		labels := mergeStringSet(current.Labels, inputs.LabelAdd, inputs.LabelRemove)
-		req.Labels = &labels
-	}
 	if len(inputs.AssigneeAdd) > 0 || len(inputs.AssigneeRemove) > 0 {
 		assignees := mergeStringSet(current.Assignees, inputs.AssigneeAdd, inputs.AssigneeRemove)
 		req.Assignees = &assignees
@@ -1595,10 +1577,8 @@ func buildTrailUpdateRequest(current *api.TrailResource, inputs trailUpdateInput
 // status/title/branch/base/assignees/reviewers/type/priority ("Body updates
 // cannot be combined with metadata updates"), so the two must be sent as
 // separate PATCH calls — that split is what makes `trail update --title X
-// --body Y` work in one command. Labels never reach here: runTrailUpdate
-// rejects them up front because the trails API does not accept label writes,
-// so the metadata request's Labels field stays nil in practice. hasMeta
-// reports whether the metadata request has any field set.
+// --body Y` work in one command. hasMeta reports whether the metadata request
+// has any field set.
 func splitTrailUpdate(full api.TrailUpdateRequest) (meta api.TrailUpdateRequest, hasMeta bool, bodyReq *api.TrailUpdateRequest) {
 	if full.Body != nil {
 		b := *full.Body

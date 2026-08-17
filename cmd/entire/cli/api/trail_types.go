@@ -127,11 +127,13 @@ type TrailCreateResponse struct {
 }
 
 // TrailUpdateRequest uses pointers to distinguish absent fields from clears.
+// There is deliberately no Labels field: the trails API does not accept label
+// writes, so `trail update` exposes no label flags (labels are read-only, see
+// TrailResource.Labels).
 type TrailUpdateRequest struct {
 	Status             *string   `json:"status,omitempty"`
 	Title              *string   `json:"title,omitempty"`
 	Body               *string   `json:"body,omitempty"`
-	Labels             *[]string `json:"labels,omitempty"`
 	Assignees          *[]string `json:"assignees,omitempty"`
 	RequestedReviewers *[]string `json:"requestedReviewers,omitempty"`
 	Type               *string   `json:"type,omitempty"`

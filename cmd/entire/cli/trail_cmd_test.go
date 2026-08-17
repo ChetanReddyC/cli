@@ -2109,12 +2109,12 @@ func TestRunTrailUpdateReportsNoChangesWhenNothingWasSent(t *testing.T) {
 	// The real source of an empty update is the interactive form closing
 	// untouched, which leaves every *Changed flag false. That exact input would
 	// re-open the form here (noFlags), so stand in with a non-nil but empty
-	// label slice: it clears noFlags, and buildTrailUpdateRequest still returns
-	// an empty request — the same state the split has to refuse to report as a
-	// success.
+	// assignee slice: it clears noFlags, and buildTrailUpdateRequest still
+	// returns an empty request — the same state the split has to refuse to
+	// report as a success.
 	err := runTrailUpdateWithClient(t.Context(), &out, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
-		Branch:   "feature/x",
-		LabelAdd: []string{},
+		Branch:      "feature/x",
+		AssigneeAdd: []string{},
 	})
 
 	require.NoError(t, err)
