@@ -31,11 +31,12 @@ const BackendTypeGitRefs = "git-refs"
 // RemoteRefLister; other backends ignore the git-shaped fields and read their
 // own configuration from cfg.
 type OpenEnv struct {
-	Repo            *git.Repository
-	BlobFetcher     BlobFetchFunc
-	RefFetcher      RefFetchFunc
-	RemoteRefLister RemoteRefListFunc
-	Refs            PersistentRefs
+	Repo                  *git.Repository
+	BlobFetcher           BlobFetchFunc
+	RefFetcher            RefFetchFunc
+	RemoteRefLister       RemoteRefListFunc
+	MetadataBranchFetcher MetadataBranchFetchFunc
+	Refs                  PersistentRefs
 	// ReadRemotes is the ordered checkpoint read-candidate chain; see
 	// OpenOptions.ReadRemotes.
 	ReadRemotes []string
@@ -152,6 +153,9 @@ func gitBranchBackendFactory(_ context.Context, env OpenEnv, _ json.RawMessage) 
 		store.SetBlobFetcher(env.BlobFetcher)
 	}
 	store.SetReadRemotes(env.ReadRemotes)
+	if env.MetadataBranchFetcher != nil {
+		store.SetMetadataBranchFetcher(env.MetadataBranchFetcher)
+	}
 	return store, nil
 }
 

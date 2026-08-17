@@ -741,6 +741,19 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		filePaths.Prompt = "/" + promptPath
 	}
 
+	// The write boundary dedupes as a last line of defense, but duplicates
+	// reaching it mean an upstream producer skipped mergeFilesTouched — warn
+	// so that producer can be found rather than silently masked.
+	filesTouched := NormalizeFilesTouched(opts.FilesTouched)
+	if len(filesTouched) < len(opts.FilesTouched) {
+		logging.Warn(logging.WithComponent(ctx, "checkpoint"),
+			"files_touched reached the write boundary with duplicates",
+			slog.String("session_id", opts.SessionID),
+			slog.Int("reported", len(opts.FilesTouched)),
+			slog.Int("unique", len(filesTouched)),
+		)
+	}
+
 	// Write session-level metadata.json (Metadata with all fields including initial_attribution)
 	sessionMetadata := Metadata{
 		CheckpointID:                opts.CheckpointID,
@@ -751,7 +764,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		CommitSHA:                   opts.CommitSHA,
 		CheckpointsCount:            opts.CheckpointsCount,
 		SaveStepCount:               opts.SaveStepCount,
-		FilesTouched:                opts.FilesTouched,
+		FilesTouched:                filesTouched,
 		Agent:                       opts.Agent,
 		Model:                       opts.Model,
 		TurnID:                      opts.TurnID,
@@ -1206,6 +1219,21 @@ func (s *treeWriter) writeCompactTranscript(ctx context.Context, agentType types
 	return &boundary
 }
 
+// NormalizeFilesTouched returns files deduplicated, sorted, and normalized to
+// forward slashes, for writing into persistent checkpoint records. It
+// preserves the nil-versus-empty distinction of its input: files_touched is
+// marshaled without omitempty, so nil-in stays nil (JSON null, as before) and
+// a non-nil empty input stays non-nil (JSON []), keeping the wire format
+// unchanged for callers that send an empty list. Exported so alternate
+// persistent backends enforce the same write-boundary invariant.
+func NormalizeFilesTouched(files []string) []string {
+	merged := mergeFilesTouched(files, nil)
+	if merged == nil && files != nil {
+		return []string{}
+	}
+	return merged
+}
+
 // mergeFilesTouched combines two file lists, removing duplicates.
 // All paths are normalized to forward slashes for platform-agnostic storage.
 func mergeFilesTouched(existing, additional []string) []string {
@@ -1585,7 +1613,7 @@ func (s *GitStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		return nil, err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	trees, err := s.getSessionsBranchTrees()
+	trees, err := s.getSessionsBranchTrees(ctx)
 	if err != nil {
 		return []CheckpointInfo{}, nil //nolint:nilerr // No sessions branch means empty list
 	}
@@ -2185,7 +2213,7 @@ func (s *GitStore) maybeMergeVercelConfig(ctx context.Context, rootTreeHash plum
 // by ref existence—lets a local orphan or partial elected-remote history fall
 // through to a legacy remote that still contains the requested checkpoint.
 func (s *GitStore) getCheckpointFetchingTree(ctx context.Context, checkpointID id.CheckpointID) (*FetchingTree, error) {
-	trees, err := s.getSessionsBranchTrees()
+	trees, err := s.getSessionsBranchTrees(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2199,13 +2227,10 @@ func (s *GitStore) getCheckpointFetchingTree(ctx context.Context, checkpointID i
 	return nil, ErrCheckpointNotFound
 }
 
-// getSessionsBranchTree returns the tree object at refs.Read. Falls back to
-// the read-candidate remotes' tracking refs for Primary (first existing wins;
-// legacy origin-only when no chain was injected) when
-// ReadBootstrappableFromRemote is true. The fallback is a pure read — it
-// never writes local refs.
-func (s *GitStore) getSessionsBranchTree() (*object.Tree, error) {
-	trees, err := s.getSessionsBranchTrees()
+// getSessionsBranchTree returns the first available committed metadata tree —
+// see getSessionsBranchTrees for the read precedence and recovery tiers.
+func (s *GitStore) getSessionsBranchTree(ctx context.Context) (*object.Tree, error) {
+	trees, err := s.getSessionsBranchTrees(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2213,9 +2238,42 @@ func (s *GitStore) getSessionsBranchTree() (*object.Tree, error) {
 }
 
 // getSessionsBranchTrees returns every available committed metadata tree in
-// read precedence: local first, then the configured remote candidates. Trees
-// pointing at the same commit are deduplicated.
-func (s *GitStore) getSessionsBranchTrees() ([]*object.Tree, error) {
+// read precedence: the local refs.Read first, then the read-candidate
+// remotes' tracking refs for Primary (elected sync remote first, legacy
+// origin-only when no chain was injected) when ReadBootstrappableFromRemote
+// is true. The remote tiers are pure reads — they never write local refs.
+// Trees pointing at the same commit are deduplicated.
+//
+// When the whole chain yields no tree with checkpoint data and a metadata
+// branch fetcher is wired, the branch is fetched from the configured
+// checkpoint remote once and resolution retried. That tier matters for a
+// fresh clone of a repo whose checkpoints live on a dedicated
+// checkpoint_remote: the branch is absent locally, and no git remote carries
+// it either, so without the fetch every committed checkpoint reads as "not
+// found" with no way to recover. Recovery triggers on data-free trees as
+// well as missing ones: a local orphan carrying nothing but initialization
+// artifacts is, to a reader, indistinguishable from no branch at all — but
+// it makes the ref resolve, which would otherwise mask the miss and leave
+// the real checkpoints on the remote permanently unreachable.
+func (s *GitStore) getSessionsBranchTrees(ctx context.Context) ([]*object.Tree, error) {
+	trees, err := s.resolveSessionsBranchTrees()
+	if err != nil || !anyTreeHasCheckpointData(trees) {
+		if s.tryFetchMetadataBranch(ctx) {
+			if fetched, fetchedErr := s.resolveSessionsBranchTrees(); fetchedErr == nil {
+				return fetched, nil
+			}
+		}
+	}
+	// Unrecovered: return what we resolved locally. Keeping the original error
+	// matters — callers such as List treat not-found as an empty result, so
+	// surfacing a transport error here would turn an offline read into a hard
+	// failure — and so does keeping data-free trees, which read as empty.
+	return trees, err
+}
+
+// resolveSessionsBranchTrees resolves the read-candidate refs and loads their
+// root trees. Purely local: no network.
+func (s *GitStore) resolveSessionsBranchTrees() ([]*object.Tree, error) {
 	refNames := []plumbing.ReferenceName{s.refs.Read}
 	if s.refs.ReadBootstrappableFromRemote() {
 		remotes := s.readRemotes
@@ -2265,6 +2323,55 @@ func (s *GitStore) getSessionsBranchTrees() ([]*object.Tree, error) {
 		return nil, fmt.Errorf("sessions branch not found: %w", firstErr)
 	}
 	return trees, nil
+}
+
+// anyTreeHasCheckpointData reports whether any resolved tree holds checkpoint
+// data beyond initialization artifacts; see treeHasCheckpointData.
+func anyTreeHasCheckpointData(trees []*object.Tree) bool {
+	for _, tree := range trees {
+		if treeHasCheckpointData(tree) {
+			return true
+		}
+	}
+	return false
+}
+
+// treeHasCheckpointData reports whether a metadata branch root tree holds
+// anything beyond orphan-initialization artifacts. It mirrors
+// strategy.metadataBranchHasData, which decides the same question when healing
+// an un-initialized orphan; the two must agree on what "un-initialized" means or
+// enable and read disagree about whether a branch is worth recovering.
+func treeHasCheckpointData(tree *object.Tree) bool {
+	if tree == nil {
+		return false
+	}
+	for _, entry := range tree.Entries {
+		if entry.Name != vercelconfig.FileName {
+			return true
+		}
+	}
+	return false
+}
+
+// tryFetchMetadataBranch runs the injected metadata-branch fetcher at most once
+// per store, reporting whether it succeeded. The once-per-store latch matters:
+// a single command re-enters getSessionsBranchTree several times (List, then
+// getFetchingTree for each read), so without it a repo the fetch cannot recover
+// — remote has no v1, is unreachable, or refuses auth — would re-pay the whole
+// fetch budget on every entry.
+func (s *GitStore) tryFetchMetadataBranch(ctx context.Context) bool {
+	if s.metadataBranchFetcher == nil || s.metadataBranchFetchTried {
+		return false
+	}
+	s.metadataBranchFetchTried = true
+	if err := s.metadataBranchFetcher(ctx); err != nil {
+		logging.Debug(ctx, "sessions branch: checkpoint remote fetch failed",
+			slog.String("ref", s.refs.Read.String()),
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	return true
 }
 
 // CreateBlobFromContent creates a blob object from in-memory content.
@@ -2422,8 +2529,12 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, fileP
 // string leaves and applies OPF only to those, preserving the JSON
 // structure.
 //
-// Post-commit condensation uses false (fast path). The pre-push rewrite
-// (strategy/manual_commit_opf_rewrite.go) uses true.
+// Post-commit condensation uses false (fast path). The pre-push
+// rewrite does NOT come through here — it batches all blobs through
+// redact.BatchBytesWithPrivacyFilter, which fails closed on an
+// enabled-but-no-categories OPF config; the true path below silently
+// falls back to regex-only in that state, so it must not be wired
+// into any flow that stamps the Entire-OPF-Applied trailer.
 func RedactBlobBytes(ctx context.Context, content []byte, treePath string, usePrivacyFilter bool) []byte {
 	if strings.HasSuffix(treePath, ".jsonl") || strings.HasSuffix(treePath, ".json") {
 		var (

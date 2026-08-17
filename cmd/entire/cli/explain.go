@@ -823,7 +823,12 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		}
 		// Reload to get the updated summary.
 		stopLoad = startSpinner(errW, fmt.Sprintf("Reloading checkpoint %s", fullCheckpointID))
-		reopened, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
+		reopened, openErr := checkpoint.Open(ctx, lookup.repo, checkpoint.OpenOptions{
+			BlobFetcher:           FetchBlobsByHash,
+			RefFetcher:            FetchCheckpointRef,
+			MetadataBranchFetcher: FetchMetadataFromCheckpointRemote,
+			ReadRemotes:           strategy.CheckpointReadRemotes(ctx),
+		})
 		if openErr != nil {
 			stopLoad(false)
 			return fmt.Errorf("open checkpoint store: %w", openErr)
@@ -999,7 +1004,16 @@ func newExplainCheckpointLookup(ctx context.Context) (*explainCheckpointLookup, 
 	// `git fetch` fails against partial-clone repos with "did not send all
 	// necessary objects"). Falls back to a full metadata-branch fetch if
 	// fetch-pack also can't reach the blobs.
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: FetchBlobsByHash, RefFetcher: FetchCheckpointRef, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		BlobFetcher: FetchBlobsByHash,
+		RefFetcher:  FetchCheckpointRef,
+		// Legacy hex-ID checkpoints live on the v1 branch, which a fresh clone
+		// with a dedicated checkpoint_remote does not have — and cannot get from
+		// origin, which never received it. Without this, explain reports every
+		// such checkpoint as unreadable.
+		MetadataBranchFetcher: FetchMetadataFromCheckpointRemote,
+		ReadRemotes:           strategy.CheckpointReadRemotes(ctx),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -2503,6 +2517,12 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	// refs-native checkpoints written on another machine; the fetchers
 	// hydrate each on read. WithRemoteListDiscovery keeps this off the
 	// per-turn hook hot path.
+	//
+	// Deliberately no MetadataBranchFetcher: that tier transfers the whole v1
+	// branch, and enumeration must stay proportionate to rendering a list — the
+	// refs side next to it discovers by name only for the same reason. A repo
+	// with no local v1 lists what it has; naming a specific checkpoint
+	// (explain --checkpoint) is what earns the fetch.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
 		BlobFetcher:     FetchBlobsByHash,
 		RefFetcher:      FetchCheckpointRef,

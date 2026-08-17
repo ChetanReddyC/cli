@@ -2338,6 +2338,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		}
 		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
+		reconcileWorktreePathForResumedTurn(ctx, state)
 
 		// ORDERING: attribution runs BEFORE migrate to use the pre-migration
 		// BaseCommit as the base tree (preserving correct agent-line counts
@@ -2500,9 +2501,9 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 		return result
 	}
 
-	// Get worktree status to find ALL changed files. Shared with the turn-start
-	// pre-prompt capture via the context status cache, so the expensive go-git
-	// worktree walk runs once per hook rather than once per caller.
+	// Get worktree status to find ALL changed files. This is a second full
+	// worktree walk in the turn-start hook — the pre-prompt capture in
+	// cli/state.go does its own. They are not shared.
 	status, err := gitrepo.Status(ctx, repo)
 	if err != nil {
 		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree status",
