@@ -130,6 +130,7 @@ func TestResolve_ActiveContextIneligibleAndNothingElseFits(t *testing.T) {
 
 	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
 	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrNoAuthContext, "an incompatible selected login is not a logged-out state")
 	assert.Contains(t, err.Error(), `"staging"`, "name the active login that was rejected")
 	assert.Contains(t, err.Error(), "no other saved login does either")
 	assert.Contains(t, err.Error(), "https://eu.auth.entire.io", "the trusted server is the only actionable detail")
@@ -150,6 +151,7 @@ func TestResolve_NoActiveContextReturnsLoginHint(t *testing.T) {
 
 	_, err := ResolveContextForCluster(t.Context(), t.TempDir(), t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoAuthContext)
 	assert.Contains(t, err.Error(), "no auth context for cluster aws-eu-central-1.entire.io")
 	assert.Contains(t, err.Error(), "https://eu.auth.entire.io")
 	assert.Contains(t, err.Error(), "entire login --server")

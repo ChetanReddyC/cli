@@ -1064,6 +1064,32 @@ func TestTrailListPageQueryUsesEntireAPIPagination(t *testing.T) {
 	}
 }
 
+func TestFindTrailByNumberUsesDirectEntireAPIRoute(t *testing.T) {
+	t.Parallel()
+	const trailNumber = 1201
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.URL.Path, "/api/v1/trails/gh/acme/repo/1201"; got != want {
+			t.Fatalf("path = %q, want %q", got, want)
+		}
+		if r.URL.RawQuery != "" {
+			t.Fatalf("query = %q, want empty", r.URL.RawQuery)
+		}
+		if err := json.NewEncoder(w).Encode(api.TrailResource{ID: "trl_old", Number: trailNumber, Branch: "old/trail"}); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL).WithTrailBackend("entire-api")
+	found, err := findTrailByNumber(t.Context(), client, "gh", "acme", "repo", trailNumber)
+	if err != nil {
+		t.Fatalf("findTrailByNumber: %v", err)
+	}
+	if found == nil || found.ID != "trl_old" {
+		t.Fatalf("found = %#v, want trl_old", found)
+	}
+}
+
 func TestFindTrailPaginatesPastServerMax(t *testing.T) {
 	t.Parallel()
 	const nextPage = "next-page"

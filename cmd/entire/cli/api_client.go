@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 )
 
 // NewAuthenticatedAPIClient creates an API client targeting api.BaseURL()
@@ -108,7 +109,7 @@ var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, fullName st
 	}
 
 	client, err := NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, "")
-	if err != nil && strings.Contains(err.Error(), "no auth context for") {
+	if errors.Is(err, clusterdiscovery.ErrNoAuthContext) {
 		return nil, fmt.Errorf("%w: %w", auth.ErrNotLoggedIn, err)
 	}
 	if err != nil {

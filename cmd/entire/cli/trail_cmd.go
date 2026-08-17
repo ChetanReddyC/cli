@@ -2102,11 +2102,45 @@ func findTrailByBranch(ctx context.Context, client *api.Client, forge, owner, re
 	})
 }
 
-// findTrailByNumber looks up a trail by numeric identifier via the list API.
+// findTrailByNumber looks up a trail by numeric identifier. entire-api exposes
+// a direct number route; the legacy backend still requires a list scan.
 func findTrailByNumber(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (*api.TrailResource, error) {
-	return findTrail(ctx, client, forge, owner, repo, func(t api.TrailResource) bool {
-		return t.Number == number
-	})
+	if !isEntireAPITrailClient(client) {
+		return findTrail(ctx, client, forge, owner, repo, func(t api.TrailResource) bool {
+			return t.Number == number
+		})
+	}
+
+	resp, err := client.Get(ctx, trailNumberPath(forge, owner, repo, number))
+	if err != nil {
+		return nil, fmt.Errorf("get trail %d: %w", number, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil //nolint:nilnil // nil, nil means "not found" to selector callers
+	}
+	if err := checkTrailResponse(resp); err != nil {
+		return nil, err
+	}
+
+	var raw json.RawMessage
+	if err := api.DecodeJSON(resp, &raw); err != nil {
+		return nil, fmt.Errorf("decode trail %d: %w", number, err)
+	}
+	var found api.TrailResource
+	if err := json.Unmarshal(raw, &found); err != nil {
+		return nil, fmt.Errorf("decode trail %d: %w", number, err)
+	}
+	if found.ID == "" && found.Number == 0 {
+		var envelope struct {
+			Trail api.TrailResource `json:"trail"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			return nil, fmt.Errorf("decode trail %d: %w", number, err)
+		}
+		found = envelope.Trail
+	}
+	return &found, nil
 }
 
 func findTrail(ctx context.Context, client *api.Client, forge, owner, repo string, match func(api.TrailResource) bool) (*api.TrailResource, error) {
