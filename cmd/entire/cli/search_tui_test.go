@@ -519,7 +519,7 @@ func TestSearchModel_TypeFilterKeys(t *testing.T) {
 	t.Parallel()
 	m := testMultiTypeModel()
 
-	// Press 1 → filter to commits (leftmost tab, matching the web UI order)
+	// Press 1 → filter to commits (leftmost tab and default, matching the web UI order)
 	m = updateModel(t, m, tea.KeyPressMsg{Code: '1', Text: "1"})
 	if m.filterType != typeFilterCommits {
 		t.Errorf("after 1: filterType = %q, want %q", m.filterType, typeFilterCommits)

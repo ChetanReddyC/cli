@@ -300,7 +300,7 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 		styles:         styles,
 		browseVP:       viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
 		darkBg:         termenv.HasDarkBackground(),
-		filterType:     typeFilterSessions,         // default the results table to sessions (checkpoints fold into sessions server-side)
+		filterType:     typeFilterCommits,          // default to the leftmost tab (Commits), matching the web UI order
 		semanticSearch: newSemanticSearcher(false), // command layer overrides with its session searcher
 	}
 	if codeOpts != nil {
