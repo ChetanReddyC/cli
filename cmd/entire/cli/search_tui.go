@@ -269,7 +269,7 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	ti := textinput.New()
 	ti.SetValue(query)
 	ti.Prompt = " › "
-	ti.Placeholder = "search checkpoints... (author:name date:week branch:main repo:owner/name or repo:*)"
+	ti.Placeholder = "search sessions, commits, code... (author:name date:week branch:main repo:owner/name or repo:*)"
 	ti.CharLimit = 200
 	ti.SetWidth(max(ss.width-6, 30))
 	ti.SetVirtualCursor(true)
@@ -831,15 +831,16 @@ func (m searchModel) viewBrowseHeader() (string, bool) {
 	b.WriteString("\n\n")
 
 	// Always show type tabs so the user can switch to the Code tab even when
-	// checkpoint search is loading/errored/empty.
-	checkpointBlocked := m.loading || m.searchErr != "" || len(m.results) == 0
+	// the semantic search is loading/errored/empty.
+	resultsBlocked := m.loading || m.searchErr != "" || len(m.results) == 0
 
 	// Type tabs
 	b.WriteString(pad + m.viewTypeTabs())
 	b.WriteString("\n\n")
 
-	// Checkpoint-specific loading/error/empty when on a checkpoint tab.
-	if checkpointBlocked && m.filterType != typeFilterCode {
+	// Loading/error/empty state for the semantic-result tabs (Sessions,
+	// Commits). Code has its own state below and is exempt.
+	if resultsBlocked && m.filterType != typeFilterCode {
 		switch {
 		case m.loading:
 			b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
