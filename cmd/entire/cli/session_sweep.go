@@ -66,8 +66,13 @@ func isSweepableZombie(st *session.State, now time.Time) bool {
 // race against a day-old zombie) and a condense of a just-resumed session is
 // coherent. If the shadow branch vanishes between our check and the engine's
 // lock, the engine clears the state — correct cleanup, since in practice that
-// only happens when a concurrent condense already succeeded. Everything is
-// best-effort: a failed session is logged and retried by the next sweep.
+// only happens when a concurrent condense already succeeded. The reverse
+// direction is also safe: an ACTIVE session with a dead owner that is being
+// resumed right now can be finalized by the sweep mid-resume, because
+// finalizeExitedSessions re-validates under the per-session lock and the
+// resume's first TurnStart re-establishes state — owner capture happens at
+// TurnStart, not SessionStart. Everything is best-effort: a failed session is
+// logged and retried by the next sweep.
 func runSessionSweep(ctx context.Context) error {
 	logCtx := logging.WithComponent(ctx, "session-sweep")
 
@@ -150,6 +155,10 @@ func sessionSweepNeeded(states []*session.State, now time.Time) bool {
 // listing the state files is a small shared-directory read, and the sweep
 // itself runs detached, so the hook's latency budget is untouched. Best-effort
 // throughout — a failure here must never fail the hook.
+//
+// A zombie that persistently fails to condense re-nominates a spawn on every
+// session start; this is accepted, by design, with no debounce — per-session
+// locks make the redundant sweeps idempotent no-ops.
 func maybeSpawnSessionSweep(ctx context.Context) {
 	states, err := strategy.ListSessionStates(ctx)
 	if err != nil {
@@ -162,6 +171,8 @@ func maybeSpawnSessionSweep(ctx context.Context) {
 	}
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "session-sweep"),
+			"skipping sweep spawn: could not resolve worktree root", slog.String("error", err.Error()))
 		return
 	}
 	logging.Info(logging.WithComponent(ctx, "session-sweep"),
