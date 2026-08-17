@@ -59,7 +59,7 @@ func (f *FactoryAIDroidAgent) ParseHookEvent(ctx context.Context, hookName strin
 	case HookNameUserPromptSubmit:
 		return f.parseTurnStart(stdin)
 	case HookNameStop:
-		return f.parseTurnEnd(stdin)
+		return f.parseTurnEnd(ctx, stdin)
 	case HookNameSessionEnd:
 		return f.parseSessionInfoEvent(stdin, agent.SessionEnd)
 	case HookNamePreToolUse:
@@ -196,7 +196,7 @@ func (f *FactoryAIDroidAgent) parseTurnStart(stdin io.Reader) (*agent.Event, err
 	}, nil
 }
 
-func (f *FactoryAIDroidAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
+func (f *FactoryAIDroidAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[stopRaw](stdin)
 	if err != nil {
 		return nil, err
@@ -205,7 +205,7 @@ func (f *FactoryAIDroidAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error
 	model := raw.Model
 	// If model not provided in hook payload, extract from transcript
 	if model == "" && raw.TranscriptPath != "" {
-		model = ExtractModelFromTranscript(raw.TranscriptPath)
+		model = ExtractModelFromTranscript(ctx, raw.TranscriptPath)
 	}
 
 	return &agent.Event{
