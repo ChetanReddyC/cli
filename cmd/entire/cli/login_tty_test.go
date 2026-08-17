@@ -196,17 +196,33 @@ func TestReadLoginURLActionFromTTY_ControlCRecordsInterrupt(t *testing.T) {
 //
 // When the program is killed by context cancellation, Bubble Tea's
 // shutdown(kill=true) skips waitForReadLoop(), so its input reader goroutine can
-// outlive Run. Closing the descriptor there races that reader (on Linux
-// cancelreader's epoll wait loop reads tty.Fd()) and frees an fd number the live
-// reader still holds, so the cancelled path must leave the descriptor alone.
+// outlive Run. Closing the descriptor there races that reader (cancelreader
+// reads tty.Fd() after each wake — epoll on Linux, kqueue on darwin) and frees
+// an fd number the live reader still holds, so neither the cancelled path nor
+// this test's own teardown may close it.
 func TestReadLoginURLActionFromTTY_CancelledLeavesDescriptorOpen(t *testing.T) {
 	t.Parallel()
 
 	ptmx, tty, observer, _ := openLoginPromptPTY(t)
 	defer ptmx.Close()
 	defer observer.Close()
-	// Ownership stays with us on this path, so this close is the real one.
-	defer tty.Close()
+
+	// There is deliberately no `defer tty.Close()`: teardown is not late enough,
+	// because the killed reader can still be in its wait on this descriptor.
+	// t.Cleanup runs after the deferred closes above, so this fails — on every
+	// platform, rather than whenever the race detector happens to catch it — if
+	// anyone adds one back.
+	//
+	// It checks the descriptor number, not the terminal state: Close sets Sysfd
+	// to -1 in shared code (internal/poll (*FD).destroy), whereas tcgetattr on
+	// the slave reports EIO on Linux once the deferred ptmx.Close above has
+	// revoked the pty — an open descriptor that a terminal-state probe would
+	// report as closed.
+	t.Cleanup(func() {
+		if int(tty.Fd()) < 0 {
+			t.Error("tty was closed during teardown")
+		}
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
