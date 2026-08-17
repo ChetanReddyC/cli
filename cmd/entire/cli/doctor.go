@@ -197,6 +197,14 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 			continue
 		}
 
+		// Degrade to warn-only when there is nobody to ask, same as
+		// checkGitHooks: an agent or CI run must not crash on a TTY prompt.
+		if !interactive.CanPromptInteractively() {
+			fmt.Fprintln(cmd.OutOrStdout(), "  Run `entire doctor --force` to fix it.")
+			fmt.Fprintln(cmd.OutOrStdout())
+			continue
+		}
+
 		// Interactive: prompt for action
 		action, err := promptSessionAction(ss)
 		if err != nil {

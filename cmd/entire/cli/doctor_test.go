@@ -400,6 +400,47 @@ func TestRunSessionsFix_ForceDiscardOutput_Indented(t *testing.T) {
 	}
 }
 
+// TestRunSessionsFix_NonInteractive_HintsForceInsteadOfPrompting — `entire
+// doctor` without --force used to open the stuck-session huh prompt even with
+// no TTY to ask on, crashing mid-scan with "bubbletea: could not open TTY" and
+// exiting 1. Non-interactive callers (agents, CI) must instead get the
+// diagnosis plus the --force hint, with the session left untouched.
+func TestRunSessionsFix_NonInteractive_HintsForceInsteadOfPrompting(t *testing.T) {
+	// Cannot use t.Parallel() because t.Chdir modifies process-global state.
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	state := &strategy.SessionState{
+		SessionID:  "2026-08-17-doctor-no-tty",
+		BaseCommit: testBaseCommit,
+		Phase:      session.PhaseActive,
+		StartedAt:  time.Now().Add(-2 * time.Hour),
+	}
+	require.NoError(t, strategy.SaveSessionState(context.Background(), state))
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	require.NoError(t, runSessionsFix(cmd, false))
+
+	output := stdout.String()
+	assert.Contains(t, output, "Found 1 stuck session(s):")
+	assert.Contains(t, output, "  Session: 2026-08-17-doctor-no-tty")
+	assert.Contains(t, output, "entire doctor --force")
+	assert.NotContains(t, output, "Discarded session")
+	assert.NotContains(t, output, "Condensed session")
+
+	// The session must survive untouched so --force (or an interactive run)
+	// can still act on it.
+	states, err := strategy.ListSessionStates(context.Background())
+	require.NoError(t, err)
+	require.Len(t, states, 1)
+	assert.Equal(t, "2026-08-17-doctor-no-tty", states[0].SessionID)
+}
+
 // TestCheckCodexHookTrust_SilentWhenCodexNotInstalled — `entire doctor`
 // shouldn't print anything Codex-related when this repo doesn't have
 // .codex/hooks.json. Other agents (Claude, Cursor) keep their existing
