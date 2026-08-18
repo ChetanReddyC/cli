@@ -149,7 +149,9 @@ func gitReadRepo(ctx context.Context) (string, bool) {
 }
 
 // snapshotFor returns the per-repository snapshot, or nil when this call must not
-// be cached. Callers hold c.mu.
+// be cached. Acquires c.mu for the map access and releases it before returning;
+// callers must NOT hold it. The lock is deliberately never held across a git read
+// (see gitRemoteCache).
 func (c *gitRemoteCache) snapshotFor(ctx context.Context) *remoteSnapshot {
 	repoRoot, ok := gitReadRepo(ctx)
 	if !ok {
