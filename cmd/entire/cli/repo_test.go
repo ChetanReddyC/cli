@@ -290,6 +290,8 @@ func serveRepoCreate(t *testing.T) <-chan []byte {
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("read create body: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 		bodyCh <- raw
 		w.Header().Set("Content-Type", "application/json")
