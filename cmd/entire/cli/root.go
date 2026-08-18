@@ -168,6 +168,8 @@ func NewRootCmd() *cobra.Command {
 		},
 	}
 
+	addContextFlag(cmd)
+
 	// Help groups; AddGroup order is display order in `entire --help`.
 	cmd.AddGroup(
 		&cobra.Group{ID: groupSetup, Title: "Entire Setup:"},
@@ -209,8 +211,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(inGroup(newRecapCmd(), groupSessions))
 	cmd.AddCommand(inGroup(newAPICmd(), groupControlPlane)) // authenticated passthrough to core/cell APIs
 	cmd.AddCommand(newAgentHelpCmd(cmd))                    // visible: agents on transports without context injection discover it via `entire help`
-
-	experimental.Register(cmd, newSearchCmd()) // 'entire search' = 'checkpoint search' (experimental)
+	cmd.AddCommand(inGroup(newSearchCmd(), groupSessions))  // 'search' — canonical top-level spelling; 'checkpoint search' stays a working alias
 
 	// Experimental labs commands (listed via `entire labs`; not deprecation shortcuts).
 	experimental.Register(cmd, newExpertsCmd()) // 'experts' (experimental); agent/workflow provenance

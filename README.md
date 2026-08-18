@@ -68,8 +68,27 @@ Install with Scoop:
 
 ```powershell
 scoop bucket add entire https://github.com/entireio/scoop-bucket.git
-scoop install entire/cli
+scoop install entire/entire
 ```
+
+#### Migrating an old `cli` Scoop install (package rename)
+
+The Scoop package was renamed from `cli` to `entire`. If your install is still
+registered as the old `cli` package, run the migration below. It installs the
+new package before removing the old one, so the old install is only removed
+once the new one is in place (`scoop reset` re-links the shared `entire.exe`
+and `git-remote-entire.exe` shims). Run it where `entire` is **not** running — a
+live `entire.exe` locks its own shim, so Scoop can't relink or uninstall it
+mid-run:
+
+```powershell
+cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"
+```
+
+If the first step fails with "couldn't find manifest", your bucket clone
+predates the renamed package — run `scoop update` to refresh it, then retry the
+command above. Nothing is removed until the install succeeds, so a failed
+attempt leaves your existing install working.
 
 ### Go (development/manual setup)
 
@@ -105,7 +124,7 @@ How to use each channel:
 - Homebrew nightly: `brew install --cask entire@nightly`
 - `install.sh` stable: `curl -fsSL https://entire.io/install.sh | bash`
 - `install.sh` nightly: `curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly`
-- Scoop: currently supports `stable` only via `scoop install entire/cli`
+- Scoop: currently supports `stable` only via `scoop install entire/entire`
 
 ## Typical Workflow
 
@@ -255,6 +274,7 @@ mise run dev
 
 # In this repo, point the CLI at the local API. The login flow targets
 # the local server via --server (the default is the production
+# auth.entire.io, which dispatches to a regional login server such as
 # us.auth.entire.io).
 cd ../cli
 export ENTIRE_API_BASE_URL=http://localhost:8787

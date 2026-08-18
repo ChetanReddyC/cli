@@ -92,13 +92,14 @@ the commands are always runnable in every build.
 Experimental commands (gated by the build-time visibility flag above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
 in stable releases, always runnable): `tokens`, `import`, `review`,
-`investigate`, `blame`, `why`, the top-level `search` shortcut, `experts`,
-`runner`, and `checkpoint policy`. `tokens` is also advertised through `entire
-labs`. The canonical `checkpoint search` is not gated and stays visible.
+`investigate`, `blame`, `why`, `experts`, `runner`, and `checkpoint policy`.
+`tokens` is also advertised through `entire labs`.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
-`configure`, `agent-help`, `api`.
+`configure`, `agent-help`, `api`, `search`. `search` is the canonical
+spelling (visible in every build, grouped with Sessions & Checkpoints);
+`checkpoint search` stays a working alias of the same command.
 
 `api` is an authenticated passthrough to Entire's HTTP APIs (gh-style): it
 attaches the right bearer and dials the right host so callers don't plumb auth
@@ -107,15 +108,39 @@ entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
 jurisdiction's cell instead of the caller's home cell and implies `--to cell`
 (cell routing + identity-token exchange live in `auth.NewEntireAPICellClient`
 via `auth.CellTarget`). `{owner}`/`{repo}`/`{repo_id}` in the path are filled
-from the current repo's origin remote. It is visible in `entire help` and
-`entire agent-help`, so agents discover it as the supported way to call the API.
+from the current repo's origin remote. It is an escape hatch, so it is absent
+from `agent-help`'s curated listing but stays in `entire help` and agent-help's
+footer — an agent that needs raw access must find it rather than hand-roll curl
+with a token.
 
 `agent-help` renders machine-readable, agent-facing usage live from the Cobra
-command tree (so it always matches the installed binary): bare prints a
-"when to use entire / which subcommand" map; `agent-help <command>` drills into
-one command's current flags; `--json` emits structured output. It is the single
-source of truth the first-turn context injection and the `--agent-help-skill`
-skill point agents at, instead of enumerating a surface that goes stale.
+command tree (so it always matches the installed binary): bare prints a curated
+"when to use entire" map; `agent-help <command>` drills into one command's
+current flags; `--json` emits structured output. It is the single source of
+truth the first-turn context injection and the `--agent-help-skill` skill point
+agents at, instead of enumerating a surface that goes stale.
+
+#### Where agent-facing text goes
+
+| What you have | Where it goes |
+| --- | --- |
+| A new command | `agentHelpClassification` in `agent_help_cmd.go` — one entry, keyed by command path, carrying `audience` and `listed` |
+| "When to use this at all" advice for agents | `agentHelpGuidance` — **never** cobra `Short`/`Long` |
+| A fact humans need too (e.g. "this output is not stable") | cobra `Long`. Human help is a reference, not a lecture: whoever typed `--help` already chose the command |
+| A per-task command recommendation | `agent-help`, which is pulled on demand. **Never** the first-turn injection, which carries only invariants true on every turn |
+
+**Flag it; don't decide it.** Whether a command is `listed`, and whether it is
+read-only / task-driven / user-owned, are product judgment calls — they change
+what agents do unprompted in every user's repo. Take the safe default
+(unlisted, user-owned), then say in the PR what you picked and why so a human
+can move it. Never quietly promote a command into the listing or into
+read-only.
+
+CI enforces the mechanical parts, so trust these rather than re-deriving them:
+every advertised top-level command and every child of a listed group is
+classified; a read-only group contains no writing subcommand; guidance text
+never appears in a command's `Short`/`Long`.
+
 Hidden commands opt into being advertised here by setting
 `Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`). Because `agent-help`
 renders live and lists non-hidden commands, the experimental commands appear in
@@ -133,9 +158,7 @@ Enabling a no-channel agent with `--agent-help-skill` reports the skill
 unsupported and points the agent at this passive path instead.
 
 Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
-`checkpoint`. The `search` top-level is experimental (see the visibility gate
-above), so it follows the build-dependent visibility rather than being
-unconditionally hidden.
+`checkpoint`.
 
 Hidden infrastructure commands: `hooks`, `trail`,
 `curl-bash-post-install`, `__send_analytics`, `mcp` (MCP stdio server for
@@ -660,7 +683,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **Shadow branch migration** - if user does stash/pull/rebase (HEAD changes without commit), shadow branch is automatically moved to new base commit
 - **Orphaned branch cleanup** - if a shadow branch exists without a corresponding session state file, it is automatically reset when a new session starts
 - PrePush hook can push `entire/checkpoints/v1` branch alongside user pushes
-- **Single checkpoint sync remote** - checkpoint data syncs only to the elected checkpoint sync remote (`strategy_options.checkpoint_push_remote` setting → `origin` → sole remote → first remote in `.git/config` order; fail-closed only when the setting names a missing remote), on both the git-branch and git-refs backends. The branch's tracking config (`branch.<name>.pushRemote`, `remote.pushDefault`, `branch.<name>.remote`) is deliberately **not** a tier: election is compared against the remote of the push being made, so electing the tracking remote silently drops checkpoint sync on every push to a different remote (`git push <other> HEAD`, a `git clone -o base` pushing checkpoints to a separately added `origin`, any repo with `remote.pushDefault`), and elects a remote the read paths — which resolve through origin's remote-tracking refs — cannot see. For a fork setup where `origin` is an unpushable base repo, name the fork with `checkpoint_push_remote`. Pushes to any other remote or to a raw URL never carry checkpoint data; the dedicated `checkpoint_remote` URL mode is exempt. `entire status` shows the sync destination and an unpushed-checkpoint count.
+- **Single checkpoint sync remote** - checkpoint data syncs only to the elected checkpoint sync remote (`strategy_options.checkpoint_push_remote` setting → `origin` → sole remote → first remote in `.git/config` order; fail-closed only when the setting names a missing remote), on both the git-branch and git-refs backends. The branch's tracking config (`branch.<name>.pushRemote`, `remote.pushDefault`, `branch.<name>.remote`) is deliberately **not** a tier: election is compared against the remote of the push being made, so electing the tracking remote silently drops checkpoint sync on every push to a different remote (`git push <other> HEAD`, a `git clone -o base` pushing checkpoints to a separately added `origin`, any repo with `remote.pushDefault`). Checkpoint reads consult the elected remote first and `origin` as a read-only legacy tier. For a fork setup where `origin` is an unpushable base repo, name the fork with `checkpoint_push_remote`. Pushes to any other remote or to a raw URL never carry checkpoint data; the dedicated `checkpoint_remote` URL mode is exempt. `entire status` shows the sync destination and an unpushed-checkpoint count.
 - **OPF (OpenAI Privacy Filter) runs at pre-push, not post-commit**: when `redaction.openai_privacy_filter.enabled` is true, the PrePush hook re-redacts unpushed `entire/checkpoints/v1` commits with the OPF 9th layer, builds new commits carrying an `Entire-OPF-Applied: true` trailer, and atomically updates the local v1 ref before pushing. Per-commit condensation stays on the fast 8-layer pipeline. See `strategy/manual_commit_opf_rewrite.go` and `docs/security-and-privacy.md` for the full flow, including divergence detection, bootstrap caps, and CAS-on-conflict semantics.
 - Safe to use on main/master since it never modifies commit history
 
@@ -669,7 +692,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - `strategy.go` - Interface definition and context structs (`StepContext`, `TaskStepContext`, `RewindPoint`, etc.)
 - `common.go` - Helpers for metadata extraction, tree building, rewind validation, `ListCheckpoints()`
 - `manual_commit*.go` - Manual-commit strategy: main impl, types, session state, condensation, rewind, git ops, logs, hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push), reset
-- `manual_commit_opf_rewrite.go` - Pre-push OPF re-redaction: walks unpushed v1 commits, runs OPF over their blobs, rebuilds commits with `Entire-OPF-Applied: true` trailer, CAS-updates the local ref. Sentinel error types (use `errors.As`): `V1DivergedError`, `BootstrapTooLargeError`, `V1RefMovedError`, `OPFRuntimeFailedError`.
+- `manual_commit_opf_rewrite.go` - Pre-push OPF re-redaction: walks unpushed v1 commits, runs OPF over their blobs, rebuilds commits with `Entire-OPF-Applied: true` trailer, CAS-updates the local ref. Sentinel error types (use `errors.As`): `V1DivergedError`, `BootstrapTooLargeError`, `V1RefMovedError`, `OPFRuntimeFailedError`, `OPFBatchTooLargeError`, `OPFRawBytesTooLargeError`, `OPFNoCategoriesError` (OPF enabled with zero effective categories — the pre-push decision and the rewrite both fail closed instead of stamping the trailer without a scan).
 - `cleanup.go` - Cleanup discovery/deletion for shadow branches, session states, and checkpoint metadata
 - `session_state.go` - Package-level session state functions
 - `hooks.go` - Git hook installation
