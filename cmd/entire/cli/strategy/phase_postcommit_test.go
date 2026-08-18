@@ -2601,7 +2601,11 @@ func TestPostCommit_EndedSessionWithLingeringMarker_UnrelatedCommitNotCondensed(
 	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	originalBaseCommit := state.BaseCommit
 
-	// A later, completely unrelated human commit: a new file, test.txt untouched.
+	// A later, completely unrelated human commit: a new file, test.txt
+	// untouched. Carries an Entire-Checkpoint trailer so PostCommit's own
+	// no-trailer early bail (~line 947) doesn't short-circuit before ever
+	// reaching the overlap check this test exists to exercise — without the
+	// trailer, this test would trivially pass for the wrong reason.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "other-work.txt"), []byte("unrelated work"), 0o644))
 	wt, err := repo.Worktree()
 	require.NoError(t, err)

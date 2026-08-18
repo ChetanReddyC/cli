@@ -696,8 +696,7 @@ func (h *postCommitActionHandler) parentCommitHash() string {
 
 func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 	logCtx := logging.WithComponent(h.ctx, "checkpoint")
-	idleWithLiveMarker := state.Phase == session.PhaseIdle && len(state.InFlightTasks) > 0
-	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, idleWithLiveMarker)
+	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, idleWithLiveMarker(state, time.Now()))
 
 	logging.Debug(logCtx, "post-commit: HandleCondense decision",
 		slog.String("session_id", state.SessionID),
@@ -725,8 +724,7 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 
 func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.State) error {
 	logCtx := logging.WithComponent(h.ctx, "checkpoint")
-	idleWithLiveMarker := state.Phase == session.PhaseIdle && len(state.InFlightTasks) > 0
-	shouldCondense := len(state.FilesTouched) > 0 && h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, idleWithLiveMarker)
+	shouldCondense := len(state.FilesTouched) > 0 && h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, idleWithLiveMarker(state, time.Now()))
 
 	logging.Debug(logCtx, "post-commit: HandleCondenseIfFilesTouched decision",
 		slog.String("session_id", state.SessionID),
@@ -758,11 +756,11 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 // ENDED) sessions with a live in-flight background task, condense unless they
 // have no tracked files and another session claims the committed files
 // (read-only gate). Stale ACTIVE sessions and any session with no live marker
-// (including IDLE sessions past their marker's lifetime, and ENDED sessions —
-// see idleWithLiveMarker's doc for why ENDED is excluded even though it can
-// carry a lingering marker) require file overlap evidence between tracked
-// files and committed files.
-func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time, idleWithLiveMarker bool) bool {
+// (including IDLE sessions whose markers were already claimed, and ENDED
+// sessions — see idleWithLiveMarker's doc for why ENDED is excluded even
+// though it can carry a lingering marker) require file overlap evidence
+// between tracked files and committed files.
+func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time, hasLiveMarker bool) bool {
 	if !h.hasNew {
 		return false
 	}
@@ -808,11 +806,11 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	// (agent killed without Stop hook) into every subsequent commit. A stale
 	// session has no recent interaction and falls through to the overlap
 	// check unless it has a live (IDLE) marker.
-	if (isActive && isRecentInteraction(lastInteraction)) || idleWithLiveMarker {
+	if (isActive && isRecentInteraction(lastInteraction)) || hasLiveMarker {
 		if h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 {
 			logging.Debug(h.ctx, "post-commit: skipping read-only session (no tracked files, other sessions claim committed files)",
 				slog.Bool("is_active", isActive),
-				slog.Bool("idle_with_live_marker", idleWithLiveMarker),
+				slog.Bool("idle_with_live_marker", hasLiveMarker),
 				slog.Int("sessions_with_committed_files", h.sessionsWithCommittedFiles),
 			)
 			return false
@@ -893,6 +891,30 @@ const activeSessionInteractionThreshold = 24 * time.Hour
 // activeSessionInteractionThreshold of now.
 func isRecentInteraction(lastInteraction *time.Time) bool {
 	return lastInteraction != nil && time.Since(*lastInteraction) < activeSessionInteractionThreshold
+}
+
+// idleWithLiveMarker reports whether state is an IDLE session with a
+// recently-started background task — the second shape trusted to link and
+// condense commits without overlap evidence. Bounded by the marker's age:
+// markers are cleared only by final captures (SubagentStop/SessionEnd), so a
+// subagent that dies without either leaves its marker behind; an unbounded
+// trust would link every later no-TTY commit into the session forever. 24h
+// matches activeSessionInteractionThreshold's generosity; the sweep-finalize
+// follow-up (see PR body) is the eventual hygiene for orphaned markers.
+//
+// Shared by tryAgentCommitFastPath's eligibility check and
+// shouldCondenseWithOverlapCheck's overlap-check bypass so the trigger and
+// the condensation trust can never drift apart into two different rules.
+func idleWithLiveMarker(state *SessionState, now time.Time) bool {
+	if state.Phase != session.PhaseIdle {
+		return false
+	}
+	for _, task := range state.InFlightTasks {
+		if now.Sub(task.StartedAt) < activeSessionInteractionThreshold {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *postCommitActionHandler) HandleDiscardIfNoFiles(state *session.State) error {
@@ -2126,17 +2148,21 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	eligibleSessions := 0
 	emptyEligibleSessions := 0
+	now := time.Now()
 	for _, state := range sessions {
 		// Two shapes are linkable here: a classic ACTIVE agent commit (the
-		// agent is mid-turn), and an IDLE session with a live in-flight
-		// background task (a background subagent committing between the
-		// parent's turns — the ACTIVE-only gate used to silently drop
-		// linkage for these, since the parent session goes idle while the
-		// subagent keeps running). The commit-snapshot capture (see
-		// lifecycle.go's captureInFlightTaskCommitSnapshot) is what makes
-		// the checkpoint this trailer points at actually contentful for the
-		// idle+marker shape; this check is only the trigger.
-		eligible := state.Phase.IsActive() || (state.Phase == session.PhaseIdle && len(state.InFlightTasks) > 0)
+		// agent is mid-turn), and an IDLE session with a live (not stale —
+		// see idleWithLiveMarker) in-flight background task (a background
+		// subagent committing between the parent's turns — the ACTIVE-only
+		// gate used to silently drop linkage for these, since the parent
+		// session goes idle while the subagent keeps running). The
+		// commit-snapshot capture (see lifecycle.go's
+		// captureInFlightTaskCommitSnapshot) is what makes the checkpoint
+		// this trailer points at actually contentful for the idle+marker
+		// shape; this check is only the trigger. Shares idleWithLiveMarker
+		// with shouldCondenseWithOverlapCheck's overlap-check bypass so the
+		// trigger and the condensation trust never drift into two rules.
+		eligible := state.Phase.IsActive() || idleWithLiveMarker(state, now)
 		if !eligible {
 			continue
 		}

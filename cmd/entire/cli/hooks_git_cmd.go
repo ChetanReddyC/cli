@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/perf"
@@ -273,7 +274,9 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 				return nil
 			}
 
-			captureCommitSnapshotsForInFlightTasks(g.ctx)
+			if headHasCheckpointTrailer(g.ctx) {
+				captureCommitSnapshotsForInFlightTasks(g.ctx)
+			}
 
 			hookErr := g.strategy.PostCommit(g.ctx)
 			g.logCompleted(hookErr)
@@ -281,6 +284,41 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// headHasCheckpointTrailer reports whether HEAD's commit message carries an
+// Entire-Checkpoint trailer, using the same trailers.ParseCheckpoint helper
+// strategy.PostCommit itself reads it with (manual_commit_hooks.go's PostCommit,
+// ~line 947). Gates captureCommitSnapshotsForInFlightTasks: condensation only
+// ever happens for a trailer-bearing commit — PostCommit bails immediately
+// otherwise — so running the commit-snapshot capture ahead of a no-trailer
+// commit would pay a full analyzer transcript scan plus a full
+// sanitize→externalize→redact transcript write for content nothing will ever
+// condense. Ordinary human commits between turns already have their session
+// state kept fresh by the turn-end backstop (captureInFlightTasks), so
+// skipping here loses nothing. Fails closed (false) on any read error: if we
+// can't tell whether the trailer is present, PostCommit itself will bail on
+// the same commit for the same reason, so there is nothing for the capture to
+// usefully back either.
+func headHasCheckpointTrailer(ctx context.Context) bool {
+	repo, err := gitrepo.OpenCurrent(ctx)
+	if err != nil {
+		return false
+	}
+	defer repo.Close()
+
+	head, err := repo.Head()
+	if err != nil {
+		return false
+	}
+
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return false
+	}
+
+	_, found := trailers.ParseCheckpoint(commit.Message)
+	return found
 }
 
 // captureCommitSnapshotsForInFlightTasks runs the commit-snapshot capture
