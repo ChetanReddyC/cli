@@ -508,11 +508,34 @@ func printReviewStreamEvent(w io.Writer, ev reviewStreamEvent) {
 	}
 }
 
+// importedTrailEventPayloadAliases covers historical event payloads imported
+// into entire-api. The server always writes the event envelope in camelCase,
+// but forwards its stored payload JSONB verbatim; the importer preserves those
+// bytes, so imported rows can still contain these snake_case keys. Keep this
+// compatibility scoped to known payload fields rather than normalizing the
+// envelope or arbitrary user data.
+var importedTrailEventPayloadAliases = map[string]string{
+	"headSha":           "head_sha",
+	"baseSha":           "base_sha",
+	"codeVersionId":     "code_version_id",
+	"filePath":          "file_path",
+	"reviewCommentId":   "review_comment_id",
+	"changeType":        "change_type",
+	"suggestedChangeId": "suggested_change_id",
+	"sourceCommentId":   "source_comment_id",
+	"targetCommentId":   "target_comment_id",
+}
+
 func payloadString(payload map[string]any, key string) string {
 	if payload == nil {
 		return ""
 	}
 	v, ok := payload[key]
+	if !ok {
+		if alias, exists := importedTrailEventPayloadAliases[key]; exists {
+			v, ok = payload[alias]
+		}
+	}
 	if !ok || v == nil {
 		return ""
 	}

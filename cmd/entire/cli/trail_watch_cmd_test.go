@@ -266,6 +266,42 @@ func TestPrintReviewStreamEventReadsEntireAPICamelCasePayload(t *testing.T) {
 	}
 }
 
+func TestPayloadStringReadsImportedSnakeCasePayload(t *testing.T) {
+	t.Parallel()
+	payload := map[string]any{
+		"head_sha":            "head",
+		"base_sha":            "base",
+		"code_version_id":     "version",
+		"file_path":           "main.go",
+		"review_comment_id":   "comment",
+		"change_type":         "replace",
+		"suggested_change_id": "change",
+		"source_comment_id":   "source",
+		"target_comment_id":   "target",
+	}
+	want := map[string]string{
+		"headSha":           "head",
+		"baseSha":           "base",
+		"codeVersionId":     "version",
+		"filePath":          "main.go",
+		"reviewCommentId":   "comment",
+		"changeType":        "replace",
+		"suggestedChangeId": "change",
+		"sourceCommentId":   "source",
+		"targetCommentId":   "target",
+	}
+	for key, expected := range want {
+		if got := payloadString(payload, key); got != expected {
+			t.Errorf("payloadString(payload, %q) = %q, want %q", key, got, expected)
+		}
+	}
+
+	payload["headSha"] = "current"
+	if got := payloadString(payload, "headSha"); got != "current" {
+		t.Errorf("canonical key must win: got %q, want current", got)
+	}
+}
+
 func TestStreamOnce_SendsLastEventIDHeader(t *testing.T) {
 	frames := []string{
 		"event: reconnect\ndata: {\"reason\":\"max_duration\"}\n\n",
