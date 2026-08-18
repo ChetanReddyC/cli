@@ -696,7 +696,7 @@ func (h *postCommitActionHandler) parentCommitHash() string {
 
 func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 	logCtx := logging.WithComponent(h.ctx, "checkpoint")
-	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime)
+	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, len(state.InFlightTasks) > 0)
 
 	logging.Debug(logCtx, "post-commit: HandleCondense decision",
 		slog.String("session_id", state.SessionID),
@@ -724,7 +724,7 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 
 func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.State) error {
 	logCtx := logging.WithComponent(h.ctx, "checkpoint")
-	shouldCondense := len(state.FilesTouched) > 0 && h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime)
+	shouldCondense := len(state.FilesTouched) > 0 && h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, len(state.InFlightTasks) > 0)
 
 	logging.Debug(logCtx, "post-commit: HandleCondenseIfFilesTouched decision",
 		slog.String("session_id", state.SessionID),
@@ -752,32 +752,49 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 }
 
 // shouldCondenseWithOverlapCheck returns true if the session should be condensed
-// into this commit. Active sessions with recent interaction condense unless they
-// have no tracked files and another session claims the committed files (read-only
-// gate). Stale ACTIVE and IDLE/ENDED sessions require file overlap evidence
-// between tracked files and committed files.
-func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time) bool {
+// into this commit. Active sessions with recent interaction, and idle sessions
+// with a live in-flight background task, condense unless they have no tracked
+// files and another session claims the committed files (read-only gate). Stale
+// ACTIVE and IDLE/ENDED sessions with no live marker require file overlap
+// evidence between tracked files and committed files.
+func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time, hasLiveInFlightMarker bool) bool {
 	if !h.hasNew {
 		return false
 	}
-	// ACTIVE sessions with recent interaction: skip the overlap check.
-	// PrepareCommitMsg already validated this commit is session-related
-	// (added trailer). The overlap check is only meaningful when we need
-	// heuristic evidence that a commit was related to the session.
+	// Two shapes skip the overlap check: an ACTIVE session with recent
+	// interaction, and an idle session with a live in-flight background task.
+	// In both cases PrepareCommitMsg's tryAgentCommitFastPath already
+	// validated this commit is session-related before adding the trailer
+	// (manual_commit_hooks.go), so the overlap check below — which exists to
+	// manufacture heuristic evidence when no such upstream signal exists —
+	// would be redundant at best.
+	//
+	// For the marker shape specifically, the overlap check isn't just
+	// redundant, it's unsatisfiable: the commit-snapshot capture that backs
+	// this trailer's checkpoint (captureInFlightTaskCommitSnapshot,
+	// cmd/entire/cli/lifecycle.go) runs post-commit, so
+	// filterToUncommittedFiles strips any file the subagent's own commit just
+	// landed before ModifiedFiles ever reaches FilesTouched — the realistic
+	// case is a self-committing background subagent, whose ModifiedFiles is
+	// then routinely empty. Requiring FilesTouched-overlap on top of hasNew
+	// would silently drop exactly the linkage this shape exists to fix.
 	//
 	// Exception: when another session's tracked files overlap with the
-	// committed files, skip this ACTIVE session if it has no tracked files
-	// itself. This prevents read-only sessions (e.g., codex exec from tools
-	// like summarize) from being condensed when a different session's commit
+	// committed files, skip this session if it has no tracked files itself.
+	// This prevents read-only sessions (e.g., codex exec from tools like
+	// summarize) from being condensed when a different session's commit
 	// triggers PostCommit. When no other session claims the committed files,
-	// the ACTIVE session is assumed to own the commit.
+	// this session is assumed to own the commit.
 	//
 	// We check LastInteractionTime to avoid condensing stale ACTIVE sessions
 	// (agent killed without Stop hook) into every subsequent commit. A stale
-	// session has no recent interaction and falls through to the overlap check.
-	if isActive && isRecentInteraction(lastInteraction) {
+	// session has no recent interaction and falls through to the overlap
+	// check unless it has a live marker.
+	if (isActive && isRecentInteraction(lastInteraction)) || hasLiveInFlightMarker {
 		if h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 {
-			logging.Debug(h.ctx, "post-commit: skipping read-only ACTIVE session (no tracked files, other sessions claim committed files)",
+			logging.Debug(h.ctx, "post-commit: skipping read-only session (no tracked files, other sessions claim committed files)",
+				slog.Bool("is_active", isActive),
+				slog.Bool("has_live_in_flight_marker", hasLiveInFlightMarker),
 				slog.Int("sessions_with_committed_files", h.sessionsWithCommittedFiles),
 			)
 			return false
@@ -2068,6 +2085,15 @@ func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, se
 // commit), or when it is IDLE with a live in-flight background task (a
 // background subagent committing between the parent session's turns — see
 // the eligibility check below for why this shape needs its own trigger).
+// Widening eligibility to the idle+marker shape also widens the no-TTY
+// auto-link window to span the whole lifetime of the background task, not
+// just the parent's own turns — including a human commit made from a
+// raw-mode TUI git client (lazygit, gitui, tig; see
+// interactive.CanPromptInteractively's rawmode_unix.go) while a subagent is
+// still running. That's an accepted trade-off, not an oversight: the marker
+// is genuine evidence that agent work is live in this worktree, and a rare
+// mislinked human commit is cheaper than the incident this fixes — a
+// background subagent's commits silently carrying no session linkage at all.
 func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commitMsgFile string, sessions []*SessionState, source string) bool {
 	noTTY := !interactive.CanPromptInteractively()
 	skipContentDetection := noTTY
@@ -2115,9 +2141,18 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		return true
 	}
 	// Log why fast path didn't fire — collect session phases for diagnostics.
+	// in_flight_tasks is summed across all sessions (not just eligible ones) so
+	// "idle, no markers at all" (in_flight_tasks == 0) reads differently in the
+	// logs from "idle, markers present but something ate them before this loop
+	// saw them" (in_flight_tasks > 0 with eligible_sessions still 0) — the
+	// latter would otherwise be indistinguishable from ordinary no-marker idle
+	// commits and point straight at a bug in marker bookkeeping upstream of
+	// this fast path.
 	phases := make([]string, 0, len(sessions))
+	totalInFlightTasks := 0
 	for _, state := range sessions {
 		phases = append(phases, string(state.Phase))
+		totalInFlightTasks += len(state.InFlightTasks)
 	}
 	message := "prepare-commit-msg: fast path found no ACTIVE or idle-with-in-flight-task sessions"
 	if eligibleSessions > 0 && emptyEligibleSessions == eligibleSessions {
@@ -2128,14 +2163,18 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		slog.Int("sessions", len(sessions)),
 		slog.Int("eligible_sessions", eligibleSessions),
 		slog.Int("empty_eligible_sessions", emptyEligibleSessions),
+		slog.Int("in_flight_tasks", totalInFlightTasks),
 		slog.Any("session_phases", phases),
 	)
 	return false
 }
 
-// addTrailerForAgentCommit handles the fast path when an agent is committing
-// (ACTIVE session + no TTY). Generates a checkpoint ID and adds the trailer
-// directly, bypassing content detection and interactive prompts.
+// addTrailerForAgentCommit handles the fast path when an agent is committing:
+// an ACTIVE session with no TTY, an IDLE session with a live in-flight
+// background task (regardless of TTY), or any eligible session when
+// commit_linking="always" is set (which skips content detection even with a
+// TTY present). Generates a checkpoint ID and adds the trailer directly,
+// bypassing content detection and interactive prompts.
 func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error { //nolint:unparam // kept for signature stability
 	cpID, err := checkpoint.GenerateCheckpointID(logCtx)
 	if err != nil {

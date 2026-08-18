@@ -2459,3 +2459,102 @@ func TestWarnStaleEndedSessions_RateLimit(t *testing.T) {
 	warnStaleEndedSessionsTo(ctx, 5, &buf)
 	assert.Contains(t, buf.String(), "entire doctor")
 }
+
+// TestPostCommit_IdleSessionWithLiveMarker_CondensesCommitSnapshot is the
+// OPEN ITEM 2.5 verification: an idle session with a live in-flight marker is
+// eligible for the fast-path trailer (tryAgentCommitFastPath), and the
+// CLI-layer commit-snapshot capture (captureInFlightTaskCommitSnapshot,
+// cmd/entire/cli/lifecycle.go) runs before PostCommit to back that trailer
+// with real content. This test reproduces the capture's realistic effect on
+// session state directly via SaveTaskStep — a non-incremental task step whose
+// ModifiedFiles ends up empty because the subagent's own file write already
+// landed in this very commit (filterToUncommittedFiles strips it once HEAD
+// includes it) — and then runs PostCommit, asserting condensation actually
+// happens end to end.
+//
+// This is the scenario the incident's fix depends on: a background subagent
+// commits its own work mid-task, so ModifiedFiles is empty and the session
+// never picks up a FilesTouched/committed-file overlap the "content
+// detection" path normally requires. Idle + EventGitCommit routes
+// unconditionally to ActionCondense (session/phase.go), and hasNew is true
+// because the commit-snapshot capture grew the shadow branch's stored
+// transcript — but shouldCondenseWithOverlapCheck still requires
+// filesTouchedBefore to overlap with the committed files for a non-active
+// session, which an empty ModifiedFiles list can never satisfy. If this test
+// fails, that overlap requirement is the residual gate Step 2.5 anticipated.
+func TestPostCommit_IdleSessionWithLiveMarker_CondensesCommitSnapshot(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-postcommit-idle-marker"
+	toolUseID := "toolu_idlemarker1"
+	agentID := "agent-idlemarker1"
+
+	worktreePath, err := paths.WorktreeRoot(context.Background())
+	require.NoError(t, err)
+	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	require.NoError(t, err)
+
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	transcriptDir := t.TempDir()
+	mainTranscriptPath := filepath.Join(transcriptDir, "main.jsonl")
+	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"work in background"}}`+"\n"), 0o644))
+
+	now := time.Now()
+	state := &SessionState{
+		SessionID:      sessionID,
+		BaseCommit:     head.Hash().String(),
+		WorktreePath:   worktreePath,
+		WorktreeID:     worktreeID,
+		StartedAt:      now,
+		Phase:          session.PhaseIdle,
+		AgentType:      agent.AgentTypeClaudeCode,
+		TranscriptPath: mainTranscriptPath,
+		InFlightTasks: []session.InFlightTask{
+			{ToolUseID: toolUseID, AgentID: agentID, StartedAt: now, SubagentType: "dev", TaskDescription: "background widget work"},
+		},
+	}
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// Reproduce captureInFlightTaskCommitSnapshot's realistic effect: a
+	// non-incremental task step with a stored transcript but zero
+	// ModifiedFiles (the subagent's file write is the very thing this commit
+	// lands, so post-commit filtering strips it before SaveTaskStep is called).
+	require.NoError(t, s.SaveTaskStep(context.Background(), TaskStepContext{
+		SessionID:              sessionID,
+		ToolUseID:              toolUseID,
+		AgentID:                agentID,
+		TranscriptPath:         mainTranscriptPath,
+		SubagentTranscriptPath: mainTranscriptPath,
+		AuthorName:             "Test",
+		AuthorEmail:            "test@test.com",
+		IsIncremental:          false,
+		SubagentType:           "dev",
+		TaskDescription:        "background widget work",
+		AgentType:              agent.AgentTypeClaudeCode,
+	}))
+
+	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+
+	// The subagent's own commit: the file it wrote, landing in HEAD alongside
+	// the Entire-Checkpoint trailer tryAgentCommitFastPath would have added.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "widget.txt"), []byte("written by background subagent"), 0o644))
+	commitFilesWithTrailer(t, repo, dir, "a1a1a1a1a1a1", "widget.txt")
+
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	// Condensation should have consumed the commit-snapshot's shadow-branch
+	// content into a permanent checkpoint.
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensing the idle+marker session's commit-snapshot capture")
+
+	refName := plumbing.NewBranchReferenceName(shadowBranch)
+	_, err = repo.Reference(refName, true)
+	assert.Error(t, err, "shadow branch should be deleted once its commit-snapshot content is condensed")
+}

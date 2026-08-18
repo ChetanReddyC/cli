@@ -7,11 +7,13 @@ import (
 	"os"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
@@ -270,11 +272,73 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 			if g.skipUnsupportedCheckpointPolicy() {
 				return nil
 			}
+
+			captureCommitSnapshotsForInFlightTasks(g.ctx)
+
 			hookErr := g.strategy.PostCommit(g.ctx)
 			g.logCompleted(hookErr)
 
 			return nil
 		},
+	}
+}
+
+// captureCommitSnapshotsForInFlightTasks runs the commit-snapshot capture
+// (captureInFlightTasksForCommit, cmd/entire/cli/lifecycle.go) for every
+// current-worktree session with a live in-flight background task, before
+// strategy.PostCommit condenses this commit. This is what makes the
+// Entire-Checkpoint trailer tryAgentCommitFastPath adds for an idle session
+// with a live marker (see manual_commit_hooks.go) point at a checkpoint that
+// actually contains the subagent's work — without it, the trailer names a
+// checkpoint with nothing behind it.
+//
+// Lives in the CLI layer (not strategy) because the capture needs
+// agent.AsTranscriptAnalyzer and agent.GetByAgentType — the strategy package
+// must not import agent analyzers. Best-effort throughout: every failure path
+// here logs and returns, never blocking strategy.PostCommit from running.
+func captureCommitSnapshotsForInFlightTasks(ctx context.Context) {
+	logCtx := logging.WithComponent(ctx, "hooks")
+
+	worktreePath, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		logging.Debug(logCtx, "post-commit: failed to resolve worktree root for commit-snapshot capture",
+			slog.String("error", err.Error()))
+		return
+	}
+
+	states, err := strategy.ListSessionStates(ctx)
+	if err != nil {
+		logging.Warn(logCtx, "post-commit: failed to list session states for commit-snapshot capture",
+			slog.String("error", err.Error()))
+		return
+	}
+
+	for _, state := range states {
+		// Exact worktree match only: a marker belongs to the worktree that
+		// launched its background task, and capturing it from a sibling
+		// worktree's post-commit hook would resolve the wrong repo-relative
+		// paths and git status.
+		if state.WorktreePath != worktreePath || len(state.InFlightTasks) == 0 {
+			continue
+		}
+
+		ag, agErr := agent.GetByAgentType(state.AgentType)
+		if agErr != nil {
+			logging.Debug(logCtx, "post-commit: could not resolve agent for commit-snapshot capture",
+				slog.String("session_id", state.SessionID),
+				slog.String("agent_type", string(state.AgentType)),
+				slog.String("error", agErr.Error()))
+			continue
+		}
+		if _, ok := agent.AsTranscriptAnalyzer(ag); !ok {
+			logging.Debug(logCtx, "post-commit: agent does not support transcript analysis, skipping commit-snapshot capture",
+				slog.String("session_id", state.SessionID),
+				slog.String("agent_type", string(state.AgentType)),
+			)
+			continue
+		}
+
+		captureInFlightTasksForCommit(ctx, ag, state.SessionID, state.TranscriptPath)
 	}
 }
 

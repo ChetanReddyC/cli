@@ -1751,6 +1751,167 @@ func persistCapturedTranscriptSize(logCtx context.Context, sessionID, toolUseID 
 	}
 }
 
+// captureInFlightTasksForCommit is the post-commit backstop for background
+// subagents dispatched by sessionID: for a session that tryAgentCommitFastPath
+// just linked via the idle+marker shape (manual_commit_hooks.go), it runs
+// captureInFlightTaskCommitSnapshot for each in-flight marker so the trailer
+// that fast path added points at a checkpoint that actually contains the
+// subagent's work, instead of one with nothing behind it. Uses the same
+// cap-8/oldest-first policy as the turn-end backstop
+// (maxInFlightTasksPerCapture): a commit is a hot path like a turn-end, and
+// turn-end/SessionEnd still backstop any marker past the cap. Best-effort
+// throughout — see captureInFlightTasks, which this mirrors.
+func captureInFlightTasksForCommit(ctx context.Context, ag agent.Agent, sessionID, sessionRef string) {
+	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
+
+	state, err := strategy.LoadSessionState(logCtx, sessionID)
+	if err != nil {
+		logging.Warn(logCtx, "failed to load session state for commit-snapshot capture",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()))
+		return
+	}
+	if state == nil || len(state.InFlightTasks) == 0 {
+		return
+	}
+
+	// InFlightTasks is append-only in launch order (AddInFlightTask), so a
+	// straight prefix slice is the oldest-first N this budget calls for. See
+	// maxInFlightTasksPerCapture's rationale — the same per-invocation latency
+	// budget applies here.
+	tasks := state.InFlightTasks
+	if len(tasks) > maxInFlightTasksPerCapture {
+		logging.Warn(logCtx, "clipping commit-snapshot capture to per-invocation budget",
+			slog.String("session_id", sessionID),
+			slog.Int("in_flight_count", len(tasks)),
+			slog.Int("cap", maxInFlightTasksPerCapture))
+		tasks = tasks[:maxInFlightTasksPerCapture]
+	}
+
+	for _, task := range tasks {
+		captureInFlightTaskCommitSnapshot(logCtx, ag, sessionID, sessionRef, task)
+	}
+}
+
+// captureInFlightTaskCommitSnapshot snapshots one in-flight task's code
+// changes and transcript as a NON-incremental checkpoint at post-commit time,
+// so the Entire-Checkpoint trailer tryAgentCommitFastPath added for an idle
+// session with a live marker (manual_commit_hooks.go) points at a checkpoint
+// that is actually contentful. Mirrors captureInFlightTaskIncremental's
+// structure (stat + growth-dedup gate, then analyzer extraction), but differs
+// from it in two load-bearing ways:
+//
+//  1. It is never skipped for zero modified files. Unlike the turn-end
+//     incremental snapshot — which skips its save entirely when the analyzer
+//     finds no files, because an incremental checkpoint carries no transcript
+//     and would otherwise be a pure no-op write — this capture always calls
+//     SaveTaskStep. Transcript-carrying and skipping storage here would leave
+//     the just-added trailer pointing at nothing, defeating the whole point.
+//  2. It sets IsIncremental: false with BOTH TranscriptPath (the parent
+//     session's transcript) and SubagentTranscriptPath set — the full-capture
+//     convention (see captureSubagentTaskStep's TaskStepContext, above) that
+//     actually persists the transcript into the shadow tree. Leaving
+//     SubagentTranscriptPath unset here (as the incremental path deliberately
+//     does) would mean the subagent's transcript is never stored.
+//
+// Like the turn-end incremental snapshot, it never calls CleanupPreTaskState
+// and never claims (removes) the in-flight marker: the task is still running,
+// and SubagentStop (or the eventual SessionEnd final capture) remains the
+// authoritative completion signal for it.
+func captureInFlightTaskCommitSnapshot(logCtx context.Context, ag agent.Agent, sessionID, sessionRef string, task session.InFlightTask) {
+	subagentTranscriptPath := ResolveAgentTranscriptPath(filepath.Dir(sessionRef), sessionID, task.AgentID)
+	if subagentTranscriptPath == "" {
+		logging.Debug(logCtx, "in-flight task transcript not yet available; skipping commit-snapshot capture",
+			slog.String("session_id", sessionID),
+			slog.String("tool_use_id", task.ToolUseID))
+		return
+	}
+
+	// Growth dedup: identical to captureInFlightTaskIncremental's gate, and
+	// deliberately shares the same LastCapturedTranscriptBytes marker field —
+	// if a turn-end incremental snapshot already accounted for this
+	// transcript size, there is nothing new for this capture to add either.
+	info, statErr := os.Stat(subagentTranscriptPath)
+	if statErr != nil {
+		logging.Warn(logCtx, "failed to stat subagent transcript for commit-snapshot capture",
+			slog.String("tool_use_id", task.ToolUseID),
+			slog.String("error", statErr.Error()))
+		return
+	}
+	transcriptSize := info.Size()
+	if transcriptSize == task.LastCapturedTranscriptBytes {
+		logging.Debug(logCtx, "subagent transcript unchanged since last snapshot; skipping commit-snapshot capture",
+			slog.String("session_id", sessionID),
+			slog.String("tool_use_id", task.ToolUseID),
+			slog.Int64("transcript_bytes", transcriptSize))
+		return
+	}
+
+	var modifiedFiles []string
+	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
+		files, _, fileErr := analyzer.ExtractModifiedFilesFromOffset(subagentTranscriptPath, 0)
+		if fileErr != nil {
+			// Skip both the save and the size persistence, for the same reason
+			// captureInFlightTaskIncremental does: persisting the size here would
+			// make the growth dedup above treat this size as already accounted
+			// for, permanently losing the retry.
+			logging.Warn(logCtx, "failed to extract modified files for commit-snapshot capture; will retry next commit",
+				slog.String("session_id", sessionID),
+				slog.String("tool_use_id", task.ToolUseID),
+				slog.String("error", fileErr.Error()))
+			return
+		}
+		modifiedFiles = files
+	}
+
+	repoRoot, err := paths.WorktreeRoot(logCtx)
+	if err != nil {
+		logging.Warn(logCtx, "failed to get worktree root for commit-snapshot capture",
+			slog.String("tool_use_id", task.ToolUseID),
+			slog.String("error", err.Error()))
+		return
+	}
+
+	// Exclude files already committed to HEAD — same guard as
+	// captureSubagentTaskStep/captureInFlightTaskIncremental: this capture runs
+	// post-commit, so a file the subagent wrote that landed in the very commit
+	// under processing is already in HEAD with matching content and must not
+	// be resurrected as "touched" again.
+	relModifiedFiles := filterToUncommittedFiles(logCtx, FilterAndNormalizePaths(modifiedFiles, repoRoot), repoRoot)
+
+	author, err := GetGitAuthor(logCtx)
+	if err != nil {
+		logging.Warn(logCtx, "failed to get git author for commit-snapshot capture",
+			slog.String("tool_use_id", task.ToolUseID),
+			slog.String("error", err.Error()))
+		return
+	}
+
+	taskStepCtx := strategy.TaskStepContext{
+		SessionID:              sessionID,
+		ToolUseID:              task.ToolUseID,
+		AgentID:                task.AgentID,
+		ModifiedFiles:          relModifiedFiles,
+		TranscriptPath:         sessionRef,
+		SubagentTranscriptPath: subagentTranscriptPath,
+		AuthorName:             author.Name,
+		AuthorEmail:            author.Email,
+		IsIncremental:          false,
+		SubagentType:           task.SubagentType,
+		TaskDescription:        task.TaskDescription,
+		AgentType:              ag.Type(),
+	}
+
+	if err := GetStrategy(logCtx).SaveTaskStep(logCtx, taskStepCtx); err != nil {
+		logging.Warn(logCtx, "failed to save commit-snapshot capture for in-flight task",
+			slog.String("tool_use_id", task.ToolUseID),
+			slog.String("error", err.Error()))
+		return
+	}
+
+	persistCapturedTranscriptSize(logCtx, sessionID, task.ToolUseID, transcriptSize)
+}
+
 // resolveSubagentSessionLink reports whether this turn belongs to a subagent
 // session spawned by a parent task invocation. It fails closed: an agent that
 // does not model detached subagent sessions, or a link that cannot be read,

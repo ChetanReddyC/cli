@@ -3465,3 +3465,214 @@ func TestCaptureInFlightTasks_FinalPathIsUncapped(t *testing.T) {
 		"a Final capture must clear every in-flight marker (got %d remaining), not just the first %d",
 		len(state.InFlightTasks), maxInFlightTasksPerCapture)
 }
+
+// --- captureInFlightTaskCommitSnapshot: post-commit content backstop for the
+// Entire-Checkpoint trailer tryAgentCommitFastPath adds to an idle session
+// with a live in-flight marker (manual_commit_hooks.go). Without this
+// capture, that trailer would point at a checkpoint with nothing behind it —
+// the regression this whole feature (subagent commit linkage) exists to fix.
+
+// TestCaptureInFlightTasksForCommit_FilesPresent_RegistersViaFilesTouched is
+// scenario (a) from Step 2.2: the subagent's analyzer-extracted file is still
+// uncommitted (not the file this particular commit landed), so it survives
+// filterToUncommittedFiles and registers via the FilesTouched merge —
+// SaveTaskStep's registration rule (manual_commit_git.go:292) only bumps
+// StepCount for a step touching zero files. Also pins that the capture stores
+// the transcript, updates the growth-dedup marker, leaves the in-flight
+// marker in place, and never touches pre-task state (CleanupPreTaskState is
+// reserved for the eventual completion signal, not this backstop).
+func TestCaptureInFlightTasksForCommit_FilesPresent_RegistersViaFilesTouched(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "commitsnap-filespresent-session"
+	toolUseID := "toolu_commitsnap_files"
+	agentID := "agent-commitsnap-files"
+
+	transcriptDir := t.TempDir()
+	mainTranscriptPath := filepath.Join(transcriptDir, "main.jsonl")
+	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"do something"}}`+"\n"), 0o600))
+
+	subagentTranscriptPath := filepath.Join(transcriptDir, "agent-"+agentID+".jsonl")
+	require.NoError(t, os.WriteFile(subagentTranscriptPath, []byte(`{"type":"assistant"}`+"\n"), 0o600))
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:      sessionID,
+		BaseCommit:     headHash,
+		StartedAt:      time.Now(),
+		Phase:          session.PhaseIdle,
+		AgentType:      agent.AgentTypeClaudeCode,
+		TranscriptPath: mainTranscriptPath,
+		InFlightTasks: []session.InFlightTask{
+			{ToolUseID: toolUseID, AgentID: agentID, StartedAt: time.Now(), SubagentType: "dev", TaskDescription: "Implement widget"},
+		},
+	}))
+
+	// Pre-task state must survive this capture untouched: CleanupPreTaskState
+	// is reserved for the completion signal (SubagentStop/SessionEnd), not
+	// this mid-flight commit backstop.
+	require.NoError(t, CapturePreTaskState(ctx, toolUseID))
+
+	// Still uncommitted (not in HEAD at all) — the subagent's own work in
+	// progress, distinct from whatever this particular commit landed.
+	testutil.WriteFile(t, repoDir, "widget.txt", "written by background subagent")
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerFiles:      []string{"widget.txt"},
+	}
+
+	captureInFlightTasksForCommit(ctx, ag, sessionID, mainTranscriptPath)
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	assert.Contains(t, state.FilesTouched, "widget.txt",
+		"an uncommitted analyzer-extracted file must register via the FilesTouched merge")
+	assert.Zero(t, state.StepCount,
+		"the files-present case registers via FilesTouched, not StepCount")
+
+	marker := state.FindInFlightTask(toolUseID)
+	require.NotNil(t, marker, "commit-snapshot capture must not claim (remove) the in-flight marker")
+	info, statErr := os.Stat(subagentTranscriptPath)
+	require.NoError(t, statErr)
+	assert.Equal(t, info.Size(), marker.LastCapturedTranscriptBytes,
+		"the marker must record the captured transcript's size")
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	transcriptPath := ".entire/metadata/" + sessionID + "/" + paths.TranscriptFileName
+	_, found := readShadowBranchFile(t, repoDir, shadowBranch, transcriptPath)
+	assert.True(t, found, "a non-incremental commit-snapshot capture must store the parent transcript")
+
+	agentTranscriptPath := ".entire/metadata/" + sessionID + "/tasks/" + toolUseID + "/agent-" + agentID + ".jsonl"
+	_, found = readShadowBranchFile(t, repoDir, shadowBranch, agentTranscriptPath)
+	assert.True(t, found, "a non-incremental commit-snapshot capture must store the subagent transcript too")
+
+	preState, preErr := LoadPreTaskState(ctx, toolUseID)
+	require.NoError(t, preErr)
+	assert.NotNil(t, preState, "commit-snapshot capture must not clean up pre-task state")
+}
+
+// TestCaptureInFlightTasksForCommit_ReadOnly_RegistersViaStepCount is scenario
+// (b) from Step 2.2: the analyzer reports no modified files (the realistic
+// shape when the subagent's own commit already landed everything it wrote, or
+// the subagent is read-only, e.g. a reviewer). SaveTaskStep's registration
+// rule bumps StepCount instead of FilesTouched when a non-incremental step
+// touches zero files (manual_commit_git.go:292) — this is what makes the
+// step visible to condensation triggers even without any file changes to
+// point at. The transcript must still be stored: a read-only subagent still
+// produced content worth backing the trailer with.
+func TestCaptureInFlightTasksForCommit_ReadOnly_RegistersViaStepCount(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "commitsnap-readonly-session"
+	toolUseID := "toolu_commitsnap_readonly"
+	agentID := "agent-commitsnap-readonly"
+
+	transcriptDir := t.TempDir()
+	mainTranscriptPath := filepath.Join(transcriptDir, "main.jsonl")
+	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"please review"}}`+"\n"), 0o600))
+
+	subagentTranscriptPath := filepath.Join(transcriptDir, "agent-"+agentID+".jsonl")
+	require.NoError(t, os.WriteFile(subagentTranscriptPath, []byte(`{"type":"assistant"}`+"\n"), 0o600))
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:      sessionID,
+		BaseCommit:     headHash,
+		StartedAt:      time.Now(),
+		Phase:          session.PhaseIdle,
+		AgentType:      agent.AgentTypeClaudeCode,
+		TranscriptPath: mainTranscriptPath,
+		InFlightTasks: []session.InFlightTask{
+			{ToolUseID: toolUseID, AgentID: agentID, StartedAt: time.Now(), SubagentType: "review", TaskDescription: "Review the diff"},
+		},
+	}))
+
+	require.NoError(t, CapturePreTaskState(ctx, toolUseID))
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerFiles:      nil,
+	}
+
+	captureInFlightTasksForCommit(ctx, ag, sessionID, mainTranscriptPath)
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	assert.Empty(t, state.FilesTouched,
+		"the read-only case must not register via FilesTouched")
+	assert.Equal(t, 1, state.StepCount,
+		"the read-only case must register via StepCount, or the step is invisible to every condensation trigger")
+
+	marker := state.FindInFlightTask(toolUseID)
+	require.NotNil(t, marker, "commit-snapshot capture must not claim (remove) the in-flight marker")
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	transcriptPath := ".entire/metadata/" + sessionID + "/" + paths.TranscriptFileName
+	_, found := readShadowBranchFile(t, repoDir, shadowBranch, transcriptPath)
+	assert.True(t, found, "a read-only subagent's transcript must still be stored to back the trailer")
+
+	preState, preErr := LoadPreTaskState(ctx, toolUseID)
+	require.NoError(t, preErr)
+	assert.NotNil(t, preState, "commit-snapshot capture must not clean up pre-task state")
+}
+
+// TestCaptureInFlightTasksForCommit_UnchangedTranscript_NoOp is the growth-dedup
+// pin: a subagent transcript byte-for-byte unchanged since the marker's last
+// recorded capture must produce no new shadow-branch write. The commit-
+// snapshot and turn-end incremental paths deliberately share the same
+// LastCapturedTranscriptBytes marker field, so a prior turn-end snapshot's
+// size already accounts for this transcript.
+func TestCaptureInFlightTasksForCommit_UnchangedTranscript_NoOp(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "commitsnap-dedup-session"
+	toolUseID := "toolu_commitsnap_dedup"
+	agentID := "agent-commitsnap-dedup"
+
+	transcriptDir := t.TempDir()
+	mainTranscriptPath := filepath.Join(transcriptDir, "main.jsonl")
+	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"do something"}}`+"\n"), 0o600))
+
+	subagentTranscriptPath := filepath.Join(transcriptDir, "agent-"+agentID+".jsonl")
+	subagentContent := []byte(`{"type":"assistant"}` + "\n")
+	require.NoError(t, os.WriteFile(subagentTranscriptPath, subagentContent, 0o600))
+
+	info, statErr := os.Stat(subagentTranscriptPath)
+	require.NoError(t, statErr)
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:      sessionID,
+		BaseCommit:     headHash,
+		StartedAt:      time.Now(),
+		Phase:          session.PhaseIdle,
+		AgentType:      agent.AgentTypeClaudeCode,
+		TranscriptPath: mainTranscriptPath,
+		InFlightTasks: []session.InFlightTask{
+			// LastCapturedTranscriptBytes already accounts for this transcript's
+			// current size, as if a turn-end incremental snapshot ran first.
+			{ToolUseID: toolUseID, AgentID: agentID, StartedAt: time.Now(), SubagentType: "dev", LastCapturedTranscriptBytes: info.Size()},
+		},
+	}))
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerFiles:      []string{"widget.txt"},
+	}
+
+	captureInFlightTasksForCommit(ctx, ag, sessionID, mainTranscriptPath)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	transcriptPath := ".entire/metadata/" + sessionID + "/" + paths.TranscriptFileName
+	_, found := readShadowBranchFile(t, repoDir, shadowBranch, transcriptPath)
+	assert.False(t, found, "an unchanged transcript must not produce a new shadow-branch write")
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	assert.Empty(t, state.FilesTouched, "a deduped capture must not merge any files")
+	assert.Zero(t, state.StepCount, "a deduped capture must not increment StepCount")
+}
