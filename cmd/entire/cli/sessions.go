@@ -886,7 +886,7 @@ func stopSessionAndPrint(ctx context.Context, cmd *cobra.Command, state *strateg
 	lastCheckpointID := state.LastCheckpointID
 	stepCount := state.StepCount
 
-	if _, err := markSessionEnded(ctx, nil, sessionID, nil); err != nil {
+	if _, err := markSessionEnded(ctx, nil, sessionID, nil, endedNow); err != nil {
 		return fmt.Errorf("failed to stop session %s: %w", sessionID, err)
 	}
 

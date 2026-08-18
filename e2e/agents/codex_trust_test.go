@@ -129,6 +129,18 @@ func TestCodexHookTrustState_CoversEveryInstalledEvent(t *testing.T) {
 				label, ok := known[event]
 				require.Truef(t, ok, "codexHookEventLabels has no entry for %s: the CLI installs it, so e2e leaves it untrusted and Codex never fires it", event)
 				require.Containsf(t, state, label+":", "no trusted_hash generated for %s", event)
+
+				// The hash is computed over the configured timeout, while Codex
+				// caps SessionEnd handlers at SESSION_END_MAX_TIMEOUT_SEC. If it
+				// applies that clamp before hashing, anything above the ceiling
+				// would hash differently here and leave session_end untrusted —
+				// silently, since an untrusted hook simply never fires. Installing
+				// exactly the ceiling keeps both orderings identical, so pin it.
+				if event == "SessionEnd" {
+					require.NotNilf(t, handler.Timeout, "SessionEnd handler has no timeout; expected the %ds ceiling", codex.SessionEndTimeoutSec)
+					require.EqualValuesf(t, codex.SessionEndTimeoutSec, *handler.Timeout,
+						"SessionEnd installed above Codex's clamp ceiling: the pre-trust hash here may no longer match what Codex computes, which would leave the hook untrusted and silently dead in e2e")
+				}
 			}
 		}
 	}

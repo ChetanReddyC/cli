@@ -97,14 +97,26 @@ func TestParseHookEvent_SessionInfoEventsNullTranscript(t *testing.T) {
 
 // Codex enforces SESSION_END_MAX_TIMEOUT_SEC = 3 and kills the hook's process
 // tree on expiry, so Entire's self-imposed budget must stay strictly under the
-// timeout it configures.
+// timeout it configures — with enough headroom to cover the startup that happens
+// before Entire can measure anything.
+//
+// The headroom is not decoration: Codex's cap starts at the `sh -c` wrapper,
+// ours at Go package init, and sh startup + the command -v PATH walk + loading a
+// ~66MB binary all land in between. Measured ~40ms warm, but a cold page cache or
+// a network filesystem is exactly where it is not, and overrunning means the
+// process tree is killed mid-condense. Pinned so tightening the budget back up
+// has to be a deliberate act.
 func TestCodexAgent_SessionEndBudgetFitsConfiguredTimeout(t *testing.T) {
 	t.Parallel()
 	ag := &CodexAgent{}
 	budget := ag.SessionEndBudget()
+	timeout := time.Duration(SessionEndTimeoutSec) * time.Second
+
 	require.Positive(t, budget)
-	require.Less(t, budget, time.Duration(SessionEndTimeoutSec)*time.Second,
+	require.Less(t, budget, timeout,
 		"budget must leave headroom before Codex terminates the hook process tree")
+	require.GreaterOrEqual(t, timeout-budget, time.Second,
+		"budget must leave at least 1s for wrapper + binary startup, which Codex's clock counts and Entire's does not")
 }
 
 func TestParseHookEvent_UserPromptSubmit(t *testing.T) {

@@ -1071,7 +1071,7 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 	// the transcript to extract file changes. Cleanup is handled by
 	// `entire clean` or when the session state is fully removed.
 
-	if _, err := endSessionNow(ctx, event, event.SessionID, nil, sessionEndCondenseDeadline(ag)); err != nil {
+	if _, err := endSessionNow(ctx, event, event.SessionID, nil, sessionEndCondenseDeadline(ag), endedNow); err != nil {
 		logging.Warn(logCtx, "failed to mark session ended",
 			slog.String("error", err.Error()))
 	}
@@ -1117,16 +1117,30 @@ func sessionEndCondenseDeadline(ag agent.Agent) time.Time {
 // the condense is skipped too and ended is false.
 //
 // condenseDeadline, when non-zero, bounds only the condense — never the
-// mark-ended write, which is a single atomic state-file rename that must always
-// complete so the session cannot be left un-finalized. The bound is best-effort:
-// it cancels git subprocesses and any context-aware step, but condensation does
-// not poll ctx between stages, so it curtails rather than guarantees. Its
-// purpose is to stop short of a host that kills the hook's whole process tree
-// (Codex) rather than to make condensation interruptible. Being cut off either
-// way is safe: MutateSessionState persists at the end, so an incomplete
-// condense leaves FullyCondensed false and PostCommit retries.
-func endSessionNow(ctx context.Context, event *agent.Event, sessionID string, guard func(*strategy.SessionState) bool, condenseDeadline time.Time) (ended bool, err error) {
-	ended, err = markSessionEnded(ctx, event, sessionID, guard)
+// mark-ended write, so the cheap step that un-sticks the session from `entire
+// status` is never the one given up on. The bound is best-effort: it cancels git
+// subprocesses and any context-aware step, but condensation does not poll ctx
+// between stages, so it curtails rather than guarantees. Its purpose is to stop
+// short of a host that kills the hook's whole process tree (Codex) rather than
+// to make condensation interruptible.
+//
+// Leaving mark-ended unbounded is not the same as guaranteeing it. It runs under
+// MutateSessionState, whose flock acquire blocks (WithSessionLockWait is opt-in,
+// and only TurnStart opts in), so a concurrent turn-end condense holding the
+// same per-session lock can push it past the host's cap and get the whole tree
+// killed. The exited-owner sweep is the backstop for that: the session is
+// reclaimed on the next `entire status` / `entire doctor`.
+//
+// Losing the race costs duplication, not data. One window is worth knowing:
+// CondenseSession commits the checkpoint to entire/checkpoints/v1 inside the
+// MutateSessionState callback, and the state is saved only after that callback
+// returns. A kill in between leaves the checkpoint committed with
+// CheckpointTranscriptStart / LastCheckpointID / StepCount / FullyCondensed
+// un-advanced, so PostCommit mints a fresh checkpoint ID over the same
+// transcript range. Everywhere else, an incomplete condense simply leaves
+// FullyCondensed false and PostCommit retries.
+func endSessionNow(ctx context.Context, event *agent.Event, sessionID string, guard func(*strategy.SessionState) bool, condenseDeadline time.Time, when endedAtPolicy) (ended bool, err error) {
+	ended, err = markSessionEnded(ctx, event, sessionID, guard, when)
 	if err != nil || !ended {
 		return ended, err
 	}
@@ -1477,6 +1491,44 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agen
 	}
 }
 
+// sessionEndedAt resolves the EndedAt stamp for a session being finalized under
+// the given policy. endedWhenLastSeen falls back through the state's own record
+// of activity and never yields a zero time: an unknown last-seen is stamped now,
+// which is what the old unconditional behavior did anyway.
+func sessionEndedAt(state *strategy.SessionState, when endedAtPolicy) time.Time {
+	if when == endedWhenLastSeen {
+		if state.LastInteractionTime != nil && !state.LastInteractionTime.IsZero() {
+			return *state.LastInteractionTime
+		}
+		if !state.StartedAt.IsZero() {
+			return state.StartedAt
+		}
+	}
+	return time.Now()
+}
+
+// endedAtPolicy selects the timestamp written to SessionState.EndedAt.
+type endedAtPolicy int
+
+const (
+	// endedNow stamps the current time: the session is ending as we watch it,
+	// driven by its own session-end hook or by `entire session stop`.
+	endedNow endedAtPolicy = iota
+
+	// endedWhenLastSeen stamps the session's last known activity instead, for
+	// finalizations that discover an end that already happened. The exited-owner
+	// sweep is the case: the agent quit at some unknown earlier point, and since
+	// the sweep covers IDLE and state files live for StaleSessionThreshold, the
+	// first run after an upgrade can finalize sessions abandoned days ago.
+	//
+	// Stamping "now" on those dates a week-old session to today, which floats it
+	// above genuinely recent work in the `entire session resume` picker
+	// (sessionLastActiveTime prefers EndedAt) and makes `entire session info`
+	// report it as just-ended. Only display and ordering read the value — nothing
+	// keys retention off it — so the older, truer timestamp is strictly better.
+	endedWhenLastSeen
+)
+
 // markSessionEnded transitions the session to ENDED phase via the state machine.
 // If event is non-nil, hook-provided metrics are persisted to state before saving.
 // markSessionEnded fires the SessionStop transition (PhaseEnded + EndedAt) under
@@ -1486,7 +1538,7 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agen
 // exited-session sweep re-checks OwnerExited under the lock so it never ends a
 // session a concurrent turn just revived). It reports whether the session was
 // actually ended.
-func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string, guard func(*strategy.SessionState) bool) (ended bool, err error) {
+func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string, guard func(*strategy.SessionState) bool, when endedAtPolicy) (ended bool, err error) {
 	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
 		if guard != nil && !guard(state) {
 			return strategy.ErrMutationSkip
@@ -1494,12 +1546,16 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 		if event != nil {
 			persistEventMetadataToState(event, state)
 		}
+		// Resolved before the transition, which is not a read-only step: the
+		// SessionStop edge carries ActionUpdateLastInteraction and stamps
+		// LastInteractionTime with now — exactly the value endedWhenLastSeen
+		// needs, so reading it afterwards always yields "now".
+		endedAt := sessionEndedAt(state, when)
 		if transErr := strategy.TransitionAndLog(ctx, state, session.EventSessionStop, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "lifecycle"), "session stop transition failed",
 				slog.String("error", transErr.Error()))
 		}
-		now := time.Now()
-		state.EndedAt = &now
+		state.EndedAt = &endedAt
 		ended = true
 		return nil
 	})

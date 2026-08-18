@@ -144,16 +144,20 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	}
 	defer repo.Close()
 
+	// Route logging to .entire/logs/ for the rest of the command. Doctor emits
+	// none itself, but the sweep below and the condense/discard handlers further
+	// down all do, and with no logger installed those land on the user's terminal
+	// via slog.Default(), interleaved with doctor's own report. It belongs here
+	// rather than inside the sweep: the sweep returns early — without touching
+	// logging — whenever no session needs finalizing, which is the common case
+	// for a run that still has time-based stuck sessions to condense.
+	defer ensureCommandLogging(ctx)()
+
 	// Finalize any ACTIVE session whose agent process has exited (no SessionStop
 	// hook fired). A gone process is unambiguous, so these are condensed on the
 	// spot rather than left for the interactive prompt below; the sweep marks
 	// them ended in place so classifySession won't re-flag them.
-	// Deferred here rather than inside the sweep: the condense and discard paths
-	// below log, and this keeps their output in .entire/logs/ instead of on the
-	// terminal alongside doctor's own report.
-	n, stopLogging := finalizeExitedSessions(ctx, states)
-	defer stopLogging()
-	if n > 0 {
+	if n := finalizeExitedSessions(ctx, states); n > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Finalized %d exited session(s) (agent process gone).\n\n", n)
 	}
 

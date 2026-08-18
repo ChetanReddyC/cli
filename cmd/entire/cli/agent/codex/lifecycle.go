@@ -78,10 +78,20 @@ func (c *CodexAgent) HookNames() []string {
 const SessionEndTimeoutSec = 3
 
 // sessionEndBudget is how long the whole session-end hook process may run
-// before Codex kills its process tree. Held just under the configured
+// before Codex kills its process tree. Held under the configured
 // SessionEndTimeoutSec so Entire stops itself cleanly instead of being
 // terminated part-way through a condense.
-const sessionEndBudget = 2500 * time.Millisecond
+//
+// The gap is 1s rather than the tighter 500ms it started as, because the two
+// clocks do not start together. Codex's cap starts when it spawns the wrapper
+// (`sh -c 'if ! command -v entire …; exec entire hooks codex session-end'`),
+// while ours starts at Go package init (processStart). Everything in between —
+// sh startup, the command -v PATH walk, and loading a ~66MB binary — is spent
+// before we can measure anything. Warm that is ~40ms, but a cold page cache, a
+// network filesystem, or an on-access scanner is exactly the case where it is
+// not, and overrunning means the process tree is killed mid-condense rather
+// than stopping short of it.
+const sessionEndBudget = 2 * time.Second
 
 // SessionEndBudget implements agent.SessionEndBudgeter. Codex runs SessionEnd
 // inside its shutdown sequence under a hard cap; see the interface docs.

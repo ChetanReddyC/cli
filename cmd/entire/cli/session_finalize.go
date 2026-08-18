@@ -42,25 +42,23 @@ const sweepCondenseBudget = time.Second
 // logged and skipped; a condense failure is logged but the session is still
 // counted (PostCommit will retry the condense later).
 //
-// The second return value tears down the logging this sweep set up, and is the
-// caller's to scope: defer it for as long as the caller keeps doing work that
-// logs, not just around this call. `entire doctor` is why — it goes on to
-// condense and discard sessions, and closing the log file first would put those
-// handlers' output back on the user's terminal.
-func finalizeExitedSessions(ctx context.Context, states []*session.State) (int, func()) {
+// Callers that keep logging after this returns must install their own
+// command-scoped logging (ensureCommandLogging) rather than rely on the sweep's:
+// the early return below leaves logging untouched, so on the common
+// nothing-to-do path there is none. `entire doctor` does exactly that — it goes
+// on to condense and discard sessions, whose handlers log.
+func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 	// Nothing to do is overwhelmingly the common case, and returning here keeps
 	// the sweep off the logging and store setup below entirely.
 	if !slices.ContainsFunc(states, (*session.State).OwnerExited) {
-		return 0, func() {}
+		return 0
 	}
 
 	// Neither caller (`entire status`, `entire doctor`) initializes logging, so
 	// the phase-transition and condense lines below would land on the user's
-	// terminal via slog.Default() instead of the log file. The level getter is
-	// paired with it exactly as at the other command-level Init sites, or
-	// `log_level` in settings would be ignored on this path.
-	logging.SetLogLevelGetter(GetLogLevel)
-	stopLogging := logging.EnsureInitialized(ctx)
+	// terminal via slog.Default() instead of the log file. A no-op when the
+	// caller already installed one for the whole command.
+	defer ensureCommandLogging(ctx)()
 
 	logCtx := logging.WithComponent(ctx, "session")
 	condenseDeadline := time.Now().Add(sweepCondenseBudget)
@@ -78,7 +76,7 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) (int, 
 		// owner with a live one, in which case ended is false and we leave it be.
 		ended, err := endSessionNow(ctx, nil, st.SessionID, func(s *session.State) bool {
 			return s.OwnerExited()
-		}, condenseDeadline)
+		}, condenseDeadline, endedWhenLastSeen)
 		if err != nil {
 			logging.Warn(logCtx, "failed to finalize exited session",
 				slog.String("session_id", st.SessionID),
@@ -108,11 +106,11 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) (int, 
 			}
 		}
 		if !refreshed {
-			now := time.Now()
+			endedAt := sessionEndedAt(st, endedWhenLastSeen)
 			st.Phase = session.PhaseEnded
-			st.EndedAt = &now
+			st.EndedAt = &endedAt
 		}
 		finalized++
 	}
-	return finalized, stopLogging
+	return finalized
 }

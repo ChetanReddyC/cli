@@ -101,6 +101,17 @@ func codexHookTrustState(projectDir string) (string, error) {
 				if handler.Type != "command" {
 					continue
 				}
+				// Codex's own normalization, mirrored: absent means its 600s
+				// default, and a sub-1s value is raised to 1.
+				//
+				// NOT mirrored: the SessionEnd ceiling. Codex caps SessionEnd
+				// handlers at SESSION_END_MAX_TIMEOUT_SEC (3), and whether that
+				// clamp lands before or after command_hook_hash decides which
+				// value it hashes. Entire installs SessionEnd at exactly 3
+				// (SessionEndTimeoutSec), so both orderings agree today and
+				// guessing wrong would break trust rather than preserve it —
+				// TestCodexHookTrustState_CoversEveryInstalledEvent pins that
+				// premise, so this stays honest without a guess.
 				timeoutSec := uint64(600)
 				if handler.Timeout != nil {
 					timeoutSec = *handler.Timeout

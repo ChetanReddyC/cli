@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -398,6 +400,51 @@ func TestRunSessionsFix_ForceDiscardOutput_Indented(t *testing.T) {
 			assert.True(t, strings.HasPrefix(line, "  ✓ "), "expected nested success line to stay indented: %q", line)
 		}
 	}
+}
+
+// Doctor's logging setup must cover the whole command, not just the
+// exited-session sweep. With no exited session to finalize — the common case,
+// and the one this fixture builds — the sweep returns before it touches logging,
+// so the condense and discard handlers that run afterwards would emit structured
+// slog lines to slog.Default(), i.e. onto the user's terminal interleaved with
+// doctor's own report.
+//
+// Cannot use t.Parallel(): t.Chdir and the process-global slog default.
+func TestRunSessionsFix_HandlerLogsStayOffTheTerminal(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	createShadowBranchRef(t, repo, testBaseCommit, "")
+
+	// Already ended, so never a candidate for the exited-owner sweep, but stuck
+	// with uncondensed data — which sends --force down the condensing path, and
+	// CondenseSessionByID logs.
+	require.NoError(t, strategy.SaveSessionState(context.Background(), &strategy.SessionState{
+		SessionID:  "2026-02-02-doctor-logging",
+		BaseCommit: testBaseCommit,
+		Phase:      session.PhaseEnded,
+		StepCount:  3,
+		StartedAt:  time.Now().Add(-2 * time.Hour),
+	}))
+
+	// Start from no logger so this asserts doctor's own setup, not one left
+	// installed by an earlier test in this package.
+	logging.Close()
+	var fallback bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&fallback, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cmd, _ := newTestCmd(t)
+	require.NoError(t, runSessionsFix(cmd, true))
+
+	assert.Empty(t, fallback.String(),
+		"handler logs went to slog.Default() (the user's terminal) instead of .entire/logs/")
+
+	logged, err := os.ReadFile(filepath.Join(dir, ".entire", "logs", "entire.log"))
+	require.NoError(t, err, "doctor did not initialize file logging")
+	assert.NotEmpty(t, logged, "nothing was logged, so this test proves nothing about where logs go")
 }
 
 // TestCheckCodexHookTrust_SilentWhenCodexNotInstalled — `entire doctor`

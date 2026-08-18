@@ -103,10 +103,19 @@ terminates the hook's whole process tree (openai/codex#37527).
 
 Entire therefore installs `SessionEnd` at exactly 3s while every other hook keeps
 30s, and `CodexAgent.SessionEndBudget` declares a slightly shorter self-imposed
-budget (`agent.SessionEndBudgeter`). That budget bounds only the eager condense;
-marking the session ENDED is one atomic state-file rename and always runs to
-completion. A curtailed condense is safe — `FullyCondensed` stays false and
-PostCommit retries.
+budget (`agent.SessionEndBudgeter`). The gap to the cap is 1s, because Codex's
+clock starts when it spawns the `sh -c` wrapper while Entire's starts at package
+init — sh startup, the `command -v` PATH walk and loading a ~66MB binary all
+happen in between.
+
+That budget bounds only the eager condense; marking the session ENDED is left
+unbounded so the cheap step is never the one given up on. Unbounded is not
+guaranteed, though: it runs under the session flock, so a concurrent condense can
+push it past the cap and get the process tree killed — the exited-owner sweep
+reclaims those. A curtailed condense is otherwise safe (`FullyCondensed` stays
+false and PostCommit retries), except between the v1 checkpoint write and the
+state save, where a kill leaves a committed checkpoint whose bookkeeping never
+advanced and PostCommit writes a second one over the same transcript range.
 
 ### Hook Input (stdin JSON)
 

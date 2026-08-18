@@ -51,9 +51,7 @@ func TestFinalizeExitedSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, stopLogging := finalizeExitedSessions(ctx, states)
-	defer stopLogging()
-	if n != len(exitedIDs) {
+	if n := finalizeExitedSessions(ctx, states); n != len(exitedIDs) {
 		t.Fatalf("finalizeExitedSessions = %d, want %d", n, len(exitedIDs))
 	}
 
@@ -78,6 +76,54 @@ func TestFinalizeExitedSessions(t *testing.T) {
 	}
 	if got.EndedAt != nil {
 		t.Error("no-owner session EndedAt set, want nil (left active)")
+	}
+}
+
+// TestFinalizeExitedSessions_StampsLastSeenNotNow — the sweep discovers ends
+// that already happened, so it must date them when the session was last seen,
+// not when the sweep noticed. Stamping "now" dates a week-old abandoned session
+// to today, floating it above real recent work in the `entire session resume`
+// picker (sessionLastActiveTime prefers EndedAt) and reporting it as just-ended.
+//
+// Not parallel: setupAttachTestRepo uses t.Chdir.
+func TestFinalizeExitedSessions_StampsLastSeenNotNow(t *testing.T) {
+	setupAttachTestRepo(t)
+	ctx := context.Background()
+
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lastSeen := time.Now().Add(-72 * time.Hour)
+	if err := store.Save(ctx, &session.State{
+		SessionID:           "walked-away-session",
+		Phase:               session.PhaseIdle,
+		StartedAt:           lastSeen.Add(-time.Hour),
+		LastInteractionTime: &lastSeen,
+		Owner:               &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	states, err := store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := finalizeExitedSessions(ctx, states); n != 1 {
+		t.Fatalf("finalizeExitedSessions = %d, want 1", n)
+	}
+
+	got, err := store.Load(ctx, "walked-away-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.EndedAt == nil {
+		t.Fatal("EndedAt = nil, want the last-seen time")
+	}
+	if !got.EndedAt.Equal(lastSeen) {
+		t.Errorf("EndedAt = %s, want the last-seen time %s (sweep back-stamped 'now')",
+			got.EndedAt.Format(time.RFC3339), lastSeen.Format(time.RFC3339))
 	}
 }
 
@@ -107,7 +153,7 @@ func TestEndSessionNow_SpentBudgetStillMarksEnded(t *testing.T) {
 
 	// A deadline already in the past: every condense is skipped from here on.
 	spent := time.Now().Add(-time.Second)
-	ended, err := endSessionNow(ctx, nil, "budget-spent-session", nil, spent)
+	ended, err := endSessionNow(ctx, nil, "budget-spent-session", nil, spent, endedNow)
 	if err != nil {
 		t.Fatalf("endSessionNow: %v", err)
 	}
@@ -165,9 +211,7 @@ func TestFinalizeExitedSessions_RevalidatesUnderLock(t *testing.T) {
 		Owner:     &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
 	}
 
-	n, stopLogging := finalizeExitedSessions(ctx, []*session.State{stale})
-	defer stopLogging()
-	if n != 0 {
+	if n := finalizeExitedSessions(ctx, []*session.State{stale}); n != 0 {
 		t.Fatalf("finalizeExitedSessions = %d, want 0 (revalidation should skip the revived session)", n)
 	}
 
