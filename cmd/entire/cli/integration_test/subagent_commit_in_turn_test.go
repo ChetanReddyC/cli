@@ -144,7 +144,12 @@ func shadowBranches(env *TestEnv) []string {
 // before prepare-commit-msg ever sees it. That sweep is unrelated to this PR
 // (it predates PR #2032) and out of scope for a test; the seed task sidesteps
 // it the way a real multi-turn session would, staying read-only so it never
-// touches FilesTouched or the session's condensed-transcript baseline.
+// touches FilesTouched or the session's condensed-transcript baseline. This
+// gap — an idle session whose only activity is one open in-flight marker,
+// with no shadow branch or LastCheckpointID yet, gets swept before
+// prepare-commit-msg ever sees it, so a first-turn background commit still
+// goes unlinked — is tracked in this PR's body under "Known gaps /
+// follow-ups", discovered via this test's need for the seed workaround.
 //
 // This drives the REAL prepare-commit-msg and post-commit git hooks end to end
 // (GitCommitWithShadowHooksAsAgent), so it is the arbiter of whether the trailer
@@ -235,15 +240,12 @@ func TestSubagentCheckpoints_CommitWhileIdleWithLiveMarker_LinksAndCondensesCont
 	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
-	state, err := env.GetSessionState(sess.ID)
-	if err != nil {
-		t.Fatalf("GetSessionState failed: %v", err)
+	state := requireSessionState(t, env, sess.ID)
+	if state.Phase != session.PhaseIdle {
+		t.Fatalf("expected session to be IDLE after turn-end, got %+v", state)
 	}
 	if hasInFlightTask(state, seedToolUseID) {
 		t.Fatalf("seed task's marker should have been claimed by its own subagent-stop, state=%+v", state)
-	}
-	if state == nil || state.Phase != session.PhaseIdle {
-		t.Fatalf("expected session to be IDLE after turn-end, got %+v", state)
 	}
 	if !hasInFlightTask(state, taskToolUseID) {
 		t.Fatalf("expected in-flight marker to survive turn-end, state=%+v", state)
@@ -252,10 +254,11 @@ func TestSubagentCheckpoints_CommitWhileIdleWithLiveMarker_LinksAndCondensesCont
 	// The subagent does its actual work while the parent sits idle between
 	// turns: a realistic transcript (the real Claude Code transcript
 	// analyzer, not a stub) plus the resulting file.
+	const editedContent = "# Idle marker\n\nWritten by a background subagent while the parent is idle.\n"
 	subagentTranscriptPath := sess.CreateSubagentTranscript(subagentID, []FileChange{
-		{Path: editedFile, Content: "# Idle marker\n"},
+		{Path: editedFile, Content: editedContent},
 	})
-	env.WriteFile(editedFile, "# Idle marker\n\nWritten by a background subagent while the parent is idle.\n")
+	env.WriteFile(editedFile, editedContent)
 
 	// The commit lands while the session is IDLE, through the real
 	// prepare-commit-msg + post-commit hook chain, with no TTY (agent-mode
@@ -275,10 +278,7 @@ func TestSubagentCheckpoints_CommitWhileIdleWithLiveMarker_LinksAndCondensesCont
 	// transcript didn't exist at Stop time), and it only runs at all because
 	// headHasCheckpointTrailer saw the trailer this same prepare-commit-msg
 	// just added. This is the ordering unit tests can't observe end to end.
-	state, err = env.GetSessionState(sess.ID)
-	if err != nil {
-		t.Fatalf("GetSessionState failed: %v", err)
-	}
+	state = requireSessionState(t, env, sess.ID)
 	marker := state.FindInFlightTask(taskToolUseID)
 	if marker == nil {
 		t.Fatalf("expected marker %s to still exist after the commit", taskToolUseID)
@@ -308,11 +308,8 @@ func TestSubagentCheckpoints_CommitWhileIdleWithLiveMarker_LinksAndCondensesCont
 	// The marker survives condensation: the task is still running, and
 	// SubagentStop (not this commit) remains the authoritative Final capture
 	// that claims it. This is the invariant the unit tests leave unpinned.
-	state, err = env.GetSessionState(sess.ID)
-	if err != nil {
-		t.Fatalf("GetSessionState failed: %v", err)
-	}
-	if state == nil || !hasInFlightTask(state, taskToolUseID) {
+	state = requireSessionState(t, env, sess.ID)
+	if !hasInFlightTask(state, taskToolUseID) {
 		t.Fatalf("expected in-flight marker for %s to survive condensation, state=%+v", taskToolUseID, state)
 	}
 
@@ -328,7 +325,7 @@ func TestSubagentCheckpoints_CommitWhileIdleWithLiveMarker_LinksAndCondensesCont
 		t.Fatalf("SimulateSubagentStop failed: %v", err)
 	}
 
-	state, err = env.GetSessionState(sess.ID)
+	state, err := env.GetSessionState(sess.ID)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}

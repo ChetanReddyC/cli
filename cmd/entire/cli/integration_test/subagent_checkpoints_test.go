@@ -393,6 +393,23 @@ func hasInFlightTask(state *strategy.SessionState, toolUseID string) bool {
 	return false
 }
 
+// requireSessionState loads sessionID's persisted state and fails the test
+// immediately if it can't be read or doesn't exist. Centralizing the nil
+// guard here keeps callers that need a non-nil state (hasInFlightTask and
+// State.FindInFlightTask both dereference unconditionally) from having to
+// duplicate — and risk dropping — the check at each read site.
+func requireSessionState(t *testing.T, env *TestEnv, sessionID string) *strategy.SessionState {
+	t.Helper()
+	state, err := env.GetSessionState(sessionID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if state == nil {
+		t.Fatalf("expected session state to exist for session %s", sessionID)
+	}
+	return state
+}
+
 // TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop covers the
 // background-subagent bug this PR fixes: Claude Code background subagents
 // (run_in_background: true) return a launch stub immediately, so post-task
