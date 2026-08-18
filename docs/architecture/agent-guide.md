@@ -433,7 +433,7 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 | `Compaction` | Fires compaction transition (stays ACTIVE), resets transcript offset | *(not used)* | `pre-compress` | `pre-compact` | `compaction` | `pre-compact` | *(not used)* |
 | `SessionEnd` | Marks session as ENDED in state machine | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` |
 | `SubagentStart` | Captures pre-task state (git status snapshot) | `pre-task` (PreToolUse[Task]) | *(not used)* | `subagent-start` | *(not used)* | `pre-tool-use` (config-level `matcher: Task`) | *(not used)* |
-| `SubagentEnd` | Extracts subagent modified files, detects changes, saves task checkpoint | `post-task` (PostToolUse[Task]) | *(not used)* | `subagent-stop` | *(not used)* | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` |
+| `SubagentEnd` | Extracts subagent modified files, detects changes, saves task checkpoint (see the "Task Steps (Subagent Checkpoints)" section of [Sessions and Checkpoints](sessions-and-checkpoints.md) for the launch-stub vs. `Final` split) | `post-task` (PostToolUse[Task], `Final: false`) + `subagent-stop` (SubagentStop, `Final: true`) | *(not used)* | `subagent-stop` | *(not used)* | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` |
 
 ### Event Field Requirements
 
@@ -445,7 +445,7 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 | `Compaction` | `SessionID` | `SessionRef`, `Metadata` |
 | `SessionEnd` | `SessionID` | `SessionRef`, `Metadata` |
 | `SubagentStart` | `SessionID`, `SessionRef`, `ToolUseID` | `ToolInput`, `Metadata` |
-| `SubagentEnd` | `SessionID`, `SessionRef`, `ToolUseID` | `SubagentID`, `ToolInput`, `Metadata` |
+| `SubagentEnd` | `SessionID`, `SessionRef`, `ToolUseID` | `SubagentID`, `ToolInput`, `Metadata`, `SubagentTranscript` (authoritative subagent transcript path when the hook payload supplies one), `Final` (true only for a true-completion signal, e.g. Claude Code's `SubagentStop`; false for a launch-time stub) |
 
 `Metadata` (`map[string]string`) holds agent-specific state that the framework stores and makes available on subsequent events. Use it for agent-internal tracking (e.g., cursor positions, background agent flags) that doesn't map to a dedicated Event field.
 

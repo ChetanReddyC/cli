@@ -236,6 +236,77 @@ makes the comparison false forever and the session silently stops condensing.
 - Deleted after condensation to `entire/checkpoints/v1`
 - Reset if orphaned (no session state file exists)
 
+### Task Steps (Subagent Checkpoints)
+
+A **task step** captures one subagent invocation (Claude Code's Task tool) as
+metadata under `.entire/metadata/<session-id>/tasks/<tool-use-id>/` on the
+shadow branch — see `SaveTaskStep` / `TaskStepContext` in
+`strategy/manual_commit_git.go` and `strategy.go`.
+
+**Foreground tasks** are unchanged: launch-time pre-task snapshots state,
+completion-time post-task (Claude Code's PostToolUse) extracts the subagent's
+modified files and transcript and saves the task step immediately. Skipped
+entirely if nothing changed.
+
+**Background tasks** (`run_in_background: true`) need more than one hook,
+because Claude Code's PostToolUse for a backgrounded Task fires at the launch
+acknowledgment, seconds after dispatch and long before the subagent has done
+any work — the true completion signal arrives later, out of band, as
+`SubagentStop`. Three points capture a background task, in order:
+
+1. **Launch stub (post-task, non-final).** Detected via `run_in_background` in
+   the Task tool's input. Instead of saving a (premature) task step, this
+   records an **in-flight marker** — `session.InFlightTask{ToolUseID, AgentID,
+   StartedAt, SubagentType, TaskDescription}` — on session state
+   (`session/state.go`). No task checkpoint is written yet; the marker is the
+   only record that background work is live. `SubagentType`/`TaskDescription`
+   are captured here because `SubagentStop`'s payload carries none of them —
+   the marker is where the eventual final capture's labels come from.
+2. **Turn-end backstop (Stop, non-final).** For every marker still in flight,
+   `captureInFlightTasks` snapshots the subagent's **code changes only** —
+   never the transcript, a property of the incremental write path itself
+   (`checkpoint/ephemeral.go`), not a choice made here — as an incremental
+   task step (`IsIncremental: true`, `IncrementalType:
+   IncrementalTypeBackgroundProgress`, sequence from the same
+   `GetNextCheckpointSequence` counter post-todo incrementals use). The marker
+   stays; the task is still running. To avoid rescanning an unchanged
+   transcript every turn, the marker records the subagent transcript size at
+   last capture and skips the scan (and the save) when it hasn't grown. Capped
+   at 8 tasks per invocation, oldest first — the remainder is picked up next
+   turn or, at worst, by the SessionEnd final capture below, so nothing is
+   lost, only delayed.
+3. **SubagentStop (final, authoritative).** The real completion signal.
+   `handleSubagentStopFinal` **claims** the in-flight marker (atomic
+   find-and-remove keyed by `ToolUseID`) before capturing:
+   - **No marker claimed** — the task was already captured at launch time
+     (foreground) or by a racing/duplicate Final event — skip the capture
+     entirely. This is what makes a foreground task safe against Claude Code
+     also sending it a `SubagentStop`: nothing to claim, nothing to redo.
+   - **Marker claimed** — save the full, non-incremental task step (transcript
+     included) and bypass the normal "no changes, skip" gate: a read-only
+     subagent (a reviewer, a search agent) still produced a transcript worth
+     keeping, and this is the only chance to capture it.
+   - **Late-arrival guard.** A `SubagentStop` can arrive after the parent
+     session already ended (or was swept). Session state missing entirely →
+     skip the capture outright — the subagent's own transcript is still on
+     disk in its own directory, but re-creating session state here would
+     resurrect a zombie shadow branch nothing then condenses. Session state
+     present but `PhaseEnded` → capture, then immediately call
+     `CondenseAndMarkFullyCondensed` (the same eager condense `SessionEnd`
+     uses) so the newly-written task step doesn't linger as post-condensation
+     zombie data.
+
+**SessionEnd finals.** If a session ends while tasks are still in flight (no
+`SubagentStop` ever arrived, or it's still pending), `SessionEnd` runs the same
+final capture as `SubagentStop` — non-incremental, transcript included,
+marker-claimed — for every remaining marker, and runs it **uncapped** (unlike
+the turn-end backstop's cap of 8): this is the last chance before the session
+closes, so clipping here would lose a transcript permanently rather than defer
+it. Crucially, this sweep runs **before** `endSessionNow` marks the session
+`PhaseEnded` and triggers its own eager condense — so the finals' task steps
+are captured in time for that condense to include them, rather than minting
+shadow data after condensation that nothing then cleans up.
+
 ### Committed Checkpoints
 
 Branch: `entire/checkpoints/v1`
