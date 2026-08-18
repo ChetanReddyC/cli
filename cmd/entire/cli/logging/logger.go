@@ -14,7 +14,7 @@
 //	defer logging.Close()
 //
 //	// Later, once the session ID is known (no need to re-Init)
-//	ctx, err = logging.WithSessionID(ctx, sessionID)
+//	ctx = logging.WithSessionID(ctx, sessionID)
 //
 //	// Add context values
 //	ctx = logging.WithComponent(ctx, "hooks")
@@ -57,12 +57,8 @@ var (
 	// logBufWriter wraps logFile with buffered I/O for performance
 	logBufWriter *bufio.Writer
 
-	// currentSessionID stores the session ID from WithSessionID to include in
-	// log lines whose context carries no injected logger
-	currentSessionID string
-
-	// mu protects logger, logFile, logBufWriter, and currentSessionID, and
-	// serializes writes to logBufWriter (see liveWriter)
+	// mu protects logger, logFile, and logBufWriter, and serializes writes to
+	// logBufWriter (see liveWriter)
 	mu sync.RWMutex
 
 	// logLevelGetter is an optional callback to get log level from settings.
@@ -194,8 +190,6 @@ func Init(ctx context.Context) (*slog.Logger, error) {
 	logFile = f
 	logBufWriter = bufio.NewWriterSize(f, 8192) // 8KB buffer for batched writes
 	logger = createLogger(liveWriter{}, level)
-	// A fresh sink carries no session yet; WithSessionID sets this.
-	currentSessionID = ""
 
 	return logger, nil
 }
@@ -215,7 +209,6 @@ func Close() {
 		_ = logFile.Close()
 		logFile = nil
 	}
-	currentSessionID = ""
 }
 
 // resetLogger resets the logger to nil (for testing).
@@ -223,7 +216,6 @@ func resetLogger() {
 	mu.Lock()
 	defer mu.Unlock()
 	logger = nil
-	currentSessionID = ""
 	if logBufWriter != nil {
 		_ = logBufWriter.Flush()
 		logBufWriter = nil
@@ -299,46 +291,64 @@ func Error(ctx context.Context, msg string, attrs ...any) {
 // contexts built before Init or derived from context.Background(), and
 // slog.Default() the last resort when nothing initialized logging at all.
 //
+// Context attributes lose to caller-supplied ones: slog does not dedupe attrs,
+// so emitting session_id from the context on top of a call site that passes its
+// own would put the key in the line twice. Over a hundred call sites pass one
+// by hand, so the collision is the common case, not the corner.
+//
 // No lock is held across l.Log: writes reach the log file through liveWriter,
 // which takes the read lock per write, so Init/Close cannot flush the buffer
 // mid-write. Only the globals read below need synchronizing.
 func log(ctx context.Context, level slog.Level, msg string, attrs ...any) {
 	mu.RLock()
 	l := logger
-	globalSessionID := currentSessionID
 	mu.RUnlock()
 
-	// Init already stamped session_id onto the logger it put in the context, so
-	// taking that path must not add it again or every line carries it twice.
-	stampSessionID := true
 	if ctxLogger := LoggerFromContext(ctx); ctxLogger != nil {
 		l = ctxLogger
-		stampSessionID = false
 	}
 	if l == nil {
 		l = slog.Default()
 	}
 
-	// Build attributes slice with session ID first (if set)
-	var allAttrs []any
-
-	// Add session ID from Init() if set (always first for consistency)
-	if stampSessionID && globalSessionID != "" {
-		allAttrs = append(allAttrs, slog.String("session_id", globalSessionID))
-	}
-
-	// Extract context values
 	contextAttrs := attrsFromContext(ctx)
+	dropSessionID := hasSessionIDAttr(attrs)
+
+	allAttrs := make([]any, 0, len(contextAttrs)+len(attrs))
 	for _, a := range contextAttrs {
+		if dropSessionID && a.Key == sessionIDAttrKey {
+			continue
+		}
 		allAttrs = append(allAttrs, a)
 	}
-
-	// Add caller-provided attributes
 	allAttrs = append(allAttrs, attrs...)
 
 	// Pass nil context to slog as we've already extracted context values as attributes.
 	// slog handlers are expected to handle nil context gracefully.
 	l.Log(nil, level, msg, allAttrs...) //nolint:staticcheck // nil context is intentional - we extract values as attributes
+}
+
+// hasSessionIDAttr reports whether attrs already carry a session_id.
+//
+// attrs follows slog's calling convention: slog.Attr values and loose
+// key/value pairs may be mixed, where a string element is a key and the
+// element after it its value. A session_id nested inside a slog.Group is a
+// different JSON path and so does not collide.
+func hasSessionIDAttr(attrs []any) bool {
+	for i := 0; i < len(attrs); i++ {
+		switch a := attrs[i].(type) {
+		case slog.Attr:
+			if a.Key == sessionIDAttrKey {
+				return true
+			}
+		case string:
+			if a == sessionIDAttrKey {
+				return true
+			}
+			i++ // the next element is this key's value, not a key
+		}
+	}
+	return false
 }
 
 // attrsFromContext extracts logging attributes from a context.
@@ -349,6 +359,10 @@ func attrsFromContext(ctx context.Context) []slog.Attr {
 
 	var attrs []slog.Attr
 
+	// Session first, matching the order log lines have always had.
+	if s := sessionIDFromContext(ctx); s != "" {
+		attrs = append(attrs, slog.String(sessionIDAttrKey, s))
+	}
 	if v := ctx.Value(componentKey); v != nil {
 		if s, ok := v.(string); ok && s != "" {
 			attrs = append(attrs, slog.String("component", s))

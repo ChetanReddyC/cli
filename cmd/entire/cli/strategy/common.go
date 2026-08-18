@@ -384,6 +384,9 @@ var initRedactionOnce sync.Once
 // .entire/logs/ — hook contexts swallow stderr, so without this users grepping
 // for component=redaction find nothing and conclude their rules never ran.
 //
+// The injected logger is stamped with the context's session ID so redact's
+// context-free calls stay filterable by session.
+//
 // Without a context logger, diagnostics fall back to the process-default
 // stderr logger and the load-time summary is skipped. That happens when the
 // root hook declined to initialize logging — outside a repository, or in a
@@ -394,7 +397,10 @@ var initRedactionOnce sync.Once
 // design, not a lost injection.
 func EnsureRedactionConfigured(ctx context.Context) {
 	initRedactionOnce.Do(func() {
-		logger := logging.LoggerFromContext(ctx)
+		// Session-stamped: redact calls this logger without a context, so it
+		// cannot pick the session up the way logging.Warn does — and its
+		// diagnostics are exactly the lines a user greps by session.
+		logger := logging.SessionLoggerFromContext(ctx)
 
 		// Redaction config is a process-wide one-shot: if the caller's ctx
 		// is already canceled (Ctrl-C mid-hook), a failed settings read here

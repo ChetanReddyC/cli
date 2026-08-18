@@ -90,12 +90,12 @@ func TestInit_CreatesLogFile(t *testing.T) {
 	}
 }
 
-// TestInit_ReturnedContextCarriesSessionStampedLogger pins the injection
-// contract downstream consumers rely on (strategy hands
-// LoggerFromContext(ctx) to the redact package, and gates the redaction
-// summary on it being non-nil): the logger Init returns must write to
-// .entire/logs/entire.log and must survive the round trip through
-// WithLogger/LoggerFromContext, with WithSessionID stamping the session on top.
+// TestInit_ReturnsLoggerForInjection pins the injection contract downstream
+// consumers rely on (strategy hands the context's logger to the redact
+// package, and gates the redaction summary on it being non-nil): the logger
+// Init returns must write to .entire/logs/entire.log and must survive the round
+// trip through WithLogger/SessionLoggerFromContext, which stamps the context's
+// session onto it for callers that log without a context.
 func TestInit_ReturnsLoggerForInjection(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -110,13 +110,10 @@ func TestInit_ReturnsLoggerForInjection(t *testing.T) {
 		t.Fatal("Init() returned no logger for a writable log directory")
 	}
 
-	ctx, err := WithSessionID(WithLogger(context.Background(), initialized), testSessionID)
-	if err != nil {
-		t.Fatalf("WithSessionID() error = %v", err)
-	}
-	l := LoggerFromContext(ctx)
+	ctx := WithSessionID(WithLogger(context.Background(), initialized), testSessionID)
+	l := SessionLoggerFromContext(ctx)
 	if l == nil {
-		t.Fatal("LoggerFromContext() = nil for a context holding the initialized logger")
+		t.Fatal("SessionLoggerFromContext() = nil for a context holding the initialized logger")
 	}
 	l.Warn("injected logger writes to the log file")
 
@@ -136,6 +133,9 @@ func TestInit_ReturnsLoggerForInjection(t *testing.T) {
 
 	if LoggerFromContext(context.Background()) != nil {
 		t.Error("LoggerFromContext() should be nil for a context without Init")
+	}
+	if SessionLoggerFromContext(context.Background()) != nil {
+		t.Error("SessionLoggerFromContext() should be nil for a context without Init")
 	}
 }
 
@@ -380,13 +380,8 @@ func TestLogging_IncludesContextValues(t *testing.T) {
 		t.Fatalf("Init() error = %v", err)
 	}
 
-	// Create context with values. WithSessionID is discarded on purpose: this
-	// context carries no injected logger, so the stamp lands in package state
-	// and log() picks it up from there.
-	if _, sErr := WithSessionID(context.Background(), sessionID); sErr != nil {
-		t.Fatalf("WithSessionID() error = %v", sErr)
-	}
-	ctx := context.Background()
+	// Create context with values.
+	ctx := WithSessionID(context.Background(), sessionID)
 	ctx = WithComponent(ctx, testComponent)
 	ctx = WithAgent(ctx, testAgent)
 
@@ -430,12 +425,7 @@ func TestLogging_AdditionalAttrs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
-	// Discarded on purpose — see TestLogging_IncludesContextValues.
-	if _, sErr := WithSessionID(context.Background(), sessionID); sErr != nil {
-		t.Fatalf("WithSessionID() error = %v", sErr)
-	}
-
-	ctx := context.Background()
+	ctx := WithSessionID(context.Background(), sessionID)
 
 	// Log with additional attrs
 	Info(ctx, "attrs test",
@@ -533,43 +523,6 @@ func TestLogging_ConcurrentInitAndLog(t *testing.T) {
 	wg.Wait()
 }
 
-func TestWithSessionID_RejectsInvalidSessionIDs(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		sessionID string
-		wantErr   bool
-	}{
-		{"empty session ID is allowed", "", false},
-		{"path traversal with slash", "../../../tmp/evil", true},
-		{"path traversal with backslash", "..\\..\\tmp\\evil", true},
-		{"contains forward slash", "2025-01-15/session", true},
-		{"contains backslash", "2025-01-15\\session", true},
-		{"valid session ID", "2025-01-15-valid-session", false},
-		{"valid UUID-like ID", "abc123-def456-ghi789", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			// No Init and no repo: validation is WithSessionID's own business,
-			// independent of whether a log file was ever opened.
-			_, err := WithSessionID(context.Background(), tt.sessionID)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("WithSessionID(%q) error = %v, wantErr %v", tt.sessionID, err, tt.wantErr)
-			}
-			if err != nil && tt.wantErr {
-				// Verify error message mentions session ID
-				if !strings.Contains(err.Error(), "session ID") {
-					t.Errorf("WithSessionID(%q) error should mention 'session ID', got: %v", tt.sessionID, err)
-				}
-			}
-		})
-	}
-}
-
 // TestLog_ResolvesLoggerFromContextFirst pins the resolution order the
 // package-level helpers use: a logger in the context wins over the package
 // global, so a caller holding an initialized context logs exactly where
@@ -602,43 +555,88 @@ func TestLog_ResolvesLoggerFromContextFirst(t *testing.T) {
 	}
 }
 
-// TestLog_ContextLoggerDoesNotDoubleStampSessionID guards the seam between the
-// two session_id sources: WithSessionID stamps it onto the context logger,
-// and log() prepends it from package state. Taking the context path must not do
-// both, or every line in a hook run carries session_id twice.
-func TestLog_ContextLoggerDoesNotDoubleStampSessionID(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-	initGitRepo(t, tmpDir)
+// TestLog_CallerSuppliedSessionIDWins guards the collision between the session
+// on the context and the one over a hundred call sites still pass by hand. slog
+// does not dedupe attrs, so emitting both puts session_id in the JSON line
+// twice; the caller's must be the one that survives.
+func TestLog_CallerSuppliedSessionIDWins(t *testing.T) {
+	t.Parallel()
 
-	l, err := Init(context.Background())
-	if err != nil {
-		t.Fatalf("Init() error = %v", err)
+	callerSessionID := "caller-supplied-session"
+	tests := []struct {
+		name  string
+		attrs []any
+	}{
+		{"as slog.Attr", []any{slog.String("session_id", callerSessionID)}},
+		{"as a loose key/value pair", []any{"session_id", callerSessionID}},
+		{
+			"after a loose pair whose value collides with the key",
+			[]any{"resolved_from", "session_id", slog.String("session_id", callerSessionID)},
+		},
 	}
 
-	ctx, err := WithSessionID(WithLogger(context.Background(), l), testSessionID)
-	if err != nil {
-		t.Fatalf("WithSessionID() error = %v", err)
-	}
-	Warn(ctx, "stamped once")
-	Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	content, err := os.ReadFile(testLogFilePath(tmpDir))
-	if err != nil {
-		t.Fatalf("Failed to read log file: %v", err)
+			var buf bytes.Buffer
+			ctx := WithLogger(context.Background(), slog.New(slog.NewJSONHandler(&buf, nil)))
+			ctx = WithSessionID(ctx, "context-session")
+			Warn(ctx, "stamped once", tt.attrs...)
+
+			line := buf.String()
+			// Counting the key with its colon: the third case deliberately
+			// passes "session_id" as a *value*, which must not be mistaken for
+			// a second key here any more than it is by log() itself.
+			if got := strings.Count(line, `"session_id":`); got != 1 {
+				t.Errorf("session_id appears %d times, want 1: %s", got, line)
+			}
+			var entry map[string]any
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				t.Fatalf("log output is not valid JSON: %v\nContent: %s", err, line)
+			}
+			if entry["session_id"] != callerSessionID {
+				t.Errorf("session_id = %v, want the caller's %q", entry["session_id"], callerSessionID)
+			}
+		})
 	}
-	var line string
-	for _, l := range strings.Split(string(content), "\n") {
-		if strings.Contains(l, "stamped once") {
-			line = l
-			break
+}
+
+// TestLog_ContextSessionIDIsScoped pins what the context value buys over the
+// package global it replaced: re-stamping a derived context shadows the session
+// for that scope only, leaving the parent's lines attributed to the parent.
+func TestLog_ContextSessionIDIsScoped(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	outer := WithLogger(context.Background(), slog.New(slog.NewJSONHandler(&buf, nil)))
+	outer = WithSessionID(outer, "outer-session")
+	inner := WithSessionID(outer, "inner-session")
+
+	Warn(inner, "inner line")
+	Warn(outer, "outer line")
+
+	for _, want := range []struct{ msg, sessionID string }{
+		{"inner line", "inner-session"},
+		{"outer line", "outer-session"},
+	} {
+		var found bool
+		for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+			if !strings.Contains(line, want.msg) {
+				continue
+			}
+			found = true
+			var entry map[string]any
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				t.Fatalf("log output is not valid JSON: %v\nContent: %s", err, line)
+			}
+			if entry["session_id"] != want.sessionID {
+				t.Errorf("%q: session_id = %v, want %q", want.msg, entry["session_id"], want.sessionID)
+			}
 		}
-	}
-	if line == "" {
-		t.Fatalf("log line missing from file: %s", content)
-	}
-	if got := strings.Count(line, `"session_id"`); got != 1 {
-		t.Errorf("session_id appears %d times, want 1: %s", got, line)
+		if !found {
+			t.Errorf("%q missing from log output: %s", want.msg, buf.String())
+		}
 	}
 }
 

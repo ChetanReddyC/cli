@@ -2,11 +2,9 @@ package logging
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // Context keys for logging values.
@@ -16,8 +14,14 @@ type contextKey int
 const (
 	componentKey contextKey = iota
 	agentKey
+	sessionKey
 	loggerKey
 )
+
+// sessionIDAttrKey is the log attribute the session context value emits under.
+// Named because log() also has to recognize it among caller-supplied attrs
+// (see log).
+const sessionIDAttrKey = "session_id"
 
 // WithLogger attaches an initialized logger to the context. Init calls this
 // on the context it returns; entry points (cobra PreRun/RunE) pass that
@@ -46,41 +50,54 @@ func LoggerFromContext(ctx context.Context) *slog.Logger {
 	return nil
 }
 
-// WithSessionID returns ctx carrying a logger stamped with sessionID, so both
-// the package-level helpers and direct holders of the injected logger (the
-// redact package) emit lines filterable by session.
+// WithSessionID adds a session ID to the context, so every line logged under
+// it is filterable by the agent session that produced it.
 //
 // Use this when the session ID becomes known — the hook path resolves it after
 // the entry point has already initialized logging — rather than calling Init
 // again. The log file path is fixed, so a re-Init would close and reopen the
 // same file and rebuild its 8KB buffer purely to add this one attribute.
 //
-// Unlike WithComponent and WithAgent, this stamps the logger rather than
-// storing a context value: redact holds the logger directly and would
-// otherwise lose session_id from exactly the diagnostics where it matters
-// most. Package state is updated too, so code that logs through a context with
-// no injected logger is still stamped.
+// Like WithComponent and WithAgent, this is a plain context value, so calling
+// it again on a derived context shadows the outer session for that scope only.
+// It deliberately does not validate: logging builds no paths from the session
+// ID, it is an slog attribute. Guarding traversal belongs where the ID is
+// resolved from the filesystem, not here.
+func WithSessionID(ctx context.Context, sessionID string) context.Context {
+	return context.WithValue(ctx, sessionKey, sessionID)
+}
+
+// SessionLoggerFromContext returns the context's logger stamped with the
+// context's session ID, for packages that hold an injected *slog.Logger and
+// call it without a context — redact's redaction diagnostics, which are
+// exactly the lines a user grepping for their session needs to find. Those
+// calls never reach log(), so they cannot pick the attribute up from the
+// context themselves. Nil when there is no injected logger, so callers keep
+// treating that as "logging is not file-backed".
 //
-// Returns ctx unchanged when logging is not file-backed — there is no logger to
-// stamp, and injecting the stderr one would break the invariant that a context
-// logger means "writes go to .entire/logs/".
-func WithSessionID(ctx context.Context, sessionID string) (context.Context, error) {
-	if sessionID == "" {
-		return ctx, nil
-	}
-	if err := validation.ValidateSessionID(sessionID); err != nil {
-		return ctx, fmt.Errorf("invalid session ID for logging: %w", err)
-	}
-
-	mu.Lock()
-	currentSessionID = sessionID
-	mu.Unlock()
-
+// Only the session is stamped. component is deliberately left off: redact tags
+// its own lines with component=redaction, and slog does not dedupe attrs, so
+// re-adding it from the context would emit the key twice.
+func SessionLoggerFromContext(ctx context.Context) *slog.Logger {
 	l := LoggerFromContext(ctx)
 	if l == nil {
-		return ctx, nil
+		return nil
 	}
-	return WithLogger(ctx, l.With(slog.String("session_id", sessionID))), nil
+	if sessionID := sessionIDFromContext(ctx); sessionID != "" {
+		return l.With(slog.String(sessionIDAttrKey, sessionID))
+	}
+	return l
+}
+
+// sessionIDFromContext returns the session ID attached by WithSessionID, or "".
+func sessionIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if s, ok := ctx.Value(sessionKey).(string); ok {
+		return s
+	}
+	return ""
 }
 
 // WithComponent adds a component name to the context.

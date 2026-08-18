@@ -151,16 +151,8 @@ func initHookLogging(ctx context.Context) (context.Context, func()) {
 
 	// Stamp the session the root entry point could not know yet. This does not
 	// re-Init: the log path is fixed, so reopening the same file to add one
-	// attribute would be pure waste. A rejected ID must not abort — redaction
-	// still has to be configured below — so warn and carry on unstamped.
-	sessionID := strategy.FindMostRecentSession(ctx)
-	sessionCtx, sessionErr := logging.WithSessionID(ctx, sessionID)
-	if sessionErr != nil {
-		logging.Warn(ctx, "ignoring unusable session ID for logging",
-			slog.String("error", sessionErr.Error()))
-	} else {
-		ctx = sessionCtx
-	}
+	// attribute would be pure waste.
+	ctx = logging.WithSessionID(ctx, strategy.FindMostRecentSession(ctx))
 
 	// Configure redaction once at startup: PII (opt-in), inline custom_redactions,
 	// and rule packs discovered under .entire/redactors/. No-op if nothing is

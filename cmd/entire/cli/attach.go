@@ -208,11 +208,8 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	if l, err := logging.Init(ctx); err == nil && l != nil {
 		ctx = logging.WithLogger(ctx, l)
 	}
-	// Stamp this attach's session so its lines are filterable. A rejected ID is
-	// non-fatal: attach still runs, its lines just carry no session_id.
-	if sessionCtx, err := logging.WithSessionID(ctx, sessionID); err == nil {
-		ctx = sessionCtx
-	}
+	// Stamp this attach's session so its lines are filterable.
+	ctx = logging.WithSessionID(ctx, sessionID)
 	// Flush the 8KB buffered log writer on exit. Without this, any
 	// Warn/Info calls during attach (including the overwrite tripwire)
 	// get silently dropped when the process exits, matching the pattern
