@@ -447,6 +447,98 @@ func TestTryAgentCommitFastPath_SkipsEmptyButAcceptsContentSession(t *testing.T)
 	assert.Contains(t, string(content), "Entire-Checkpoint", "should add trailer from the content session")
 }
 
+// Regression test: background subagents commit mid-task while the parent
+// session is IDLE (between turns). The old ACTIVE-only gate silently dropped
+// linkage for these commits — six of seven commits in a real subagent-driven
+// PR shipped with no Entire-Checkpoint trailer. An idle session with a live
+// InFlightTask marker must still take the fast path.
+func TestTryAgentCommitFastPath_AcceptsIdleSessionWithInFlightTask(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+
+	commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(commitMsgFile, []byte("test commit\n"), 0o644))
+
+	idleWithMarker := &SessionState{
+		SessionID:      "claude-session",
+		AgentType:      "Claude Code",
+		Phase:          session.PhaseIdle,
+		TranscriptPath: "/some/path/to/transcript.jsonl",
+		InFlightTasks: []session.InFlightTask{
+			{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now()},
+		},
+	}
+
+	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{idleWithMarker}, "message")
+	assert.True(t, result, "fast path should fire for an idle session with a live in-flight task marker")
+
+	content, err := os.ReadFile(commitMsgFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "Entire-Checkpoint", "should add trailer for idle session with in-flight task")
+}
+
+// Regression test: an idle session with NO in-flight task markers is an
+// ordinary post-turn commit, not a mid-task background-subagent commit. It
+// must stay unlinked — widening the eligibility check must not accidentally
+// make every idle session linkable.
+func TestTryAgentCommitFastPath_DeclinesIdleSessionWithoutInFlightTasks(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+
+	commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(commitMsgFile, []byte("test commit\n"), 0o644))
+
+	idleNoMarkers := &SessionState{
+		SessionID:      "claude-session",
+		AgentType:      "Claude Code",
+		Phase:          session.PhaseIdle,
+		TranscriptPath: "/some/path/to/transcript.jsonl",
+		StepCount:      1,
+	}
+
+	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{idleNoMarkers}, "message")
+	assert.False(t, result, "fast path should not fire for an idle session with no in-flight task markers")
+
+	content, err := os.ReadFile(commitMsgFile)
+	require.NoError(t, err)
+	assert.NotContains(t, string(content), "Entire-Checkpoint", "ordinary post-turn commit must stay unlinked")
+}
+
+// Regression test: linkage is for live sessions only. An ENDED session's
+// in-flight task marker belongs to SessionEnd/sweep handling, not the
+// prepare-commit-msg fast path — an ended session must still decline even
+// with a marker present.
+func TestTryAgentCommitFastPath_DeclinesEndedSessionWithInFlightTask(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+
+	commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(commitMsgFile, []byte("test commit\n"), 0o644))
+
+	endedWithMarker := &SessionState{
+		SessionID:      "claude-session",
+		AgentType:      "Claude Code",
+		Phase:          session.PhaseEnded,
+		TranscriptPath: "/some/path/to/transcript.jsonl",
+		InFlightTasks: []session.InFlightTask{
+			{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now()},
+		},
+	}
+
+	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{endedWithMarker}, "message")
+	assert.False(t, result, "fast path should not fire for an ended session, even with an in-flight task marker")
+
+	content, err := os.ReadFile(commitMsgFile)
+	require.NoError(t, err)
+	assert.NotContains(t, string(content), "Entire-Checkpoint", "ended session marker belongs to SessionEnd/sweep handling")
+}
+
 // getHeadHash returns the HEAD commit hash as a string.
 func getHeadHash(t *testing.T, repo *git.Repository) string {
 	t.Helper()

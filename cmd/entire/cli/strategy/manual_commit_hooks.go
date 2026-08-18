@@ -2057,12 +2057,17 @@ func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, se
 // Returns true if the fast path was taken (trailer added or attempt made),
 // false if the caller should continue with normal content detection.
 //
-// The fast path activates when an ACTIVE session exists and either:
+// The fast path activates when an eligible session exists and either:
 //   - No TTY is available (agent subprocess, CI), or
 //   - commit_linking="always" (user opted into auto-linking — needed because
 //     some agents like Gemini subagents commit mid-turn from processes that
 //     have /dev/tty but can't respond to prompts, and content detection fails
 //     since the shadow branch doesn't exist yet).
+//
+// A session is eligible when it is ACTIVE (the classic mid-turn agent
+// commit), or when it is IDLE with a live in-flight background task (a
+// background subagent committing between the parent session's turns — see
+// the eligibility check below for why this shape needs its own trigger).
 func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commitMsgFile string, sessions []*SessionState, source string) bool {
 	noTTY := !interactive.CanPromptInteractively()
 	skipContentDetection := noTTY
@@ -2075,13 +2080,23 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		return false
 	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
-	activeSessions := 0
-	emptyActiveSessions := 0
+	eligibleSessions := 0
+	emptyEligibleSessions := 0
 	for _, state := range sessions {
-		if !state.Phase.IsActive() {
+		// Two shapes are linkable here: a classic ACTIVE agent commit (the
+		// agent is mid-turn), and an IDLE session with a live in-flight
+		// background task (a background subagent committing between the
+		// parent's turns — the ACTIVE-only gate used to silently drop
+		// linkage for these, since the parent session goes idle while the
+		// subagent keeps running). The commit-snapshot capture (see
+		// lifecycle.go's captureInFlightTaskCommitSnapshot) is what makes
+		// the checkpoint this trailer points at actually contentful for the
+		// idle+marker shape; this check is only the trigger.
+		eligible := state.Phase.IsActive() || (state.Phase == session.PhaseIdle && len(state.InFlightTasks) > 0)
+		if !eligible {
 			continue
 		}
-		activeSessions++
+		eligibleSessions++
 		// Skip sessions that have no condensable content: no transcript path,
 		// no tracked files, and no shadow branch data (StepCount == 0). These
 		// would produce a Skipped result in CondenseSession, leaving the
@@ -2089,7 +2104,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		// NOTE: conservative approximation of the skip gate in CondenseSession
 		// (which checks extracted data, not raw state). Keep aligned.
 		if state.TranscriptPath == "" && len(state.FilesTouched) == 0 && state.StepCount == 0 {
-			emptyActiveSessions++
+			emptyEligibleSessions++
 			logging.Debug(logCtx, "prepare-commit-msg: fast path skipping empty session",
 				slog.String("session_id", state.SessionID),
 				slog.String("agent_type", string(state.AgentType)),
@@ -2104,15 +2119,15 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 	for _, state := range sessions {
 		phases = append(phases, string(state.Phase))
 	}
-	message := "prepare-commit-msg: fast path found no ACTIVE sessions"
-	if activeSessions > 0 && emptyActiveSessions == activeSessions {
-		message = "prepare-commit-msg: fast path skipped all ACTIVE sessions as empty"
+	message := "prepare-commit-msg: fast path found no ACTIVE or idle-with-in-flight-task sessions"
+	if eligibleSessions > 0 && emptyEligibleSessions == eligibleSessions {
+		message = "prepare-commit-msg: fast path skipped all eligible sessions as empty"
 	}
 	logging.Debug(logCtx, message,
 		slog.Bool("no_tty", noTTY),
 		slog.Int("sessions", len(sessions)),
-		slog.Int("active_sessions", activeSessions),
-		slog.Int("empty_active_sessions", emptyActiveSessions),
+		slog.Int("eligible_sessions", eligibleSessions),
+		slog.Int("empty_eligible_sessions", emptyEligibleSessions),
 		slog.Any("session_phases", phases),
 	)
 	return false
