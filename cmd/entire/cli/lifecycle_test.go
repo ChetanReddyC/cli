@@ -2828,10 +2828,20 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect(t
 // before this SubagentStop arrived, the Final capture must run and then
 // immediately trigger the same eager condense SessionEnd uses, so the
 // newly-captured task step doesn't linger as post-condensation zombie shadow
-// data. Uses a read-only capture (no file changes) so FilesTouched stays
-// empty and StepCount stays 0 — the same "no steps" shortcut
-// CondenseAndMarkFullyCondensed takes on an otherwise-empty ended session —
-// making the eager condense observable via FullyCondensed.
+// data.
+//
+// Uses a read-only capture (no file changes) — the headline motivating case,
+// a background reviewer that edits nothing. Before the fix in
+// strategy.SaveTaskStep (registering a transcript-only task step with
+// StepCount), such a step touched neither FilesTouched nor StepCount, so
+// CondenseAndMarkFullyCondensed took its StepCount<=0 shortcut: it marked the
+// session FullyCondensed WITHOUT ever reading the shadow branch, stranding
+// the just-captured transcript there to be destroyed as an orphan. The
+// session state carries a real transcript path and a registered agent type
+// so CondenseSession has actual content to condense instead of hitting its
+// own "nothing to condense" skip gate — proving the shadow branch's content
+// was genuinely consumed (persistent checkpoint written, shadow branch
+// deleted), not merely that FullyCondensed flipped true via a shortcut.
 func TestHandleLifecycleSubagentEnd_SubagentStop_PhaseEnded_TriggersEagerCondense(t *testing.T) {
 	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
 	repoDir, headHash := setupSubagentEndTestRepo(t)
@@ -2839,11 +2849,23 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_PhaseEnded_TriggersEagerCondens
 	sessionID := "ended-session"
 	toolUseID := "toolu_ended1"
 
+	// The transcript must live OUTSIDE the repo: an untracked file inside the
+	// repo would show up as a git-status "new file" and defeat the read-only
+	// (no file changes) scenario this test is specifically covering.
+	transcriptDir := t.TempDir()
+	transcriptPath := filepath.Join(transcriptDir, "transcript.jsonl")
+	transcript := `{"type":"human","uuid":"u1","message":{"content":"please review the diff"}}
+{"type":"assistant","uuid":"u2","message":{"content":"Reviewed; looks correct."}}
+`
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(transcript), 0o644))
+
 	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
-		SessionID:  sessionID,
-		BaseCommit: headHash,
-		StartedAt:  time.Now(),
-		Phase:      session.PhaseEnded,
+		SessionID:      sessionID,
+		BaseCommit:     headHash,
+		StartedAt:      time.Now(),
+		Phase:          session.PhaseEnded,
+		AgentType:      agent.AgentTypeClaudeCode,
+		TranscriptPath: transcriptPath,
 		InFlightTasks: []session.InFlightTask{
 			{ToolUseID: toolUseID, AgentID: "agent-ended1", StartedAt: time.Now(), SubagentType: "reviewer"},
 		},
@@ -2863,13 +2885,27 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_PhaseEnded_TriggersEagerCondens
 	require.NoError(t, err)
 
 	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
-	if !testutil.BranchExists(t, repoDir, shadowBranch) {
-		t.Error("a read-only capture (no file changes) must still save a task step on a Final event")
-	}
 
 	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
 	require.NoError(t, loadErr)
 	require.NotNil(t, state)
 	assert.Empty(t, state.InFlightTasks, "in-flight marker must be cleared regardless of the condense outcome")
 	assert.True(t, state.FullyCondensed, "a late capture on an ended session must trigger the eager condense SessionEnd uses")
+
+	// The real assertion: condensation must have CONSUMED the shadow branch's
+	// content, not merely marked FullyCondensed via a skip/shortcut path.
+	if testutil.BranchExists(t, repoDir, shadowBranch) {
+		t.Error("condensation must delete the shadow branch once its content is consumed into a permanent checkpoint")
+	}
+
+	checkpoints, listErr := strategy.ListCheckpoints(ctx)
+	require.NoError(t, listErr)
+	found := false
+	for _, cp := range checkpoints {
+		if cp.SessionID == sessionID {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "the transcript-only task step must reach permanent checkpoint storage, not be stranded and discarded")
 }

@@ -379,8 +379,8 @@ type State struct {
 // post-task hook fires at the background launch STUB, so between launch and
 // SubagentStop this is the only record that the session has live background
 // work. Consumed by the turn-end incremental snapshot and the SessionEnd
-// final capture (follow-up PR) and by commit linkage (follow-up PR). Cleared
-// ONLY by a Final capture: the SubagentStop handler (every exit path,
+// final capture (this PR, Task 3) and by commit linkage (follow-up PR).
+// Cleared ONLY by a Final capture: the SubagentStop handler (every exit path,
 // including the no-changes skip) or the SessionEnd final capture. Turn-end
 // snapshots leave it in place.
 type InFlightTask struct {
@@ -430,6 +430,19 @@ func (s *State) RemoveInFlightTask(toolUseID string) {
 			return
 		}
 	}
+}
+
+// FindInFlightTask returns a pointer to the in-flight marker for toolUseID, or
+// nil if none exists. The pointer aliases the slice element, so callers must
+// not retain it across a mutation that could reallocate InFlightTasks (e.g.
+// AddInFlightTask, RemoveInFlightTask).
+func (s *State) FindInFlightTask(toolUseID string) *InFlightTask {
+	for i := range s.InFlightTasks {
+		if s.InFlightTasks[i].ToolUseID == toolUseID {
+			return &s.InFlightTasks[i]
+		}
+	}
+	return nil
 }
 
 // PromptAttribution captures line-level attribution data at the start of each prompt.

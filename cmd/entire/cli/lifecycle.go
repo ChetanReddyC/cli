@@ -1144,14 +1144,14 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	}
 
 	if event.Final {
-		return handleSubagentStopFinal(ctx, logCtx, ag, event)
+		return handleSubagentStopFinal(logCtx, ag, event)
 	}
 
 	if isBackgroundLaunch(event.ToolInput) {
-		return recordInFlightTaskLaunch(ctx, logCtx, event)
+		return recordInFlightTaskLaunch(logCtx, event)
 	}
 
-	return captureSubagentTaskStep(ctx, logCtx, ag, event, subagentCaptureOptions{})
+	return captureSubagentTaskStep(logCtx, ag, event, subagentCaptureOptions{})
 }
 
 // recordInFlightTaskLaunch handles a background Task launch. It records an
@@ -1160,14 +1160,14 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 // is the first point that sees the subagent's actual work. Tolerates
 // strategy.ErrStateNotFound the way SaveTaskStep itself tolerates a launch
 // event arriving before session state exists.
-func recordInFlightTaskLaunch(ctx context.Context, logCtx context.Context, event *agent.Event) error {
+func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error {
 	logging.Debug(logCtx, "background subagent launch detected; deferring capture to subagent-stop",
 		slog.String("session_id", event.SessionID),
 		slog.String("tool_use_id", event.ToolUseID),
 		slog.String("agent_id", event.SubagentID),
 	)
 
-	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
+	mutErr := strategy.MutateSessionState(logCtx, event.SessionID, func(state *strategy.SessionState) error {
 		state.AddInFlightTask(session.InFlightTask{
 			ToolUseID:       event.ToolUseID,
 			AgentID:         event.SubagentID,
@@ -1191,8 +1191,8 @@ func recordInFlightTaskLaunch(ctx context.Context, logCtx context.Context, event
 // ended/swept session) the same way SaveTaskStep tolerates a missing state.
 // Safe to call speculatively on every SubagentStop exit path, including ones
 // where no marker was ever recorded (foreground tasks, duplicate fires).
-func removeInFlightTaskMarker(ctx context.Context, logCtx context.Context, sessionID, toolUseID string) {
-	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+func removeInFlightTaskMarker(logCtx context.Context, sessionID, toolUseID string) {
+	mutErr := strategy.MutateSessionState(logCtx, sessionID, func(state *strategy.SessionState) error {
 		state.RemoveInFlightTask(toolUseID)
 		return nil
 	})
@@ -1212,8 +1212,8 @@ func removeInFlightTaskMarker(ctx context.Context, logCtx context.Context, sessi
 // session sweep exists to prevent — then captures (bypassing the no-changes
 // skip gate: a read-only subagent still produced a transcript worth a task
 // step) and clears the in-flight marker on every exit path.
-func handleSubagentStopFinal(ctx context.Context, logCtx context.Context, ag agent.Agent, event *agent.Event) error {
-	state, err := strategy.LoadSessionState(ctx, event.SessionID)
+func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agent.Event) error {
+	state, err := strategy.LoadSessionState(logCtx, event.SessionID)
 	if err != nil {
 		logging.Warn(logCtx, "failed to load session state for subagent-stop capture",
 			slog.String("session_id", event.SessionID),
@@ -1227,17 +1227,11 @@ func handleSubagentStopFinal(ctx context.Context, logCtx context.Context, ag age
 		logging.Info(logCtx, "skipping subagent-stop capture: session state not found",
 			slog.String("session_id", event.SessionID),
 			slog.String("tool_use_id", event.ToolUseID))
-		removeInFlightTaskMarker(ctx, logCtx, event.SessionID, event.ToolUseID)
+		removeInFlightTaskMarker(logCtx, event.SessionID, event.ToolUseID)
 		return nil
 	}
 
-	var marker *session.InFlightTask
-	for i := range state.InFlightTasks {
-		if state.InFlightTasks[i].ToolUseID == event.ToolUseID {
-			marker = &state.InFlightTasks[i]
-			break
-		}
-	}
+	marker := state.FindInFlightTask(event.ToolUseID)
 	if marker == nil {
 		// No marker: this ToolUseID was already captured at launch-time
 		// post-task (foreground task), or this is a duplicate SubagentStop.
@@ -1245,21 +1239,28 @@ func handleSubagentStopFinal(ctx context.Context, logCtx context.Context, ag age
 		logging.Debug(logCtx, "no in-flight marker for subagent-stop; skipping duplicate/foreground capture",
 			slog.String("session_id", event.SessionID),
 			slog.String("tool_use_id", event.ToolUseID))
-		removeInFlightTaskMarker(ctx, logCtx, event.SessionID, event.ToolUseID)
+		removeInFlightTaskMarker(logCtx, event.SessionID, event.ToolUseID)
 		return nil
 	}
 
 	// SubagentStop payloads carry no tool_input, so event.SubagentType/
-	// TaskDescription are empty at this point; the marker recorded them at
-	// launch time. Fall back to the event's own fields only if the marker
-	// somehow lacks them (defensive; shouldn't happen in practice).
-	if marker.SubagentType != "" || marker.TaskDescription != "" {
+	// TaskDescription/SubagentID are typically empty at this point; the marker
+	// recorded all three at launch time. Each field falls back independently —
+	// not as an all-or-nothing pair — so a marker that only captured one of
+	// them (e.g. a legacy marker written before a field existed) still
+	// contributes what it has instead of being discarded wholesale.
+	if marker.SubagentType != "" {
 		event.SubagentType = marker.SubagentType
+	}
+	if marker.TaskDescription != "" {
 		event.TaskDescription = marker.TaskDescription
 	}
+	if event.SubagentID == "" && marker.AgentID != "" {
+		event.SubagentID = marker.AgentID
+	}
 
-	captureErr := captureSubagentTaskStep(ctx, logCtx, ag, event, subagentCaptureOptions{bypassNoChangesSkip: true})
-	removeInFlightTaskMarker(ctx, logCtx, event.SessionID, event.ToolUseID)
+	captureErr := captureSubagentTaskStep(logCtx, ag, event, subagentCaptureOptions{bypassNoChangesSkip: true})
+	removeInFlightTaskMarker(logCtx, event.SessionID, event.ToolUseID)
 	if captureErr != nil {
 		return captureErr
 	}
@@ -1268,7 +1269,7 @@ func handleSubagentStopFinal(ctx context.Context, logCtx context.Context, ag age
 		// The session ended before this SubagentStop arrived. Trigger the same
 		// eager condense SessionEnd uses so the newly-captured task step doesn't
 		// linger as post-condensation zombie shadow data.
-		if condErr := GetStrategy(ctx).CondenseAndMarkFullyCondensed(ctx, event.SessionID); condErr != nil {
+		if condErr := GetStrategy(logCtx).CondenseAndMarkFullyCondensed(logCtx, event.SessionID); condErr != nil {
 			logging.Warn(logCtx, "eager condense after late subagent-stop capture failed",
 				slog.String("session_id", event.SessionID),
 				slog.String("error", condErr.Error()))
@@ -1291,7 +1292,7 @@ type subagentCaptureOptions struct {
 
 // captureSubagentTaskStep detects changes and saves a task checkpoint for a
 // completed subagent invocation.
-func captureSubagentTaskStep(ctx context.Context, logCtx context.Context, ag agent.Agent, event *agent.Event, opts subagentCaptureOptions) error {
+func captureSubagentTaskStep(logCtx context.Context, ag agent.Agent, event *agent.Event, opts subagentCaptureOptions) error {
 	// Determine subagent transcript path (empty when the agent stores none).
 	// event.SubagentTranscript is authoritative when the hook payload supplies
 	// it directly (e.g. Claude Code's SubagentStop carries agent_transcript_path);
@@ -1337,7 +1338,7 @@ func captureSubagentTaskStep(ctx context.Context, logCtx context.Context, ag age
 	// to the session's pre-prompt state. Without either, DetectFileChanges receives
 	// nil and treats ALL untracked files as new — which would create spurious task
 	// checkpoints for pre-existing untracked files (e.g., .github/hooks/entire.json).
-	preState, err := LoadPreTaskState(ctx, event.ToolUseID)
+	preState, err := LoadPreTaskState(logCtx, event.ToolUseID)
 	if err != nil {
 		logging.Warn(logCtx, "failed to load pre-task state",
 			slog.String("error", err.Error()))
@@ -1346,14 +1347,14 @@ func captureSubagentTaskStep(ctx context.Context, logCtx context.Context, ag age
 	if preState != nil {
 		preUntrackedFiles = preState.PreUntrackedFiles()
 	}
-	changes, err := DetectFileChanges(ctx, preUntrackedFiles)
+	changes, err := DetectFileChanges(logCtx, preUntrackedFiles)
 	if err != nil {
 		logging.Warn(logCtx, "failed to compute file changes",
 			slog.String("error", err.Error()))
 	}
 
 	// Get worktree root and normalize paths
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	repoRoot, err := paths.WorktreeRoot(logCtx)
 	if err != nil {
 		return fmt.Errorf("failed to get worktree root: %w", err)
 	}
@@ -1370,7 +1371,7 @@ func captureSubagentTaskStep(ctx context.Context, logCtx context.Context, ag age
 	// filterToUncommittedFiles is the same guard the turn-end path already applies
 	// for this exact reason; it fails open, so a git error keeps the list as-is
 	// rather than silently dropping a real checkpoint.
-	relModifiedFiles := filterToUncommittedFiles(ctx, FilterAndNormalizePaths(modifiedFiles, repoRoot), repoRoot)
+	relModifiedFiles := filterToUncommittedFiles(logCtx, FilterAndNormalizePaths(modifiedFiles, repoRoot), repoRoot)
 	var relNewFiles, relDeletedFiles []string
 	if changes != nil {
 		// changes come from git status, so they are uncommitted by construction.
@@ -1387,7 +1388,7 @@ func captureSubagentTaskStep(ctx context.Context, logCtx context.Context, ag age
 	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 && len(relDeletedFiles) == 0 {
 		if !opts.bypassNoChangesSkip {
 			logging.Info(logCtx, "no file changes detected, skipping task checkpoint")
-			_ = CleanupPreTaskState(ctx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+			_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 			return nil
 		}
 		logging.Info(logCtx, "no file changes detected but capturing anyway (final subagent-stop capture)")
@@ -1402,13 +1403,13 @@ func captureSubagentTaskStep(ctx context.Context, logCtx context.Context, ag age
 	}
 
 	// Get git author
-	author, err := GetGitAuthor(ctx)
+	author, err := GetGitAuthor(logCtx)
 	if err != nil {
 		return fmt.Errorf("failed to get git author: %w", err)
 	}
 
 	// Build task checkpoint context
-	strat := GetStrategy(ctx)
+	strat := GetStrategy(logCtx)
 	agentType := ag.Type()
 
 	taskStepCtx := strategy.TaskStepContext{
@@ -1428,11 +1429,11 @@ func captureSubagentTaskStep(ctx context.Context, logCtx context.Context, ag age
 		AgentType:              agentType,
 	}
 
-	if err := strat.SaveTaskStep(ctx, taskStepCtx); err != nil {
+	if err := strat.SaveTaskStep(logCtx, taskStepCtx); err != nil {
 		return fmt.Errorf("failed to save task step: %w", err)
 	}
 
-	_ = CleanupPreTaskState(ctx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+	_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 	return nil
 }
 

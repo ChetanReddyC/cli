@@ -849,3 +849,22 @@ func TestState_RemoveInFlightTask(t *testing.T) {
 	s.RemoveInFlightTask("toolu_2")
 	assert.Empty(t, s.InFlightTasks)
 }
+
+// TestState_FindInFlightTask pins lookup semantics: the matching marker is
+// returned by reference (so the Final-path handler can read its launch-
+// recorded label without copying), and a ToolUseID with no marker returns nil
+// rather than panicking — the same "no marker" case the Final-path dedup
+// depends on.
+func TestState_FindInFlightTask(t *testing.T) {
+	t.Parallel()
+	s := &State{InFlightTasks: []InFlightTask{
+		{ToolUseID: "toolu_1", SubagentType: "reviewer"},
+		{ToolUseID: "toolu_2", SubagentType: "dev"},
+	}}
+
+	got := s.FindInFlightTask("toolu_2")
+	require.NotNil(t, got)
+	assert.Equal(t, "dev", got.SubagentType)
+
+	assert.Nil(t, s.FindInFlightTask("does-not-exist"))
+}
