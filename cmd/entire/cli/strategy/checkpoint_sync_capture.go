@@ -65,11 +65,31 @@ func saveCapturedSyncRemotes(ctx context.Context, remotes []string) error {
 	if err != nil {
 		return fmt.Errorf("encode captured sync remotes: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// Unique temp name rather than a fixed path + ".tmp": the file lives in the
+	// git common dir, which is shared across every worktree of the repo, so two
+	// concurrent pre-push hooks would otherwise write the same scratch path and
+	// one could rename the other's half-written content into place.
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create captured sync remotes temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		// No-op once the rename succeeded; cleans up on every failure path.
+		_ = os.Remove(tmpName)
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod captured sync remotes temp file: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("write captured sync remotes: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close captured sync remotes temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("commit captured sync remotes: %w", err)
 	}
 	return nil
