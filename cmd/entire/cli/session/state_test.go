@@ -751,3 +751,101 @@ func TestState_InvestigateRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestState_InFlightTasks_RoundTrip pins the JSON wire format for in-flight
+// background task markers. Regression this guards: without a persisted
+// record of a dispatched background subagent, the launch-time post-task hook
+// (which fires at the launch stub, seconds before any real work happens) has
+// no way to defer capture to SubagentStop — the marker is the only memory
+// that background work is still outstanding.
+func TestState_InFlightTasks_RoundTrip(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC().Truncate(time.Second)
+	s := State{
+		SessionID:  "2026-04-20-uuid",
+		BaseCommit: "abc",
+		StartedAt:  now,
+		InFlightTasks: []InFlightTask{
+			{
+				ToolUseID:       "toolu_01X",
+				AgentID:         "a123",
+				StartedAt:       now,
+				SubagentType:    "code-reviewer",
+				TaskDescription: "Review the diff",
+			},
+		},
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got State
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	require.Len(t, got.InFlightTasks, 1)
+	assert.Equal(t, "toolu_01X", got.InFlightTasks[0].ToolUseID)
+	assert.Equal(t, "a123", got.InFlightTasks[0].AgentID)
+	assert.True(t, now.Equal(got.InFlightTasks[0].StartedAt))
+	assert.Equal(t, "code-reviewer", got.InFlightTasks[0].SubagentType)
+	assert.Equal(t, "Review the diff", got.InFlightTasks[0].TaskDescription)
+
+	// Zero-value: an empty in-flight task list must be omitted entirely, not
+	// serialized as "in_flight_tasks":[] or ":null".
+	zero := State{SessionID: "x", BaseCommit: "y", StartedAt: now}
+	zb, err := json.Marshal(zero)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(zb), `"in_flight_tasks"`) {
+		t.Errorf("expected zero-value State to omit in_flight_tasks, got %s", zb)
+	}
+}
+
+// TestState_AddInFlightTask_DedupByToolUseID pins that a duplicate launch
+// event for the same Task tool invocation replaces the existing marker
+// instead of accumulating a second one. Regression this guards: without
+// dedup, a retried/duplicate PostToolUse for the same tool_use_id would leave
+// two markers, and RemoveInFlightTask (which removes only the first match)
+// would leak a stale entry after SubagentStop clears the "real" one.
+func TestState_AddInFlightTask_DedupByToolUseID(t *testing.T) {
+	t.Parallel()
+	s := &State{}
+	first := time.Now().UTC()
+	s.AddInFlightTask(InFlightTask{ToolUseID: "toolu_1", AgentID: "a1", StartedAt: first})
+	require.Len(t, s.InFlightTasks, 1)
+
+	second := first.Add(time.Minute)
+	s.AddInFlightTask(InFlightTask{ToolUseID: "toolu_1", AgentID: "a1-retry", StartedAt: second})
+	require.Len(t, s.InFlightTasks, 1, "duplicate ToolUseID must replace, not append")
+	assert.Equal(t, "a1-retry", s.InFlightTasks[0].AgentID)
+	assert.True(t, second.Equal(s.InFlightTasks[0].StartedAt))
+
+	// A different ToolUseID does get appended.
+	s.AddInFlightTask(InFlightTask{ToolUseID: "toolu_2", StartedAt: second})
+	require.Len(t, s.InFlightTasks, 2)
+}
+
+// TestState_RemoveInFlightTask pins removal semantics: the matching marker is
+// cleared, other markers survive, and removing a ToolUseID with no marker
+// (the foreground-task / double-fire case) is a safe no-op rather than a panic
+// or error.
+func TestState_RemoveInFlightTask(t *testing.T) {
+	t.Parallel()
+	s := &State{InFlightTasks: []InFlightTask{
+		{ToolUseID: "toolu_1"},
+		{ToolUseID: "toolu_2"},
+	}}
+
+	s.RemoveInFlightTask("toolu_1")
+	require.Len(t, s.InFlightTasks, 1)
+	assert.Equal(t, "toolu_2", s.InFlightTasks[0].ToolUseID)
+
+	// No-op when the ToolUseID has no marker.
+	s.RemoveInFlightTask("does-not-exist")
+	require.Len(t, s.InFlightTasks, 1)
+
+	s.RemoveInFlightTask("toolu_2")
+	assert.Empty(t, s.InFlightTasks)
+}

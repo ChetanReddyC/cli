@@ -152,6 +152,54 @@ func TestParseSubagentTypeAndDescription(t *testing.T) {
 	}
 }
 
+// TestIsBackgroundLaunch pins background-subagent detection: this is the
+// signal handleLifecycleSubagentEnd uses to decide whether a launch-time
+// PostToolUse event should defer capture to SubagentStop (background) or
+// capture immediately (foreground, unchanged legacy behavior).
+func TestIsBackgroundLaunch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		toolInput string
+		want      bool
+	}{
+		{
+			name:      "run_in_background true",
+			toolInput: `{"subagent_type": "dev", "run_in_background": true}`,
+			want:      true,
+		},
+		{
+			name:      "run_in_background false",
+			toolInput: `{"subagent_type": "dev", "run_in_background": false}`,
+			want:      false,
+		},
+		{
+			name:      "run_in_background absent",
+			toolInput: `{"subagent_type": "dev"}`,
+			want:      false,
+		},
+		{
+			name:      "empty input",
+			toolInput: ``,
+			want:      false,
+		},
+		{
+			name:      "invalid json",
+			toolInput: `not valid json`,
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isBackgroundLaunch([]byte(tt.toolInput)); got != tt.want {
+				t.Errorf("isBackgroundLaunch(%q) = %v, want %v", tt.toolInput, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExtractLastCompletedTodoFromToolInput(t *testing.T) {
 	tests := []struct {
 		name      string

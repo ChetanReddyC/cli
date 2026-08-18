@@ -1124,7 +1124,18 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 	return nil
 }
 
-// handleLifecycleSubagentEnd handles subagent end: detects changes, saves task checkpoint.
+// handleLifecycleSubagentEnd handles subagent completion. It dispatches on
+// event.Final — never on any payload sentinel — to tell a real completion
+// signal (SubagentStop) from the launch-time PostToolUse (post-task) stub:
+//
+//   - event.Final == true (SubagentStop): the authoritative final capture.
+//     See handleSubagentStopFinal.
+//   - event.Final == false, background launch (run_in_background: true in
+//     ToolInput): post-task fires seconds after launch, before any real work
+//     happens. Records an in-flight marker and defers the real capture to
+//     SubagentStop instead of saving a stub task step.
+//   - event.Final == false, foreground: unchanged legacy behavior — captures
+//     immediately via captureSubagentTaskStep.
 func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	if event.SubagentType == "" && event.TaskDescription == "" {
@@ -1132,6 +1143,155 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		event.SubagentType, event.TaskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
 	}
 
+	if event.Final {
+		return handleSubagentStopFinal(ctx, logCtx, ag, event)
+	}
+
+	if isBackgroundLaunch(event.ToolInput) {
+		return recordInFlightTaskLaunch(ctx, logCtx, event)
+	}
+
+	return captureSubagentTaskStep(ctx, logCtx, ag, event, subagentCaptureOptions{})
+}
+
+// recordInFlightTaskLaunch handles a background Task launch. It records an
+// in-flight marker on session state and returns without saving a task step;
+// the real capture happens at SubagentStop (handleSubagentStopFinal), which
+// is the first point that sees the subagent's actual work. Tolerates
+// strategy.ErrStateNotFound the way SaveTaskStep itself tolerates a launch
+// event arriving before session state exists.
+func recordInFlightTaskLaunch(ctx context.Context, logCtx context.Context, event *agent.Event) error {
+	logging.Debug(logCtx, "background subagent launch detected; deferring capture to subagent-stop",
+		slog.String("session_id", event.SessionID),
+		slog.String("tool_use_id", event.ToolUseID),
+		slog.String("agent_id", event.SubagentID),
+	)
+
+	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
+		state.AddInFlightTask(session.InFlightTask{
+			ToolUseID:       event.ToolUseID,
+			AgentID:         event.SubagentID,
+			StartedAt:       time.Now(),
+			SubagentType:    event.SubagentType,
+			TaskDescription: event.TaskDescription,
+		})
+		return nil
+	})
+	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		logging.Warn(logCtx, "failed to record in-flight task marker",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("error", mutErr.Error()))
+	}
+	return nil
+}
+
+// removeInFlightTaskMarker clears the in-flight marker for toolUseID, tolerating
+// strategy.ErrStateNotFound (the session state may already be gone, e.g. an
+// ended/swept session) the same way SaveTaskStep tolerates a missing state.
+// Safe to call speculatively on every SubagentStop exit path, including ones
+// where no marker was ever recorded (foreground tasks, duplicate fires).
+func removeInFlightTaskMarker(ctx context.Context, logCtx context.Context, sessionID, toolUseID string) {
+	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		state.RemoveInFlightTask(toolUseID)
+		return nil
+	})
+	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		logging.Warn(logCtx, "failed to remove in-flight task marker",
+			slog.String("session_id", sessionID),
+			slog.String("tool_use_id", toolUseID),
+			slog.String("error", mutErr.Error()))
+	}
+}
+
+// handleSubagentStopFinal is the authoritative final capture, run for
+// SubagentStop (event.Final == true). It guards against a late SubagentStop
+// resurrecting an ended/swept session — SaveTaskStep -> ensureSessionInitialized
+// -> initializeSession would otherwise re-create session state unconditionally
+// and mint a shadow branch nothing condenses, the exact zombie class the
+// session sweep exists to prevent — then captures (bypassing the no-changes
+// skip gate: a read-only subagent still produced a transcript worth a task
+// step) and clears the in-flight marker on every exit path.
+func handleSubagentStopFinal(ctx context.Context, logCtx context.Context, ag agent.Agent, event *agent.Event) error {
+	state, err := strategy.LoadSessionState(ctx, event.SessionID)
+	if err != nil {
+		logging.Warn(logCtx, "failed to load session state for subagent-stop capture",
+			slog.String("session_id", event.SessionID),
+			slog.String("error", err.Error()))
+	}
+	if state == nil {
+		// Session state missing entirely (ended and swept, or never existed).
+		// The subagent transcript remains on disk in the agent's own directory;
+		// there is nothing here to attach it to, and re-creating session state
+		// for a late event would resurrect a zombie session.
+		logging.Info(logCtx, "skipping subagent-stop capture: session state not found",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID))
+		removeInFlightTaskMarker(ctx, logCtx, event.SessionID, event.ToolUseID)
+		return nil
+	}
+
+	var marker *session.InFlightTask
+	for i := range state.InFlightTasks {
+		if state.InFlightTasks[i].ToolUseID == event.ToolUseID {
+			marker = &state.InFlightTasks[i]
+			break
+		}
+	}
+	if marker == nil {
+		// No marker: this ToolUseID was already captured at launch-time
+		// post-task (foreground task), or this is a duplicate SubagentStop.
+		// Skip the save but still attempt marker removal (no-op either way).
+		logging.Debug(logCtx, "no in-flight marker for subagent-stop; skipping duplicate/foreground capture",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID))
+		removeInFlightTaskMarker(ctx, logCtx, event.SessionID, event.ToolUseID)
+		return nil
+	}
+
+	// SubagentStop payloads carry no tool_input, so event.SubagentType/
+	// TaskDescription are empty at this point; the marker recorded them at
+	// launch time. Fall back to the event's own fields only if the marker
+	// somehow lacks them (defensive; shouldn't happen in practice).
+	if marker.SubagentType != "" || marker.TaskDescription != "" {
+		event.SubagentType = marker.SubagentType
+		event.TaskDescription = marker.TaskDescription
+	}
+
+	captureErr := captureSubagentTaskStep(ctx, logCtx, ag, event, subagentCaptureOptions{bypassNoChangesSkip: true})
+	removeInFlightTaskMarker(ctx, logCtx, event.SessionID, event.ToolUseID)
+	if captureErr != nil {
+		return captureErr
+	}
+
+	if state.Phase == session.PhaseEnded {
+		// The session ended before this SubagentStop arrived. Trigger the same
+		// eager condense SessionEnd uses so the newly-captured task step doesn't
+		// linger as post-condensation zombie shadow data.
+		if condErr := GetStrategy(ctx).CondenseAndMarkFullyCondensed(ctx, event.SessionID); condErr != nil {
+			logging.Warn(logCtx, "eager condense after late subagent-stop capture failed",
+				slog.String("session_id", event.SessionID),
+				slog.String("error", condErr.Error()))
+		}
+	}
+
+	return nil
+}
+
+// subagentCaptureOptions controls captureSubagentTaskStep's behavior across
+// its two callers (launch-time foreground capture vs. SubagentStop final
+// capture).
+type subagentCaptureOptions struct {
+	// bypassNoChangesSkip, when true, saves a task step even when no file
+	// changes were detected. Only set for Final (SubagentStop) captures: a
+	// read-only background subagent (e.g. a reviewer) still produced a
+	// transcript worth a task step, and this is the only chance to capture it.
+	bypassNoChangesSkip bool
+}
+
+// captureSubagentTaskStep detects changes and saves a task checkpoint for a
+// completed subagent invocation.
+func captureSubagentTaskStep(ctx context.Context, logCtx context.Context, ag agent.Agent, event *agent.Event, opts subagentCaptureOptions) error {
 	// Determine subagent transcript path (empty when the agent stores none).
 	// event.SubagentTranscript is authoritative when the hook payload supplies
 	// it directly (e.g. Claude Code's SubagentStop carries agent_transcript_path);
@@ -1219,11 +1379,18 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
 	}
 
-	// If no changes, skip
+	// If no changes, skip — unless this is a Final (SubagentStop) capture: a
+	// read-only background subagent (e.g. a reviewer) still produced a
+	// transcript worth a task step, and SubagentStop is the only chance to
+	// capture it (bypassNoChangesSkip is never set for the foreground
+	// launch-time path, which keeps its original skip-on-no-changes behavior).
 	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 && len(relDeletedFiles) == 0 {
-		logging.Info(logCtx, "no file changes detected, skipping task checkpoint")
-		_ = CleanupPreTaskState(ctx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
-		return nil
+		if !opts.bypassNoChangesSkip {
+			logging.Info(logCtx, "no file changes detected, skipping task checkpoint")
+			_ = CleanupPreTaskState(ctx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+			return nil
+		}
+		logging.Info(logCtx, "no file changes detected but capturing anyway (final subagent-stop capture)")
 	}
 
 	// Find checkpoint UUID from main transcript (best-effort)

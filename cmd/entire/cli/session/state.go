@@ -367,6 +367,69 @@ type State struct {
 	// resolved, in which case liveness falls back to the StuckActiveThreshold
 	// timeout. Only meaningful on Owner.Host.
 	Owner *proclive.Identity `json:"owner,omitempty"`
+
+	// InFlightTasks tracks background subagents dispatched by this session
+	// whose completion signal (SubagentStop) has not arrived yet. See
+	// InFlightTask.
+	InFlightTasks []InFlightTask `json:"in_flight_tasks,omitempty"`
+}
+
+// InFlightTask records a background subagent dispatched by this session whose
+// completion signal (SubagentStop) has not arrived yet. Entire's launch-time
+// post-task hook fires at the background launch STUB, so between launch and
+// SubagentStop this is the only record that the session has live background
+// work. Consumed by the turn-end incremental snapshot and the SessionEnd
+// final capture (follow-up PR) and by commit linkage (follow-up PR). Cleared
+// ONLY by a Final capture: the SubagentStop handler (every exit path,
+// including the no-changes skip) or the SessionEnd final capture. Turn-end
+// snapshots leave it in place.
+type InFlightTask struct {
+	// ToolUseID is the Task tool invocation's tool_use_id — the same ID used
+	// to key TaskMetadataDir. Dedup key for AddInFlightTask.
+	ToolUseID string `json:"tool_use_id"`
+
+	// AgentID is the subagent identifier (tool_response.agentId at launch
+	// time), used to resolve the subagent's own transcript file.
+	AgentID string `json:"agent_id,omitempty"`
+
+	// StartedAt is when the background launch was observed.
+	StartedAt time.Time `json:"started_at"`
+
+	// SubagentType and TaskDescription are captured at launch time because
+	// SubagentStop payloads carry no tool_input — a Final-path capture has no
+	// way to derive them from the event itself (ParseSubagentTypeAndDescription
+	// yields empty strings on a nil ToolInput). The Final handler reads these
+	// from the marker to label the task step, falling back to the event's own
+	// fields only when the marker is absent.
+	SubagentType    string `json:"subagent_type,omitempty"`
+	TaskDescription string `json:"task_description,omitempty"`
+}
+
+// AddInFlightTask records a background subagent launch, replacing any
+// existing entry with the same ToolUseID. Dedup by ToolUseID: a retried or
+// duplicate launch event must not create two markers for the same task,
+// which would make RemoveInFlightTask leave a stale entry behind after the
+// first is cleared.
+func (s *State) AddInFlightTask(task InFlightTask) {
+	for i, existing := range s.InFlightTasks {
+		if existing.ToolUseID == task.ToolUseID {
+			s.InFlightTasks[i] = task
+			return
+		}
+	}
+	s.InFlightTasks = append(s.InFlightTasks, task)
+}
+
+// RemoveInFlightTask clears the in-flight marker for toolUseID, if present.
+// No-op when no marker matches, so it is safe to call speculatively on every
+// SubagentStop exit path — including foreground tasks, which never had one.
+func (s *State) RemoveInFlightTask(toolUseID string) {
+	for i, existing := range s.InFlightTasks {
+		if existing.ToolUseID == toolUseID {
+			s.InFlightTasks = append(s.InFlightTasks[:i], s.InFlightTasks[i+1:]...)
+			return
+		}
+	}
 }
 
 // PromptAttribution captures line-level attribution data at the start of each prompt.

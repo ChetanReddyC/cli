@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
@@ -24,7 +27,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -2551,4 +2556,320 @@ func TestResolveSubagentSessionLink_AgentWithoutCapability(t *testing.T) {
 	if _, ok := resolveSubagentSessionLink(context.Background(), ag, "transcript.jsonl"); ok {
 		t.Error("an agent without the capability must never resolve a subagent link")
 	}
+}
+
+// --- handleLifecycleSubagentEnd: background launch marker + SubagentStop dispatch ---
+
+// setupSubagentEndTestRepo initializes a git repo with one commit and chdirs
+// into it, returning the repo dir and HEAD hash for building session state and
+// shadow-branch assertions.
+func setupSubagentEndTestRepo(t *testing.T) (repoDir, headHash string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	return tmpDir, testutil.GetHeadHash(t, tmpDir)
+}
+
+// readShadowBranchHeadMessage returns the commit message at the tip of
+// branchName, or "" if the branch does not exist.
+func readShadowBranchHeadMessage(t *testing.T, repoDir, branchName string) string {
+	t.Helper()
+	repo, err := gitrepo.OpenPath(repoDir)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	if err != nil {
+		return ""
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		return ""
+	}
+	return commit.Message
+}
+
+// TestHandleLifecycleSubagentEnd_BackgroundLaunch_RecordsMarkerWithoutTaskStep
+// is the regression this PR fixes: Claude Code's launch-time post-task hook
+// fires seconds after a background subagent starts, before any real work
+// happens. Capturing at that point would save an empty stub task step and
+// never revisit it. The launch event must instead record an in-flight marker
+// (carrying the launch-time subagent_type/description, since SubagentStop
+// payloads have no tool_input to derive them from) and save nothing yet.
+func TestHandleLifecycleSubagentEnd_BackgroundLaunch_RecordsMarkerWithoutTaskStep(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "bg-launch-session"
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: headHash,
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseActive,
+	}))
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  sessionID,
+		ToolUseID:  "toolu_bg1",
+		SubagentID: "agent-bg1",
+		ToolInput:  json.RawMessage(`{"subagent_type":"reviewer","description":"Review the PR","run_in_background":true}`),
+		Final:      false,
+		Timestamp:  time.Now(),
+	}
+
+	err := handleLifecycleSubagentEnd(ctx, ag, event)
+	require.NoError(t, err)
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	require.Len(t, state.InFlightTasks, 1, "background launch must record an in-flight marker")
+	marker := state.InFlightTasks[0]
+	assert.Equal(t, "toolu_bg1", marker.ToolUseID)
+	assert.Equal(t, "agent-bg1", marker.AgentID)
+	assert.Equal(t, "reviewer", marker.SubagentType)
+	assert.Equal(t, "Review the PR", marker.TaskDescription)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	if testutil.BranchExists(t, repoDir, shadowBranch) {
+		t.Error("background launch must defer capture to subagent-stop, not save a task step immediately")
+	}
+}
+
+// TestHandleLifecycleSubagentEnd_ForegroundLaunch_CapturesImmediately guards
+// the "existing behavior untouched" half of the launch-time branch: a
+// foreground Task invocation (no run_in_background) must still capture at
+// launch time exactly as before, never deferring via the marker path.
+func TestHandleLifecycleSubagentEnd_ForegroundLaunch_CapturesImmediately(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "fg-launch-session"
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: headHash,
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseActive,
+	}))
+
+	testutil.WriteFile(t, repoDir, "foreground.txt", "written by foreground subagent")
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  sessionID,
+		ToolUseID:  "toolu_fg1",
+		SubagentID: "agent-fg1",
+		ToolInput:  json.RawMessage(`{"subagent_type":"dev","description":"Implement X"}`),
+		Final:      false,
+		Timestamp:  time.Now(),
+	}
+
+	err := handleLifecycleSubagentEnd(ctx, ag, event)
+	require.NoError(t, err)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	if !testutil.BranchExists(t, repoDir, shadowBranch) {
+		t.Error("foreground launch must still capture immediately (unchanged legacy behavior)")
+	}
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	assert.Empty(t, state.InFlightTasks, "foreground launch must never record an in-flight marker")
+}
+
+// TestHandleLifecycleSubagentEnd_SubagentStop_CapturesUsingLaunchRecordedLabel
+// is the addendum from Task 1's code review: SubagentStop payloads carry no
+// tool_input, so a Final capture can't derive subagent_type/description from
+// the event itself (ParseSubagentTypeAndDescription yields empty strings on a
+// nil ToolInput). The Final handler must instead read them from the in-flight
+// marker recorded at launch time, and the marker must be cleared afterward.
+func TestHandleLifecycleSubagentEnd_SubagentStop_CapturesUsingLaunchRecordedLabel(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "stop-capture-session"
+	toolUseID := "toolu_stop1"
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: headHash,
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseActive,
+		InFlightTasks: []session.InFlightTask{
+			{
+				ToolUseID:       toolUseID,
+				AgentID:         "agent-stop1",
+				StartedAt:       time.Now(),
+				SubagentType:    "reviewer",
+				TaskDescription: "Review the PR",
+			},
+		},
+	}))
+
+	testutil.WriteFile(t, repoDir, "reviewed.txt", "written by background subagent")
+
+	// event.ToolInput is empty, as a real SubagentStop payload's would be —
+	// event.SubagentType/TaskDescription resolve to "" at the top of
+	// handleLifecycleSubagentEnd, so the label can only come from the marker.
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  sessionID,
+		ToolUseID:  toolUseID,
+		SubagentID: "agent-stop1",
+		Final:      true,
+		Timestamp:  time.Now(),
+	}
+
+	err := handleLifecycleSubagentEnd(ctx, ag, event)
+	require.NoError(t, err)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	msg := readShadowBranchHeadMessage(t, repoDir, shadowBranch)
+	assert.Contains(t, msg, "reviewer", "task step must carry the launch-recorded subagent type")
+	assert.Contains(t, msg, "Review the PR", "task step must carry the launch-recorded description")
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	assert.Empty(t, state.InFlightTasks, "subagent-stop must clear the in-flight marker")
+}
+
+// TestHandleLifecycleSubagentEnd_SubagentStop_NoMarker_SkipsDuplicateCapture
+// covers the foreground-SubagentStop dedup: a foreground task already
+// captured at launch-time post-task (or a duplicate SubagentStop fire) has no
+// in-flight marker, so the Final handler must skip the save rather than
+// writing a second task step.
+func TestHandleLifecycleSubagentEnd_SubagentStop_NoMarker_SkipsDuplicateCapture(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "stop-nomarker-session"
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: headHash,
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseActive,
+		// No InFlightTasks: simulates a foreground task already captured, or a
+		// duplicate SubagentStop.
+	}))
+
+	testutil.WriteFile(t, repoDir, "already-captured.txt", "should not be captured again")
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  sessionID,
+		ToolUseID:  "toolu_no_marker",
+		SubagentID: "agent-no-marker",
+		Final:      true,
+		Timestamp:  time.Now(),
+	}
+
+	err := handleLifecycleSubagentEnd(ctx, ag, event)
+	require.NoError(t, err)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	if testutil.BranchExists(t, repoDir, shadowBranch) {
+		t.Error("subagent-stop with no in-flight marker must skip the save (foreground/double-fire dedup)")
+	}
+}
+
+// TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect
+// pins Step 2.4b's late-arrival guard: SaveTaskStep's ensureSessionInitialized
+// re-creates session state unconditionally, so a late SubagentStop for a
+// session that was already ended and swept must never call it — that would
+// resurrect a zombie session and mint a shadow branch nothing condenses,
+// exactly the class of bug the session sweep feature exists to prevent.
+func TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "swept-session"
+	// Deliberately no strategy.SaveSessionState call: this session's state was
+	// already removed (ended + swept, or never existed).
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  sessionID,
+		ToolUseID:  "toolu_swept1",
+		SubagentID: "agent-swept1",
+		Final:      true,
+		Timestamp:  time.Now(),
+	}
+
+	err := handleLifecycleSubagentEnd(ctx, ag, event)
+	require.NoError(t, err)
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	assert.Nil(t, state, "a late subagent-stop for a missing session must not resurrect session state")
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	if testutil.BranchExists(t, repoDir, shadowBranch) {
+		t.Error("a late subagent-stop for a missing session must not mint a shadow branch")
+	}
+}
+
+// TestHandleLifecycleSubagentEnd_SubagentStop_PhaseEnded_TriggersEagerCondense
+// pins the other half of Step 2.4b: when the session ended (PhaseEnded)
+// before this SubagentStop arrived, the Final capture must run and then
+// immediately trigger the same eager condense SessionEnd uses, so the
+// newly-captured task step doesn't linger as post-condensation zombie shadow
+// data. Uses a read-only capture (no file changes) so FilesTouched stays
+// empty and StepCount stays 0 — the same "no steps" shortcut
+// CondenseAndMarkFullyCondensed takes on an otherwise-empty ended session —
+// making the eager condense observable via FullyCondensed.
+func TestHandleLifecycleSubagentEnd_SubagentStop_PhaseEnded_TriggersEagerCondense(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "ended-session"
+	toolUseID := "toolu_ended1"
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: headHash,
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseEnded,
+		InFlightTasks: []session.InFlightTask{
+			{ToolUseID: toolUseID, AgentID: "agent-ended1", StartedAt: time.Now(), SubagentType: "reviewer"},
+		},
+	}))
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  sessionID,
+		ToolUseID:  toolUseID,
+		SubagentID: "agent-ended1",
+		Final:      true,
+		Timestamp:  time.Now(),
+	}
+
+	err := handleLifecycleSubagentEnd(ctx, ag, event)
+	require.NoError(t, err)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	if !testutil.BranchExists(t, repoDir, shadowBranch) {
+		t.Error("a read-only capture (no file changes) must still save a task step on a Final event")
+	}
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	assert.Empty(t, state.InFlightTasks, "in-flight marker must be cleared regardless of the condense outcome")
+	assert.True(t, state.FullyCondensed, "a late capture on an ended session must trigger the eager condense SessionEnd uses")
 }
