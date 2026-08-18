@@ -489,8 +489,11 @@ func TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop(t *testing.T)
 		t.Fatalf("task checkpoint missing after subagent-stop: %s", checkpointPath)
 	}
 
-	// The subagent's own transcript (extracted by the real analyzer) is
-	// stored and references the edited file.
+	// The subagent's own transcript is stored and references the edited file.
+	// This pins what got captured, not how: the capture path merges the real
+	// transcript analyzer's output with git-status detection, so a second
+	// untracked file would also show up here via git status by design (unit
+	// tests cover the analyzer-extraction split in isolation).
 	transcriptWantPath := paths.EntireMetadataDir + "/" + session.ID + "/tasks/" + taskToolUseID + "/" + paths.AgentTranscriptFileName(subagentID)
 	content, ok := env.ReadFileFromBranch(shadowBranch, transcriptWantPath)
 	if !ok {
@@ -601,5 +604,96 @@ func TestSubagentCheckpoints_TurnEndBackstop_ThenSubagentStop(t *testing.T) {
 	}
 	if state != nil && hasInFlightTask(state, taskToolUseID) {
 		t.Errorf("in-flight marker for %s should be cleared after subagent-stop", taskToolUseID)
+	}
+}
+
+// TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce resolves Open
+// Item 2 from the subagent-stop-capture plan empirically: a foreground task
+// (no run_in_background) is captured immediately at post-task time and never
+// records an in-flight marker. Claude Code fires SubagentStop for every
+// completed Task, foreground and background alike, so entire also sees a
+// SubagentStop for this same tool_use_id after the foreground capture already
+// ran. Without the marker-claim guard, that second event would re-run the
+// capture and produce a duplicate task checkpoint / commit. This verifies the
+// regression is closed: exactly one task checkpoint is written, no in-flight
+// marker is ever created for a foreground task, and the SubagentStop
+// double-fire produces no additional commit.
+func TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	session := env.NewSession()
+	session.CreateTranscript("run a foreground task", nil)
+
+	const (
+		taskToolUseID = "toolu_01ForegroundDoubleFire"
+		subagentID    = "c3333444455556666"
+		editedFile    = "docs/foreground.md"
+	)
+
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	if err := env.SimulatePreTask(session.ID, session.TranscriptPath, taskToolUseID); err != nil {
+		t.Fatalf("SimulatePreTask failed: %v", err)
+	}
+
+	env.WriteFile(editedFile, "# Foreground\n\nWritten by a foreground subagent.\n")
+
+	// Foreground completion: PostToolUse fires with no run_in_background, so
+	// this is captured immediately — the existing, unchanged behavior.
+	if err := env.SimulatePostTask(PostTaskInput{
+		SessionID:      session.ID,
+		TranscriptPath: session.TranscriptPath,
+		ToolUseID:      taskToolUseID,
+		AgentID:        subagentID,
+	}); err != nil {
+		t.Fatalf("SimulatePostTask failed: %v", err)
+	}
+
+	// Foreground tasks never record an in-flight marker.
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if state != nil && hasInFlightTask(state, taskToolUseID) {
+		t.Fatalf("foreground task should never record an in-flight marker, state=%+v", state)
+	}
+
+	checkpointPath := paths.EntireMetadataDir + "/" + session.ID + "/tasks/" + taskToolUseID + "/" + paths.CheckpointFileName
+	shadowBranch := env.GetShadowBranchName()
+	if !env.FileExistsInBranch(shadowBranch, checkpointPath) {
+		t.Fatalf("task checkpoint missing after foreground post-task: %s", checkpointPath)
+	}
+	commitsAfterPostTask := env.GetGitLog()
+
+	// The double-fire: SubagentStop for the same tool_use_id, with no marker
+	// left to claim. Must be a no-op, not a second capture.
+	if err := env.SimulateSubagentStop(SubagentStopInput{
+		SessionID:      session.ID,
+		TranscriptPath: session.TranscriptPath,
+		AgentID:        subagentID,
+		ToolUseID:      taskToolUseID,
+	}); err != nil {
+		t.Fatalf("SimulateSubagentStop failed: %v", err)
+	}
+
+	commitsAfterSubagentStop := env.GetGitLog()
+	if len(commitsAfterSubagentStop) != len(commitsAfterPostTask) {
+		t.Errorf("SubagentStop double-fire created a new commit: before=%d after=%d",
+			len(commitsAfterPostTask), len(commitsAfterSubagentStop))
+	}
+
+	// Still exactly one task checkpoint, and still no marker was ever
+	// created.
+	shadowBranch = env.GetShadowBranchName()
+	if !env.FileExistsInBranch(shadowBranch, checkpointPath) {
+		t.Fatalf("task checkpoint missing after subagent-stop double-fire: %s", checkpointPath)
+	}
+	state, err = env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if state != nil && hasInFlightTask(state, taskToolUseID) {
+		t.Errorf("in-flight marker for %s should not exist after a foreground double-fire", taskToolUseID)
 	}
 }
