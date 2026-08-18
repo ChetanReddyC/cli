@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -109,6 +110,7 @@ type mockAnalyzerAgent struct {
 	*mockLifecycleAgent
 
 	analyzerFiles []string
+	analyzerErr   error
 }
 
 var _ agent.TranscriptAnalyzer = (*mockAnalyzerAgent)(nil)
@@ -116,6 +118,9 @@ var _ agent.TranscriptAnalyzer = (*mockAnalyzerAgent)(nil)
 func (m *mockAnalyzerAgent) GetTranscriptPosition(_ string) (int, error) { return 0, nil }
 
 func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(_ string, _ int) ([]string, int, error) {
+	if m.analyzerErr != nil {
+		return nil, 0, m.analyzerErr
+	}
 	return m.analyzerFiles, 0, nil
 }
 
@@ -3289,6 +3294,64 @@ func TestHandleLifecycleTurnEnd_InFlightTask_ZeroFilesRecordsTranscriptSize(t *t
 	require.NoError(t, statErr)
 	assert.Equal(t, info.Size(), marker.LastCapturedTranscriptBytes,
 		"the zero-files skip path must still record the transcript size, or an unchanged read-only transcript is rescanned every turn-end forever")
+}
+
+// TestHandleLifecycleTurnEnd_InFlightTask_AnalyzerErrorDoesNotPersistSize is
+// the regression for a review fix on Task 4: a failed
+// ExtractModifiedFilesFromOffset used to fall through into the zero-files
+// branch, which persisted LastCapturedTranscriptBytes — permanently skipping
+// retries at that transcript size, since the growth dedup would treat it as
+// already accounted for. An analyzer error must skip BOTH the save and the
+// size persistence so the next turn-end retries the scan.
+func TestHandleLifecycleTurnEnd_InFlightTask_AnalyzerErrorDoesNotPersistSize(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "turnend-analyzererr-session"
+	toolUseID := "toolu_analyzererr1"
+	agentID := "agent-analyzererr1"
+
+	transcriptDir := t.TempDir()
+	mainTranscriptPath := filepath.Join(transcriptDir, "main.jsonl")
+	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"do something"}}`+"\n"), 0o600))
+
+	subagentTranscriptPath := filepath.Join(transcriptDir, "agent-"+agentID+".jsonl")
+	require.NoError(t, os.WriteFile(subagentTranscriptPath, []byte(`{"type":"assistant"}`+"\n"), 0o600))
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: headHash,
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseActive,
+		InFlightTasks: []session.InFlightTask{
+			{ToolUseID: toolUseID, AgentID: agentID, StartedAt: time.Now(), SubagentType: "dev", TaskDescription: "Implement widget"},
+		},
+	}))
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerErr:        errors.New("transcript parse failed"),
+	}
+
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  sessionID,
+		SessionRef: mainTranscriptPath,
+		Timestamp:  time.Now(),
+	}
+	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, event))
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	cpPath := ".entire/metadata/" + sessionID + "/tasks/" + toolUseID + "/checkpoints/001-" + toolUseID + ".json"
+	_, found := readShadowBranchFile(t, repoDir, shadowBranch, cpPath)
+	assert.False(t, found, "an analyzer error must not produce an incremental checkpoint")
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	marker := state.FindInFlightTask(toolUseID)
+	require.NotNil(t, marker, "analyzer error must not clear the in-flight marker")
+	assert.Zero(t, marker.LastCapturedTranscriptBytes,
+		"an analyzer error must not persist the transcript size, or the next turn-end's growth dedup would wrongly treat this size as already captured and skip retrying")
 }
 
 // TestHandleLifecycleSessionEnd_InFlightTask_FinalCapture is the regression

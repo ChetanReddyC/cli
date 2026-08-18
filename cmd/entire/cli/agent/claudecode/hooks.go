@@ -61,12 +61,7 @@ const metadataDenyRule = "Read(./.entire/metadata/**)"
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 //
-// Broken into helpers (resolveInstallRepoRoot, loadRawClaudeSettingsForInstall,
-// installHookEntries, applyMetadataDenyRule, writeClaudeSettingsFile) rather
-// than one long function: each phase (locate file, parse, mutate hooks, mutate
-// permissions, write) is independently testable-by-inspection and keeps this
-// function's own cyclomatic complexity from growing every time Entire
-// registers another hook type.
+// Split into per-phase helpers below; see each helper's doc.
 func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	repoRoot, err := resolveInstallRepoRoot(ctx)
 	if err != nil {

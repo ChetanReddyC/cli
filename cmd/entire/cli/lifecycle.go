@@ -1641,13 +1641,21 @@ func captureInFlightTaskIncremental(logCtx context.Context, ag agent.Agent, sess
 	// background task's contribution.
 	var modifiedFiles []string
 	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
-		if files, _, fileErr := analyzer.ExtractModifiedFilesFromOffset(subagentTranscriptPath, 0); fileErr != nil {
-			logging.Warn(logCtx, "failed to extract modified files for in-flight task snapshot",
+		files, _, fileErr := analyzer.ExtractModifiedFilesFromOffset(subagentTranscriptPath, 0)
+		if fileErr != nil {
+			// Skip the save AND the size persistence: if we recorded
+			// transcriptSize here, the growth dedup above would treat this size
+			// as "fully accounted for" and skip retrying on every subsequent
+			// turn-end, permanently losing this task's progress at this size.
+			// Returning without persisting leaves LastCapturedTranscriptBytes at
+			// its prior value, so the next turn-end retries the scan.
+			logging.Warn(logCtx, "failed to extract modified files for in-flight task snapshot; will retry next turn-end",
+				slog.String("session_id", sessionID),
 				slog.String("tool_use_id", task.ToolUseID),
 				slog.String("error", fileErr.Error()))
-		} else {
-			modifiedFiles = files
+			return
 		}
+		modifiedFiles = files
 	}
 
 	repoRoot, err := paths.WorktreeRoot(logCtx)
