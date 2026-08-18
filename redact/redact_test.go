@@ -973,6 +973,18 @@ func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
 			want:  "DB_PASSWORD=secret_here",
 		},
 		{
+			// Greedy betterleaks matches carry trailing query text in the
+			// finding; the placeholder guard must still see "changeme".
+			name:  "placeholder with trailing query params is preserved",
+			input: "password=changeme&sslmode=require",
+			want:  "password=changeme&sslmode=require",
+		},
+		{
+			name:  "real value with trailing query params is still redacted",
+			input: "password=hunter2secret&sslmode=require",
+			want:  "password=REDACTED",
+		},
+		{
 			name:  "placeholder literal is preserved",
 			input: "DB_PASSWORD=placeholder",
 			want:  "DB_PASSWORD=placeholder",

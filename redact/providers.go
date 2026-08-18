@@ -9,7 +9,7 @@ import "regexp"
 // credential formats the other secret layers don't reliably flag.
 //
 // The betterleaks layer's coverage of these differs per prefix (verified
-// against the vendored betterleaks v1.8.0 rule source):
+// against the upstream betterleaks v1.8.0 rule source):
 //   - sb_secret_: the supabase-project-api-key rule fires standalone in
 //     1.8.0 (the project-url pairing moved from a RequiredRules gate to a
 //     validation-only component), but it matches an exact 31-character body

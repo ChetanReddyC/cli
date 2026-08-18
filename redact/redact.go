@@ -212,7 +212,7 @@ func detectAllLayers(s string) []taggedRegion {
 			// would suppress as a documentation placeholder (changeme,
 			// secret_here, ${VAR}, mask runs) stays visible even when a
 			// betterleaks rule flags it.
-			if f.Secret == "" || isPlaceholderSecretValue(f.Secret) {
+			if f.Secret == "" || isPlaceholderFinding(f.Secret) {
 				continue
 			}
 			searchFrom := 0
@@ -410,6 +410,22 @@ func hasNonPlaceholderPasswordAssignment(candidate string) bool {
 
 func hasNonPlaceholderPasswordValue(value string) bool {
 	return value != "" && !isPlaceholderSecretValue(value)
+}
+
+// isPlaceholderFinding reports whether a betterleaks finding's secret is a
+// documentation placeholder. Greedy rules (generic-password) run to end of
+// line, so a placeholder value can carry trailing query/DSN text in the
+// finding ("changeme&sslmode=require"); check the head before the first
+// value delimiter too, mirroring the [^\s,;&]+ value charset of the
+// bounded credential layer.
+func isPlaceholderFinding(secret string) bool {
+	if isPlaceholderSecretValue(secret) {
+		return true
+	}
+	if i := strings.IndexAny(secret, "&;, \t"); i > 0 {
+		return isPlaceholderSecretValue(secret[:i])
+	}
+	return false
 }
 
 func isPlaceholderSecretValue(value string) bool {
