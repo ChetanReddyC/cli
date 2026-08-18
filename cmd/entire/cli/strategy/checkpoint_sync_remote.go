@@ -20,6 +20,11 @@ type CheckpointSyncRemoteSource string
 const (
 	// SyncRemoteSourceConfig: strategy_options.checkpoint_push_remote.
 	SyncRemoteSourceConfig CheckpointSyncRemoteSource = "config"
+	// SyncRemoteSourceObserved: elected by evidence — a past push that agreed
+	// with the branch's declared push destination (see
+	// maybeCaptureCheckpointSyncRemote). Named for what was observed, not for the
+	// latch that recorded it, which is why the internal names still say "capture".
+	SyncRemoteSourceObserved CheckpointSyncRemoteSource = "observed"
 	// SyncRemoteSourceDefault: "origin" exists.
 	SyncRemoteSourceDefault CheckpointSyncRemoteSource = "default"
 	// SyncRemoteSourceSole: exactly one remote configured.
@@ -38,27 +43,32 @@ type CheckpointSyncRemote struct {
 // ResolveCheckpointSyncRemote elects the one configured git remote that
 // checkpoint data syncs to. Pure local lookup — no network. Precedence:
 // checkpoint_push_remote setting (fail-closed if the named remote does not
-// exist), then "origin", then the sole remote, then the first remote in
-// .git/config order. It knows nothing about the checkpoint_remote URL
+// exist), then the captured election (evidence-elected by a past push that
+// agreed with the branch's declared push destination; fail-soft if that
+// remote is gone), then "origin", then the sole remote, then the first remote
+// in .git/config order. It knows nothing about the checkpoint_remote URL
 // feature; callers exempt that case themselves.
 //
-// Deliberately NOT keyed on the branch's tracking config
+// Deliberately NOT keyed on the branch's tracking config alone
 // (branch.<name>.pushRemote / remote.pushDefault / branch.<name>.remote).
 // Election is compared against the remote of the push actually being made, so
-// electing the tracking remote silently drops checkpoint sync on every push to
-// any OTHER remote — `git push <other> HEAD`, a `git clone -o base` whose
-// checkpoints go to a separately added origin, any repo with remote.pushDefault
-// set. TestAlternates_RelativeObjectAlternate_CheckpointSync is the regression:
+// electing the tracking remote from config at rest silently drops checkpoint
+// sync on every push to any OTHER remote — `git push <other> HEAD`, a
+// `git clone -o base` whose checkpoints go to a separately added origin, any
+// repo with remote.pushDefault set.
+// TestAlternates_RelativeObjectAlternate_CheckpointSync is the regression:
 // it clones with `-o base` and pushes checkpoints to `origin`, and a tracking
-// tier makes the pre-push hook a silent no-op.
+// tier makes the pre-push hook a silent no-op. The captured tier is the safe
+// form of the same intent: tracking config nominates a remote, but only an
+// actual push to it elects it (see maybeCaptureCheckpointSyncRemote).
 //
 // The fork setup that motivated the tracking tier — clone the base repo, add
-// your fork, push there, with origin unpushable — is served by setting
-// checkpoint_push_remote explicitly. Reads follow the election: the checkpoint
-// read paths (resume, explain, discovery) consult the elected remote first and
-// fall back to origin as a read-only legacy tier (see CheckpointReadRemotes),
-// so an explicitly elected non-origin remote is fully readable from the same
-// clone. The tracking tier stays out for the silent-no-op reason above.
+// your fork, push there, with origin unpushable — is served automatically by
+// capture, or explicitly by checkpoint_push_remote. Either way the result is
+// readable from the same clone: the read paths (resume, explain, discovery)
+// consult the elected remote first and fall back to origin as a read-only
+// legacy tier (see CheckpointReadRemotes). Tracking config on its own still
+// elects nothing, for the silent-no-op reason above.
 func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, error) {
 	// Fail closed on an unreadable settings file: election must never
 	// override a checkpoint_push_remote the file may contain but we could
@@ -74,6 +84,17 @@ func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, err
 				"checkpoint_push_remote %q is not a configured git remote; checkpoint sync disabled until fixed", name)
 		}
 		return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceConfig}, nil
+	}
+
+	// Captured tier: fail-soft, unlike the explicit setting above — capture
+	// is automatic state, so a captured remote that was since renamed or
+	// removed falls through to the default tiers instead of disabling sync.
+	for _, name := range loadCapturedSyncRemotes(ctx) {
+		if isConfiguredRemote(ctx, name) {
+			return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceObserved}, nil
+		}
+		logging.Debug(ctx, "captured checkpoint sync remote is not configured; falling through",
+			slog.String("remote", name))
 	}
 
 	remotes := configuredRemotesInConfigOrder(ctx)
