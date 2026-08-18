@@ -54,6 +54,23 @@ func loadCapturedSyncRemotes(ctx context.Context) []string {
 	return f.Remotes
 }
 
+// capturedElectionStillValid reports whether a capture is already in force. It
+// asks the same question the resolver asks — is the captured remote actually
+// configured — because the two must agree on what a captured entry means. Gating
+// on mere presence instead stranded the state: after `git remote rename fork
+// myfork` the resolver skipped the dead entry and fell back to origin, while this
+// check still saw a non-empty file and refused to ever capture myfork, so
+// checkpoints silently stopped reaching the remote the user actually pushes to
+// with no recovery short of deleting the file by hand.
+func capturedElectionStillValid(ctx context.Context) bool {
+	for _, name := range loadCapturedSyncRemotes(ctx) {
+		if isConfiguredRemote(ctx, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // saveCapturedSyncRemotes writes the captured election atomically
 // (temp+rename), so a concurrent reader never sees a partial file.
 func saveCapturedSyncRemotes(ctx context.Context, remotes []string) error {
@@ -113,7 +130,7 @@ func maybeCaptureCheckpointSyncRemote(ctx context.Context, pushRemote string) {
 	if !isConfiguredRemote(ctx, pushRemote) {
 		return
 	}
-	if len(loadCapturedSyncRemotes(ctx)) > 0 {
+	if capturedElectionStillValid(ctx) {
 		return
 	}
 	// Fail-closed on unreadable settings, same as the election itself: a
