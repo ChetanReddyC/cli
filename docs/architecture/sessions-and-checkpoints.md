@@ -307,6 +307,25 @@ it. Crucially, this sweep runs **before** `endSessionNow` marks the session
 are captured in time for that condense to include them, rather than minting
 shadow data after condensation that nothing then cleans up.
 
+**Commit linkage while idle.** A background subagent's `git commit` normally
+lands between the parent session's turns, while the session is IDLE — the
+fast-path trailer decision (`tryAgentCommitFastPath`,
+`strategy/manual_commit_hooks.go`) used to trust only ACTIVE sessions, so
+these commits shipped with no `Entire-Checkpoint` trailer at all. An IDLE
+session with a live in-flight marker (`idleWithLiveMarker`) is now linkable
+too, bounded by the marker's age (`activeSessionInteractionThreshold`, 24h) so
+a subagent that dies without a final capture doesn't leave the session
+trusted forever. The trailer alone would dangle, though — the subagent's work
+isn't in the parent's shadow baseline yet — so post-commit gates a
+*commit-snapshot* capture (`captureInFlightTaskCommitSnapshot`,
+`lifecycle.go`) on the trailer's presence (`headHasCheckpointTrailer`,
+`hooks_git_cmd.go`) and runs it before `strategy.PostCommit`'s condensation in
+the same hook invocation: a non-incremental `SaveTaskStep` (transcript
+included, growth-deduped against the marker's `LastCapturedTranscriptBytes`,
+no `CleanupPreTaskState`, no marker claim — the task is still running) so the
+minted checkpoint is contentful by construction. Ordinary idle commits with no
+in-flight markers are unaffected — they stay exactly as before.
+
 ### Committed Checkpoints
 
 Branch: `entire/checkpoints/v1`
