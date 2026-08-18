@@ -413,6 +413,19 @@ type InFlightTask struct {
 	// checkpoint. Zero (the default) always triggers the first capture: a
 	// resolved subagent transcript is never a zero-byte file in practice.
 	LastCapturedTranscriptBytes int64 `json:"last_captured_transcript_bytes,omitempty"`
+
+	// LastSnapshotAttempt is when captureInFlightTasks last SELECTED this
+	// marker for a turn-end incremental snapshot attempt (stamped regardless
+	// of per-task outcome — skipped, deduped, or saved). The turn-end path
+	// selects at most maxInFlightTasksPerCapture markers ordered by
+	// least-recently-attempted (zero value sorts first), so this is what
+	// rotates the selection: without it, a stable oldest-StartedAt prefix
+	// would always pick the same N markers, and any task beyond the cap would
+	// never get an incremental snapshot for the life of the session, even
+	// though the comment on the cap promises it's "picked up next turn-end."
+	// The SessionEnd final path is uncapped and never reads or writes this
+	// field.
+	LastSnapshotAttempt time.Time `json:"last_snapshot_attempt,omitempty"`
 }
 
 // AddInFlightTask records a background subagent launch, replacing any

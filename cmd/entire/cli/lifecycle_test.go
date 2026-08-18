@@ -3018,6 +3018,76 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_ClaimPreventsDoubleCapture(t *t
 	assert.Equal(t, firstMsg, secondMsg, "a duplicate Final event must not capture a second time")
 }
 
+// TestHandleLifecycleSubagentEnd_SubagentStop_Background_ExcludesForeignWorktreeChanges
+// is the regression for a verified external-review finding: a background
+// Final (SubagentStop) capture used to merge DetectFileChanges' whole-worktree
+// git-status scan (vs. the launch-time pre-task baseline) into the task step.
+// That scan is correct for a FOREGROUND capture — the parent is blocked on the
+// subagent, so the worktree delta since launch really is the subagent's — but
+// a background task's Final can arrive minutes to hours after launch, by
+// which point the scan sweeps in whatever the parent (or another concurrent
+// agent) wrote to the worktree in the meantime, misattributing it to this
+// task's checkpoint: a long-running background agent's checkpoint absorbing
+// the parent's later edits. A background Final capture must include only
+// event.ModifiedFiles plus the analyzer-extracted files from the subagent's
+// own transcript, never the worktree-wide scan.
+func TestHandleLifecycleSubagentEnd_SubagentStop_Background_ExcludesForeignWorktreeChanges(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "bg-foreign-session"
+	toolUseID := "toolu_foreign1"
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: headHash,
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseActive,
+		InFlightTasks: []session.InFlightTask{
+			{
+				ToolUseID:       toolUseID,
+				AgentID:         "agent-foreign1",
+				StartedAt:       time.Now(),
+				SubagentType:    "dev",
+				TaskDescription: "Implement widget",
+			},
+		},
+	}))
+
+	// The subagent's own work: named by the transcript analyzer, and present
+	// on disk so it can actually be written into the shadow tree.
+	testutil.WriteFile(t, repoDir, "agent-work.txt", "written by the background subagent")
+
+	// A foreign file: written to the worktree after launch but NOT by this
+	// subagent — the transcript analyzer never names it. This simulates the
+	// parent's own edit (or another concurrent agent's) landing during the
+	// long window between a background launch and its eventual SubagentStop.
+	testutil.WriteFile(t, repoDir, "foreign.txt", "written by someone else after launch")
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerFiles:      []string{"agent-work.txt"},
+	}
+	event := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  sessionID,
+		ToolUseID:  toolUseID,
+		SubagentID: "agent-foreign1",
+		Final:      true,
+		Timestamp:  time.Now(),
+	}
+
+	err := handleLifecycleSubagentEnd(ctx, ag, event)
+	require.NoError(t, err)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	_, gotAgentWork := readShadowBranchFile(t, repoDir, shadowBranch, "agent-work.txt")
+	assert.True(t, gotAgentWork, "the subagent's own analyzer-reported file must still be captured")
+
+	_, gotForeign := readShadowBranchFile(t, repoDir, shadowBranch, "foreign.txt")
+	assert.False(t, gotForeign, "a background Final capture must not absorb a foreign worktree file via the whole-worktree DetectFileChanges scan — that is another agent's or the parent's work, not this task's")
+}
+
 // TestHandleLifecycleTurnEnd_InFlightTask_IncrementalSnapshot is the
 // regression Task 3 fixes: before this backstop, a background subagent's
 // code changes were completely invisible between launch and its eventual
@@ -3464,4 +3534,79 @@ func TestCaptureInFlightTasks_FinalPathIsUncapped(t *testing.T) {
 	assert.Empty(t, state.InFlightTasks,
 		"a Final capture must clear every in-flight marker (got %d remaining), not just the first %d",
 		len(state.InFlightTasks), maxInFlightTasksPerCapture)
+}
+
+// TestCaptureInFlightTasks_TurnEndRotatesSnapshotSelection is the regression
+// for a verified external-review finding: the turn-end incremental path used
+// to select a stable oldest-StartedAt prefix of at most
+// maxInFlightTasksPerCapture markers, and markers persist until their Final
+// capture. With more than the cap in flight, any marker beyond the first N
+// never received an incremental snapshot for the life of the session — a
+// stable prefix never rotates — contradicting the cap comment's promise that
+// a clipped task is merely delayed to "next turn-end." With
+// maxInFlightTasksPerCapture+1 markers, two consecutive non-final captures
+// must together stamp LastSnapshotAttempt on every marker at least once: the
+// 9th marker must not be starved forever.
+func TestCaptureInFlightTasks_TurnEndRotatesSnapshotSelection(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "rotate-turnend-session"
+
+	const taskCount = maxInFlightTasksPerCapture + 1
+	tasks := make([]session.InFlightTask, 0, taskCount)
+	for i := range taskCount {
+		tasks = append(tasks, session.InFlightTask{
+			ToolUseID: fmt.Sprintf("toolu_rotate%d", i),
+			AgentID:   fmt.Sprintf("agent-rotate%d", i),
+			StartedAt: time.Now(),
+		})
+	}
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:     sessionID,
+		BaseCommit:    headHash,
+		StartedAt:     time.Now(),
+		Phase:         session.PhaseActive,
+		InFlightTasks: tasks,
+	}))
+
+	ag := newMockAgent()
+
+	// First turn-end: no marker has ever been attempted (all-zero
+	// LastSnapshotAttempt, tied), so selection falls back to StartedAt order —
+	// exactly the pre-fix stable prefix — and stamps only the capped batch.
+	captureInFlightTasks(ctx, ag, sessionID, "", false)
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	require.Len(t, state.InFlightTasks, taskCount, "a non-final capture must never remove markers")
+
+	stampedAfterFirst := 0
+	for _, task := range state.InFlightTasks {
+		if !task.LastSnapshotAttempt.IsZero() {
+			stampedAfterFirst++
+		}
+	}
+	assert.Equal(t, maxInFlightTasksPerCapture, stampedAfterFirst,
+		"the first turn-end must stamp exactly the capped batch, leaving the marker(s) beyond the cap unattempted")
+
+	// Second turn-end: the never-attempted marker(s) (zero LastSnapshotAttempt)
+	// must sort before everything the first call just stamped, so this
+	// selection reaches them — the rotation this fix adds. Under the old
+	// stable-oldest-StartedAt-prefix selection, this second call would pick
+	// the exact same 8 markers again and the 9th would still be unattempted.
+	captureInFlightTasks(ctx, ag, sessionID, "", false)
+
+	state, loadErr = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	require.Len(t, state.InFlightTasks, taskCount)
+
+	for _, task := range state.InFlightTasks {
+		assert.False(t, task.LastSnapshotAttempt.IsZero(),
+			"tool_use_id %s has a zero LastSnapshotAttempt after two turn-ends spanning %d markers — the stable-prefix selection this fixes starves markers beyond the cap forever",
+			task.ToolUseID, taskCount)
+	}
 }

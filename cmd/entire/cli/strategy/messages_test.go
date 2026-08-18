@@ -317,6 +317,8 @@ func TestFormatIncrementalSubject(t *testing.T) {
 // TestFormatBackgroundProgressSubject exercises the four-way fallback matrix
 // FormatIncrementalSubject delegates to for IncrementalTypeBackgroundProgress.
 func TestFormatBackgroundProgressSubject(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name            string
 		subagentType    string
@@ -359,6 +361,8 @@ func TestFormatBackgroundProgressSubject(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			got := FormatBackgroundProgressSubject(tt.subagentType, tt.taskDescription, tt.shortToolUseID)
 			if got != tt.want {
 				t.Errorf("FormatBackgroundProgressSubject(%q, %q, %q) = %q, want %q",

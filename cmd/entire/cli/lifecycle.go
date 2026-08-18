@@ -1302,7 +1302,14 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	// The marker is already claimed (removed) at this point regardless of
 	// what captureSubagentTaskStep does below — a capture failure after a
 	// successful claim loses the marker, same as before this refactor.
-	captureErr := captureSubagentTaskStep(logCtx, ag, event, subagentCaptureOptions{bypassNoChangesSkip: true})
+	//
+	// analyzerFilesOnly: true because reaching this point means a marker WAS
+	// claimed above — every Final capture that runs through this function is a
+	// background task (foreground tasks capture immediately at launch and are
+	// never marked in-flight), so the worktree-wide DetectFileChanges scan
+	// would risk sweeping in the parent's or another agent's later edits. See
+	// subagentCaptureOptions.analyzerFilesOnly.
+	captureErr := captureSubagentTaskStep(logCtx, ag, event, subagentCaptureOptions{bypassNoChangesSkip: true, analyzerFilesOnly: true})
 	if captureErr != nil {
 		return captureErr
 	}
@@ -1330,6 +1337,15 @@ type subagentCaptureOptions struct {
 	// read-only background subagent (e.g. a reviewer) still produced a
 	// transcript worth a task step, and this is the only chance to capture it.
 	bypassNoChangesSkip bool
+
+	// analyzerFilesOnly, when true, skips the whole-worktree
+	// LoadPreTaskState/DetectFileChanges merge in captureSubagentTaskStep and
+	// captures only event.ModifiedFiles plus the transcript-analyzer-extracted
+	// files. Set ONLY for background Final (SubagentStop) captures — see the
+	// comment on that skip in captureSubagentTaskStep for the attribution
+	// rationale. Never set for the foreground launch-time path, which keeps
+	// its original (correct, worktree-scan-based) behavior unchanged.
+	analyzerFilesOnly bool
 }
 
 // captureSubagentTaskStep detects changes and saves a task checkpoint for a
@@ -1380,19 +1396,38 @@ func captureSubagentTaskStep(logCtx context.Context, ag agent.Agent, event *agen
 	// to the session's pre-prompt state. Without either, DetectFileChanges receives
 	// nil and treats ALL untracked files as new — which would create spurious task
 	// checkpoints for pre-existing untracked files (e.g., .github/hooks/entire.json).
-	preState, err := LoadPreTaskState(logCtx, event.ToolUseID)
-	if err != nil {
-		logging.Warn(logCtx, "failed to load pre-task state",
-			slog.String("error", err.Error()))
-	}
-	var preUntrackedFiles []string
-	if preState != nil {
-		preUntrackedFiles = preState.PreUntrackedFiles()
-	}
-	changes, err := DetectFileChanges(logCtx, preUntrackedFiles)
-	if err != nil {
-		logging.Warn(logCtx, "failed to compute file changes",
-			slog.String("error", err.Error()))
+	//
+	// Skipped entirely when opts.analyzerFilesOnly is set. DetectFileChanges is a
+	// git-status scan of the ENTIRE worktree against the launch-time pre-task
+	// baseline. For a foreground capture that's correct: the parent is blocked on
+	// the subagent, so the worktree delta since launch really is the subagent's.
+	// For a background Final (SubagentStop/SessionEnd) capture, launch and
+	// completion can be minutes to hours apart, so the same scan sweeps in
+	// whatever the parent — or any other concurrent agent — changed in the
+	// meantime, misattributing it to this task's checkpoint. Falling back to only
+	// event.ModifiedFiles plus the analyzer-extracted files can under-capture a
+	// subagent's shell side-effect files that its transcript never names, but
+	// that's the lesser failure: over-capture steals attribution from someone
+	// else's work, which is worse and harder to notice. This mirrors the
+	// turn-end incremental path (captureInFlightTaskIncremental) and the
+	// commit-snapshot path, which are already analyzer-only for the same reason.
+	var changes *FileChanges
+	if !opts.analyzerFilesOnly {
+		preState, preErr := LoadPreTaskState(logCtx, event.ToolUseID)
+		if preErr != nil {
+			logging.Warn(logCtx, "failed to load pre-task state",
+				slog.String("error", preErr.Error()))
+		}
+		var preUntrackedFiles []string
+		if preState != nil {
+			preUntrackedFiles = preState.PreUntrackedFiles()
+		}
+		var changesErr error
+		changes, changesErr = DetectFileChanges(logCtx, preUntrackedFiles)
+		if changesErr != nil {
+			logging.Warn(logCtx, "failed to compute file changes",
+				slog.String("error", changesErr.Error()))
+		}
 	}
 
 	// Get worktree root and normalize paths
@@ -1480,8 +1515,11 @@ func captureSubagentTaskStep(logCtx context.Context, ag agent.Agent, event *agen
 }
 
 // maxInFlightTasksPerCapture bounds how many in-flight background tasks a
-// single turn-end captureInFlightTasks invocation processes, oldest first.
-// Applies ONLY to the incremental (final == false) path.
+// single turn-end captureInFlightTasks invocation processes, selected by
+// selectInFlightTasksForSnapshot (least-recently-attempted first, so the
+// selection rotates turn-end to turn-end rather than always picking the same
+// oldest-launched markers). Applies ONLY to the incremental (final == false)
+// path.
 //
 // Budget rationale: each capture costs one analyzer transcript scan plus one
 // git tree write — empirically tens of milliseconds, about the same as one
@@ -1490,8 +1528,9 @@ func captureSubagentTaskStep(logCtx context.Context, ag agent.Agent, event *agen
 // already consumes a variable share of that budget before this backstop
 // runs. Capping at 8 bounds the added worst case to well under a second while
 // covering any realistic number of concurrent background subagents; a task
-// past the cap is simply delayed — it's picked up on the next turn-end, or
-// at SessionEnd, whichever comes first, so nothing is permanently missed.
+// past the cap is simply delayed — it's picked up on a later turn-end (the
+// rotation guarantees it eventually surfaces, not just the same 8 forever),
+// or at SessionEnd, whichever comes first, so nothing is permanently missed.
 //
 // The SessionEnd final path (final == true) does NOT apply this cap: there is
 // no "next turn-end" for it to defer to — SessionEnd is the last chance to
@@ -1538,18 +1577,33 @@ func captureInFlightTasks(ctx context.Context, ag agent.Agent, sessionID, sessio
 		return
 	}
 
-	// InFlightTasks is append-only in launch order (AddInFlightTask), so a
-	// straight prefix slice is the oldest-first N this budget calls for.
 	// The cap applies only to the incremental (turn-end) path: a Final
 	// (SessionEnd) capture is every task's last chance to keep its
 	// transcript, so it must never be clipped — see maxInFlightTasksPerCapture.
+	//
+	// Selection is NOT a straight oldest-StartedAt prefix: InFlightTasks is
+	// append-only in launch order, so a plain prefix would always pick the
+	// same first maxInFlightTasksPerCapture markers by launch order, and any
+	// task beyond the cap would never get an incremental snapshot for the
+	// life of the session — contradicting the cap comment's promise that a
+	// clipped task is "picked up next turn-end." selectInFlightTasksForSnapshot
+	// instead rotates the selection by least-recently-attempted, and the
+	// stamp below records this batch's attempt so the next turn-end picks a
+	// different set.
 	tasks := state.InFlightTasks
-	if !final && len(tasks) > maxInFlightTasksPerCapture {
-		logging.Warn(logCtx, "clipping in-flight task capture to per-invocation budget",
-			slog.String("session_id", sessionID),
-			slog.Int("in_flight_count", len(tasks)),
-			slog.Int("cap", maxInFlightTasksPerCapture))
-		tasks = tasks[:maxInFlightTasksPerCapture]
+	if !final {
+		if len(tasks) > maxInFlightTasksPerCapture {
+			logging.Warn(logCtx, "clipping in-flight task capture to per-invocation budget",
+				slog.String("session_id", sessionID),
+				slog.Int("in_flight_count", len(tasks)),
+				slog.Int("cap", maxInFlightTasksPerCapture))
+		}
+		tasks = selectInFlightTasksForSnapshot(tasks, maxInFlightTasksPerCapture)
+		// Stamped before processing, in one batch mutation, regardless of each
+		// task's eventual per-task outcome (skipped, deduped, or saved): the
+		// stamp is what rotates the selection, so it must land even if a
+		// later task in this same batch fails to capture.
+		stampInFlightSnapshotAttempts(logCtx, sessionID, tasks)
 	}
 
 	for _, task := range tasks {
@@ -1558,6 +1612,77 @@ func captureInFlightTasks(ctx context.Context, ag agent.Agent, sessionID, sessio
 		} else {
 			captureInFlightTaskIncremental(logCtx, ag, sessionID, sessionRef, task)
 		}
+	}
+}
+
+// selectInFlightTasksForSnapshot picks up to maxCount markers for a single
+// turn-end incremental-snapshot attempt, ordered by least-recently-attempted
+// (zero LastSnapshotAttempt — never attempted — sorts first), ties broken by
+// StartedAt. Returns tasks unmodified (no copy, no reorder) when it already
+// fits within maxCount, so the common case (few concurrent background tasks)
+// costs nothing.
+//
+// This is the fix for the starvation regression: InFlightTasks is
+// append-only in launch order, so a plain oldest-StartedAt prefix always
+// selects the same first `maxCount` markers by launch order — any task
+// beyond the cap would never receive an incremental snapshot for the life of
+// the session, contradicting maxInFlightTasksPerCapture's promise that a
+// clipped task is merely delayed to a later turn-end. Selecting by
+// least-recently-attempted instead means every marker's turn comes up within
+// ceil(len(tasks)/maxCount) turn-ends, however many are in flight.
+func selectInFlightTasksForSnapshot(tasks []session.InFlightTask, maxCount int) []session.InFlightTask {
+	if len(tasks) <= maxCount {
+		return tasks
+	}
+	ordered := make([]session.InFlightTask, len(tasks))
+	copy(ordered, tasks)
+	slices.SortStableFunc(ordered, func(a, b session.InFlightTask) int {
+		if !a.LastSnapshotAttempt.Equal(b.LastSnapshotAttempt) {
+			if a.LastSnapshotAttempt.Before(b.LastSnapshotAttempt) {
+				return -1
+			}
+			return 1
+		}
+		if a.StartedAt.Before(b.StartedAt) {
+			return -1
+		}
+		if b.StartedAt.Before(a.StartedAt) {
+			return 1
+		}
+		return 0
+	})
+	return ordered[:maxCount]
+}
+
+// stampInFlightSnapshotAttempts records now as LastSnapshotAttempt on every
+// marker in the SELECTED batch, in one MutateSessionState call, regardless of
+// each task's eventual per-task capture outcome (skipped, deduped, or saved).
+// This stamp is what rotates selectInFlightTasksForSnapshot's next-turn-end
+// choice away from this batch — without it, an unattempted marker would never
+// stop sorting first and the rotation would never advance past the first
+// selection. Best-effort: a failure here is logged and does not block the
+// capture attempts about to run against the unmutated `tasks` slice.
+func stampInFlightSnapshotAttempts(logCtx context.Context, sessionID string, tasks []session.InFlightTask) {
+	if len(tasks) == 0 {
+		return
+	}
+	selected := make(map[string]struct{}, len(tasks))
+	for _, task := range tasks {
+		selected[task.ToolUseID] = struct{}{}
+	}
+	now := time.Now()
+	mutErr := strategy.MutateSessionState(logCtx, sessionID, func(state *strategy.SessionState) error {
+		for i := range state.InFlightTasks {
+			if _, ok := selected[state.InFlightTasks[i].ToolUseID]; ok {
+				state.InFlightTasks[i].LastSnapshotAttempt = now
+			}
+		}
+		return nil
+	})
+	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		logging.Warn(logCtx, "failed to stamp in-flight task snapshot attempt timestamps",
+			slog.String("session_id", sessionID),
+			slog.String("error", mutErr.Error()))
 	}
 }
 
