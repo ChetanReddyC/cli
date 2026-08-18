@@ -323,7 +323,13 @@ isn't in the parent's shadow baseline yet — so post-commit gates a
 the same hook invocation: a non-incremental `SaveTaskStep` (transcript
 included, growth-deduped against the marker's `LastCapturedTranscriptBytes`,
 no `CleanupPreTaskState`, no marker claim — the task is still running) so the
-minted checkpoint is contentful by construction. Ordinary idle commits with no
+minted checkpoint is contentful in the same hook invocation, on the happy
+path. The gate only guarantees no capture attempt without a trailer, not no
+trailer without content: a capture failure (the subagent transcript not yet
+on disk, a stat/analyzer/`SaveTaskStep` error) is best-effort and leaves the
+trailer standing with condensation skipped for now, degrading to the existing
+backstops — the next turn-end incremental, the eventual SubagentStop Final, or
+the next commit — to fill it in later. Ordinary idle commits with no
 in-flight markers are unaffected — they stay exactly as before.
 
 ### Committed Checkpoints

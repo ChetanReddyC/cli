@@ -2460,28 +2460,28 @@ func TestWarnStaleEndedSessions_RateLimit(t *testing.T) {
 	assert.Contains(t, buf.String(), "entire doctor")
 }
 
-// TestPostCommit_IdleSessionWithLiveMarker_CondensesCommitSnapshot is the
-// OPEN ITEM 2.5 verification: an idle session with a live in-flight marker is
-// eligible for the fast-path trailer (tryAgentCommitFastPath), and the
-// CLI-layer commit-snapshot capture (captureInFlightTaskCommitSnapshot,
-// cmd/entire/cli/lifecycle.go) runs before PostCommit to back that trailer
-// with real content. This test reproduces the capture's realistic effect on
-// session state directly via SaveTaskStep — a non-incremental task step whose
+// TestPostCommit_IdleSessionWithLiveMarker_CondensesCommitSnapshot verifies
+// that an idle session with a live in-flight marker — eligible for the
+// fast-path trailer via tryAgentCommitFastPath, and backed by the CLI-layer
+// commit-snapshot capture (captureInFlightTaskCommitSnapshot,
+// cmd/entire/cli/lifecycle.go) that runs before PostCommit — actually
+// condenses. This test reproduces the capture's realistic effect on session
+// state directly via SaveTaskStep — a non-incremental task step whose
 // ModifiedFiles ends up empty because the subagent's own file write already
 // landed in this very commit (filterToUncommittedFiles strips it once HEAD
-// includes it) — and then runs PostCommit, asserting condensation actually
-// happens end to end.
+// includes it) — and then runs PostCommit, asserting condensation happens
+// end to end despite that empty ModifiedFiles list.
 //
 // This is the scenario the incident's fix depends on: a background subagent
 // commits its own work mid-task, so ModifiedFiles is empty and the session
 // never picks up a FilesTouched/committed-file overlap the "content
-// detection" path normally requires. Idle + EventGitCommit routes
-// unconditionally to ActionCondense (session/phase.go), and hasNew is true
-// because the commit-snapshot capture grew the shadow branch's stored
-// transcript — but shouldCondenseWithOverlapCheck still requires
-// filesTouchedBefore to overlap with the committed files for a non-active
-// session, which an empty ModifiedFiles list can never satisfy. If this test
-// fails, that overlap requirement is the residual gate Step 2.5 anticipated.
+// detection" path normally requires for a non-active session. Idle +
+// EventGitCommit routes unconditionally to ActionCondense (session/phase.go),
+// hasNew is true because the commit-snapshot capture grew the shadow
+// branch's stored transcript, and idleWithLiveMarker's overlap-check bypass
+// (shouldCondenseWithOverlapCheck) is what lets condensation proceed without
+// the overlap an empty ModifiedFiles list could never supply. Without a live
+// marker, that overlap requirement still applies unchanged.
 func TestPostCommit_IdleSessionWithLiveMarker_CondensesCommitSnapshot(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)

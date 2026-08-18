@@ -323,12 +323,27 @@ func headHasCheckpointTrailer(ctx context.Context) bool {
 
 // captureCommitSnapshotsForInFlightTasks runs the commit-snapshot capture
 // (captureInFlightTasksForCommit, cmd/entire/cli/lifecycle.go) for every
-// current-worktree session with a live in-flight background task, before
+// current-worktree session with any in-flight background task, before
 // strategy.PostCommit condenses this commit. This is what makes the
 // Entire-Checkpoint trailer tryAgentCommitFastPath adds for an idle session
 // with a live marker (see manual_commit_hooks.go) point at a checkpoint that
 // actually contains the subagent's work — without it, the trailer names a
 // checkpoint with nothing behind it.
+//
+// Deliberately broader than idleWithLiveMarker's trigger-side eligibility:
+// this loop has no phase check and no age bound on the marker, and it reads
+// from the unpruned strategy.ListSessionStates rather than the pruned
+// findSessionsForWorktree the trigger uses. This is safe, not an oversight:
+// an ACTIVE session with an in-flight marker must stay eligible too (a
+// foreground turn that also has a background subagent running), so a
+// phase filter here would wrongly skip it. An aged/stale marker costs at
+// most one wasted stat-and-compare — captureInFlightTaskCommitSnapshot's own
+// growth dedup against LastCapturedTranscriptBytes turns a no-op into a
+// no-op — never a wasted full capture. And this loop only ever backs a
+// checkpoint that condensation actually promotes: headHasCheckpointTrailer
+// already gates the call on a trailer having landed, so scanning extra
+// markers here can't manufacture linkage that tryAgentCommitFastPath's own,
+// narrower trust decision didn't already grant.
 //
 // Lives in the CLI layer (not strategy) because the capture needs
 // agent.AsTranscriptAnalyzer and agent.GetByAgentType — the strategy package
