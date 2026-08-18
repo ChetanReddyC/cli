@@ -84,17 +84,26 @@ func initRootLogging(cmd *cobra.Command) {
 	cmd.SetContext(logging.WithLogger(ctx, l))
 }
 
-func NewRootCmd() *cobra.Command {
-	// Run every ancestor's persistent hooks, root first, instead of only the
-	// closest one cobra picks by default. This is what makes the root
-	// PersistentPreRunE below the single logging.Init site: `hooks`,
-	// `checkpoint`, `session`, and `agent` all define their own
-	// PersistentPreRunE, and under the default behaviour each of those would
-	// shadow the root hook — silently, since a skipped Init only shows up as
-	// missing log lines. Cobra runs pre-runs root→leaf, so the logger is in
-	// the context before any group hook or RunE observes it.
+// Run every ancestor's persistent hooks, root first, instead of only the closest
+// one cobra picks by default. This is what makes the root PersistentPreRunE the
+// single logging.Init site: `hooks`, `checkpoint`, `session`, and `agent` all
+// define their own PersistentPreRunE, and under the default behaviour each of
+// those would shadow the root hook — silently, since a skipped Init only shows
+// up as missing log lines. Cobra runs pre-runs root→leaf, so the logger is in
+// the context before any group hook or RunE observes it.
+//
+// Set here rather than in NewRootCmd: this is a global in the cobra package, and
+// writing it per construction races with cobra reading it during Execute as soon
+// as anything builds or runs root commands concurrently — which parallel tests
+// do. Package init runs before any goroutine exists, so one write, no
+// synchronisation, nothing to get wrong later.
+//
+//nolint:gochecknoinits // Set a cobra package global once, before any goroutine can read it (see above).
+func init() {
 	cobra.EnableTraverseRunHooks = true
+}
 
+func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "entire",
 		Short:   "Entire CLI",
