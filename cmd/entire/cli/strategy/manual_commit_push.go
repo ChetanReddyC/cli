@@ -84,10 +84,12 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	//
 	// Capture runs before the gate so that the push which elects a remote by
 	// evidence (push target agrees with the branch's declared push
-	// destination) is also the first push to carry checkpoints there.
+	// destination) is also the first push to carry checkpoints there. The hint
+	// then speaks only for what capture left gated — see hintGatedCheckpointSync.
 	if !ps.hasCheckpointURL() {
 		maybeCaptureCheckpointSyncRemote(ctx, ps.remote)
 		if !checkpointSyncAllowedForRemote(ctx, ps.remote) {
+			hintGatedCheckpointSync(ctx, ps.remote)
 			return nil
 		}
 	}

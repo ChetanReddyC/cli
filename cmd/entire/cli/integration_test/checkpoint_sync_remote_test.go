@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -57,7 +58,13 @@ func queuedCheckpointRefCount(t *testing.T, env *TestEnv) int {
 // queue must survive), then against the elected remote (the checkpoint lands
 // and the queue drains). Shared by the default-election and config-override
 // scenarios, which are mirror images of each other.
-func assertSingleRemoteRouting(t *testing.T, env *TestEnv, checkpointID string, gated, elected remoteTarget) {
+//
+// expectGatedHint asserts the gated pre-push's output: an automatic election
+// must tell the user their checkpoints are waiting for the elected remote and
+// name checkpoint_push_remote (the gate was previously a silent no-op —
+// checkpoints stranded locally with no signal), while an explicit
+// checkpoint_push_remote is a decision already made and must stay quiet.
+func assertSingleRemoteRouting(t *testing.T, env *TestEnv, checkpointID string, gated, elected remoteTarget, expectGatedHint bool) {
 	t.Helper()
 
 	if checkpointID == "" {
@@ -71,7 +78,13 @@ func assertSingleRemoteRouting(t *testing.T, env *TestEnv, checkpointID string, 
 	}
 
 	// Pre-push to the non-elected remote: gated, no checkpoint data escapes.
-	env.RunPrePush(gated.name)
+	gatedOutput := env.RunPrePushOutput(gated.name)
+	if hinted := strings.Contains(gatedOutput, "checkpoint_push_remote"); hinted != expectGatedHint {
+		t.Errorf("gated pre-push hint presence = %v, want %v; output:\n%s", hinted, expectGatedHint, gatedOutput)
+	}
+	if expectGatedHint && !strings.Contains(gatedOutput, fmt.Sprintf("%q", elected.name)) {
+		t.Errorf("gated pre-push hint should name the elected remote %q; output:\n%s", elected.name, gatedOutput)
+	}
 	if env.CheckpointsPresentOnRemote(gated.bareDir) {
 		t.Errorf("checkpoints should NOT be on non-elected remote %q", gated.name)
 	}
@@ -153,7 +166,8 @@ func TestCheckpointSyncRemote_DefaultElection_OnlyOriginReceivesCheckpoints(t *t
 
 		assertSingleRemoteRouting(t, env, checkpointID,
 			remoteTarget{name: "publish", bareDir: barePublish},
-			remoteTarget{name: "origin", bareDir: bareOrigin})
+			remoteTarget{name: "origin", bareDir: bareOrigin},
+			false)
 
 		if got := capturedSyncRemotesOnDisk(t, env); got != nil {
 			t.Errorf("an undeclared one-off push must not capture the election, got %v", got)
@@ -183,7 +197,8 @@ func TestCheckpointSyncRemote_ConfigOverride_RoutesToNamedRemote(t *testing.T) {
 
 		assertSingleRemoteRouting(t, env, checkpointID,
 			remoteTarget{name: "origin", bareDir: bareOrigin},
-			remoteTarget{name: "publish", bareDir: barePublish})
+			remoteTarget{name: "publish", bareDir: barePublish},
+			false)
 
 		// Status reflects the override election.
 		st := statusSyncJSONOutput(t, env)
@@ -467,8 +482,12 @@ func TestCheckpointSyncRemote_DedicatedCheckpointRemoteExemptFromGate(t *testing
 	checkpointID := createCheckpointedCommit(t, env, "Add dedicated module", "dedicated.go", "package dedicated", "Add dedicated module")
 
 	// Pre-push for the non-elected remote: the dedicated URL exemption applies,
-	// so the checkpoint syncs to the dedicated store.
-	env.RunPrePush("publish")
+	// so the checkpoint syncs to the dedicated store. The gated-push hint must
+	// stay absent — the checkpoints DID sync, and telling a dedicated-mode
+	// user to set checkpoint_push_remote would break their setup.
+	if out := env.RunPrePushOutput("publish"); strings.Contains(out, "checkpoint_push_remote") {
+		t.Errorf("dedicated checkpoint_remote mode must not show the gated-push hint; output:\n%s", out)
+	}
 
 	if !env.BranchExistsOnRemote(checkpointBare, paths.MetadataBranchName) {
 		t.Fatal("dedicated checkpoint store should have the checkpoint branch")
