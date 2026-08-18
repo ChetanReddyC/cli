@@ -886,9 +886,13 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		preUntrackedFiles = preState.PreUntrackedFiles()
 	}
 
-	// Detect file changes via git status
+	// Detect file changes via git status. captureDegraded tracks whether any
+	// status scan feeding this turn breached its budget, so the marker
+	// persisted at turn end reflects the whole turn, not just this walk.
+	captureDegraded := preState != nil && preState.UntrackedScanSkipped
 	changes, err := DetectFileChanges(ctx, preUntrackedFiles)
 	if err != nil {
+		captureDegraded = captureDegraded || errors.Is(err, gitrepo.ErrStatusBudgetExceeded)
 		logStatusDegrade(logCtx, "failed to compute file changes", err)
 	}
 	if changes != nil && preState != nil && preState.UntrackedScanSkipped {
@@ -926,6 +930,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
 	if totalChanges == 0 {
 		logging.Info(logCtx, "no files modified during session, skipping checkpoint")
+		recordCaptureDegraded(ctx, sessionID, captureDegraded)
 		transitionSessionTurnEnd(ctx, sessionID, event)
 		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
@@ -983,6 +988,33 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		TokenUsage:               tokenUsage,
 	}
 
+	// finishTurn is the shared turn-end tail, run whether the save succeeded
+	// or was skipped on a status budget breach. The LastPrompt backfill must
+	// come after SaveStep because SaveStep may reinitialize session state,
+	// which would overwrite an earlier LastPrompt update — and SaveStep has
+	// initialized state even when it then failed on the budget.
+	finishTurn := func(degraded bool) {
+		if backfilledPrompt != "" {
+			mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+				if state.LastPrompt != "" {
+					return strategy.ErrMutationSkip
+				}
+				state.LastPrompt = backfilledPrompt
+				return nil
+			})
+			if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+				logging.Warn(logCtx, "failed to backfill LastPrompt in session state",
+					slog.String("error", mutErr.Error()))
+			}
+		}
+		recordCaptureDegraded(ctx, sessionID, degraded)
+		transitionSessionTurnEnd(ctx, sessionID, event)
+		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
+			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
+				slog.String("error", cleanupErr.Error()))
+		}
+	}
+
 	if err := strat.SaveStep(ctx, stepCtx); err != nil {
 		if errors.Is(err, gitrepo.ErrStatusBudgetExceeded) {
 			// The first-checkpoint status read inside the save breached its
@@ -990,40 +1022,13 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 			// checkpoint, run the normal turn-end bookkeeping, and exit 0.
 			logging.Warn(logCtx, "checkpoint skipped: status budget exceeded during save; capture degraded this turn",
 				slog.String("error", err.Error()))
-			transitionSessionTurnEnd(ctx, sessionID, event)
-			if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
-				logging.Warn(logCtx, "failed to cleanup pre-prompt state",
-					slog.String("error", cleanupErr.Error()))
-			}
+			finishTurn(true)
 			return nil
 		}
 		return fmt.Errorf("failed to save step: %w", err)
 	}
 
-	// Update session state with backfilled prompt after SaveStep.
-	// Done after SaveStep because SaveStep may reinitialize session state,
-	// which would overwrite an earlier LastPrompt update.
-	if backfilledPrompt != "" {
-		mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
-			if state.LastPrompt != "" {
-				return strategy.ErrMutationSkip
-			}
-			state.LastPrompt = backfilledPrompt
-			return nil
-		})
-		if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
-			logging.Warn(logCtx, "failed to backfill LastPrompt in session state",
-				slog.String("error", mutErr.Error()))
-		}
-	}
-
-	// Transition session phase and cleanup
-	transitionSessionTurnEnd(ctx, sessionID, event)
-	if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
-		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
-			slog.String("error", cleanupErr.Error()))
-	}
-
+	finishTurn(captureDegraded)
 	return nil
 }
 
@@ -1262,8 +1267,10 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 
 	if err := strat.SaveTaskStep(ctx, taskStepCtx); err != nil {
 		if errors.Is(err, gitrepo.ErrStatusBudgetExceeded) {
-			// Same posture as turn-end: a status budget breach inside the save
-			// skips this task's checkpoint instead of failing the hook.
+			// Defensive symmetry with turn-end, not a live path today: task
+			// saves write via writeTask, which reads no worktree status, so
+			// nothing under SaveTaskStep currently emits the sentinel. Kept so
+			// the degrade posture is already correct if that changes.
 			logging.Warn(logCtx, "task checkpoint skipped: status budget exceeded during save",
 				slog.String("error", err.Error()))
 			_ = CleanupPreTaskState(ctx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
@@ -1312,6 +1319,29 @@ func parseTranscriptForCheckpointUUID(transcriptPath string) ([]transcriptLine, 
 		return nil, fmt.Errorf("parsing transcript for checkpoint UUID: %w", err)
 	}
 	return lines, nil
+}
+
+// recordCaptureDegraded persists (or clears) the capture-degraded timestamp on
+// session state at turn end, so a status-budget breach is visible in
+// `entire status` instead of only in .entire/logs. A healthy turn clears it —
+// the marker means "the LAST turn degraded", not "some turn once did". Skips
+// the state write when nothing changes, which is the common case.
+func recordCaptureDegraded(ctx context.Context, sessionID string, degraded bool) {
+	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if !degraded && state.CaptureDegradedAt == nil {
+			return strategy.ErrMutationSkip
+		}
+		state.CaptureDegradedAt = nil
+		if degraded {
+			now := time.Now().UTC()
+			state.CaptureDegradedAt = &now
+		}
+		return nil
+	})
+	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to record capture degradation in session state",
+			slog.String("error", mutErr.Error()))
+	}
 }
 
 // transitionSessionTurnEnd transitions the session phase to IDLE and dispatches turn-end actions.

@@ -122,7 +122,14 @@ func statusWithBudget(ctx context.Context, root string, budget time.Duration, wa
 	case res := <-resultCh:
 		return res.status, res.err
 	case <-ctx.Done():
-		return nil, ctx.Err() //nolint:wrapcheck // cancellation, not a status failure
+		// Cancellation abandons the walk exactly like a timer breach, so it
+		// must arm the latch and carry the sentinel too: otherwise a caller's
+		// errors.Is degrade check misses, the hook fails hard, and a later
+		// call in this process could re-enter the abandoned walk. ctx.Err()
+		// stays in the chain so cancellation remains distinguishable.
+		statusBudgetBreached.Store(true)
+		return nil, fmt.Errorf("worktree status walk of %s abandoned on cancellation: %w: %w",
+			root, ctx.Err(), ErrStatusBudgetExceeded)
 	case <-timer.C:
 		statusBudgetBreached.Store(true)
 		elapsed := time.Since(start).Round(time.Millisecond)

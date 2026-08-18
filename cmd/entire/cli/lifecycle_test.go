@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -907,6 +908,82 @@ func TestTurnFlow_StatusBudgetBreachDegradesGracefully(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, state.FilesTouched, "agent.txt")
 	require.NotContains(t, state.FilesTouched, "preexisting.txt")
+	require.NotNil(t, state.CaptureDegradedAt, "the breach must be persisted so `entire status` can surface it")
+}
+
+// mockPromptAgent adds PromptExtractor so turn-end's LastPrompt backfill runs.
+type mockPromptAgent struct {
+	mockAnalyzerAgent
+
+	prompts []string
+}
+
+var _ agent.PromptExtractor = (*mockPromptAgent)(nil)
+
+func (m *mockPromptAgent) ExtractPrompts(string, int) ([]string, error) { return m.prompts, nil }
+
+// TestHandleLifecycleTurnEnd_SaveBreachStillBackfillsLastPrompt pins the
+// degrade-path bookkeeping: when the first-checkpoint status read inside
+// SaveStep breaches its budget, the checkpoint is skipped and the hook exits
+// 0 — but the turn-end tail must still run, backfilling LastPrompt (SaveStep
+// initialized session state before failing, wiping any earlier value) and
+// persisting the capture-degraded marker.
+func TestHandleLifecycleTurnEnd_SaveBreachStillBackfillsLastPrompt(t *testing.T) {
+	// Not parallel: t.Chdir plus the package-global git-status budget override.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "README.md", "# test\n")
+	testutil.GitAdd(t, tmpDir, "README.md")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	t.Cleanup(checkpoint.SetGitStatusBudgetForTesting(time.Nanosecond))
+
+	ctx := context.Background()
+	sessionID := "sess-save-breach-backfill"
+
+	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
+
+	resolvedDir, err := filepath.EvalSymlinks(tmpDir)
+	require.NoError(t, err)
+	ag := &mockPromptAgent{
+		mockAnalyzerAgent: mockAnalyzerAgent{
+			mockLifecycleAgent: mockLifecycleAgent{
+				name:           "mock-prompt",
+				agentType:      "Mock Prompt Agent",
+				transcriptData: []byte(`{"type":"user","message":"test"}`),
+			},
+			modifiedFiles: []string{filepath.Join(resolvedDir, "agent.txt")},
+		},
+		prompts: []string{"write agent.txt"},
+	}
+
+	// Turn start without a prompt (exec-mode shape, e.g. Factory Droid):
+	// prompt.txt stays empty so turn-end must backfill from the transcript.
+	startEvent := &agent.Event{
+		Type:       agent.TurnStart,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+	require.NoError(t, handleLifecycleTurnStart(ctx, ag, startEvent))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "agent.txt"), []byte("agent"), 0o600))
+
+	endEvent := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, endEvent), "save breach must degrade, not fail the hook")
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, 0, state.StepCount, "the breached save must not have produced a checkpoint")
+	require.Equal(t, "write agent.txt", state.LastPrompt, "the backfill must run on the degrade path too")
+	require.NotNil(t, state.CaptureDegradedAt, "the save breach must be persisted so `entire status` can surface it")
 }
 
 // TestHandleLifecycleTurnEnd_ScanSkippedMarkerSkipsNewFileDetection pins the
@@ -976,6 +1053,16 @@ func TestHandleLifecycleTurnEnd_ScanSkippedMarkerSkipsNewFileDetection(t *testin
 	require.Contains(t, state.FilesTouched, "agent.txt")
 	require.NotContains(t, state.FilesTouched, "preexisting.txt",
 		"marker must disable new-file detection: with no baseline, pre-existing untracked files would be misattributed to the agent")
+	require.NotNil(t, state.CaptureDegradedAt,
+		"a marker-degraded turn must be persisted even when the end-hook walk succeeds")
+
+	// A following turn whose scans stay within budget clears the marker: the
+	// warning means "the LAST turn degraded", not "some turn once did".
+	require.NoError(t, handleLifecycleTurnStart(ctx, ag, startEvent))
+	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, endEvent))
+	state, err = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Nil(t, state.CaptureDegradedAt, "a healthy turn must clear the degradation marker")
 }
 
 // TestHandleLifecycleSubagentEnd_ScanSkippedMarkerSkipsNewFileDetection is the

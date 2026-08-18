@@ -543,7 +543,10 @@ process-local latch makes every later `StatusWithBudget` call in the same hook
 process fail fast rather than re-entering the walk. The first-checkpoint
 `git status` subprocess in the checkpoint store is bounded by the same
 `StatusWalkBudget` (a killed child, not an abandoned goroutine) and reports the
-same sentinel; the lifecycle handlers warn-and-skip the checkpoint on it. Paths
+same sentinel; the lifecycle handlers warn-and-skip the checkpoint on it. Turn
+end persists whether the turn degraded (`SessionState.CaptureDegradedAt` — set
+on breach, cleared by the next healthy turn) so `entire status` surfaces the
+degradation instead of it living only in `.entire/logs`. Paths
 where a user is actively waiting on a command (review, rewind, and
 `session adopt` via `detectFileChangesUnbounded`) keep the unbounded
 `gitrepo.Status`.

@@ -50,6 +50,30 @@ func TestStatusWithBudget_BreachAbandonsWalkPromptly(t *testing.T) {
 	require.False(t, walkStarted)
 }
 
+// TestStatusWithBudget_CancellationArmsLatchAndCarriesSentinel pins the
+// fail-open guarantee against cancellation: a walk abandoned because the
+// context died must degrade exactly like a timer breach — callers match on
+// ErrStatusBudgetExceeded, and the latch must stop this process from
+// re-entering the abandoned walk — while cancellation stays visible in the
+// error chain.
+func TestStatusWithBudget_CancellationArmsLatchAndCarriesSentinel(t *testing.T) {
+	// Not parallel: mutates the process-global breach latch.
+	t.Cleanup(func() { statusBudgetBreached.Store(false) })
+
+	walkRelease := make(chan struct{})
+	defer close(walkRelease)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := statusWithBudget(ctx, "/pathological/root", time.Minute, func() (git.Status, error) {
+		<-walkRelease
+		return git.Status{}, nil
+	})
+	require.ErrorIs(t, err, ErrStatusBudgetExceeded)
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, statusBudgetBreached.Load(), "cancellation must arm the latch like a timer breach")
+}
+
 // TestStatusWithBudget_BreachWarnsWithRepoRoot pins the observability half of
 // the incident: the original failure was completely silent, so the breach
 // Warn must name the repo root (plus elapsed/budget) for doctor/logs

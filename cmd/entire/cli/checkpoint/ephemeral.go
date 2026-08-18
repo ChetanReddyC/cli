@@ -1228,7 +1228,24 @@ func isProtectedCheckpointPath(relPath string) bool {
 // gitStatusBudget bounds the first-checkpoint `git status` subprocess in
 // collectChangedFiles. A var rather than a direct use of the const so tests
 // can shrink it to force the breach path without a multi-million-file fixture.
+//
+// Deliberately independent of the go-git walk's breach latch: after a turn's
+// go-git walk breached, this subprocess still gets its own full budget rather
+// than failing fast. C git is typically orders of magnitude faster and honors
+// ignore files, so it often produces a real first checkpoint where the go-git
+// walk could not — and unlike the walk it is reliably killed on expiry, so the
+// worst case is the two budgets stacking to ~40s of the agent's ~60s hook
+// timeout (the hook still exits with degradation), never a zombie.
 var gitStatusBudget = gitrepo.StatusWalkBudget
+
+// SetGitStatusBudgetForTesting overrides the first-checkpoint git-status
+// budget so lifecycle tests can exercise the save-breach degrade path; the
+// returned func restores the real budget.
+func SetGitStatusBudgetForTesting(budget time.Duration) (restore func()) {
+	orig := gitStatusBudget
+	gitStatusBudget = budget
+	return func() { gitStatusBudget = orig }
+}
 
 // collectChangedFiles returns all changed files from git status for the first checkpoint.
 //
