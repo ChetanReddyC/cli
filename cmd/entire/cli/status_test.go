@@ -2106,7 +2106,7 @@ func TestRunStatus_CheckpointSyncDestination_CapturedAnnotated(t *testing.T) {
 	}
 
 	out := stdout.String()
-	if !strings.Contains(out, "Checkpoints sync to: fork (captured from your pushes)") {
+	if !strings.Contains(out, "Checkpoints sync to: fork (follows your branch's push destination)") {
 		t.Errorf("expected annotated destination line for captured remote, got:\n%s", out)
 	}
 }

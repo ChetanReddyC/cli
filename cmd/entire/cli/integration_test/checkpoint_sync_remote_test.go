@@ -272,7 +272,7 @@ func TestCheckpointSyncRemote_TrackedPushCapturesElection(t *testing.T) {
 			t.Error("origin must not receive checkpoint data after the election was captured")
 		}
 
-		const wantRemote, wantSource = "fork", "captured"
+		const wantRemote, wantSource = "fork", "observed"
 		st := statusSyncJSONOutput(t, env)
 		if st.CheckpointSyncRemote != wantRemote || st.CheckpointSyncRemoteSource != wantSource {
 			t.Errorf("status should report remote %q from source %q, got %q from %q",

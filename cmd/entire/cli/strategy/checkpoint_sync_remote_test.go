@@ -425,7 +425,7 @@ func TestResolveCheckpointSyncRemote_CapturedTier(t *testing.T) {
 
 		got, err := ResolveCheckpointSyncRemote(ctx)
 		require.NoError(t, err)
-		assert.Equal(t, CheckpointSyncRemote{Name: "fork", Source: SyncRemoteSourceCaptured}, got)
+		assert.Equal(t, CheckpointSyncRemote{Name: "fork", Source: SyncRemoteSourceObserved}, got)
 	})
 
 	t.Run("explicit checkpoint_push_remote beats captured", func(t *testing.T) {
@@ -482,7 +482,7 @@ func TestMaybeCaptureCheckpointSyncRemote(t *testing.T) {
 		assert.Contains(t, buf.String(), "checkpoint_push_remote", "announcement must name the override")
 		got, err := ResolveCheckpointSyncRemote(ctx)
 		require.NoError(t, err)
-		assert.Equal(t, CheckpointSyncRemote{Name: "fork", Source: SyncRemoteSourceCaptured}, got)
+		assert.Equal(t, CheckpointSyncRemote{Name: "fork", Source: SyncRemoteSourceObserved}, got)
 	})
 
 	t.Run("push to the already-elected remote does not capture", func(t *testing.T) {

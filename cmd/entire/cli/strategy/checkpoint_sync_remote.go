@@ -20,10 +20,14 @@ type CheckpointSyncRemoteSource string
 const (
 	// SyncRemoteSourceConfig: strategy_options.checkpoint_push_remote.
 	SyncRemoteSourceConfig CheckpointSyncRemoteSource = "config"
-	// SyncRemoteSourceCaptured: elected by evidence — a past push that agreed
+	// SyncRemoteSourceObserved: elected by evidence — a past push that agreed
 	// with the branch's declared push destination (see
-	// maybeCaptureCheckpointSyncRemote).
-	SyncRemoteSourceCaptured CheckpointSyncRemoteSource = "captured"
+	// maybeCaptureCheckpointSyncRemote). Named for what was observed rather than
+	// for the mechanism that recorded it: "captured" is our word for the latch,
+	// and it credits the push while omitting the declaration that made the push
+	// count — the half that separates this from the tracking tier reverted in
+	// 74e239a9.
+	SyncRemoteSourceObserved CheckpointSyncRemoteSource = "observed"
 	// SyncRemoteSourceDefault: "origin" exists.
 	SyncRemoteSourceDefault CheckpointSyncRemoteSource = "default"
 	// SyncRemoteSourceSole: exactly one remote configured.
@@ -90,7 +94,7 @@ func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, err
 	// removed falls through to the default tiers instead of disabling sync.
 	for _, name := range loadCapturedSyncRemotes(ctx) {
 		if isConfiguredRemote(ctx, name) {
-			return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceCaptured}, nil
+			return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceObserved}, nil
 		}
 		logging.Debug(ctx, "captured checkpoint sync remote is not configured; falling through",
 			slog.String("remote", name))
