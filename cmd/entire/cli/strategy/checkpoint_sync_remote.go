@@ -134,6 +134,72 @@ func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote string) bool
 	return true
 }
 
+// hintGatedCheckpointSync tells the user, on a gated pre-push, that
+// checkpoints are waiting for the elected sync remote and how to re-route
+// them — otherwise the gate is a silent no-op and checkpoints strand locally
+// until the elected remote happens to be pushed.
+//
+// Stays quiet unless every condition holds: the push target is a configured
+// remote (checkpoint_push_remote takes a remote name, so a raw-URL push has
+// no actionable suggestion), the election succeeded AND was automatic (an
+// explicit checkpoint_push_remote is a decision already made, and the
+// fail-closed misconfigured case logs a warning through the gate itself), and
+// checkpoints are actually waiting. Fully local — no network.
+//
+// The hint names .entire/settings.local.json: a remote name is a per-clone
+// fact, and committing it to the tracked settings.json would fail-close
+// checkpoint sync for every teammate whose clone lacks that remote name.
+func hintGatedCheckpointSync(ctx context.Context, pushRemote string) {
+	if !isConfiguredRemote(ctx, pushRemote) {
+		return
+	}
+	syncRemote, err := ResolveCheckpointSyncRemote(ctx)
+	if err != nil || syncRemote.Name == "" || syncRemote.Source == SyncRemoteSourceConfig {
+		return
+	}
+	// Only for a remote this branch actually pushes to. The advice is "point
+	// checkpoint_push_remote at the remote you just pushed", which is right for a
+	// habitual destination and wrong — actively harmful — for a one-off: a
+	// deploy-target push (`git push heroku`) or a single `git push upstream` to
+	// open a PR would be told to publish session transcripts there, which is the
+	// leak the single-remote gate exists to prevent.
+	//
+	// Since capture now takes a declared destination on the first push that
+	// agrees with it, this gate leaves the hint speaking for exactly what capture
+	// cannot fix: a declared remote that capture will not elect because a capture
+	// is already in force (phase-1 first-capture-sticks), where naming the setting
+	// really is the only way to re-route.
+	if declaredPushDestination(ctx) != pushRemote {
+		logging.Debug(ctx, "gated checkpoint sync hint suppressed: push target is not this branch's declared destination",
+			slog.String("push_remote", pushRemote),
+			slog.String("checkpoint_sync_remote", syncRemote.Name))
+		return
+	}
+	count, err := CountUnpushedCheckpoints(ctx, syncRemote.Name)
+	if err != nil {
+		// Stay quiet toward the user (best-effort hint in their push), but
+		// leave a trace: a persistently failing count would otherwise
+		// re-create the silent stall this hint exists to surface.
+		logging.Debug(ctx, "gated checkpoint sync hint suppressed: cannot count unpushed checkpoints",
+			slog.String("checkpoint_sync_remote", syncRemote.Name),
+			slog.String("error", err.Error()))
+		return
+	}
+	if count == 0 {
+		return
+	}
+	fmt.Fprintf(stderrWriter,
+		"[entire] %d checkpoint(s) are waiting to sync to %q, this repo's checkpoint sync remote; this push to %q does not carry them.\n",
+		count, syncRemote.Name, pushRemote)
+	fmt.Fprintf(stderrWriter,
+		"[entire] To sync checkpoints to %q instead, set strategy_options.checkpoint_push_remote to %q in .entire/settings.local.json.\n",
+		pushRemote, pushRemote)
+	logging.Info(ctx, "gated checkpoint sync hint shown",
+		slog.Int("unpushed_checkpoints", count),
+		slog.String("checkpoint_sync_remote", syncRemote.Name),
+		slog.String("push_remote", pushRemote))
+}
+
 // configuredRemotesInConfigOrder lists remote names in .git/config section
 // order (approximates "first remote added"; `git remote` output is
 // alphabetical and unsuitable). Remotes configured with only pushurl are
