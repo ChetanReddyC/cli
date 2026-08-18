@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -16,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-git/go-git/v6"
@@ -539,6 +541,139 @@ func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T)
 	require.Equal(t, string(session.KindAgentInvestigate), meta.Kind, "per-session Kind")
 	require.Equal(t, "0123456789ab", meta.InvestigateRunID, "per-session InvestigateRunID")
 	require.Equal(t, "Why is checkout flaky?", meta.InvestigateTopic, "per-session InvestigateTopic")
+}
+
+func setupEndedSessionWithoutFiles(t *testing.T, s *ManualCommitStrategy, repo *git.Repository, dir, sessionID string) *SessionState {
+	t.Helper()
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	endedAt := time.Now().UTC()
+	state.Phase = session.PhaseEnded
+	state.EndedAt = &endedAt
+	state.FilesTouched = nil
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+	return state
+}
+
+func TestCondenseSessionByID_ReusesCheckpointFromInterruptedEagerCondense(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "interrupted-eager-condense"
+	setupEndedSessionWithoutFiles(t, s, repo, dir, sessionID)
+
+	staleState, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	orphanID := id.MustCheckpointID("111111111111")
+	result, err := s.CondenseSession(context.Background(), repo, orphanID, staleState, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped)
+
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	checkpoints, err := store.List(context.Background())
+	require.NoError(t, err)
+	require.Len(t, checkpoints, 1)
+
+	require.NoError(t, s.CondenseSessionByID(context.Background(), sessionID))
+
+	checkpoints, err = store.List(context.Background())
+	require.NoError(t, err)
+	require.Len(t, checkpoints, 1)
+	assert.Equal(t, orphanID, checkpoints[0].CheckpointID)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, orphanID, state.LastCheckpointID)
+	assert.Equal(t, result.TotalTranscriptLines, state.CheckpointTranscriptStart)
+}
+
+func TestCondenseAndMarkFullyCondensed_ReusesReservedAttemptAfterInterruptedWrite(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "reserved-eager-condense"
+	setupEndedSessionWithoutFiles(t, s, repo, dir, sessionID)
+
+	var reservedID id.CheckpointID
+	reserveErr := MutateSessionState(context.Background(), sessionID, func(state *SessionState) error {
+		var err error
+		reservedID, _, err = ensureCondensationAttemptID(context.Background(), state)
+		return err
+	})
+	require.NoError(t, reserveErr)
+
+	staleState, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	result, err := s.CondenseSession(context.Background(), repo, reservedID, staleState, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped)
+
+	require.NoError(t, s.CondenseAndMarkFullyCondensed(context.Background(), sessionID))
+
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	checkpoints, err := store.List(context.Background())
+	require.NoError(t, err)
+	require.Len(t, checkpoints, 1)
+	assert.Equal(t, reservedID, checkpoints[0].CheckpointID)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, reservedID, state.LastCheckpointID)
+	assert.Empty(t, state.CondensationAttemptID)
+	assert.True(t, state.FullyCondensed)
+}
+
+func TestCondenseSessionByID_DoesNotReuseCheckpointAfterSessionAdvances(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "advanced-after-interrupted-condense"
+	setupEndedSessionWithoutFiles(t, s, repo, dir, sessionID)
+
+	staleState, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	orphanID := id.MustCheckpointID("111111111111")
+	result, err := s.CondenseSession(context.Background(), repo, orphanID, staleState, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped)
+
+	metadataDir := paths.EntireMetadataDir + "/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	advancedTranscript := testTranscriptPromptResponse + `{"type":"human","message":{"content":"another prompt"}}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(advancedTranscript), 0o644))
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint 2",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	}))
+
+	require.NoError(t, s.CondenseSessionByID(context.Background(), sessionID))
+
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	checkpoints, err := store.List(context.Background())
+	require.NoError(t, err)
+	require.Len(t, checkpoints, 2)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	assert.NotEqual(t, orphanID, state.LastCheckpointID)
 }
 
 // TestCheckpointStepCount covers the prompt-window math that produces the

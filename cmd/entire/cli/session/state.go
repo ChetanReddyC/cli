@@ -232,6 +232,10 @@ type State struct {
 	// sessions that have been condensed at least once. Cleared on new prompt.
 	LastCheckpointID id.CheckpointID `json:"last_checkpoint_id,omitempty"`
 
+	// CondensationAttemptID is allocated and saved before a persistent checkpoint
+	// write so a retry after process death writes the same checkpoint ID.
+	CondensationAttemptID id.CheckpointID `json:"condensation_attempt_id,omitempty"`
+
 	// LastCheckpointCommitHash is the exact commit SHA that carried
 	// LastCheckpointID at condensation time. Used by the reconcile path to
 	// distinguish "reset back to the condensed commit" (same SHA) from

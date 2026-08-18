@@ -1431,7 +1431,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	// Save checkpoint ID so subsequent commits can reuse it (e.g., amend restores trailer).
 	// LastCheckpointCommitHash records the exact commit SHA so the reconcile path can
 	// distinguish a true reset (same SHA) from cherry-pick/rebase (same trailer, new SHA).
-	state.LastCheckpointID = checkpointID
+	state.LastCheckpointID = result.CheckpointID
 	state.LastCheckpointCommitHash = newHead
 
 	logging.Info(logCtx, "session condensed",
