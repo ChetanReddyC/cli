@@ -13,8 +13,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
@@ -102,6 +104,14 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	fmt.Fprintln(cmd.OutOrStdout())
 
 	ctx := cmd.Context()
+
+	// The git hook surface. Checked before the agent hook checks because it is
+	// the more fundamental one: if git hooks are broken, commits are not captured
+	// at all and agent-config drift is noise by comparison.
+	if hooksErr := checkGitHooks(cmd, force); hooksErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: git hook check failed: %v\n", hooksErr)
+		finalErr = NewSilentError(fmt.Errorf("git hook check failed: %w", hooksErr))
+	}
 
 	// Agent-specific: Codex hook trust state.
 	checkCodexHookTrust(cmd)
@@ -369,11 +379,18 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	ctx := cmd.Context()
 	refs := checkpoint.ResolveRefs(ctx)
 	w := cmd.OutOrStdout()
-	if !refs.PrimaryFetchableFromOrigin() {
-		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to origin)\n", refs.Primary)
+	if !refs.PrimaryFetchableFromRemote() {
+		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to a remote)\n", refs.Primary)
 		return nil
 	}
-	remoteRefName := plumbing.NewRemoteReferenceName("origin", refs.Primary.Short())
+	// Check against the first checkpoint read candidate whose remote-tracking
+	// ref exists — a pure read across both tiers (elected sync remote, then
+	// the legacy origin tier).
+	remoteName, remoteRefName, ok := strategy.FirstReadCandidateTrackingRef(ctx, repo, refs.Primary)
+	if !ok {
+		fmt.Fprintln(w, "✓ Metadata branches: OK (no remote-tracking metadata ref found)")
+		return nil
+	}
 	disconnected, err := strategy.IsMetadataDisconnected(ctx, repo, remoteRefName)
 	if err != nil {
 		return fmt.Errorf("could not check metadata branch state: %w", err)
@@ -387,6 +404,17 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	fmt.Fprintln(w, "Metadata branches: DISCONNECTED")
 	fmt.Fprintf(w, "  Local and remote %s branches share no common ancestor.\n", refs.Primary.Short())
 	fmt.Fprintln(w, "  Some remote checkpoints may not be visible locally.")
+
+	// The repair advances the local ref from the remote tip, so it is
+	// confined to the elected checkpoint sync remote: a stale legacy-tier
+	// origin must never drive a local-ref rewrite. Report-only otherwise.
+	elected, electErr := strategy.ResolveCheckpointSyncRemote(ctx)
+	if electErr != nil || elected.Name != remoteName {
+		fmt.Fprintf(w, "  The disconnected tracking ref belongs to remote %q, which is not the elected checkpoint sync remote.\n", remoteName)
+		fmt.Fprintln(w, "  Automatic repair only reconciles against the elected sync remote; fetch its metadata branch and re-run 'entire doctor'.")
+		return nil
+	}
+
 	fmt.Fprintln(w, "  Fix: cherry-pick local checkpoints onto remote tip (preserves all data).")
 
 	if !force {
@@ -434,6 +462,84 @@ func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, err
 		fmt.Fprintln(w, "  -> Skipped")
 	}
 	return confirmed, nil
+}
+
+// checkGitHooks reports whether Entire's git hooks are installed and current,
+// and offers to reinstall them when they are not.
+//
+// This is the one hook surface a user cannot see going wrong. Agent hook configs
+// are committed files that turn up in a diff; .git/hooks is per-clone and
+// untracked, so pulling a release that changes hook generation never touches it.
+// A hook left by the removed local-dev mode still carries Entire's marker, so it
+// looks installed while naming a launcher inside the working tree that no longer
+// exists — and because that shape got no availability guard while pre-push
+// deliberately propagates exit codes, the symptom a user actually sees is `git
+// push` being rejected.
+//
+// Unlike the agent hook checks this one repairs rather than only warning: the
+// reinstall is content-idempotent, backs up any foreign hook it displaces, and
+// writes exactly what the next turn-start would write anyway. Someone reaching
+// for doctor after a rejected push wants to be unblocked, not handed a second
+// command to run.
+func checkGitHooks(cmd *cobra.Command, force bool) error {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	switch strategy.CheckGitHookState(ctx) {
+	case strategy.GitHooksCurrent:
+		fmt.Fprintln(w, "✓ Git hooks: OK")
+		return nil
+
+	case strategy.GitHooksAbsent:
+		// Missing hooks are only a problem where Entire was actually set up.
+		// doctor runs in any git repo, so treating this as actionable would let
+		// `entire doctor --force` install hooks into — and back up the existing
+		// hooks of — a repo that never opted in. That is the loudest possible
+		// surprise from a diagnostic command. The sibling checks already hold this
+		// line: checkHookDrift stays silent on HooksAbsent, and
+		// checkCodexHookTrust returns early when there is no codex hooks file.
+		//
+		// IsSetUpAny rather than IsSetUpAndEnabled: a repo that ran `entire
+		// disable` still wants working hooks, because the hooks themselves are
+		// what no-op while disabled.
+		if !settings.IsSetUpAny(ctx) {
+			return nil
+		}
+		fmt.Fprintln(w, "Git hooks: NOT INSTALLED")
+		fmt.Fprintln(w, "  Commits in this repository are not captured as checkpoints.")
+
+	case strategy.GitHooksOutdated:
+		// Actionable whatever the settings say: a hook carrying Entire's marker
+		// means this repo opted in at some point, and a stale one is actively
+		// broken rather than merely missing.
+		fmt.Fprintln(w, "Git hooks: OUT OF DATE")
+		fmt.Fprintln(w, "  A hook still runs Entire from the working tree instead of the installed")
+		fmt.Fprintln(w, "  binary. This can reject `git push`, because the path it names is gone.")
+	}
+	fmt.Fprintln(w, "  Fix: reinstall the managed git hooks (any non-Entire hook is backed up).")
+
+	if !force {
+		// Degrade to warn-only when there is nobody to ask. An agent or CI run
+		// must not be blocked on a prompt, and rewriting a repo's hooks
+		// unasked is worse than naming the command that does it.
+		if !interactive.CanPromptInteractively() {
+			fmt.Fprintln(w, "  Run `entire doctor --force` to apply it.")
+			return nil
+		}
+		proceed, promptErr := confirmDoctorFix(ctx, w, "Reinstall Entire git hooks?")
+		if promptErr != nil {
+			return promptErr
+		}
+		if !proceed {
+			return nil
+		}
+	}
+
+	if _, err := strategy.ReinstallGitHooks(ctx); err != nil {
+		return fmt.Errorf("failed to reinstall git hooks: %w", err)
+	}
+	fmt.Fprintln(w, "  ✓ Fixed: git hooks reinstalled")
+	return nil
 }
 
 // checkHookDrift warns when an installed agent's Entire hook config is out of

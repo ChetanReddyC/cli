@@ -81,9 +81,17 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// remote selected by this push. The gate must stay BELOW
 	// resolvePushSettings: hasCheckpointURL is only known after resolution,
 	// so hoisting the gate above it would break the exemption.
-	if !ps.hasCheckpointURL() && !checkpointSyncAllowedForRemote(ctx, ps.remote) {
-		hintGatedCheckpointSync(ctx, ps.remote)
-		return nil
+	//
+	// Capture runs before the gate so that the push which elects a remote by
+	// evidence (push target agrees with the branch's declared push
+	// destination) is also the first push to carry checkpoints there. The hint
+	// then speaks only for what capture left gated — see hintGatedCheckpointSync.
+	if !ps.hasCheckpointURL() {
+		maybeCaptureCheckpointSyncRemote(ctx, ps.remote)
+		if !checkpointSyncAllowedForRemote(ctx, ps.remote) {
+			hintGatedCheckpointSync(ctx, ps.remote)
+			return nil
+		}
 	}
 
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
@@ -92,7 +100,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// branch — the empty-remote guard below is unnecessary for this backend.
 	// (A configured git-branch mirror's v1 ref is not pushed here yet — mirror
 	// push for downgrade safety is a later step.)
-	if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: a bad checkpoints block already surfaces via Open; default to no refs push
+	if ps.primaryIsRefs {
 		return s.prePushCheckpointRefs(ctx, ps)
 	}
 
@@ -242,7 +250,24 @@ func isConfiguredRemote(ctx context.Context, name string) bool {
 	if name == "" {
 		return false
 	}
-	return exec.CommandContext(ctx, "git", "remote", "get-url", name).Run() == nil
+	return cachedIsConfiguredRemote(ctx, name, func() (bool, error) {
+		cmd := exec.CommandContext(ctx, "git", "remote", "get-url", name)
+		if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
+			cmd.Dir = worktreeRoot
+		}
+		err := cmd.Run()
+		if err == nil {
+			return true, nil
+		}
+		// git ran and said no: a real answer worth caching. git failing to run at
+		// all says nothing about the remote, and memoizing that false would
+		// fail-close checkpoint_push_remote for the rest of the process.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return false, nil
+		}
+		return false, fmt.Errorf("probe remote %q: %w", name, err)
+	})
 }
 
 // remoteHasTrackingRefs reports whether any refs/remotes/<remote>/* ref exists

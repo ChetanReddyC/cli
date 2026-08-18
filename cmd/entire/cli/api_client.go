@@ -7,6 +7,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 )
 
 // NewAuthenticatedAPIClient creates an API client targeting api.BaseURL()
@@ -65,4 +66,17 @@ func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool,
 	// (login hint, discovery-unavailable, region guidance); re-wrapping here
 	// would bury them, so surface them verbatim.
 	return auth.NewEntireAPICellClient(ctx, insecureHTTP, target) //nolint:wrapcheck // pass through contextual auth errors
+}
+
+// newTrailAPIClient dials the entire-api cell that owns the repository. It is a
+// package seam so tests can substitute a client pointed at a stub server.
+var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
+	client, err := NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, "")
+	if errors.Is(err, clusterdiscovery.ErrNoAuthContext) {
+		return nil, fmt.Errorf("%w: %w", auth.ErrNotLoggedIn, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
 }
