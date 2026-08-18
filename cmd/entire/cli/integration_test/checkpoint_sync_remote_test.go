@@ -296,6 +296,71 @@ func TestCheckpointSyncRemote_TrackedPushCapturesElection(t *testing.T) {
 	})
 }
 
+// TestCheckpointSyncRemote_DeferredPushDoesNotCaptureElection covers the
+// gate-to-delivery gap on the most likely first push there is: the user adds a
+// brand-new empty fork and pushes their branch to it for the first time. That
+// push declares fork AND is the one the empty-remote defer suppresses, because
+// publishing entire/checkpoints/v1 to a remote with no branches would let a
+// forge adopt it as the default branch.
+//
+// So the election must not move: capturing here announced a destination that
+// received nothing, and since the election is permanent and one-shot the
+// checkpoints could afterwards only drain to fork — which is still empty and
+// still deferring. The next push, once the user's branch exists on fork, is the
+// one that both delivers and captures.
+//
+// git-branch only: the defer protects a refs/heads branch, and the git-refs
+// backend publishes under refs/entire/, which no forge will adopt.
+func TestCheckpointSyncRemote_DeferredPushDoesNotCaptureElection(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	env.CheckpointStore = StoreGitBranch
+
+	bareOrigin := env.SetupBareRemote()
+	// A fork that exists in config but has never been fetched or pushed: no
+	// tracking refs, which is what the defer reads as "empty".
+	freshFork := initUnregisteredBareRepo(t)
+	testutil.AddRemote(t, env.RepoDir, "fork", freshFork)
+	env.setGitConfigBaseline()
+	setBranchTrackingRemote(t, env, "fork")
+
+	checkpointID := createCheckpointedCommit(t, env, "Add deferred module", "deferred.go", "package deferred", "Add deferred module")
+
+	env.RunPrePush("fork")
+
+	if got := capturedSyncRemotesOnDisk(t, env); got != nil {
+		t.Errorf("a push whose checkpoint delivery was deferred must not capture the election, got %v", got)
+	}
+	if env.CheckpointsPresentOnRemote(freshFork) {
+		t.Error("the defer must hold: no checkpoint data may reach the empty fork")
+	}
+
+	// The election is still the default, so it remains available to whichever
+	// push first actually delivers.
+	const wantRemote, wantSource = "origin", "default"
+	st := statusSyncJSONOutput(t, env)
+	if st.CheckpointSyncRemote != wantRemote || st.CheckpointSyncRemoteSource != wantSource {
+		t.Errorf(`status should still report origin from "default", got %q from %q`,
+			st.CheckpointSyncRemote, st.CheckpointSyncRemoteSource)
+	}
+
+	// Publish the user's branch to fork, which retires the defer, and push
+	// again: this push delivers, so this is the push that captures.
+	env.GitPush("fork", env.GetCurrentBranch())
+	env.RunPrePush("fork")
+
+	if got := capturedSyncRemotesOnDisk(t, env); len(got) != 1 || got[0] != "fork" {
+		t.Errorf("the first push that actually delivers should capture the election, got %v", got)
+	}
+	if !env.CheckpointExistsOnRemote(freshFork, checkpointID) {
+		t.Errorf("checkpoint %s should reach fork once the defer no longer applies", checkpointID)
+	}
+	if env.CheckpointsPresentOnRemote(bareOrigin) {
+		t.Error("origin must never receive checkpoint data in this flow")
+	}
+}
+
 // TestCheckpointSyncRemote_MisconfiguredSettingFailsClosed verifies that when
 // checkpoint_push_remote names a remote that is not configured, checkpoint
 // sync is disabled for every remote (fail-closed) while the user's own push

@@ -82,13 +82,20 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// resolvePushSettings: hasCheckpointURL is only known after resolution,
 	// so hoisting the gate above it would break the exemption.
 	//
-	// Capture runs before the gate so that the push which elects a remote by
-	// evidence (push target agrees with the branch's declared push
-	// destination) is also the first push to carry checkpoints there. The hint
-	// then speaks only for what capture left gated — see hintGatedCheckpointSync.
+	// Capture is two-phase, straddling this whole function. The proposal runs
+	// before the gate so that the push which elects a remote by evidence (push
+	// target agrees with the branch's declared push destination) is also the
+	// first push to carry checkpoints there; the election is persisted only at
+	// the delivery points below, once those checkpoints actually arrived.
+	// Everything in between can still stop delivery, and the election is
+	// permanent, so intent is not enough to move it. The hint below then speaks
+	// only for what capture left gated — see hintGatedCheckpointSync.
+	var pendingCapture string
 	if !ps.hasCheckpointURL() {
-		maybeCaptureCheckpointSyncRemote(ctx, ps.remote)
-		if !checkpointSyncAllowedForRemote(ctx, ps.remote) {
+		if pendingCaptureCheckpointSyncRemote(ctx, ps.remote) {
+			pendingCapture = ps.remote
+		}
+		if !checkpointSyncAllowedForRemote(ctx, ps.remote, pendingCapture) {
 			hintGatedCheckpointSync(ctx, ps.remote)
 			return nil
 		}
@@ -101,7 +108,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// (A configured git-branch mirror's v1 ref is not pushed here yet — mirror
 	// push for downgrade safety is a later step.)
 	if ps.primaryIsRefs {
-		return s.prePushCheckpointRefs(ctx, ps)
+		return s.prePushCheckpointRefs(ctx, ps, pendingCapture)
 	}
 
 	// git-branch primary: entire/checkpoints/v1 is a real refs/heads branch, so
@@ -191,6 +198,11 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		}
 	}
 	pushCheckpointsSpan.End()
+
+	// Delivered: the election may now follow the push that carried it.
+	if pendingCapture != "" {
+		commitCapturedSyncRemote(ctx, pendingCapture)
+	}
 
 	cleanupPushedShadowBranches(ctx)
 	return nil
@@ -297,7 +309,7 @@ func remoteHasTrackingRefs(ctx context.Context, remote string) bool {
 // checkpoint *format* compatibility (diverged from the remote, or an unsupported
 // local format), which is independent of the storage backend, so a blocked
 // policy skips the ref push (leaving refs queued) rather than pushing.
-func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pushSettings) error {
+func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pushSettings, pendingCapture string) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		logging.Warn(ctx, "git-refs pre-push: open repo failed; skipping checkpoint push",
@@ -314,7 +326,13 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 
-	if _, err := flushCheckpointRefsQueue(ctx, repo, ps); err != nil {
+	if _, err := flushCheckpointRefsQueue(ctx, repo, ps); err == nil {
+		// Delivered. An empty queue lands here too, and should: nothing was
+		// stranded, so following the push is safe either way.
+		if pendingCapture != "" {
+			commitCapturedSyncRemote(ctx, pendingCapture)
+		}
+	} else {
 		// Fail-soft: a checkpoint-ref push failure must never block the user's
 		// git push. The refs stay queued for the next pre-push.
 		logging.Warn(ctx, "git-refs pre-push: checkpoint ref push failed; refs left queued",

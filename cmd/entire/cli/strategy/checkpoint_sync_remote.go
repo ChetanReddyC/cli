@@ -22,7 +22,7 @@ const (
 	SyncRemoteSourceConfig CheckpointSyncRemoteSource = "config"
 	// SyncRemoteSourceObserved: elected by evidence — a past push that agreed
 	// with the branch's declared push destination (see
-	// maybeCaptureCheckpointSyncRemote). Named for what was observed, not for the
+	// commitCapturedSyncRemote). Named for what was observed, not for the
 	// latch that recorded it, which is why the internal names still say "capture".
 	SyncRemoteSourceObserved CheckpointSyncRemoteSource = "observed"
 	// SyncRemoteSourceDefault: "origin" exists.
@@ -60,7 +60,8 @@ type CheckpointSyncRemote struct {
 // it clones with `-o base` and pushes checkpoints to `origin`, and a tracking
 // tier makes the pre-push hook a silent no-op. The captured tier is the safe
 // form of the same intent: tracking config nominates a remote, but only an
-// actual push to it elects it (see maybeCaptureCheckpointSyncRemote).
+// actual push that delivers checkpoints to it elects it (see
+// commitCapturedSyncRemote).
 //
 // The fork setup that motivated the tracking tier — clone the base repo, add
 // your fork, push there, with origin unpushable — is served automatically by
@@ -115,7 +116,13 @@ func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, err
 // checkpoint sync remote — including raw-URL pushes (git passes the URL as
 // the hook arg) and the fail-closed misconfigured case. Callers exempt the
 // dedicated checkpoint_remote URL mode before calling.
-func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote string) bool {
+// pendingCapture, when non-empty, is the remote this push is about to elect but
+// has not persisted yet — the gate must let the electing push carry the
+// checkpoints that justify the election.
+func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote, pendingCapture string) bool {
+	if pendingCapture != "" && pendingCapture == pushRemote {
+		return true
+	}
 	syncRemote, err := ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
 		// Neutral wording: err covers both a misconfigured checkpoint_push_remote
