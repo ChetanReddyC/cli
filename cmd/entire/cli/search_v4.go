@@ -97,6 +97,7 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 
 	slugs, allRepos := cfg.ScopeSlugs()
 	var cells []cellGroup
+	var skipped []string
 	var warnings []string
 	scoped := !allRepos
 	if scoped {
@@ -107,7 +108,7 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 		if err != nil {
 			return nil, err
 		}
-		cells = groupReposByCell(entries)
+		cells, skipped = groupReposByCell(entries)
 	} else {
 		index, err := s.listFullIndex(ctx)
 		if err != nil {
@@ -120,7 +121,10 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 			logging.Debug(ctx, "semantic search: repo index truncated; cross-repo results may be incomplete")
 			warnings = append(warnings, "repo index truncated; cross-repo results may be incomplete")
 		}
-		cells = groupReposByCell(index.Repos)
+		cells, skipped = groupReposByCell(index.Repos)
+	}
+	if len(skipped) > 0 {
+		warnings = append(warnings, fmt.Sprintf("skipped %d repo(s) whose placement is not ready yet: %s", len(skipped), strings.Join(skipped, ", ")))
 	}
 
 	if len(cells) == 0 {

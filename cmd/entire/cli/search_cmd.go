@@ -527,7 +527,10 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 	}
 
 	// Step 3: Group repos by cell and resolve baseURLs via shared helpers.
-	cells := groupReposByCell(indexRepos)
+	cells, skippedNotReady := groupReposByCell(indexRepos)
+	if len(skippedNotReady) > 0 {
+		logging.Debug(ctx, "code search: skipping repos whose placement is not ready", "repos", strings.Join(skippedNotReady, ","))
+	}
 	if len(cells) == 0 {
 		return &codesearch.SearchResponse{}, nil
 	}

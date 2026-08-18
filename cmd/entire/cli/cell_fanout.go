@@ -54,13 +54,18 @@ type cellGroup struct {
 // collapse across jurisdictions into one group routed by whichever repo came
 // first — they stay per-jurisdiction and route via the jurisdiction fallback.
 //
-// When a RepoIndexEntry has Placements, each placement is added to the group
-// for its own cell/jurisdiction with its placement-specific repo ID. This
-// ensures mirror placements in other regions (e.g. a US-homed repo with an EU
-// mirror) are searched in both cells — matching the BFF's fan-out behavior.
-// When Placements is empty, the top-level Cell/Jurisdiction/ID are used as
-// before (backward compat for index responses that predate placements).
-func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
+// A RepoIndexEntry with Placements routes to its CANONICAL placement only
+// (canonicalRepoPlacement). Mirror placements are replicated copies of the
+// same content indexed under their own namespaces — searching them returns
+// duplicate and stale rows, and diverges from the web, whose BFF routes
+// canonical-only (ENT-1672). When Placements is empty, the top-level
+// Cell/Jurisdiction/ID are used (backward compat for index responses that
+// predate placements).
+//
+// skipped names repos whose canonical placement is explicitly not ready
+// (processing/failed/suspended) — not routable, nothing searchable there yet.
+// Callers surface these as warnings so the narrowed scope is visible.
+func groupReposByCell(repos []coreapi.RepoIndexEntry) (cells []cellGroup, skipped []string) {
 	byCell := make(map[string]*cellGroup)
 
 	addToGroup := func(id, cell, jurisdiction, clusterSlug string) {
@@ -92,22 +97,26 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
 
 	for _, r := range repos {
 		if len(r.Placements) > 0 {
-			for _, p := range r.Placements {
-				// Each placement carries its own cluster slug, cell, and
-				// jurisdiction (the /repos spec bump; the top-level RepoIndexEntry
-				// fields are deprecated). Route every placement — home and mirror
-				// alike — by its OWN slug so resolveCellBaseURLs can do the exact
-				// catalog join (bySlug), instead of leaving mirrors slugless and
-				// falling back to jurisdiction-default routing, which can query
-				// the wrong cell within a jurisdiction and silently miss a mirror.
-				addToGroup(p.ID, p.Cell, p.Jurisdiction, p.ClusterSlug)
+			p, ok := canonicalRepoPlacement(r)
+			if !ok {
+				label := r.FullName
+				if label == "" {
+					label = r.ID
+				}
+				skipped = append(skipped, label)
+				continue
 			}
+			// The canonical placement carries its own cluster slug, cell, and
+			// jurisdiction (the /repos spec bump; the top-level RepoIndexEntry
+			// fields are deprecated), so resolveCellBaseURLs can do the exact
+			// catalog join (bySlug) instead of jurisdiction-default routing.
+			addToGroup(p.ID, p.Cell, p.Jurisdiction, p.ClusterSlug)
 		} else {
 			addToGroup(r.ID, r.Cell, r.Jurisdiction, r.ClusterSlug) //nolint:staticcheck // top-level Cell/ClusterSlug deprecated by /repos spec bump; migrate to per-placement fields separately
 		}
 	}
 
-	cells := make([]cellGroup, 0, len(byCell))
+	cells = make([]cellGroup, 0, len(byCell))
 	for _, g := range byCell {
 		cells = append(cells, *g)
 	}
@@ -117,7 +126,30 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) []cellGroup {
 		}
 		return cells[i].jurisdiction < cells[j].jurisdiction
 	})
-	return cells
+	return cells, skipped
+}
+
+// canonicalRepoPlacement picks the entry's canonical placement: the one whose
+// ID equals the entry's own ID, else the first — the BFF's exact rule
+// (list-repos-index.ts canonicalPlacement), so web and CLI search the same
+// namespace for the same repo. Selection must never key on the Mirror flag:
+// real /repos rows mark every placement Mirror:true, canonical included.
+//
+// ok is false when the chosen placement is explicitly not ready — an unready
+// placement is not routable, and a ready mirror is no substitute (it may
+// predate the clone). An empty status (older cores) stays routable.
+func canonicalRepoPlacement(r coreapi.RepoIndexEntry) (coreapi.RepoPlacement, bool) {
+	p := r.Placements[0]
+	for _, c := range r.Placements {
+		if c.ID == r.ID {
+			p = c
+			break
+		}
+	}
+	if p.Status != "" && p.Status != coreapi.RepoPlacementStatusReady {
+		return coreapi.RepoPlacement{}, false
+	}
+	return p, true
 }
 
 // resolveCellBaseURLs fills each group's baseURL from the cluster catalog,
