@@ -190,11 +190,12 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// Thread the span's context into the push so the network push and any
 	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
 	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoint_refs")
-	// allDelivered stays true for an empty ref set, matching the git-refs empty
-	// queue: nothing was stranded either way. It must come from pushRefIfNeeded's
-	// delivered return and NOT from err, which is fail-soft and nil even when the
-	// remote refused the ref.
-	allDelivered := true
+	// Capture needs checkpoint data CONFIRMED on this remote, so count what
+	// landed rather than trusting the absence of an error: every ref that was due
+	// has to deliver, and at least one has to actually do so. Delivery must come
+	// from pushRefIfNeeded's delivered return and NOT from err, which is
+	// fail-soft and nil even when the remote refused the ref.
+	deliveredCount, anyFailed := 0, false
 	for _, ref := range refs.Push {
 		delivered, err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref)
 		if err != nil {
@@ -202,14 +203,21 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 			pushCheckpointsSpan.End()
 			return err
 		}
-		if !delivered {
-			allDelivered = false
+		if delivered {
+			deliveredCount++
+		} else {
+			anyFailed = true
 		}
 	}
 	pushCheckpointsSpan.End()
 
-	// Delivered: the election may now follow the push that carried it.
-	if pendingCapture != "" && allDelivered {
+	// Delivered: the election may now follow the push that carried it. A push that
+	// carried nothing — an empty ref set, or a v1 ref that does not exist locally
+	// yet — leaves the election alone. It is safe either way (nothing is stranded
+	// when there was nothing to strand), but capturing would announce a move that
+	// moved no data, which is the class of claim this whole path exists to stop
+	// making. The next push that carries a checkpoint captures instead.
+	if pendingCapture != "" && deliveredCount > 0 && !anyFailed {
 		commitCapturedSyncRemote(ctx, pendingCapture)
 	}
 
@@ -335,10 +343,10 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 
-	if _, err := flushCheckpointRefsQueue(ctx, repo, ps); err == nil {
-		// Delivered. An empty queue lands here too, and should: nothing was
-		// stranded, so following the push is safe either way.
-		if pendingCapture != "" {
+	if flushed, err := flushCheckpointRefsQueue(ctx, repo, ps); err == nil {
+		// Delivered, and only if something actually was: an empty queue pushed
+		// nothing, so it must not move the election or announce that it had.
+		if pendingCapture != "" && flushed > 0 {
 			commitCapturedSyncRemote(ctx, pendingCapture)
 		}
 	} else {

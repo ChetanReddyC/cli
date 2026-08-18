@@ -444,6 +444,48 @@ func TestCheckpointSyncRemote_RejectedPushDoesNotCaptureElection(t *testing.T) {
 	})
 }
 
+// TestCheckpointSyncRemote_EmptyPushDoesNotCaptureElection covers the third way
+// a push can deliver nothing: there was nothing to deliver. The branch declares
+// the fork and the push succeeds, but no checkpoint exists yet, so the ref set /
+// queue is empty and no checkpoint data reaches the remote.
+//
+// Capturing here is SAFE — nothing is stranded when there was nothing to strand
+// — but it announces "Checkpoints now sync to fork" on a push that moved no
+// data, which is the class of claim this path exists to stop making. So the
+// election waits for the push that carries a checkpoint. Trail finding
+// 01M0AK6PZCWE.
+func TestCheckpointSyncRemote_EmptyPushDoesNotCaptureElection(t *testing.T) {
+	t.Parallel()
+	ForEachBackend(t, func(t *testing.T, backend string) {
+		env := NewFeatureBranchEnv(t)
+		env.CheckpointStore = backend
+
+		env.SetupBareRemote()
+		bareFork := env.SetupNamedBareRemote(forkRemote) // `-u`: the branch declares fork
+
+		// No createCheckpointedCommit: there is deliberately nothing to sync.
+		env.RunPrePush(forkRemote)
+
+		if got := capturedSyncRemotesOnDisk(t, env); got != nil {
+			t.Errorf("a push with no checkpoint to carry must not capture the election, got %v", got)
+		}
+		if env.CheckpointsPresentOnRemote(bareFork) {
+			t.Error("no checkpoint data should exist on the remote")
+		}
+
+		// And the election is still available to the first push that does carry one.
+		checkpointID := createCheckpointedCommit(t, env, "Add later module", "later.go", "package later", "Add later module")
+		env.RunPrePush(forkRemote)
+
+		if got := capturedSyncRemotesOnDisk(t, env); len(got) != 1 || got[0] != forkRemote {
+			t.Errorf("the first push carrying a checkpoint should capture, got %v", got)
+		}
+		if !env.CheckpointExistsOnRemote(bareFork, checkpointID) {
+			t.Errorf("checkpoint %s should reach fork on that push", checkpointID)
+		}
+	})
+}
+
 // TestCheckpointSyncRemote_MisconfiguredSettingFailsClosed verifies that when
 // checkpoint_push_remote names a remote that is not configured, checkpoint
 // sync is disabled for every remote (fail-closed) while the user's own push

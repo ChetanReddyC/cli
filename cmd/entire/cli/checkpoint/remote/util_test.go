@@ -449,6 +449,36 @@ func TestPushURL(t *testing.T) {
 			wantEnabled:  false,
 		},
 		{
+			// Trail finding 01M0AK6Q03PQ argued that deduplicating a push URL
+			// equal to origin's drops the push-destination signal and reduces the
+			// check to origin-only, reinstating the row above. It cannot: the two
+			// identities are the same string, so parsing an owner from either is
+			// identical and the all-identities-must-match loop is unchanged by
+			// removing a duplicate. This case pins that — pushing straight to
+			// origin's own URL in the upstream topology keeps the setting, which
+			// is correct, because upstream IS the push destination here and no
+			// fork is involved.
+			name:          "push url equal to origin keeps a same-owner committed setting",
+			originURL:     "https://github.com/acme/app.git",
+			originPushURL: "https://github.com/acme/app.git",
+			pushRemote:    "origin",
+			settingsJSON:  `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:       "https://github.com/acme/checkpoints.git",
+			wantEnabled:   true,
+		},
+		{
+			// The mirror image, and the case that would actually regress if the
+			// dedup were wrong: same equal-URL shape, mismatched owner. The
+			// ownership refusal still fires.
+			name:          "push url equal to origin still refuses a mismatched owner",
+			originURL:     "https://github.com/contributor/app.git",
+			originPushURL: "https://github.com/contributor/app.git",
+			pushRemote:    "origin",
+			settingsJSON:  `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:       "https://github.com/contributor/app.git",
+			wantEnabled:   false,
+		},
+		{
 			// Same topology, but the developer confirmed the checkpoint repo is
 			// theirs by putting it in the gitignored settings.local.json. That
 			// provenance short-circuit still wins — it is the escape hatch for
