@@ -255,13 +255,10 @@ The branch's tracking config (`branch.<name>.pushRemote`,
 Election is compared against the remote of the push being made, so electing
 the tracking remote turns every push to a different remote into a silent
 no-op — `git push <other> HEAD`, a `git clone -o base` whose checkpoints go to
-a separately added `origin`, any repo with `remote.pushDefault` set. It would
-also elect a remote the read paths cannot see, since `resume` and `explain`
-resolve checkpoints through origin's remote-tracking refs.
+a separately added `origin`, any repo with `remote.pushDefault` set.
 
 For the fork setup where `origin` is an unpushable base repo, name the fork
-explicitly with `checkpoint_push_remote` — the only form of it where the
-checkpoints can also be read back.
+explicitly with `checkpoint_push_remote`.
 
 The pre-push hook carries checkpoint data only when the push targets the
 elected remote; pushes to any other remote or to a raw URL sync nothing, on
@@ -270,6 +267,33 @@ intact for the next elected-remote push). The dedicated `checkpoint_remote`
 URL mode is exempt — it addresses a separate metadata store directly. `entire
 status` shows the sync destination and how many checkpoints have not reached
 it yet.
+
+**Reads follow the election.** Where writes confine to one remote, reads
+consult an ordered candidate chain: the elected sync remote first, then
+`origin` as a **read-only legacy tier** — every pre-election repo has its
+checkpoint data on origin, and a fresh clone may lack the local settings that
+elected something else. `strategy.CheckpointReadRemotes` (and
+`CheckpointReadRemotesWithElection`, which bundles the election result for
+callers that need both) resolves the chain, failing *open* to `[origin]` when
+the election fails — failing reads closed would only prevent *finding* data.
+Every checkpoint-data read iterates the chain per operation (metadata-branch
+fetches, tracking-ref readers, per-checkpoint ref fetches, blob hydration,
+checkpoint-policy reads). Metadata-branch fetches refresh every candidate's
+tracking ref because branch existence alone does not prove that branch contains
+the requested checkpoint; they succeed when any candidate fetch succeeds.
+Other reads try candidates in order, advancing on missing data or transport
+failure and surfacing the first candidate's error when all fail. Local-ref advancement stays
+**elected-remote-only** — `EnsurePrimaryRef`, the metadata-fetch advance step,
+`promoteRemoteTrackingPrimary`, and the local checkpoint-policy ref update
+never act on the legacy tier, keyed on the explicit election result rather
+than the chain's first entry (a stale origin feeding `SafelyAdvanceLocalRef`
+would replay local v1 onto stale history — the issue-#1374 hazard). Legacy
+data on origin is therefore served through origin's *tracking ref* (resume's
+final metadata tier and the store's tracking-ref fallback), never by moving
+local refs. A repository with no remotes keeps its "checkpoint absent"
+classification, which requires positive evidence on every axis (a successful
+empty `git remote` listing, a live context, readable settings without a
+`checkpoint_remote` key).
 
 Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkpoint**:
 
