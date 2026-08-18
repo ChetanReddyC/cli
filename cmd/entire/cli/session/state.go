@@ -235,6 +235,9 @@ type State struct {
 	// CondensationAttemptID is allocated and saved before a persistent checkpoint
 	// write so a retry after process death writes the same checkpoint ID.
 	CondensationAttemptID id.CheckpointID `json:"condensation_attempt_id,omitempty"`
+	// CondensationRecoveryPending keeps legacy orphan reconciliation enabled
+	// across process death after doctor has reserved an attempt ID.
+	CondensationRecoveryPending bool `json:"condensation_recovery_pending,omitempty"`
 
 	// LastCheckpointCommitHash is the exact commit SHA that carried
 	// LastCheckpointID at condensation time. Used by the reconcile path to

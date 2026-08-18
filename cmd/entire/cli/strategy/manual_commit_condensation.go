@@ -96,14 +96,13 @@ func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointI
 
 // condenseOpts provides pre-resolved git objects to avoid redundant reads.
 type condenseOpts struct {
-	shadowRef          *plumbing.Reference // Pre-resolved shadow branch ref (nil = resolve from repo)
-	headTree           *object.Tree        // Pre-resolved HEAD tree (passed through to calculateSessionAttributions)
-	parentTree         *object.Tree        // Pre-resolved parent tree (nil for initial commits, for consistent non-agent line counting)
-	repoDir            string              // Repository worktree path for git CLI commands
-	parentCommitHash   string              // HEAD's first parent hash for per-commit non-agent file detection
-	headCommitHash     string              // HEAD commit hash (passed through for attribution)
-	allAgentFiles      map[string]struct{} // Union of all sessions' FilesTouched for cross-session exclusion (nil = single-session)
-	recoverInterrupted bool                // Reconcile an older durable write whose session-state update was interrupted.
+	shadowRef        *plumbing.Reference // Pre-resolved shadow branch ref (nil = resolve from repo)
+	headTree         *object.Tree        // Pre-resolved HEAD tree (passed through to calculateSessionAttributions)
+	parentTree       *object.Tree        // Pre-resolved parent tree (nil for initial commits, for consistent non-agent line counting)
+	repoDir          string              // Repository worktree path for git CLI commands
+	parentCommitHash string              // HEAD's first parent hash for per-commit non-agent file detection
+	headCommitHash   string              // HEAD commit hash (passed through for attribution)
+	allAgentFiles    map[string]struct{} // Union of all sessions' FilesTouched for cross-session exclusion (nil = single-session)
 }
 
 // redactSessionJSONLBytes runs the regex-only redaction pipeline (the
@@ -360,82 +359,20 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	if err != nil {
 		return nil, err
 	}
-	if result := recoverInterruptedCondensation(ctx, logCtx, o.recoverInterrupted, store, state, redactedTranscript, extractedAssets, sessionData, transcriptSizeBaseline); result != nil {
-		return result, nil
+	recovery := recoverInterruptedCondensation(ctx, logCtx, state.CondensationRecoveryPending, store, state, redactedTranscript, extractedAssets, sessionData, transcriptSizeBaseline)
+	if recovery.done {
+		return recovery.result, recovery.err
 	}
 
-	// Get author info
-	authorName, authorEmail := GetGitAuthorFromRepo(repo)
-
-	// Determine attribution base commit
-	attrBase := state.AttributionBaseCommit
-	if attrBase == "" {
-		attrBase = state.BaseCommit
-	}
-
-	attributionStart := time.Now()
-	attrCtx, attributionSpan := perf.Start(ctx, "calculate_session_attribution")
-	attribution := calculateSessionAttributions(attrCtx, repo, ref, sessionData, state, attributionOpts{
-		headTree:              o.headTree,
-		parentTree:            o.parentTree,
-		repoDir:               o.repoDir,
-		attributionBaseCommit: attrBase,
-		parentCommitHash:      o.parentCommitHash,
-		headCommitHash:        o.headCommitHash,
-		allAgentFiles:         o.allAgentFiles,
-	})
-	attributionSpan.End()
-	attributionDuration := time.Since(attributionStart)
-
-	// Get current branch name
-	branchName := GetCurrentBranchName(repo)
-
-	var summary *cpkg.Summary
-	if settings.IsSummarizeEnabled(ctx) && redactedTranscript.Len() > 0 {
-		summary = generateSummary(ctx, redactedTranscript, sessionData.FilesTouched, state)
-	}
-
-	// Post-commit emits regex-only blobs. OPF runs later in the
-	// pre-push rewrite path, never here.
-	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(sessionData.SkillEvents, state.TurnID))
-
-	writeOpts := cpkg.WriteOptions{
-		CheckpointID:                checkpointID,
-		SessionID:                   state.SessionID,
-		Strategy:                    StrategyNameManualCommit,
-		Branch:                      branchName,
-		Transcript:                  redactedTranscript,
-		Assets:                      extractedAssets,
-		Prompts:                     sessionData.Prompts,
-		FilesTouched:                sessionData.FilesTouched,
-		CheckpointsCount:            checkpointStepCount(state),
-		SaveStepCount:               state.StepCount,
-		EphemeralBranch:             shadowBranchName,
-		AuthorName:                  authorName,
-		AuthorEmail:                 authorEmail,
-		Agent:                       state.AgentType,
-		Model:                       state.ModelName,
-		TurnID:                      state.TurnID,
-		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
-		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
-		TokenUsage:                  sessionData.TokenUsage,
-		SkillEvents:                 skillEvents,
-		SessionMetrics:              buildSessionMetrics(state),
-		Attribution:                 attribution,
-		PromptAttributionsJSON:      marshalPromptAttributionsIncludingPending(state),
-		Summary:                     summary,
-		Kind:                        string(state.Kind),
-		ReviewSkills:                state.ReviewSkills,
-		ReviewPrompt:                state.ReviewPrompt,
-		HasReview:                   state.Kind.IsReview(),
-		HasInvestigation:            state.Kind.IsInvestigate(),
-		InvestigateRunID:            state.InvestigateRunID,
-		InvestigateTopic:            state.InvestigateTopic,
-	}
+	writeOpts, attributionDuration := buildCondensationWriteOptions(
+		ctx, repo, ref, state, sessionData, redactedTranscript, extractedAssets,
+		checkpointID, shadowBranchName, o,
+	)
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
-	if err := store.Write(writeCtx, cpkg.Session(writeOpts)); err != nil {
+	writeRequest := condensationSessionWriteRequest(state, checkpointID, writeOpts)
+	if err := store.Write(writeCtx, writeRequest); err != nil {
 		writeCommittedSpan.RecordError(err)
 		writeCommittedSpan.End()
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)
@@ -470,6 +407,86 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TotalTranscriptLines:   sessionData.FullTranscriptLines,
 		TranscriptSizeBaseline: transcriptSizeBaseline,
 	}, nil
+}
+
+func condensationSessionWriteRequest(state *SessionState, checkpointID id.CheckpointID, opts cpkg.WriteOptions) cpkg.WriteRequest {
+	if state.CondensationAttemptID != id.EmptyCheckpointID && state.CondensationAttemptID == checkpointID {
+		return cpkg.ReservedSession(opts)
+	}
+	return cpkg.Session(opts)
+}
+
+func buildCondensationWriteOptions(
+	ctx context.Context,
+	repo *git.Repository,
+	shadowRef *plumbing.Reference,
+	state *SessionState,
+	sessionData *ExtractedSessionData,
+	transcript redact.RedactedBytes,
+	assets []cpkg.TranscriptAsset,
+	checkpointID id.CheckpointID,
+	shadowBranchName string,
+	o condenseOpts,
+) (cpkg.WriteOptions, time.Duration) {
+	authorName, authorEmail := GetGitAuthorFromRepo(repo)
+	attrBase := state.AttributionBaseCommit
+	if attrBase == "" {
+		attrBase = state.BaseCommit
+	}
+
+	attributionStart := time.Now()
+	attrCtx, attributionSpan := perf.Start(ctx, "calculate_session_attribution")
+	attribution := calculateSessionAttributions(attrCtx, repo, shadowRef, sessionData, state, attributionOpts{
+		headTree:              o.headTree,
+		parentTree:            o.parentTree,
+		repoDir:               o.repoDir,
+		attributionBaseCommit: attrBase,
+		parentCommitHash:      o.parentCommitHash,
+		headCommitHash:        o.headCommitHash,
+		allAgentFiles:         o.allAgentFiles,
+	})
+	attributionSpan.End()
+	attributionDuration := time.Since(attributionStart)
+
+	var summary *cpkg.Summary
+	if settings.IsSummarizeEnabled(ctx) && transcript.Len() > 0 {
+		summary = generateSummary(ctx, transcript, sessionData.FilesTouched, state)
+	}
+
+	skillEvents := mergeSkillEvents(state.SkillEvents, withSkillEventTurnID(sessionData.SkillEvents, state.TurnID))
+	return cpkg.WriteOptions{
+		CheckpointID:                checkpointID,
+		SessionID:                   state.SessionID,
+		Strategy:                    StrategyNameManualCommit,
+		Branch:                      GetCurrentBranchName(repo),
+		Transcript:                  transcript,
+		Assets:                      assets,
+		Prompts:                     sessionData.Prompts,
+		FilesTouched:                sessionData.FilesTouched,
+		CheckpointsCount:            checkpointStepCount(state),
+		SaveStepCount:               state.StepCount,
+		EphemeralBranch:             shadowBranchName,
+		AuthorName:                  authorName,
+		AuthorEmail:                 authorEmail,
+		Agent:                       state.AgentType,
+		Model:                       state.ModelName,
+		TurnID:                      state.TurnID,
+		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
+		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
+		TokenUsage:                  sessionData.TokenUsage,
+		SkillEvents:                 skillEvents,
+		SessionMetrics:              buildSessionMetrics(state),
+		Attribution:                 attribution,
+		PromptAttributionsJSON:      marshalPromptAttributionsIncludingPending(state),
+		Summary:                     summary,
+		Kind:                        string(state.Kind),
+		ReviewSkills:                state.ReviewSkills,
+		ReviewPrompt:                state.ReviewPrompt,
+		HasReview:                   state.Kind.IsReview(),
+		HasInvestigation:            state.Kind.IsInvestigate(),
+		InvestigateRunID:            state.InvestigateRunID,
+		InvestigateTopic:            state.InvestigateTopic,
+	}, attributionDuration
 }
 
 // redactOrDrop runs redactSessionTranscript and, on failure, logs a warning
@@ -1266,6 +1283,17 @@ func ensureCondensationAttemptID(ctx context.Context, state *SessionState) (id.C
 	return checkpointID, true, nil
 }
 
+func reserveDoctorCondensationAttempt(ctx context.Context, state *SessionState) (id.CheckpointID, error) {
+	checkpointID, created, err := ensureCondensationAttemptID(ctx, state)
+	if err != nil {
+		return id.EmptyCheckpointID, err
+	}
+	if created && state.Phase == session.PhaseEnded && len(state.FilesTouched) == 0 {
+		state.CondensationRecoveryPending = true
+	}
+	return checkpointID, nil
+}
+
 // CondenseSessionByID condenses a session by its ID and cleans up.
 // This is used by "entire doctor" to salvage stuck sessions.
 func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionID string) error {
@@ -1278,10 +1306,9 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	defer repo.Close()
 
 	var checkpointID id.CheckpointID
-	var attemptCreated bool
 	reserveErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 		var reserveErr error
-		checkpointID, attemptCreated, reserveErr = ensureCondensationAttemptID(ctx, state)
+		checkpointID, reserveErr = reserveDoctorCondensationAttempt(ctx, state)
 		return reserveErr
 	})
 	if errors.Is(reserveErr, ErrStateNotFound) {
@@ -1312,8 +1339,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 			return ErrMutationSkip
 		}
 
-		recoverInterrupted := attemptCreated && state.Phase == session.PhaseEnded && len(state.FilesTouched) == 0
-		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{recoverInterrupted: recoverInterrupted})
+		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil)
 		if err != nil {
 			return fmt.Errorf("failed to condense session: %w", err)
 		}
@@ -1323,7 +1349,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 				slog.String("session_id", sessionID),
 			)
 			state.FullyCondensed = true
-			state.CondensationAttemptID = id.EmptyCheckpointID
+			clearCondensationAttempt(state)
 			return nil
 		}
 
@@ -1400,7 +1426,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		}
 		if state.StepCount <= 0 {
 			state.FullyCondensed = true
-			state.CondensationAttemptID = id.EmptyCheckpointID
+			clearCondensationAttempt(state)
 			return nil
 		}
 
@@ -1413,7 +1439,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			)
 			state.StepCount = 0
 			state.FullyCondensed = true
-			state.CondensationAttemptID = id.EmptyCheckpointID
+			clearCondensationAttempt(state)
 			return nil //nolint:nilerr // A missing shadow branch means there is no remaining work to condense.
 		}
 
@@ -1450,7 +1476,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 
 		if state.StepCount <= 0 {
 			state.FullyCondensed = true
-			state.CondensationAttemptID = id.EmptyCheckpointID
+			clearCondensationAttempt(state)
 			return nil
 		}
 
@@ -1466,7 +1492,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			)
 			state.StepCount = 0
 			state.FullyCondensed = true
-			state.CondensationAttemptID = id.EmptyCheckpointID
+			clearCondensationAttempt(state)
 			return nil
 		}
 
@@ -1489,7 +1515,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 				slog.String("session_id", sessionID),
 			)
 			state.FullyCondensed = true
-			state.CondensationAttemptID = id.EmptyCheckpointID
+			clearCondensationAttempt(state)
 			return nil
 		}
 

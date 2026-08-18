@@ -23,10 +23,12 @@ import (
 //     a git-branch primary the branch is authoritative for hex, so refs is not
 //     consulted.
 //
-// List unions both backends (disjoint ID spaces). Creates (Session) are NOT
+// List unions both backends (disjoint ID spaces). Fresh creates (Session) are NOT
 // kind-routed: they go to the configured primary (+ mirrors) via writer, since
 // a new checkpoint's ID is already minted to match the primary's format (see
-// checkpoint.GenerateCheckpointID). Backfills update an existing checkpoint,
+// checkpoint.GenerateCheckpointID). ReservedSession writes are kind-routed when
+// their ID no longer matches the primary, preserving the backend chosen before
+// an interrupted write. Backfills update an existing checkpoint,
 // so they follow the same store order as reads, though only
 // ErrCheckpointNotFound falls through (stricter than reads) — see Write.
 type kindRoutingStore struct {
@@ -204,6 +206,9 @@ func (s *kindRoutingStore) ReadSessionMetadataAndPrompts(ctx context.Context, ch
 // whose ref exists only remotely is fetched and backfilled in place rather
 // than falling through to the fallback store.
 func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
+	if reserved, ok := req.(ReservedSession); ok {
+		return s.writeReservedSession(ctx, reserved)
+	}
 	checkpointID, isBackfill := backfillTarget(req)
 	if !isBackfill {
 		return s.writer.Write(ctx, req) //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
@@ -235,9 +240,32 @@ func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
 	return err //nolint:wrapcheck // ErrCheckpointNotFound from the final store, surfaced verbatim
 }
 
+func (s *kindRoutingStore) writeReservedSession(ctx context.Context, req ReservedSession) error {
+	checkpointID := WriteOptions(req).CheckpointID
+	target := s.branch
+	targetType := BackendTypeGitBranch
+	if checkpointID.Kind() == id.KindULID {
+		target = s.refs
+		targetType = BackendTypeGitRefs
+	}
+	if targetType == s.primaryType {
+		target = s.writer
+	}
+	if err := target.Write(ctx, req); err != nil {
+		return err //nolint:wrapcheck // target error is the operation's error, surfaced verbatim
+	}
+	if targetType != s.primaryType {
+		logging.Info(ctx, "checkpoint: reserved session written to original backend after primary changed",
+			slog.String("checkpoint_id", checkpointID.String()),
+			slog.String("target_backend", targetType),
+			slog.String("primary_backend", s.primaryType))
+	}
+	return nil
+}
+
 // backfillTarget returns the checkpoint ID a backfill request updates.
-// ok is false for Session (a create) and unknown request types, which are not
-// kind-routed.
+// ok is false for Session and ReservedSession (creates) and unknown request
+// types, which are not kind-routed.
 //
 // WriteRequest is a closed union: any new backfill-shaped request type MUST be
 // added to this switch, or it silently gets create routing — primary-only, no

@@ -46,28 +46,36 @@ func findInterruptedCondensation(
 	state *SessionState,
 	transcript redact.RedactedBytes,
 	assets []cpkg.TranscriptAsset,
-) (id.CheckpointID, bool) {
+) (id.CheckpointID, bool, error) {
 	expectedTranscript, err := transcriptForRecoveryComparison(state.AgentType, transcript, assets)
 	if err != nil {
-		return id.EmptyCheckpointID, false
+		return id.EmptyCheckpointID, false, err
 	}
 
 	checkpoints, err := store.List(ctx)
 	if err != nil {
-		return id.EmptyCheckpointID, false
+		return id.EmptyCheckpointID, false, fmt.Errorf("list checkpoints: %w", err)
 	}
 	for _, info := range checkpoints {
 		if info.ListedStub || (info.SessionID != state.SessionID && !slices.Contains(info.SessionIDs, state.SessionID)) {
 			continue
 		}
 		summary, readErr := store.Read(ctx, info.CheckpointID)
-		if readErr != nil || summary == nil {
-			continue
+		if readErr != nil {
+			return id.EmptyCheckpointID, false, fmt.Errorf("read checkpoint %s: %w", info.CheckpointID, readErr)
+		}
+		if summary == nil {
+			return id.EmptyCheckpointID, false, fmt.Errorf("read checkpoint %s: %w", info.CheckpointID, cpkg.ErrCheckpointNotFound)
 		}
 		for sessionIndex := range len(summary.Sessions) {
 			metadata, metadataErr := store.ReadSessionMetadata(ctx, info.CheckpointID, sessionIndex)
-			if metadataErr != nil || metadata == nil ||
-				metadata.SessionID != state.SessionID ||
+			if metadataErr != nil {
+				return id.EmptyCheckpointID, false, fmt.Errorf("read checkpoint %s session %d metadata: %w", info.CheckpointID, sessionIndex, metadataErr)
+			}
+			if metadata == nil {
+				return id.EmptyCheckpointID, false, fmt.Errorf("read checkpoint %s session %d metadata: %w", info.CheckpointID, sessionIndex, cpkg.ErrCheckpointNotFound)
+			}
+			if metadata.SessionID != state.SessionID ||
 				metadata.Strategy != StrategyNameManualCommit ||
 				metadata.CheckpointTranscriptStart != state.CheckpointTranscriptStart ||
 				metadata.TranscriptIdentifierAtStart != state.TranscriptIdentifierAtStart ||
@@ -80,12 +88,24 @@ func findInterruptedCondensation(
 				continue
 			}
 			content, contentErr := store.ReadSessionContent(ctx, info.CheckpointID, sessionIndex)
-			if contentErr == nil && content != nil && bytes.Equal(content.Transcript, expectedTranscript) {
-				return info.CheckpointID, true
+			if contentErr != nil {
+				return id.EmptyCheckpointID, false, fmt.Errorf("read checkpoint %s session %d content: %w", info.CheckpointID, sessionIndex, contentErr)
+			}
+			if content == nil {
+				return id.EmptyCheckpointID, false, fmt.Errorf("read checkpoint %s session %d content: %w", info.CheckpointID, sessionIndex, cpkg.ErrCheckpointNotFound)
+			}
+			if bytes.Equal(content.Transcript, expectedTranscript) {
+				return info.CheckpointID, true, nil
 			}
 		}
 	}
-	return id.EmptyCheckpointID, false
+	return id.EmptyCheckpointID, false, nil
+}
+
+type interruptedCondensationRecovery struct {
+	result *CondenseResult
+	err    error
+	done   bool
 }
 
 func recoverInterruptedCondensation(
@@ -97,13 +117,19 @@ func recoverInterruptedCondensation(
 	assets []cpkg.TranscriptAsset,
 	sessionData *ExtractedSessionData,
 	transcriptSizeBaseline int64,
-) *CondenseResult {
+) interruptedCondensationRecovery {
 	if !enabled {
-		return nil
+		return interruptedCondensationRecovery{}
 	}
-	existingID, found := findInterruptedCondensation(ctx, store, state, transcript, assets)
+	existingID, found, err := findInterruptedCondensation(ctx, store, state, transcript, assets)
+	if err != nil {
+		return interruptedCondensationRecovery{
+			err:  fmt.Errorf("recover interrupted condensation: %w", err),
+			done: true,
+		}
+	}
 	if !found {
-		return nil
+		return interruptedCondensationRecovery{}
 	}
 
 	state.PromptWindowResetPending = true
@@ -111,13 +137,16 @@ func recoverInterruptedCondensation(
 		slog.String("session_id", state.SessionID),
 		slog.String("checkpoint_id", existingID.String()),
 	)
-	return &CondenseResult{
-		CheckpointID:           existingID,
-		SessionID:              state.SessionID,
-		CheckpointsCount:       checkpointStepCount(state),
-		FilesTouched:           sessionData.FilesTouched,
-		Prompts:                sessionData.Prompts,
-		TotalTranscriptLines:   sessionData.FullTranscriptLines,
-		TranscriptSizeBaseline: transcriptSizeBaseline,
+	return interruptedCondensationRecovery{
+		result: &CondenseResult{
+			CheckpointID:           existingID,
+			SessionID:              state.SessionID,
+			CheckpointsCount:       checkpointStepCount(state),
+			FilesTouched:           sessionData.FilesTouched,
+			Prompts:                sessionData.Prompts,
+			TotalTranscriptLines:   sessionData.FullTranscriptLines,
+			TranscriptSizeBaseline: transcriptSizeBaseline,
+		},
+		done: true,
 	}
 }

@@ -465,9 +465,9 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	}
 	readCommitMessageSpan.End()
 
-	// Generate a fresh checkpoint ID and resolve session metadata
+	// Resolve the checkpoint ID and session metadata.
 	_, resolveMetadataSpan := perf.Start(ctx, "resolve_session_metadata")
-	checkpointID, err := checkpoint.GenerateCheckpointID(ctx)
+	checkpointID, err := checkpointIDForSessions(ctx, sessionsWithContent)
 	if err != nil {
 		resolveMetadataSpan.RecordError(err)
 		resolveMetadataSpan.End()
@@ -1201,6 +1201,14 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 ) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	if state.CondensationAttemptID != id.EmptyCheckpointID && state.CondensationAttemptID != checkpointID {
+		logging.Warn(logCtx, "post-commit: preserving interrupted condensation with a different checkpoint ID",
+			slog.String("session_id", state.SessionID),
+			slog.String("reserved_checkpoint_id", state.CondensationAttemptID.String()),
+			slog.String("commit_checkpoint_id", checkpointID.String()))
+		uncondensedActiveOnBranch[shadowBranchName] = true
+		return
+	}
 
 	// Pre-resolve shadow branch ref and tree for this session.
 	// These are read 4+ times across sessionHasNewContent, filesOverlapWithContent,
@@ -2120,10 +2128,10 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 }
 
 // addTrailerForAgentCommit handles the fast path when an agent is committing
-// (ACTIVE session + no TTY). Generates a checkpoint ID and adds the trailer
+// (ACTIVE session + no TTY). It resolves a checkpoint ID and adds the trailer
 // directly, bypassing content detection and interactive prompts.
 func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error { //nolint:unparam // kept for signature stability
-	cpID, err := checkpoint.GenerateCheckpointID(logCtx)
+	cpID, err := checkpointIDForSessions(logCtx, []*SessionState{state})
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
@@ -2153,6 +2161,19 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
 	return nil
+}
+
+func checkpointIDForSessions(ctx context.Context, states []*SessionState) (id.CheckpointID, error) {
+	for _, state := range states {
+		if state.CondensationAttemptID != id.EmptyCheckpointID {
+			return state.CondensationAttemptID, nil
+		}
+	}
+	checkpointID, err := checkpoint.GenerateCheckpointID(ctx)
+	if err != nil {
+		return id.EmptyCheckpointID, fmt.Errorf("generate checkpoint ID: %w", err)
+	}
+	return checkpointID, nil
 }
 
 // addCheckpointTrailer adds the Entire-Checkpoint trailer to a commit message.

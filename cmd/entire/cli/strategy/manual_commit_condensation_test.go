@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -455,8 +456,9 @@ func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T)
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
-	repo, err := git.PlainOpen(dir)
+	repo, err := OpenRepository(context.Background())
 	require.NoError(t, err)
+	defer repo.Close()
 
 	s := &ManualCommitStrategy{}
 	sessionID := "2026-05-08-investigate-condensation"
@@ -561,8 +563,9 @@ func TestCondenseSessionByID_ReusesCheckpointFromInterruptedEagerCondense(t *tes
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
-	repo, err := git.PlainOpen(dir)
+	repo, err := OpenRepository(context.Background())
 	require.NoError(t, err)
+	defer repo.Close()
 
 	s := &ManualCommitStrategy{}
 	sessionID := "interrupted-eager-condense"
@@ -597,8 +600,9 @@ func TestCondenseAndMarkFullyCondensed_ReusesReservedAttemptAfterInterruptedWrit
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
-	repo, err := git.PlainOpen(dir)
+	repo, err := OpenRepository(context.Background())
 	require.NoError(t, err)
+	defer repo.Close()
 
 	s := &ManualCommitStrategy{}
 	sessionID := "reserved-eager-condense"
@@ -633,12 +637,48 @@ func TestCondenseAndMarkFullyCondensed_ReusesReservedAttemptAfterInterruptedWrit
 	assert.True(t, state.FullyCondensed)
 }
 
+func TestPrepareCommitMsg_ReusesReservedAttemptAfterSessionResume(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := OpenRepository(context.Background())
+	require.NoError(t, err)
+	defer repo.Close()
+
+	s := &ManualCommitStrategy{}
+	sessionID := "resumed-interrupted-condense"
+	setupEndedSessionWithoutFiles(t, s, repo, dir, sessionID)
+
+	reservedID := id.MustCheckpointID("111111111111")
+	require.NoError(t, MutateSessionState(context.Background(), sessionID, func(state *SessionState) error {
+		state.CondensationAttemptID = reservedID
+		return nil
+	}))
+
+	require.NoError(t, s.InitializeSession(context.Background(), sessionID, agent.AgentTypeClaudeCode, "", "continue", ""))
+	resumed, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, session.PhaseActive, resumed.Phase)
+	require.Equal(t, reservedID, resumed.CondensationAttemptID)
+
+	commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(commitMsgFile, []byte("commit after resume\n"), 0o600))
+	require.NoError(t, s.PrepareCommitMsg(context.Background(), commitMsgFile, "message"))
+
+	content, err := os.ReadFile(commitMsgFile)
+	require.NoError(t, err)
+	checkpointID, found := trailers.ParseCheckpoint(string(content))
+	require.True(t, found)
+	assert.Equal(t, reservedID, checkpointID)
+}
+
 func TestCondenseSessionByID_DoesNotReuseCheckpointAfterSessionAdvances(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
-	repo, err := git.PlainOpen(dir)
+	repo, err := OpenRepository(context.Background())
 	require.NoError(t, err)
+	defer repo.Close()
 
 	s := &ManualCommitStrategy{}
 	sessionID := "advanced-after-interrupted-condense"
