@@ -382,3 +382,224 @@ func verifyShadowCheckpointStorage(t *testing.T, env *TestEnv, sessionID, taskTo
 		t.Logf("Found %d incremental checkpoint files in shadow branch tree", foundCheckpointFiles)
 	}
 }
+
+// hasInFlightTask reports whether state has an in-flight marker for toolUseID.
+func hasInFlightTask(state *strategy.SessionState, toolUseID string) bool {
+	for _, task := range state.InFlightTasks {
+		if task.ToolUseID == toolUseID {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop covers the
+// background-subagent bug this PR fixes: Claude Code background subagents
+// (run_in_background: true) return a launch stub immediately, so post-task
+// (PostToolUse) used to fire seconds after launch — before the subagent had
+// done any real work — and save (or skip) a task step from that stub alone.
+// The real completion signal, SubagentStop, fired no hook entire listened to,
+// so everything the subagent actually did was invisible to entire.
+//
+// This verifies the fix end to end, using a realistic Claude Code subagent
+// transcript (session.CreateSubagentTranscript — the same builder
+// TestSubagentCheckpoints_StoresSubagentTranscript uses) so the real
+// transcript analyzer, not a stub, is what extracts the modified file:
+//  1. post-task with run_in_background: true records an in-flight marker and
+//     writes NO task checkpoint — capture is deferred, not lost.
+//  2. subagent-stop (the authoritative final capture) writes the task
+//     checkpoint with the subagent's real modified file and its own
+//     transcript, and clears the marker.
+func TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	session := env.NewSession()
+	session.CreateTranscript("delegate a background task", nil)
+
+	const (
+		taskToolUseID = "toolu_01BackgroundABC123"
+		subagentID    = "a1111222233334444"
+		editedFile    = "docs/background.md"
+	)
+
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	if err := env.SimulatePreTask(session.ID, session.TranscriptPath, taskToolUseID); err != nil {
+		t.Fatalf("SimulatePreTask failed: %v", err)
+	}
+
+	// Launch stub: PostToolUse fires immediately with run_in_background: true
+	// and the launch-assigned agentId, before the subagent has done any work.
+	if err := env.SimulatePostTask(PostTaskInput{
+		SessionID:       session.ID,
+		TranscriptPath:  session.TranscriptPath,
+		ToolUseID:       taskToolUseID,
+		AgentID:         subagentID,
+		RunInBackground: true,
+	}); err != nil {
+		t.Fatalf("SimulatePostTask (background stub) failed: %v", err)
+	}
+
+	// Marker recorded; no task checkpoint written from the stub.
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if state == nil || !hasInFlightTask(state, taskToolUseID) {
+		t.Fatalf("expected in-flight marker for %s after background launch stub, state=%+v", taskToolUseID, state)
+	}
+
+	checkpointPath := paths.EntireMetadataDir + "/" + session.ID + "/tasks/" + taskToolUseID + "/" + paths.CheckpointFileName
+	if env.FileExistsInBranch(env.GetShadowBranchName(), checkpointPath) {
+		t.Fatalf("task checkpoint should not exist after the background launch stub (deferred to subagent-stop): %s", checkpointPath)
+	}
+
+	// The subagent does its actual work: a realistic transcript (parsed by the
+	// real Claude Code transcript analyzer, not a stub) plus the resulting
+	// uncommitted file.
+	subagentTranscriptPath := session.CreateSubagentTranscript(subagentID, []FileChange{
+		{Path: editedFile, Content: "# Background\n"},
+	})
+	env.WriteFile(editedFile, "# Background\n\nWritten by a background subagent.\n")
+
+	// The real completion signal.
+	if err := env.SimulateSubagentStop(SubagentStopInput{
+		SessionID:           session.ID,
+		TranscriptPath:      session.TranscriptPath,
+		AgentID:             subagentID,
+		AgentTranscriptPath: subagentTranscriptPath,
+		ToolUseID:           taskToolUseID,
+	}); err != nil {
+		t.Fatalf("SimulateSubagentStop failed: %v", err)
+	}
+
+	// Marker cleared.
+	state, err = env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if state != nil && hasInFlightTask(state, taskToolUseID) {
+		t.Errorf("in-flight marker for %s should be cleared after subagent-stop", taskToolUseID)
+	}
+
+	// Task checkpoint now exists.
+	shadowBranch := env.GetShadowBranchName()
+	if !env.FileExistsInBranch(shadowBranch, checkpointPath) {
+		t.Fatalf("task checkpoint missing after subagent-stop: %s", checkpointPath)
+	}
+
+	// The subagent's own transcript (extracted by the real analyzer) is
+	// stored and references the edited file.
+	transcriptWantPath := paths.EntireMetadataDir + "/" + session.ID + "/tasks/" + taskToolUseID + "/" + paths.AgentTranscriptFileName(subagentID)
+	content, ok := env.ReadFileFromBranch(shadowBranch, transcriptWantPath)
+	if !ok {
+		t.Fatalf("subagent transcript not stored at %s", transcriptWantPath)
+	}
+	if !strings.Contains(content, editedFile) {
+		t.Errorf("stored subagent transcript does not reference the modified file %q: %q", editedFile, content)
+	}
+
+	// The modified file's real content was captured into the shadow tree at
+	// its real repo path — proof the checkpoint carries the subagent's actual
+	// work, not just an empty stub.
+	if !env.FileExistsInBranch(shadowBranch, editedFile) {
+		t.Errorf("modified file %s not captured into shadow branch tree", editedFile)
+	}
+}
+
+// TestSubagentCheckpoints_TurnEndBackstop_ThenSubagentStop covers the
+// turn-end incremental backstop between a background launch stub and the
+// eventual subagent-stop: before this PR, a background subagent's in-flight
+// work had zero checkpoint presence until (if ever) SubagentStop arrived.
+// Now turn-end (Stop) snapshots the subagent's code changes incrementally —
+// leaving the in-flight marker in place, since the task is still running —
+// and subagent-stop remains the authoritative final capture that clears it.
+func TestSubagentCheckpoints_TurnEndBackstop_ThenSubagentStop(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	session := env.NewSession()
+	session.CreateTranscript("delegate a background task", nil)
+
+	const (
+		taskToolUseID = "toolu_01TurnEndBackstop"
+		subagentID    = "b2222333344445555"
+		editedFile    = "docs/turnend.md"
+	)
+
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	if err := env.SimulatePreTask(session.ID, session.TranscriptPath, taskToolUseID); err != nil {
+		t.Fatalf("SimulatePreTask failed: %v", err)
+	}
+	if err := env.SimulatePostTask(PostTaskInput{
+		SessionID:       session.ID,
+		TranscriptPath:  session.TranscriptPath,
+		ToolUseID:       taskToolUseID,
+		AgentID:         subagentID,
+		RunInBackground: true,
+	}); err != nil {
+		t.Fatalf("SimulatePostTask (background stub) failed: %v", err)
+	}
+
+	// The subagent has made progress by the time the parent's turn ends, but
+	// SubagentStop hasn't arrived yet.
+	subagentTranscriptPath := session.CreateSubagentTranscript(subagentID, []FileChange{
+		{Path: editedFile, Content: "# In progress\n"},
+	})
+	env.WriteFile(editedFile, "# In progress\n\nStill running.\n")
+
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop (turn-end) failed: %v", err)
+	}
+
+	// Incremental checkpoint exists from the turn-end backstop.
+	shadowBranch := env.GetShadowBranchName()
+	incrementalPath := paths.EntireMetadataDir + "/" + session.ID + "/tasks/" + taskToolUseID +
+		"/checkpoints/001-" + taskToolUseID + ".json"
+	if !env.FileExistsInBranch(shadowBranch, incrementalPath) {
+		t.Fatalf("expected incremental checkpoint from turn-end backstop at %s", incrementalPath)
+	}
+
+	// The marker survives: the task is still running, and subagent-stop
+	// remains the authoritative final capture.
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if state == nil || !hasInFlightTask(state, taskToolUseID) {
+		t.Fatalf("expected in-flight marker for %s to survive turn-end, state=%+v", taskToolUseID, state)
+	}
+
+	// The final (non-incremental) task checkpoint does not exist yet.
+	finalCheckpointPath := paths.EntireMetadataDir + "/" + session.ID + "/tasks/" + taskToolUseID + "/" + paths.CheckpointFileName
+	if env.FileExistsInBranch(shadowBranch, finalCheckpointPath) {
+		t.Fatalf("final task checkpoint should not exist before subagent-stop: %s", finalCheckpointPath)
+	}
+
+	// subagent-stop arrives: the authoritative final capture.
+	if err := env.SimulateSubagentStop(SubagentStopInput{
+		SessionID:           session.ID,
+		TranscriptPath:      session.TranscriptPath,
+		AgentID:             subagentID,
+		AgentTranscriptPath: subagentTranscriptPath,
+		ToolUseID:           taskToolUseID,
+	}); err != nil {
+		t.Fatalf("SimulateSubagentStop failed: %v", err)
+	}
+
+	// Final capture landed; marker cleared.
+	shadowBranch = env.GetShadowBranchName()
+	if !env.FileExistsInBranch(shadowBranch, finalCheckpointPath) {
+		t.Fatalf("final task checkpoint missing after subagent-stop: %s", finalCheckpointPath)
+	}
+
+	state, err = env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if state != nil && hasInFlightTask(state, taskToolUseID) {
+		t.Errorf("in-flight marker for %s should be cleared after subagent-stop", taskToolUseID)
+	}
+}
