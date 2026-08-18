@@ -22,11 +22,8 @@ const (
 	SyncRemoteSourceConfig CheckpointSyncRemoteSource = "config"
 	// SyncRemoteSourceObserved: elected by evidence — a past push that agreed
 	// with the branch's declared push destination (see
-	// maybeCaptureCheckpointSyncRemote). Named for what was observed rather than
-	// for the mechanism that recorded it: "captured" is our word for the latch,
-	// and it credits the push while omitting the declaration that made the push
-	// count — the half that separates this from the tracking tier reverted in
-	// 74e239a9.
+	// maybeCaptureCheckpointSyncRemote). Named for what was observed, not for the
+	// latch that recorded it, which is why the internal names still say "capture".
 	SyncRemoteSourceObserved CheckpointSyncRemoteSource = "observed"
 	// SyncRemoteSourceDefault: "origin" exists.
 	SyncRemoteSourceDefault CheckpointSyncRemoteSource = "default"

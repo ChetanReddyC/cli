@@ -383,6 +383,18 @@ func TestCheckpointSyncAllowedForRemote(t *testing.T) {
 // newCaptureTestRepo builds a repo with one commit and an origin+fork remote
 // pair — the fork topology: origin wins the default election, fork is where
 // the user's branches actually push.
+// gitInRepo runs a git subcommand in repoDir with isolated config, for setup the
+// testutil helpers do not cover (remote rename).
+func gitInRepo(t *testing.T, repoDir string, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", args...)
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+}
+
 func newCaptureTestRepo(t *testing.T) string {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -421,7 +433,7 @@ func TestResolveCheckpointSyncRemote_CapturedTier(t *testing.T) {
 	t.Run("captured remote beats origin", func(t *testing.T) {
 		dir := newCaptureTestRepo(t)
 		t.Chdir(dir)
-		require.NoError(t, saveCapturedSyncRemotes(ctx, []string{"fork"}))
+		require.NoError(t, saveCapturedSyncRemote(ctx, "fork"))
 
 		got, err := ResolveCheckpointSyncRemote(ctx)
 		require.NoError(t, err)
@@ -432,7 +444,7 @@ func TestResolveCheckpointSyncRemote_CapturedTier(t *testing.T) {
 		dir := newCaptureTestRepo(t)
 		testutil.WriteCheckpointPushRemoteSetting(t, dir, "origin")
 		t.Chdir(dir)
-		require.NoError(t, saveCapturedSyncRemotes(ctx, []string{"fork"}))
+		require.NoError(t, saveCapturedSyncRemote(ctx, "fork"))
 
 		got, err := ResolveCheckpointSyncRemote(ctx)
 		require.NoError(t, err)
@@ -444,7 +456,7 @@ func TestResolveCheckpointSyncRemote_CapturedTier(t *testing.T) {
 		// automatic, so a renamed/removed remote must not disable sync.
 		dir := newCaptureTestRepo(t)
 		t.Chdir(dir)
-		require.NoError(t, saveCapturedSyncRemotes(ctx, []string{"gone"}))
+		require.NoError(t, saveCapturedSyncRemote(ctx, "gone"))
 
 		got, err := ResolveCheckpointSyncRemote(ctx)
 		require.NoError(t, err)
@@ -517,13 +529,36 @@ func TestMaybeCaptureCheckpointSyncRemote(t *testing.T) {
 		testutil.AddRemote(t, dir, "work", "https://example.com/work.git")
 		setGitConfig(t, dir, "branch."+currentBranchName(t, dir)+".remote", "work")
 		t.Chdir(dir)
-		require.NoError(t, saveCapturedSyncRemotes(ctx, []string{"fork"}))
+		require.NoError(t, saveCapturedSyncRemote(ctx, "fork"))
 		buf := captureStderrWriter(t)
 
 		maybeCaptureCheckpointSyncRemote(ctx, "work")
 
 		assert.Equal(t, []string{"fork"}, loadCapturedSyncRemotes(ctx), "first capture sticks until config or phase 2")
 		assert.Empty(t, buf.String())
+	})
+
+	t.Run("a dead capture does not block a fresh one", func(t *testing.T) {
+		// The sticky rule asks whether a capture is IN FORCE, not whether the file
+		// is non-empty. Gating on presence stranded the election: after
+		// `git remote rename fork myfork` the resolver skipped the dead entry and
+		// fell back to origin, while capture refused to ever elect myfork — so for
+		// a user who only pushes to myfork every push was gated and checkpoints
+		// reached nowhere, recoverable only by deleting the state file by hand.
+		dir := newCaptureTestRepo(t)
+		t.Chdir(dir)
+		require.NoError(t, saveCapturedSyncRemote(ctx, "fork"))
+		// The rename is what kills the captured entry: fork stops existing, the
+		// state file still names it, and myfork becomes the declared destination.
+		gitInRepo(t, dir, "remote", "rename", "fork", "myfork")
+		setGitConfig(t, dir, "branch."+currentBranchName(t, dir)+".remote", "myfork")
+		buf := captureStderrWriter(t)
+
+		maybeCaptureCheckpointSyncRemote(ctx, "myfork")
+
+		assert.Equal(t, []string{"myfork"}, loadCapturedSyncRemotes(ctx),
+			"a captured remote that no longer exists must not veto the next capture")
+		assert.Contains(t, buf.String(), `"myfork"`, "the new election must be announced")
 	})
 
 	t.Run("explicit checkpoint_push_remote disables capture", func(t *testing.T) {

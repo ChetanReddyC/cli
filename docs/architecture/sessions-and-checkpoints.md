@@ -266,7 +266,7 @@ got the static tracking tier dropped in `74e239a9` — it turned pushes to every
 other remote into silent no-ops, e.g. `git clone -o base` pushing a separately
 added `origin`); a bare push to an undeclared remote never elects either (the
 pre-single-remote transcript leak). Phase-1 rules: at most one captured
-remote, and the first capture sticks — a mixed-habit repo whose branches push
+remote, and the first still-configured capture sticks — a mixed-habit repo whose branches push
 two remotes must not flip the election per push. An explicit
 `checkpoint_push_remote` always outranks and disables capture. See
 `strategy/checkpoint_sync_capture.go`.

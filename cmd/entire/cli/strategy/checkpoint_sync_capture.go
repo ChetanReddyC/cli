@@ -10,8 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
 // capturedSyncRemotesFileName is the per-clone captured-election state, stored
@@ -19,6 +20,15 @@ import (
 // from day one: phase 1 caps membership at one remote, and lifting the cap
 // (per-remote push-queue tracking) must not need a state migration.
 const capturedSyncRemotesFileName = "entire-checkpoint-sync-remotes.json"
+
+// capturedSyncRemotesLockName serializes the read-decide-write in
+// maybeCaptureCheckpointSyncRemote. Paired with the state file exactly as
+// checkpoint/pushqueue.go pairs its queue and lock in this same directory: the
+// atomic write below keeps readers safe, but without the lock two concurrent
+// pre-push hooks in different worktrees both observe "nothing captured", both
+// write, and last-rename-wins — so each announces a different remote and "first
+// capture sticks" becomes a coin flip.
+const capturedSyncRemotesLockName = "entire-checkpoint-sync-remotes.lock"
 
 type capturedSyncRemotesFile struct {
 	Remotes []string `json:"remotes"`
@@ -30,6 +40,14 @@ func capturedSyncRemotesPath(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return filepath.Join(commonDir, capturedSyncRemotesFileName), nil
+}
+
+func capturedSyncRemotesLockPath(ctx context.Context) (string, error) {
+	commonDir, err := GetGitCommonDir(ctx)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(commonDir, capturedSyncRemotesLockName), nil
 }
 
 // loadCapturedSyncRemotes reads the captured election. Fail-soft: a missing,
@@ -54,60 +72,22 @@ func loadCapturedSyncRemotes(ctx context.Context) []string {
 	return f.Remotes
 }
 
-// capturedElectionStillValid reports whether a capture is already in force. It
-// asks the same question the resolver asks — is the captured remote actually
-// configured — because the two must agree on what a captured entry means. Gating
-// on mere presence instead stranded the state: after `git remote rename fork
-// myfork` the resolver skipped the dead entry and fell back to origin, while this
-// check still saw a non-empty file and refused to ever capture myfork, so
-// checkpoints silently stopped reaching the remote the user actually pushes to
-// with no recovery short of deleting the file by hand.
-func capturedElectionStillValid(ctx context.Context) bool {
-	for _, name := range loadCapturedSyncRemotes(ctx) {
-		if isConfiguredRemote(ctx, name) {
-			return true
-		}
-	}
-	return false
-}
-
-// saveCapturedSyncRemotes writes the captured election atomically
-// (temp+rename), so a concurrent reader never sees a partial file.
-func saveCapturedSyncRemotes(ctx context.Context, remotes []string) error {
+// saveCapturedSyncRemote persists the one captured remote. Singular on purpose:
+// phase 1 caps membership at one, and a plural writer left that cap resting on a
+// single call site passing a one-element literal. The on-disk shape stays
+// list-shaped, so lifting the cap in phase 2 needs a new writer rather than a
+// migration.
+func saveCapturedSyncRemote(ctx context.Context, name string) error {
 	path, err := capturedSyncRemotesPath(ctx)
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(capturedSyncRemotesFile{Remotes: remotes})
+	data, err := json.Marshal(capturedSyncRemotesFile{Remotes: []string{name}})
 	if err != nil {
 		return fmt.Errorf("encode captured sync remotes: %w", err)
 	}
-	// Unique temp name rather than a fixed path + ".tmp": the file lives in the
-	// git common dir, which is shared across every worktree of the repo, so two
-	// concurrent pre-push hooks would otherwise write the same scratch path and
-	// one could rename the other's half-written content into place.
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("create captured sync remotes temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		// No-op once the rename succeeded; cleans up on every failure path.
-		_ = os.Remove(tmpName)
-	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("chmod captured sync remotes temp file: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
+	if err := jsonutil.WriteFileAtomic(path, data, 0o600); err != nil {
 		return fmt.Errorf("write captured sync remotes: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close captured sync remotes temp file: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("commit captured sync remotes: %w", err)
 	}
 	return nil
 }
@@ -130,31 +110,58 @@ func maybeCaptureCheckpointSyncRemote(ctx context.Context, pushRemote string) {
 	if !isConfiguredRemote(ctx, pushRemote) {
 		return
 	}
-	if capturedElectionStillValid(ctx) {
+
+	// The whole read-decide-write runs under the lock, not just the write: the
+	// decision is what has to be exclusive, or two hooks both see "nothing
+	// captured" and race. A lock we cannot take is not a reason to skip capture
+	// forever, but it is a reason to skip it this once.
+	lockPath, err := capturedSyncRemotesLockPath(ctx)
+	if err != nil {
+		logging.Debug(ctx, "capture skipped: cannot resolve lock path",
+			slog.String("error", err.Error()))
 		return
 	}
-	// Fail-closed on unreadable settings, same as the election itself: a
-	// checkpoint_push_remote we could not read must not be overridden by a
-	// capture.
-	s, err := settings.Load(ctx)
-	if err != nil || s.GetCheckpointPushRemote() != "" {
+	release, err := flock.Acquire(lockPath)
+	if err != nil {
+		logging.Debug(ctx, "capture skipped: cannot acquire lock",
+			slog.String("error", err.Error()))
 		return
 	}
+	defer release()
+
+	// One election answers every remaining gate, so there is no second copy of
+	// its rules to drift: err covers unreadable settings and a fail-closed
+	// checkpoint_push_remote, Source covers an explicit override and a capture
+	// already in force, and Name covers "already elected, nothing to capture".
+	// A separate validity predicate beside the resolver was how the two came to
+	// disagree about a dead captured entry in the first place.
 	elected, err := ResolveCheckpointSyncRemote(ctx)
-	if err != nil || elected.Name == pushRemote {
-		// The already-elected remote needs no capture — and persisting it
-		// would block the one real capture this clone gets in phase 1.
+	if err != nil {
+		return
+	}
+	switch elected.Source {
+	case SyncRemoteSourceConfig, SyncRemoteSourceObserved:
+		// An explicit override, or a capture already in force: nothing to displace.
+		return
+	case SyncRemoteSourceDefault, SyncRemoteSourceSole, SyncRemoteSourceFirst:
+		// Exactly the tiers a capture may displace. Enumerated rather than left to
+		// a default so `exhaustive` turns a new tier into a decision here instead
+		// of silently letting capture override it.
+	}
+	if elected.Name == pushRemote {
 		return
 	}
 	if declaredPushDestination(ctx) != pushRemote {
 		return
 	}
-	if saveErr := saveCapturedSyncRemotes(ctx, []string{pushRemote}); saveErr != nil {
+	if saveErr := saveCapturedSyncRemote(ctx, pushRemote); saveErr != nil {
 		logging.Warn(ctx, "failed to persist captured checkpoint sync remote",
 			slog.String("remote", pushRemote),
 			slog.String("error", saveErr.Error()))
 		return
 	}
+	// Announced only after the state landed, so the message can never claim a
+	// change that was not persisted.
 	fmt.Fprintf(stderrWriter,
 		"[entire] Checkpoints now sync to %q — the remote your branch pushes to. Override with strategy_options.checkpoint_push_remote in .entire/settings.local.json.\n",
 		pushRemote)
