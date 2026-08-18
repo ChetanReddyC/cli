@@ -111,6 +111,24 @@ type Event struct {
 	// SubagentID identifies the subagent instance (for SubagentEnd events).
 	SubagentID string
 
+	// SubagentTranscript is the subagent's own transcript path when the hook
+	// payload supplies one directly (e.g. Claude Code SubagentStop's
+	// agent_transcript_path). Authoritative when non-empty; empty means the
+	// caller must resolve the path itself (e.g. via ResolveAgentTranscriptPath)
+	// — the case for launch-time PostToolUse events, which don't carry it.
+	SubagentTranscript string
+
+	// Final is true only for events that represent true completion of a
+	// subagent (Claude Code's SubagentStop), never for the launch-time
+	// PostToolUse SubagentEnd, which fires at the background launch stub
+	// seconds after launch. Downstream lifecycle branching keys off this flag,
+	// not any payload sentinel. Final is the disambiguator for agents with a
+	// two-signal model (a launch-time stub plus a separate completion hook,
+	// like Claude Code's background tasks); agents whose single subagent-end
+	// event already fires at true completion must leave it false so the
+	// existing pipeline handles them unchanged.
+	Final bool
+
 	// ToolInput is the raw tool input JSON (for subagent type/description extraction).
 	// Used when both SubagentType and TaskDescription are empty (agents that don't provide
 	// these fields directly parse them from ToolInput).

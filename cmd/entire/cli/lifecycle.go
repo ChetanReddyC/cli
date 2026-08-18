@@ -1133,7 +1133,14 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	}
 
 	// Determine subagent transcript path (empty when the agent stores none).
-	subagentTranscriptPath := ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
+	// event.SubagentTranscript is authoritative when the hook payload supplies
+	// it directly (e.g. Claude Code's SubagentStop carries agent_transcript_path);
+	// ResolveAgentTranscriptPath is the fallback for launch-time PostToolUse
+	// events, which don't carry it.
+	subagentTranscriptPath := event.SubagentTranscript
+	if subagentTranscriptPath == "" {
+		subagentTranscriptPath = ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
+	}
 
 	// Log context
 	subagentEndAttrs := []any{

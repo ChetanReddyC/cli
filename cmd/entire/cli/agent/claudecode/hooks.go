@@ -29,6 +29,7 @@ const (
 	HookNamePreTask          = "pre-task"
 	HookNamePostTask         = "post-task"
 	HookNamePostTodo         = "post-todo"
+	HookNameSubagentStop     = "subagent-stop"
 )
 
 // Claude Code tool-name matchers for Entire's PreToolUse/PostToolUse hooks.
