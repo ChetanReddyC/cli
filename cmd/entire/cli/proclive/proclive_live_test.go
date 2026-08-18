@@ -109,3 +109,58 @@ func TestResolveOwner_ReturnsSomething(t *testing.T) {
 		t.Errorf("resolved owner Check = %v, want alive", got)
 	}
 }
+
+// Commit attribution asks a different question than liveness: not "is the
+// recorded owner alive" but "is the recorded owner an ANCESTOR of the process
+// asking". A commit hook whose ancestry contains a session's owner was spawned
+// (however indirectly) by that session's agent, in whatever worktree — the
+// identity-linking contract (PR #2013), served by the same Identity that
+// captureSessionOwner already persists every turn start.
+func TestHasAncestor_ParentMatches(t *testing.T) {
+	parent, ok := IdentityOf(os.Getppid())
+	if !ok {
+		t.Fatal("IdentityOf(parent) should resolve on a supported platform")
+	}
+	if !HasAncestor(parent) {
+		t.Fatalf("the test process's parent %+v must be reported as an ancestor", parent)
+	}
+}
+
+func TestHasAncestor_RejectsRecycledPID(t *testing.T) {
+	parent, ok := IdentityOf(os.Getppid())
+	if !ok {
+		t.Fatal("IdentityOf(parent) should resolve")
+	}
+	parent.Start += "-not-the-same-boot-instant"
+	if HasAncestor(parent) {
+		t.Fatal("same PID with a different start fingerprint is a recycled PID, not an ancestor")
+	}
+}
+
+func TestHasAncestor_RejectsForeignHost(t *testing.T) {
+	parent, ok := IdentityOf(os.Getppid())
+	if !ok {
+		t.Fatal("IdentityOf(parent) should resolve")
+	}
+	parent.Host += "-elsewhere"
+	if HasAncestor(parent) {
+		t.Fatal("a PID recorded on another host is meaningless here and must never match")
+	}
+}
+
+func TestHasAncestor_NonAncestorDoesNotMatch(t *testing.T) {
+	pid, _ := startSleeper(t)
+	sibling, ok := IdentityOf(pid)
+	if !ok {
+		t.Fatal("IdentityOf(sleeper) should resolve")
+	}
+	if HasAncestor(sibling) {
+		t.Fatal("a sibling child process is not an ancestor")
+	}
+}
+
+func TestHasAncestor_EmptyIdentityNeverMatches(t *testing.T) {
+	if HasAncestor(Identity{}) {
+		t.Fatal("the zero identity must never match")
+	}
+}

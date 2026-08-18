@@ -17,7 +17,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/internal/proctree"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -125,21 +124,6 @@ type State struct {
 	// WorktreeID is the internal git worktree identifier (empty for main worktree)
 	// Derived from .git/worktrees/<name>/, stable across git worktree move
 	WorktreeID string `json:"worktree_id,omitempty"`
-
-	// AgentAncestry records the agent process that owns this session: the
-	// session-start hook's first NON-SHELL ancestor (agents run hooks as
-	// children, possibly via `sh -c`). Deliberately only that one ref — the
-	// chain above the agent (user shell, tmux, terminal emulator, IDE) is
-	// shared with unrelated processes, and recording it would falsely
-	// identity-match a human commit typed in the same terminal. Commit hooks
-	// match their own ancestry against this ref to attribute a commit to the
-	// session whose agent made it, regardless of which worktree the commit
-	// happens in. Best-effort: empty when ancestry could not be resolved, in
-	// which case attribution falls back to worktree-path matching. The field
-	// is a slice only for serialization headroom — writers must never record
-	// more than the single agent ref, or shared user-side processes would
-	// creep back into the match set.
-	AgentAncestry []proctree.ProcessRef `json:"agent_ancestry,omitempty"`
 
 	// AdoptedIntoWorktreePath marks a source-side tombstone left behind after
 	// `entire session adopt` moves this session into another repository/worktree.

@@ -2380,12 +2380,6 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
 		reconcileWorktreePathForResumedTurn(ctx, state)
-		// A resumed session runs under a new agent process; the recorded ref
-		// is dead (start-time guard: it can never match again) and identity
-		// linking would silently revert to worktree matching for the rest of
-		// the session. Re-record when none of the recorded refs is our
-		// ancestor.
-		refreshAgentAncestry(ctx, state)
 
 		// ORDERING: attribution runs BEFORE migrate to use the pre-migration
 		// BaseCommit as the base tree (preserving correct agent-line counts

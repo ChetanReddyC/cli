@@ -180,15 +180,19 @@ with pending content in the commit's worktree — concurrent sessions interleave
 by design) **plus the identity-matched session** when the committing process's
 ancestry names one that path matching missed.
 
-**Identity matching**: at session start the hook records **the agent process
-only** — its first non-shell ancestor (pid + start time; agents run hooks as
-children, possibly via `sh -c`) — in `SessionState.AgentAncestry`. Everything
-above the agent (user shell, tmux, terminal emulator, IDE) is deliberately
-unrecorded: it is shared with unrelated processes, and matching it would
-falsely attribute a human commit typed in the same terminal. At commit time
-the hook walks its own ancestry (git ← tool shell ← agent) and matches that
-ref — nearest ancestor wins, ties go to the most recently interacting
-session, and start times guard against PID reuse. This makes an agent-made commit link to
+**Identity matching**: reuses the owner fingerprint liveness already
+records — `SessionState.Owner`, a `proclive.Identity` captured on every turn
+start by `captureSessionOwner` (the first non-transient ancestor of the hook:
+agents run hooks as children, possibly via `sh -c`, and proclive skips
+shells, the `entire` binary itself, and the Go toolchain). At commit time the
+hook asks `proclive.HasAncestor(owner)`: was this commit's process spawned,
+however indirectly, by that session's agent? Host, boot, and start-time
+guards mean a recycled PID or an identity recorded on another machine can
+never match. Ties (one agent process hosting several sessions, or a nested
+agent whose outer agent is also an ancestor) go to the most recently
+interacting session. On platforms proclive cannot introspect (Windows),
+identity matching reports nothing and linking falls back to worktree
+matching. This makes an agent-made commit link to
 its own session **in any worktree**, with no bookkeeping to drift. A commit
 identity-matched outside the session's home worktree is **guest-linked**: it
 condenses and links, but never mutates worktree-coupled state (`BaseCommit`,

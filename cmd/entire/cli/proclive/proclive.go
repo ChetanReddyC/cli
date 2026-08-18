@@ -193,3 +193,71 @@ func Check(id Identity) Liveness {
 	}
 	return LivenessAlive
 }
+
+// IdentityOf fingerprints an arbitrary live process on this machine, with the
+// same Host/Boot guards ResolveOwner records. Returns (zero, false) when the
+// process cannot be introspected or the host cannot be determined.
+func IdentityOf(pid int) (Identity, bool) {
+	if pid <= 0 {
+		return Identity{}, false
+	}
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		return Identity{}, false
+	}
+	boot, err := bootID()
+	if err != nil {
+		boot = ""
+	}
+	_, name, start, err := procStat(pid)
+	if err != nil {
+		return Identity{}, false
+	}
+	return Identity{PID: pid, Start: start, Boot: boot, Host: host, Name: name}, true
+}
+
+// HasAncestor reports whether id names a live ancestor of the current
+// process. Where Check asks "is the recorded owner still alive", HasAncestor
+// asks "was the current process spawned (however indirectly) by the recorded
+// owner" — the commit-attribution question: a git hook whose ancestry
+// contains a session's owner was started by that session's agent, in
+// whatever worktree.
+//
+// Matching requires the full identity to hold: same host, same boot (when
+// recorded), and the ancestor's start fingerprint equal to the recorded one —
+// so a recycled PID or an identity from another machine can never match.
+// Best-effort like ResolveOwner: any introspection failure reports false, and
+// the caller falls back to whatever non-identity matching it has.
+func HasAncestor(id Identity) bool {
+	if id.PID <= 0 || id.Start == "" || id.Host == "" {
+		return false
+	}
+	host, err := os.Hostname()
+	if err != nil || host != id.Host {
+		return false
+	}
+	if id.Boot != "" {
+		boot, err := bootID()
+		if err != nil || boot == "" || boot != id.Boot {
+			return false
+		}
+	}
+	candidate, _, _, err := procStat(os.Getpid())
+	if err != nil {
+		return false
+	}
+	for range maxAncestorDepth {
+		if candidate <= 1 {
+			return false
+		}
+		parent, _, start, err := procStat(candidate)
+		if err != nil {
+			return false
+		}
+		if candidate == id.PID {
+			return start != "" && start == id.Start
+		}
+		candidate = parent
+	}
+	return false
+}

@@ -294,39 +294,6 @@ func TestMutateSessionState_DoesNotClobberRicherStateUnderRace(t *testing.T) {
 	require.Equal(t, "gpt-5", existing.ModelName)
 }
 
-// Commit attribution matches a commit hook's process ancestry against refs
-// recorded at session start; without them, agent commits fall back to
-// worktree-path guessing — the gap behind the sessC dangling-trailer incident
-// (a commit in a sibling worktree linked to a leaked fixture session instead
-// of the live agent session that made it).
-//
-// Not parallel: uses t.Chdir()
-func TestInitializeSession_RecordsAgentAncestry(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "f.txt", "init")
-	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "init")
-	t.Chdir(dir)
-
-	repo, err := OpenRepository(context.Background())
-	require.NoError(t, err)
-	defer repo.Close()
-
-	s := NewManualCommitStrategy()
-	require.NoError(t, s.initializeSession(context.Background(), repo, "sess-ancestry-test", agent.AgentTypeClaudeCode, "", "", ""))
-
-	state, err := LoadSessionState(context.Background(), "sess-ancestry-test")
-	require.NoError(t, err)
-	require.NotNil(t, state)
-	require.Len(t, state.AgentAncestry, 1,
-		"session start records exactly ONE ref — the agent process; recording the chain above it (user shell, terminal, IDE) made same-terminal human commits falsely identity-match")
-	// Under go test the hook's first non-shell ancestor is the test runner —
-	// this process's parent (go/gotestsum are not shell-like).
-	assert.Equal(t, os.Getppid(), state.AgentAncestry[0].PID)
-	assert.NotZero(t, state.AgentAncestry[0].StartTime, "refs without start times cannot guard against PID reuse")
-}
-
 // TestMutateSessionState_NestedCallsAreReentrant verifies that calling
 // MutateSessionState from within an outer MutateSessionState callback
 // doesn't deadlock. POSIX flock isn't reentrant across distinct FDs in the

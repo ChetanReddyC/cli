@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/internal/proctree"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
@@ -40,14 +40,15 @@ func identityTestRepo(t *testing.T) string {
 	return dir
 }
 
-// selfAncestorRef returns a ProcessRef for this test process's parent — a
-// live process guaranteed to appear in the ancestry of any process this test
-// (or code it calls in-process) walks from.
-func selfAncestorRef(t *testing.T) proctree.ProcessRef {
+// selfAncestorOwner returns the proclive.Identity of this test process's
+// parent — a live process guaranteed to appear in the ancestry of any code
+// this test calls in-process, standing in for the agent process that
+// captureSessionOwner records as SessionState.Owner.
+func selfAncestorOwner(t *testing.T) *proclive.Identity {
 	t.Helper()
-	ref, err := proctree.Ref(os.Getppid())
-	require.NoError(t, err)
-	return ref
+	id, ok := proclive.IdentityOf(os.Getppid())
+	require.True(t, ok, "IdentityOf(parent) must resolve on supported platforms")
+	return &id
 }
 
 func saveIdentitySession(t *testing.T, id string, mutate func(*SessionState)) {
@@ -86,9 +87,9 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 
 	t.Run("matches the session whose agent is in the commit ancestry", func(t *testing.T) {
 		identityTestRepo(t)
-		anc := selfAncestorRef(t)
+		anc := selfAncestorOwner(t)
 		saveIdentitySession(t, "sess-agent", func(st *SessionState) {
-			st.AgentAncestry = []proctree.ProcessRef{anc}
+			st.Owner = anc
 			st.WorktreePath = "/somewhere/else/entirely"
 		})
 
@@ -101,7 +102,7 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 	t.Run("no recorded ancestry matches nothing", func(t *testing.T) {
 		identityTestRepo(t)
 		saveIdentitySession(t, "sess-plain", func(st *SessionState) {
-			st.AgentAncestry = nil
+			st.Owner = nil
 		})
 
 		s := NewManualCommitStrategy()
@@ -111,10 +112,11 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 	t.Run("dead process refs cannot match a recycled PID", func(t *testing.T) {
 		identityTestRepo(t)
 		saveIdentitySession(t, "sess-stale", func(st *SessionState) {
-			// Same PID as a live ancestor, wrong start time: a recycled PID.
-			ref := selfAncestorRef(t)
-			ref.StartTime++
-			st.AgentAncestry = []proctree.ProcessRef{ref}
+			// Same PID as a live ancestor, wrong start fingerprint: a
+			// recycled PID.
+			owner := *selfAncestorOwner(t)
+			owner.Start += "-recycled"
+			st.Owner = &owner
 		})
 
 		s := NewManualCommitStrategy()
@@ -123,9 +125,9 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 
 	t.Run("imported sessions never match", func(t *testing.T) {
 		identityTestRepo(t)
-		anc := selfAncestorRef(t)
+		anc := selfAncestorOwner(t)
 		saveIdentitySession(t, "sess-imported", func(st *SessionState) {
-			st.AgentAncestry = []proctree.ProcessRef{anc}
+			st.Owner = anc
 			st.Kind = session.KindImported
 		})
 
@@ -137,14 +139,14 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 		// A resumed agent process produces a new session ID with the same
 		// ancestry; the commit belongs to the one currently interacting.
 		identityTestRepo(t)
-		anc := selfAncestorRef(t)
+		anc := selfAncestorOwner(t)
 		old := time.Now().Add(-2 * time.Hour)
 		saveIdentitySession(t, "sess-old", func(st *SessionState) {
-			st.AgentAncestry = []proctree.ProcessRef{anc}
+			st.Owner = anc
 			st.LastInteractionTime = &old
 		})
 		saveIdentitySession(t, "sess-new", func(st *SessionState) {
-			st.AgentAncestry = []proctree.ProcessRef{anc}
+			st.Owner = anc
 		})
 
 		s := NewManualCommitStrategy()
@@ -168,9 +170,9 @@ func TestFindSessionsForCommitLinking_IdentityAddsGuestSession(t *testing.T) {
 	// — invisible to path matching (exact matches exist, so the sibling
 	// fallback never fires), which is exactly how sibling-worktree agent
 	// commits lost their linkage.
-	anc := selfAncestorRef(t)
+	anc := selfAncestorOwner(t)
 	saveIdentitySession(t, "sess-agent-elsewhere", func(st *SessionState) {
-		st.AgentAncestry = []proctree.ProcessRef{anc}
+		st.Owner = anc
 		st.WorktreePath = "/somewhere/else/entirely"
 	})
 
@@ -301,10 +303,10 @@ func TestFindSessionsForWorktree_AmbiguityResolvedByLiveness(t *testing.T) {
 		dir := identityTestRepo(t)
 		wtA := addSiblingWorktree(t, dir, "live-c")
 		wtB := addSiblingWorktree(t, dir, "live-d")
-		anc := selfAncestorRef(t)
+		anc := selfAncestorOwner(t)
 		saveIdentitySession(t, "sess-live-c", func(st *SessionState) {
 			st.WorktreePath = wtA
-			st.AgentAncestry = []proctree.ProcessRef{anc}
+			st.Owner = anc
 		})
 		saveIdentitySession(t, "sess-live-d", func(st *SessionState) { st.WorktreePath = wtB })
 		buf := captureStderrWriter(t)
@@ -350,30 +352,6 @@ func TestUpdateBaseCommitIfChanged_GuestWorktreeGating(t *testing.T) {
 	s.updateBaseCommitIfChanged(ctx, guest, "2222222222222222222222222222222222222222", dir)
 	assert.Equal(t, "1111111111111111111111111111111111111111", guest.BaseCommit,
 		"a guest-linked session's BaseCommit tracks its home worktree, not this commit")
-}
-
-// Regression (Cursor bugbot on PR #2013): recording the raw ancestor chain
-// captured the user's shell and terminal above the agent, so a human commit
-// typed in the same terminal identity-matched the agent's session. Shell-like
-// processes must be skipped (agents interpose `sh -c` below themselves) and
-// everything above the first non-shell ancestor must stay unrecorded.
-func TestIsShellLikeExe(t *testing.T) {
-	t.Parallel()
-	shellLike := []string{"sh", "bash", "zsh", "fish", "-fish", "dash", "tmux", "cmd.exe", "powershell.exe", "pwsh", "/bin/sh", "-bash",
-		// tmux's server renames itself via prctl; a comm of "tmux: server"
-		// must still classify as tmux or every pane shares a recordable ref.
-		"tmux: server",
-		// An unresolvable name is not evidence — treat as shell (skip), or an
-		// unidentifiable process gets recorded as "the agent" even when it is
-		// the very shell the filter exists to exclude.
-		""}
-	for _, exe := range shellLike {
-		assert.True(t, isShellLikeExe(exe), "%q hosts arbitrary children; matching it proves plumbing, not authorship", exe)
-	}
-	notShell := []string{"claude", "node", "codex", "gemini", "entire", "go", "gotestsum", "strategy.test", "Cursor.exe"}
-	for _, exe := range notShell {
-		assert.False(t, isShellLikeExe(exe), "%q must remain recordable as an agent process", exe)
-	}
 }
 
 // Not parallel: uses t.Chdir()

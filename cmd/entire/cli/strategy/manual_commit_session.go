@@ -631,7 +631,6 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		AttributionBaseCommit: headHash,
 		WorktreePath:          worktreePath,
 		WorktreeID:            worktreeID,
-		AgentAncestry:         recordAgentAncestry(ctx),
 		StartedAt:             now,
 		LastInteractionTime:   &now,
 		TurnID:                turnID.String(),
