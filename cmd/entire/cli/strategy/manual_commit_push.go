@@ -190,17 +190,26 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// Thread the span's context into the push so the network push and any
 	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
 	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoint_refs")
+	// allDelivered stays true for an empty ref set, matching the git-refs empty
+	// queue: nothing was stranded either way. It must come from pushRefIfNeeded's
+	// delivered return and NOT from err, which is fail-soft and nil even when the
+	// remote refused the ref.
+	allDelivered := true
 	for _, ref := range refs.Push {
-		if err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref); err != nil {
+		delivered, err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref)
+		if err != nil {
 			pushCheckpointsSpan.RecordError(err)
 			pushCheckpointsSpan.End()
 			return err
+		}
+		if !delivered {
+			allDelivered = false
 		}
 	}
 	pushCheckpointsSpan.End()
 
 	// Delivered: the election may now follow the push that carried it.
-	if pendingCapture != "" {
+	if pendingCapture != "" && allDelivered {
 		commitCapturedSyncRemote(ctx, pendingCapture)
 	}
 

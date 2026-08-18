@@ -127,6 +127,25 @@ func setBranchTrackingRemote(t *testing.T, env *TestEnv, remoteName string) {
 	env.setGitConfigBaseline()
 }
 
+// forkRemote is the non-origin remote these tests push to — the fork topology
+// that motivated the captured election.
+const forkRemote = "fork"
+
+// setRemoteURL repoints a configured remote. Used to take a remote dark
+// mid-test by aiming it at a path that does not exist, which fails the transfer
+// while leaving the remote configured and its tracking refs in place.
+func setRemoteURL(t *testing.T, env *TestEnv, remote, url string) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", "remote", "set-url", remote, url)
+	cmd.Dir = env.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote set-url %s: %v\n%s", remote, err, out)
+	}
+	// Deliberate test setup, not drift — refresh the teardown baseline.
+	env.setGitConfigBaseline()
+}
+
 // capturedSyncRemotesOnDisk reads the captured-election state file for the
 // test repo; nil when no capture has happened.
 func capturedSyncRemotesOnDisk(t *testing.T, env *TestEnv) []string {
@@ -266,12 +285,12 @@ func TestCheckpointSyncRemote_TrackedPushCapturesElection(t *testing.T) {
 		env.CheckpointStore = backend
 
 		bareOrigin := env.SetupBareRemote()
-		bareFork := env.SetupNamedBareRemote("fork") // `-u`: branch declares fork
+		bareFork := env.SetupNamedBareRemote(forkRemote) // `-u`: branch declares fork
 
 		checkpointID := createCheckpointedCommit(t, env, "Add capture module", "capture.go", "package capture", "Add capture module")
 
-		env.RunPrePush("fork")
-		if got := capturedSyncRemotesOnDisk(t, env); len(got) != 1 || got[0] != "fork" {
+		env.RunPrePush(forkRemote)
+		if got := capturedSyncRemotesOnDisk(t, env); len(got) != 1 || got[0] != forkRemote {
 			t.Errorf("declared-destination push should capture the election, got %v", got)
 		}
 		if !env.CheckpointExistsOnRemote(bareFork, checkpointID) {
@@ -287,7 +306,7 @@ func TestCheckpointSyncRemote_TrackedPushCapturesElection(t *testing.T) {
 			t.Error("origin must not receive checkpoint data after the election was captured")
 		}
 
-		const wantRemote, wantSource = "fork", "observed"
+		const wantRemote, wantSource = forkRemote, "observed"
 		st := statusSyncJSONOutput(t, env)
 		if st.CheckpointSyncRemote != wantRemote || st.CheckpointSyncRemoteSource != wantSource {
 			t.Errorf("status should report remote %q from source %q, got %q from %q",
@@ -321,13 +340,13 @@ func TestCheckpointSyncRemote_DeferredPushDoesNotCaptureElection(t *testing.T) {
 	// A fork that exists in config but has never been fetched or pushed: no
 	// tracking refs, which is what the defer reads as "empty".
 	freshFork := initUnregisteredBareRepo(t)
-	testutil.AddRemote(t, env.RepoDir, "fork", freshFork)
+	testutil.AddRemote(t, env.RepoDir, forkRemote, freshFork)
 	env.setGitConfigBaseline()
-	setBranchTrackingRemote(t, env, "fork")
+	setBranchTrackingRemote(t, env, forkRemote)
 
 	checkpointID := createCheckpointedCommit(t, env, "Add deferred module", "deferred.go", "package deferred", "Add deferred module")
 
-	env.RunPrePush("fork")
+	env.RunPrePush(forkRemote)
 
 	if got := capturedSyncRemotesOnDisk(t, env); got != nil {
 		t.Errorf("a push whose checkpoint delivery was deferred must not capture the election, got %v", got)
@@ -347,10 +366,10 @@ func TestCheckpointSyncRemote_DeferredPushDoesNotCaptureElection(t *testing.T) {
 
 	// Publish the user's branch to fork, which retires the defer, and push
 	// again: this push delivers, so this is the push that captures.
-	env.GitPush("fork", env.GetCurrentBranch())
-	env.RunPrePush("fork")
+	env.GitPush(forkRemote, env.GetCurrentBranch())
+	env.RunPrePush(forkRemote)
 
-	if got := capturedSyncRemotesOnDisk(t, env); len(got) != 1 || got[0] != "fork" {
+	if got := capturedSyncRemotesOnDisk(t, env); len(got) != 1 || got[0] != forkRemote {
 		t.Errorf("the first push that actually delivers should capture the election, got %v", got)
 	}
 	if !env.CheckpointExistsOnRemote(freshFork, checkpointID) {
@@ -359,6 +378,70 @@ func TestCheckpointSyncRemote_DeferredPushDoesNotCaptureElection(t *testing.T) {
 	if env.CheckpointsPresentOnRemote(bareOrigin) {
 		t.Error("origin must never receive checkpoint data in this flow")
 	}
+}
+
+// TestCheckpointSyncRemote_RejectedPushDoesNotCaptureElection covers the other
+// end of the gate-to-delivery gap: the push is attempted and the remote refuses
+// it. Unlike the deferred case this reaches the network, so it exercises each
+// backend's own delivery point — the git-branch ref-push loop and the git-refs
+// queue flush — and the git-refs flush is fail-soft, so its error path would
+// otherwise never be asserted against capture at all.
+//
+// Capturing here was the worst shape of the old behavior: the election moved to
+// a remote that had just refused the data, and because it is one-shot the
+// checkpoints could then only ever be retried against that same remote.
+func TestCheckpointSyncRemote_RejectedPushDoesNotCaptureElection(t *testing.T) {
+	t.Parallel()
+	ForEachBackend(t, func(t *testing.T, backend string) {
+		env := NewFeatureBranchEnv(t)
+		env.CheckpointStore = backend
+
+		bareOrigin := env.SetupBareRemote()
+		// `-u`: the branch declares fork, and this push leaves tracking refs
+		// behind — which retires the empty-remote defer, so the flow gets past
+		// it and actually attempts the transfer.
+		bareFork := env.SetupNamedBareRemote(forkRemote)
+
+		checkpointID := createCheckpointedCommit(t, env, "Add rejected module", "rejected.go", "package rejected", "Add rejected module")
+
+		// fork goes dark only now, after its tracking refs exist.
+		setRemoteURL(t, env, forkRemote, env.RepoDir+"/nonexistent-remote")
+
+		// git-branch surfaces the failed checkpoint delivery to the caller;
+		// git-refs is fail-soft and leaves the refs queued. Either is fine here
+		// — what must hold is that neither moved the election.
+		if err := env.RunPrePushWithError(forkRemote); err != nil {
+			t.Logf("pre-push reported the failed checkpoint delivery: %v", err)
+		}
+
+		if got := capturedSyncRemotesOnDisk(t, env); got != nil {
+			t.Errorf("a push whose checkpoint delivery was rejected must not capture the election, got %v", got)
+		}
+		if env.CheckpointsPresentOnRemote(bareOrigin) {
+			t.Error("the gated remote must not receive checkpoint data")
+		}
+
+		// Still the default election, so the checkpoints are not trapped: they
+		// remain routable once the user fixes the remote.
+		const wantRemote, wantSource = "origin", "default"
+		st := statusSyncJSONOutput(t, env)
+		if st.CheckpointSyncRemote != wantRemote || st.CheckpointSyncRemoteSource != wantSource {
+			t.Errorf("status should still report %q from %q, got %q from %q",
+				wantRemote, wantSource, st.CheckpointSyncRemote, st.CheckpointSyncRemoteSource)
+		}
+
+		// Repair the remote and push again: the retry both delivers and captures,
+		// so one rejected push costs the user nothing permanent.
+		setRemoteURL(t, env, forkRemote, bareFork)
+		env.RunPrePush(forkRemote)
+
+		if got := capturedSyncRemotesOnDisk(t, env); len(got) != 1 || got[0] != forkRemote {
+			t.Errorf("the retry that delivers should capture the election, got %v", got)
+		}
+		if !env.CheckpointExistsOnRemote(bareFork, checkpointID) {
+			t.Errorf("checkpoint %s should reach fork on the successful retry", checkpointID)
+		}
+	})
 }
 
 // TestCheckpointSyncRemote_MisconfiguredSettingFailsClosed verifies that when
