@@ -208,7 +208,11 @@ func detectAllLayers(s string) []taggedRegion {
 	// 2. Pattern-based detection via betterleaks (secrets — always on).
 	if d := getDetector(); d != nil {
 		for _, f := range d.DetectString(s) {
-			if f.Secret == "" {
+			// Placeholder policy applies stack-wide: a value our own layers
+			// would suppress as a documentation placeholder (changeme,
+			// secret_here, ${VAR}, mask runs) stays visible even when a
+			// betterleaks rule flags it.
+			if f.Secret == "" || isPlaceholderSecretValue(f.Secret) {
 				continue
 			}
 			searchFrom := 0

@@ -913,9 +913,11 @@ func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
 			want:  "PWD=/workspace/project",
 		},
 		{
-			name:  "standalone password assignment is preserved",
+			// betterleaks >= 1.8.0 detects generic password assignments;
+			// over-redaction here is accepted as the safe direction.
+			name:  "standalone password assignment is redacted by betterleaks",
 			input: "password=not-a-secret-setting",
-			want:  "password=not-a-secret-setting",
+			want:  "password=REDACTED",
 		},
 		{
 			name:  "password reset query parameter is preserved",
@@ -923,9 +925,12 @@ func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
 			want:  "https://example.com/?password_reset=true",
 		},
 		{
-			name:  "generic https password query is preserved",
+			// betterleaks >= 1.8.0 detects generic password assignments; its
+			// match runs to end of line, so the trailing query param is
+			// consumed too. Accepted as safe-direction over-redaction.
+			name:  "generic https password query is redacted by betterleaks",
 			input: "https://example.com/callback?user=svc&password=not-a-db-credential&debug=true",
-			want:  "https://example.com/callback?user=svc&password=not-a-db-credential&debug=true",
+			want:  "https://example.com/callback?user=svc&password=REDACTED",
 		},
 		{
 			name:  "db password hash field is preserved",

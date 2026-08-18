@@ -9,18 +9,17 @@ import "regexp"
 // credential formats the other secret layers don't reliably flag.
 //
 // The betterleaks layer's coverage of these differs per prefix (verified
-// against the vendored betterleaks v1.5.0 rule source):
-//   - sb_secret_: the supabase-project-api-key rule is a *composite* rule
-//     (RequiredRules: supabase-project-url) that only fires when a matching
-//     "*.supabase.co" URL is present in the same content, on top of an
-//     entropy<=4.0 filter. A secret captured on its own therefore passes
-//     straight through regardless of entropy.
-//   - sbp_: the supabase-management-token rule fires standalone (no
-//     RequiredRules), but only matches an exact 40-character lowercase body
-//     and is further filtered by entropy<=3.5 and a two-digit minimum. A
-//     high-entropy 40-char sbp_ token captured alone IS caught by
-//     betterleaks; what this layer adds for sbp_ is coverage of bodies at
-//     other lengths, lower entropy, or without two digits.
+// against the vendored betterleaks v1.8.0 rule source):
+//   - sb_secret_: the supabase-project-api-key rule fires standalone in
+//     1.8.0 (the project-url pairing moved from a RequiredRules gate to a
+//     validation-only component), but it matches an exact 31-character body
+//     and drops findings with entropy<=4.0. A low-entropy or odd-length
+//     secret therefore still passes straight through.
+//   - sbp_: the supabase-management-token rule fires standalone, but only
+//     matches an exact 40-character lowercase body and is further filtered
+//     by entropy<=3.5. A high-entropy 40-char sbp_ token captured alone IS
+//     caught by betterleaks; what this layer adds for sbp_ is coverage of
+//     bodies at other lengths or lower entropy.
 //
 // Supabase (https://supabase.com/docs/guides/getting-started/api-keys):
 //   - sb_secret_...      secret API key (replaces the legacy service_role
