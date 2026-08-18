@@ -3232,6 +3232,65 @@ func TestHandleLifecycleTurnEnd_InFlightTask_DedupsUnchangedTranscript(t *testin
 	assert.Greater(t, marker.LastCapturedTranscriptBytes, firstSize, "the marker must record the grown transcript's new size")
 }
 
+// TestHandleLifecycleTurnEnd_InFlightTask_ZeroFilesRecordsTranscriptSize is the
+// regression for a review rider on Task 3: before this fix, the zero-modified-
+// files skip path in captureInFlightTaskIncremental returned without
+// persisting LastCapturedTranscriptBytes, so a read-only background subagent
+// (e.g. a reviewer) whose transcript never touches a file had its unchanged
+// transcript rescanned by the analyzer on every single turn-end for the life
+// of the session. The marker must record the transcript size on the
+// zero-files skip path too, not only after a successful save.
+func TestHandleLifecycleTurnEnd_InFlightTask_ZeroFilesRecordsTranscriptSize(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "turnend-zerofiles-session"
+	toolUseID := "toolu_zerofiles1"
+	agentID := "agent-zerofiles1"
+
+	transcriptDir := t.TempDir()
+	mainTranscriptPath := filepath.Join(transcriptDir, "main.jsonl")
+	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"review the diff"}}`+"\n"), 0o600))
+
+	// A read-only subagent (e.g. a reviewer): the analyzer reports no modified
+	// files, so the incremental save is skipped entirely.
+	subagentTranscriptPath := filepath.Join(transcriptDir, "agent-"+agentID+".jsonl")
+	require.NoError(t, os.WriteFile(subagentTranscriptPath, []byte(`{"type":"assistant"}`+"\n"), 0o600))
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: headHash,
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseActive,
+		InFlightTasks: []session.InFlightTask{
+			{ToolUseID: toolUseID, AgentID: agentID, StartedAt: time.Now(), SubagentType: "review", TaskDescription: "Review the diff"},
+		},
+	}))
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerFiles:      nil,
+	}
+
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  sessionID,
+		SessionRef: mainTranscriptPath,
+		Timestamp:  time.Now(),
+	}
+	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, event))
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	marker := state.FindInFlightTask(toolUseID)
+	require.NotNil(t, marker, "zero-files skip must not clear the in-flight marker")
+
+	info, statErr := os.Stat(subagentTranscriptPath)
+	require.NoError(t, statErr)
+	assert.Equal(t, info.Size(), marker.LastCapturedTranscriptBytes,
+		"the zero-files skip path must still record the transcript size, or an unchanged read-only transcript is rescanned every turn-end forever")
+}
+
 // TestHandleLifecycleSessionEnd_InFlightTask_FinalCapture is the regression
 // Task 3 fixes: a session that ended before SubagentStop arrived used to lose
 // the whole subagent transcript — the in-flight marker just sat there

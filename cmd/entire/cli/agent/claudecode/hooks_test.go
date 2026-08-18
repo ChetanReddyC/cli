@@ -694,7 +694,10 @@ func TestInstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	// Create settings with a hook type we don't handle (Notification is a real Claude Code hook type)
+	// Create settings with hook types we don't handle (Notification and
+	// PreCompact are real Claude Code hook types). SubagentStop used to be the
+	// second example here, but it is now a managed hook type (see
+	// TestInstallHooks_SubagentStop_*), so PreCompact stands in for it.
 	writeSettingsFile(t, tempDir, `{
   "hooks": {
     "Notification": [
@@ -703,10 +706,10 @@ func TestInstallHooks_PreservesUnknownHookTypes(t *testing.T) {
         "hooks": [{"type": "command", "command": "echo notification received"}]
       }
     ],
-    "SubagentStop": [
+    "PreCompact": [
       {
         "matcher": ".*",
-        "hooks": [{"type": "command", "command": "echo subagent stopped"}]
+        "hooks": [{"type": "command", "command": "echo pre compact"}]
       }
     ]
   }
@@ -726,9 +729,9 @@ func TestInstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 		t.Errorf("Notification hook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
 	}
 
-	// Verify SubagentStop hook is preserved
-	if _, ok := rawHooks["SubagentStop"]; !ok {
-		t.Errorf("SubagentStop hook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
+	// Verify PreCompact hook is preserved
+	if _, ok := rawHooks["PreCompact"]; !ok {
+		t.Errorf("PreCompact hook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
 	}
 
 	// Verify the Notification hook content is intact
@@ -746,22 +749,22 @@ func TestInstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 		}
 	}
 
-	// Verify the SubagentStop hook content is intact
-	var subagentStopMatchers []ClaudeHookMatcher
-	if err := json.Unmarshal(rawHooks["SubagentStop"], &subagentStopMatchers); err != nil {
-		t.Fatalf("failed to parse SubagentStop hooks: %v", err)
+	// Verify the PreCompact hook content is intact
+	var preCompactMatchers []ClaudeHookMatcher
+	if err := json.Unmarshal(rawHooks["PreCompact"], &preCompactMatchers); err != nil {
+		t.Fatalf("failed to parse PreCompact hooks: %v", err)
 	}
-	if len(subagentStopMatchers) != 1 {
-		t.Errorf("SubagentStop matchers = %d, want 1", len(subagentStopMatchers))
+	if len(preCompactMatchers) != 1 {
+		t.Errorf("PreCompact matchers = %d, want 1", len(preCompactMatchers))
 	}
-	if len(subagentStopMatchers) > 0 {
-		if subagentStopMatchers[0].Matcher != ".*" {
-			t.Errorf("SubagentStop matcher = %q, want %q", subagentStopMatchers[0].Matcher, ".*")
+	if len(preCompactMatchers) > 0 {
+		if preCompactMatchers[0].Matcher != ".*" {
+			t.Errorf("PreCompact matcher = %q, want %q", preCompactMatchers[0].Matcher, ".*")
 		}
-		if len(subagentStopMatchers[0].Hooks) > 0 {
-			if subagentStopMatchers[0].Hooks[0].Command != "echo subagent stopped" {
-				t.Errorf("SubagentStop hook command = %q, want %q",
-					subagentStopMatchers[0].Hooks[0].Command, "echo subagent stopped")
+		if len(preCompactMatchers[0].Hooks) > 0 {
+			if preCompactMatchers[0].Hooks[0].Command != "echo pre compact" {
+				t.Errorf("PreCompact hook command = %q, want %q",
+					preCompactMatchers[0].Hooks[0].Command, "echo pre compact")
 			}
 		}
 	}
@@ -791,10 +794,10 @@ func TestUninstallHooks_PreservesUnknownHookTypes(t *testing.T) {
         "hooks": [{"type": "command", "command": "echo notification received"}]
       }
     ],
-    "SubagentStop": [
+    "PreCompact": [
       {
         "matcher": ".*",
-        "hooks": [{"type": "command", "command": "echo subagent stopped"}]
+        "hooks": [{"type": "command", "command": "echo pre compact"}]
       }
     ]
   }
@@ -814,9 +817,9 @@ func TestUninstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 		t.Errorf("Notification hook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
 	}
 
-	// Verify SubagentStop hook is preserved
-	if _, ok := rawHooks["SubagentStop"]; !ok {
-		t.Errorf("SubagentStop hook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
+	// Verify PreCompact hook is preserved
+	if _, ok := rawHooks["PreCompact"]; !ok {
+		t.Errorf("PreCompact hook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
 	}
 
 	// Verify our hooks were removed
@@ -852,6 +855,93 @@ func TestInstallHooks_UsesCurrentToolMatchers(t *testing.T) {
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "post-task subagent hook")
 	assertHookExists(t, settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate",
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "post-todo task-list hook")
+}
+
+// TestInstallHooks_SubagentStop_FreshInstall is the regression for wiring up
+// the real background-subagent-completion signal (SubagentStop fires at true
+// completion, even for background subagents whose PostToolUse fires seconds
+// after launch at the launch stub — see
+// docs/superpowers/plans/2026-08-17-subagent-stop-capture.md). A fresh install
+// must write the SubagentStop hook with the same empty-matcher,
+// availability-guarded `sh -c` shape as Stop.
+func TestInstallHooks_SubagentStop_FreshInstall(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+	wantCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")
+	assertHookExists(t, settings.Hooks.SubagentStop, "", wantCmd, "SubagentStop hook")
+
+	// Same shape as Stop: single command, empty matcher, no timeout.
+	if len(settings.Hooks.SubagentStop) != 1 || settings.Hooks.SubagentStop[0].Matcher != "" {
+		t.Fatalf("SubagentStop = %+v, want a single matcher with an empty string matcher (same shape as Stop)", settings.Hooks.SubagentStop)
+	}
+	if len(settings.Hooks.SubagentStop[0].Hooks) != 1 {
+		t.Fatalf("SubagentStop hooks = %d, want 1", len(settings.Hooks.SubagentStop[0].Hooks))
+	}
+	if got := settings.Hooks.SubagentStop[0].Hooks[0].Timeout; got != 0 {
+		t.Errorf("SubagentStop timeout = %d, want 0 (no explicit timeout, same as Stop)", got)
+	}
+}
+
+// TestCheckHookConfig_Outdated_MissingSubagentStop pins CheckHookConfig's
+// drift detection for the new hook: an install that predates SubagentStop
+// (Stop + current tool-use matchers present, but no SubagentStop entry) must
+// read as outdated so `entire doctor`/`entire enable --force` picks it up,
+// not silently stay HooksCurrent forever.
+func TestCheckHookConfig_Outdated_MissingSubagentStop(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	stop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
+    "PreToolUse": [{"matcher": "Agent", "hooks": [{"type": "command", "command": %q}]}],
+    "PostToolUse": [
+      {"matcher": "Agent", "hooks": [{"type": "command", "command": %q}]},
+      {"matcher": "TaskCreate|TaskUpdate", "hooks": [{"type": "command", "command": %q}]}
+    ]
+  }
+}`, stop, pre, post, todo))
+
+	if got := CheckHookConfig(context.Background()); got != HooksOutdated {
+		t.Errorf("CheckHookConfig() = %v, want HooksOutdated (missing SubagentStop)", got)
+	}
+}
+
+// TestUninstallHooks_RemovesSubagentStop verifies `entire disable` strips the
+// SubagentStop hook installed by InstallHooks — without threading it through
+// UninstallHooks, disabling Entire would leave this hook behind.
+func TestUninstallHooks_RemovesSubagentStop(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	settings := readClaudeSettings(t, tempDir)
+	if !hasEntireHook(settings.Hooks.SubagentStop) {
+		t.Fatal("SubagentStop hook should be installed before uninstall")
+	}
+
+	if err := a.UninstallHooks(context.Background()); err != nil {
+		t.Fatalf("UninstallHooks() error = %v", err)
+	}
+
+	settings = readClaudeSettings(t, tempDir)
+	if hasEntireHook(settings.Hooks.SubagentStop) {
+		t.Error("SubagentStop hook should be removed after uninstall")
+	}
 }
 
 func TestCheckHookConfig_Absent(t *testing.T) {
@@ -909,6 +999,7 @@ func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
 	t.Chdir(tempDir)
 
 	stop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	subagentStop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")
 	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
 	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
 	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
@@ -917,13 +1008,14 @@ func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
 	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
   "hooks": {
     "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
+    "SubagentStop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
     "PreToolUse": [{"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]}],
     "PostToolUse": [
       {"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]},
       {"matcher": "TaskCreate|TaskUpdate|TaskGet", "hooks": [{"type": "command", "command": %q}]}
     ]
   }
-}`, stop, pre, post, todo))
+}`, stop, subagentStop, pre, post, todo))
 
 	if got := CheckHookConfig(context.Background()); got != HooksCurrent {
 		t.Errorf("CheckHookConfig() = %v, want HooksCurrent (superset matcher)", got)

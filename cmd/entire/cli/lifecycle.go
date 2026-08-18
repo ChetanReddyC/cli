@@ -1667,6 +1667,12 @@ func captureInFlightTaskIncremental(logCtx context.Context, ag agent.Agent, sess
 	if len(relModifiedFiles) == 0 {
 		logging.Debug(logCtx, "no file changes detected for in-flight task, skipping incremental snapshot",
 			slog.String("tool_use_id", task.ToolUseID))
+		// Still record the transcript size: a read-only background subagent
+		// (e.g. a reviewer) never has file changes, so without this its
+		// unchanged transcript would fail the growth-dedup check (which
+		// compares against LastCapturedTranscriptBytes) and get rescanned by
+		// the analyzer on every single turn-end for the life of the session.
+		persistCapturedTranscriptSize(logCtx, sessionID, task.ToolUseID, transcriptSize)
 		return
 	}
 
@@ -1705,16 +1711,25 @@ func captureInFlightTaskIncremental(logCtx context.Context, ag agent.Agent, sess
 		return
 	}
 
-	// Persist the captured size so a subsequent turn-end with an unchanged
-	// transcript can skip re-scanning and re-committing (the dedup above).
-	// The marker must still exist under its own ToolUseID: incremental
-	// snapshots never claim/remove it (only Final captures do via
-	// claimInFlightTask). The only way it could be gone here is a Final
-	// capture racing this same call between the earlier LoadSessionState in
-	// captureInFlightTasks and now — tolerated the same way the rest of this
-	// path tolerates a vanished marker (nothing to update).
+	persistCapturedTranscriptSize(logCtx, sessionID, task.ToolUseID, transcriptSize)
+}
+
+// persistCapturedTranscriptSize records a subagent transcript's just-scanned
+// size on its in-flight marker so a subsequent turn-end with an unchanged
+// transcript can skip both the analyzer scan and any shadow-branch write (the
+// growth dedup in captureInFlightTaskIncremental). Called from both the
+// zero-files skip path and after a successful incremental save — either way,
+// the transcript at this size has now been fully accounted for.
+//
+// The marker must still exist under its own ToolUseID: incremental snapshots
+// never claim/remove it (only Final captures do via claimInFlightTask). The
+// only way it could be gone here is a Final capture racing this same call
+// between the earlier LoadSessionState in captureInFlightTasks and now —
+// tolerated the same way the rest of this path tolerates a vanished marker
+// (nothing to update).
+func persistCapturedTranscriptSize(logCtx context.Context, sessionID, toolUseID string, transcriptSize int64) {
 	mutErr := strategy.MutateSessionState(logCtx, sessionID, func(state *strategy.SessionState) error {
-		marker := state.FindInFlightTask(task.ToolUseID)
+		marker := state.FindInFlightTask(toolUseID)
 		if marker == nil {
 			return nil
 		}
@@ -1723,7 +1738,7 @@ func captureInFlightTaskIncremental(logCtx context.Context, ag agent.Agent, sess
 	})
 	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
 		logging.Warn(logCtx, "failed to persist captured transcript size for in-flight task",
-			slog.String("tool_use_id", task.ToolUseID),
+			slog.String("tool_use_id", toolUseID),
 			slog.String("error", mutErr.Error()))
 	}
 }
