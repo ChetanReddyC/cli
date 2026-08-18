@@ -2558,3 +2558,76 @@ func TestPostCommit_IdleSessionWithLiveMarker_CondensesCommitSnapshot(t *testing
 	_, err = repo.Reference(refName, true)
 	assert.Error(t, err, "shadow branch should be deleted once its commit-snapshot content is condensed")
 }
+
+// TestPostCommit_EndedSessionWithLingeringMarker_UnrelatedCommitNotCondensed
+// is the regression for a scoping bug in the idle+marker overlap-check
+// bypass: finalizeExitedSessions (cmd/entire/cli/session_finalize.go) ends a
+// crashed/exited agent's session via endSessionNow, which never runs a final
+// in-flight-task capture — so a PhaseEnded session can carry a stale
+// InFlightTasks marker indefinitely, alongside FilesTouched left over from its
+// real earlier work. An earlier version of the marker bypass keyed only on
+// "has a marker" (not on phase), so it also fired for this ENDED session and
+// trusted its marker enough to skip the overlap check — condensing a later,
+// completely unrelated human commit into it. idleWithLiveMarker must be
+// scoped to state.Phase == PhaseIdle so an ENDED session with a lingering
+// marker still needs real file-overlap evidence like any other stale session.
+func TestPostCommit_EndedSessionWithLingeringMarker_UnrelatedCommitNotCondensed(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-postcommit-ended-lingering-marker"
+
+	// Real earlier work: test.txt modified, shadow branch has content.
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	now := time.Now()
+	state.Phase = session.PhaseEnded
+	state.EndedAt = &now
+	state.FilesTouched = []string{"test.txt"}
+	// A marker finalizeExitedSessions left behind: the crashed agent's
+	// background task was never finalized by a real SubagentStop/SessionEnd
+	// capture, so the marker is still here even though the session is ENDED.
+	state.InFlightTasks = []session.InFlightTask{
+		{ToolUseID: "toolu_crashed1", AgentID: "agent-crashed1", StartedAt: now},
+	}
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	originalBaseCommit := state.BaseCommit
+
+	// A later, completely unrelated human commit: a new file, test.txt untouched.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "other-work.txt"), []byte("unrelated work"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("other-work.txt")
+	require.NoError(t, err)
+	cpID := id.MustCheckpointID("c1c1c1c1c1c1")
+	commitMsg := "unrelated human commit\n\n" + trailers.CheckpointTrailerKey + ": " + cpID.String() + "\n"
+	_, err = wt.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	// Must NOT condense: no permanent checkpoint, shadow branch survives.
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.Error(t, err, "an unrelated commit must not condense a stale ended session's lingering marker")
+
+	refName := plumbing.NewBranchReferenceName(shadowBranch)
+	_, err = repo.Reference(refName, true)
+	require.NoError(t, err, "shadow branch must survive an unrelated commit")
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, originalBaseCommit, state.BaseCommit,
+		"BaseCommit must not move for an ended session on an unrelated commit")
+	assert.Len(t, state.InFlightTasks, 1,
+		"the lingering marker must remain untouched by an unrelated commit")
+}
