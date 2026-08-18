@@ -48,10 +48,10 @@ func TestReviewEventsPath(t *testing.T) {
 
 func TestStreamOnce_PrintsReadyAndReviewEvents(t *testing.T) {
 	frames := []string{
-		"event: ready\ndata: {\"trail_id\":\"trl_1\",\"cursor\":0}\n\n",
-		"id: 1\nevent: session.started\ndata: {\"id\":\"1\",\"trail_id\":\"trl_1\",\"review_session_id\":\"ses_123\",\"actor_id\":\"agent:reviewer\",\"event_type\":\"session.started\",\"target_type\":\"review_session\",\"target_id\":\"ses_123\",\"payload\":{\"code_version_id\":\"cv_1\"},\"created_at\":\"2026-01-01T00:00:00Z\"}\n\n",
-		"id: 2\nevent: comment.created\ndata: {\"id\":\"2\",\"trail_id\":\"trl_1\",\"review_session_id\":\"ses_123\",\"actor_id\":\"agent:reviewer\",\"event_type\":\"comment.created\",\"target_type\":\"review_comment\",\"target_id\":\"c1\",\"payload\":{\"severity\":\"high\",\"file_path\":\"src/foo.ts\",\"granularity\":\"line\"},\"created_at\":\"2026-01-01T00:00:01Z\"}\n\n",
-		"id: 3\nevent: session.ended\ndata: {\"id\":\"3\",\"trail_id\":\"trl_1\",\"review_session_id\":\"ses_123\",\"actor_id\":\"agent:reviewer\",\"event_type\":\"session.ended\",\"target_type\":\"review_session\",\"target_id\":\"ses_123\",\"payload\":{\"reason\":\"done\"},\"created_at\":\"2026-01-01T00:00:02Z\"}\n\n",
+		"event: ready\ndata: {\"trailId\":\"trl_1\",\"cursor\":0}\n\n",
+		"id: 1\nevent: session.started\ndata: {\"id\":\"1\",\"trailId\":\"trl_1\",\"reviewId\":\"ses_123\",\"actorId\":\"agent:reviewer\",\"eventType\":\"session.started\",\"targetType\":\"review_session\",\"targetId\":\"ses_123\",\"payload\":{\"codeVersionId\":\"cv_1\"},\"createdAt\":\"2026-01-01T00:00:00Z\"}\n\n",
+		"id: 2\nevent: comment.created\ndata: {\"id\":\"2\",\"trailId\":\"trl_1\",\"reviewId\":\"ses_123\",\"actorId\":\"agent:reviewer\",\"eventType\":\"comment.created\",\"targetType\":\"review_comment\",\"targetId\":\"c1\",\"payload\":{\"severity\":\"high\",\"filePath\":\"src/foo.ts\",\"granularity\":\"line\"},\"createdAt\":\"2026-01-01T00:00:01Z\"}\n\n",
+		"id: 3\nevent: session.ended\ndata: {\"id\":\"3\",\"trailId\":\"trl_1\",\"reviewId\":\"ses_123\",\"actorId\":\"agent:reviewer\",\"eventType\":\"session.ended\",\"targetType\":\"review_session\",\"targetId\":\"ses_123\",\"payload\":{\"reason\":\"done\"},\"createdAt\":\"2026-01-01T00:00:02Z\"}\n\n",
 		"event: reconnect\ndata: {\"reason\":\"max_duration\"}\n\n",
 	}
 	srv, _ := fakeSSEServer(t, frames)
@@ -87,7 +87,7 @@ func TestStreamOnce_PrintsReadyAndReviewEvents(t *testing.T) {
 
 func TestStreamOnce_JSONOutputEnvelope(t *testing.T) {
 	frames := []string{
-		"event: ready\ndata: {\"trail_id\":\"trl_1\",\"cursor\":0}\n\n",
+		"event: ready\ndata: {\"trailId\":\"trl_1\",\"cursor\":0}\n\n",
 		"event: reconnect\ndata: {\"reason\":\"max_duration\"}\n\n",
 	}
 	srv, _ := fakeSSEServer(t, frames)
@@ -142,8 +142,8 @@ func TestStreamOnce_ShowPingsTrimsSSECommentWhitespace(t *testing.T) {
 
 func TestStreamOnce_ReconnectEvent(t *testing.T) {
 	frames := []string{
-		"event: ready\ndata: {\"trail_id\":\"trl_1\",\"cursor\":0}\n\n",
-		"id: 1\nevent: session.started\ndata: {\"id\":\"1\",\"event_type\":\"session.started\",\"target_type\":\"review_session\",\"target_id\":\"ses_123\",\"actor_id\":\"agent\",\"payload\":{}}\n\n",
+		"event: ready\ndata: {\"trailId\":\"trl_1\",\"cursor\":0}\n\n",
+		"id: 1\nevent: session.started\ndata: {\"id\":\"1\",\"eventType\":\"session.started\",\"targetType\":\"review_session\",\"targetId\":\"ses_123\",\"actorId\":\"agent\",\"payload\":{}}\n\n",
 		"event: reconnect\ndata: {\"reason\":\"max_duration\"}\n\n",
 	}
 	srv, _ := fakeSSEServer(t, frames)
