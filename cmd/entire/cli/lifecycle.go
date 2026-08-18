@@ -1479,15 +1479,9 @@ func captureSubagentTaskStep(logCtx context.Context, ag agent.Agent, event *agen
 	return nil
 }
 
-// incrementalTypeBackgroundProgress is the TaskStepContext.IncrementalType
-// stamped on turn-end backstop snapshots of in-flight background tasks. It is
-// distinct from post-todo's per-TodoWrite incrementals, whose IncrementalType
-// is the triggering tool name (e.g. "TodoWrite") — this capture isn't
-// triggered by any single tool call, it's a periodic backstop.
-const incrementalTypeBackgroundProgress = "background_progress"
-
 // maxInFlightTasksPerCapture bounds how many in-flight background tasks a
-// single captureInFlightTasks invocation processes, oldest first.
+// single turn-end captureInFlightTasks invocation processes, oldest first.
+// Applies ONLY to the incremental (final == false) path.
 //
 // Budget rationale: each capture costs one analyzer transcript scan plus one
 // git tree write — empirically tens of milliseconds, about the same as one
@@ -1495,9 +1489,17 @@ const incrementalTypeBackgroundProgress = "background_progress"
 // 60s timeout, and the rest of turn-end (transcript flush wait, SaveStep)
 // already consumes a variable share of that budget before this backstop
 // runs. Capping at 8 bounds the added worst case to well under a second while
-// covering any realistic number of concurrent background subagents; anything
-// beyond the cap is picked up on the next turn-end or at SessionEnd, so
-// nothing is permanently missed — only delayed.
+// covering any realistic number of concurrent background subagents; a task
+// past the cap is simply delayed — it's picked up on the next turn-end, or
+// at SessionEnd, whichever comes first, so nothing is permanently missed.
+//
+// The SessionEnd final path (final == true) does NOT apply this cap: there is
+// no "next turn-end" for it to defer to — SessionEnd is the last chance to
+// capture a task's transcript before the marker's information is gone for
+// good, so it processes every marker regardless of count. It isn't on the
+// per-turn latency budget this cap protects, and each Final capture
+// claims-and-removes its own marker (claimInFlightTask), so the set it
+// iterates only shrinks as it goes.
 const maxInFlightTasksPerCapture = 8
 
 // captureInFlightTasks is the turn-end/SessionEnd backstop for background
@@ -1538,8 +1540,11 @@ func captureInFlightTasks(ctx context.Context, ag agent.Agent, sessionID, sessio
 
 	// InFlightTasks is append-only in launch order (AddInFlightTask), so a
 	// straight prefix slice is the oldest-first N this budget calls for.
+	// The cap applies only to the incremental (turn-end) path: a Final
+	// (SessionEnd) capture is every task's last chance to keep its
+	// transcript, so it must never be clipped — see maxInFlightTasksPerCapture.
 	tasks := state.InFlightTasks
-	if len(tasks) > maxInFlightTasksPerCapture {
+	if !final && len(tasks) > maxInFlightTasksPerCapture {
 		logging.Warn(logCtx, "clipping in-flight task capture to per-invocation budget",
 			slog.String("session_id", sessionID),
 			slog.Int("in_flight_count", len(tasks)),
@@ -1607,6 +1612,28 @@ func captureInFlightTaskIncremental(logCtx context.Context, ag agent.Agent, sess
 		return
 	}
 
+	// Growth dedup: skip the analyzer scan and shadow-branch commit entirely
+	// when the transcript hasn't grown since the last snapshot that actually
+	// captured something. Without this, every turn-end after a task's last
+	// real progress re-scans the whole transcript and writes a
+	// content-identical checkpoint — a per-turn cost that grows with the
+	// transcript and adds pure noise to the checkpoint history.
+	info, statErr := os.Stat(subagentTranscriptPath)
+	if statErr != nil {
+		logging.Warn(logCtx, "failed to stat subagent transcript for in-flight task snapshot",
+			slog.String("tool_use_id", task.ToolUseID),
+			slog.String("error", statErr.Error()))
+		return
+	}
+	transcriptSize := info.Size()
+	if transcriptSize == task.LastCapturedTranscriptBytes {
+		logging.Debug(logCtx, "subagent transcript unchanged since last snapshot; skipping incremental capture",
+			slog.String("session_id", sessionID),
+			slog.String("tool_use_id", task.ToolUseID),
+			slog.Int64("transcript_bytes", transcriptSize))
+		return
+	}
+
 	// Extract modified files from the SUBAGENT's own transcript — the same
 	// analyzer call captureSubagentTaskStep uses — rather than from git status
 	// directly: turn-end runs in the parent's working tree, where git status
@@ -1653,26 +1680,51 @@ func captureInFlightTaskIncremental(logCtx context.Context, ag agent.Agent, sess
 
 	seq := GetNextCheckpointSequence(sessionID, task.ToolUseID)
 
+	// SubagentTranscriptPath is deliberately omitted: the incremental write
+	// path (checkpoint/ephemeral.go's IsIncremental branch) never stores a
+	// transcript, so setting it here would imply storage that doesn't happen.
 	taskStepCtx := strategy.TaskStepContext{
-		SessionID:              sessionID,
-		ToolUseID:              task.ToolUseID,
-		AgentID:                task.AgentID,
-		ModifiedFiles:          relModifiedFiles,
-		SubagentTranscriptPath: subagentTranscriptPath,
-		AuthorName:             author.Name,
-		AuthorEmail:            author.Email,
-		IsIncremental:          true,
-		IncrementalSequence:    seq,
-		IncrementalType:        incrementalTypeBackgroundProgress,
-		SubagentType:           task.SubagentType,
-		TaskDescription:        task.TaskDescription,
-		AgentType:              ag.Type(),
+		SessionID:           sessionID,
+		ToolUseID:           task.ToolUseID,
+		AgentID:             task.AgentID,
+		ModifiedFiles:       relModifiedFiles,
+		AuthorName:          author.Name,
+		AuthorEmail:         author.Email,
+		IsIncremental:       true,
+		IncrementalSequence: seq,
+		IncrementalType:     strategy.IncrementalTypeBackgroundProgress,
+		SubagentType:        task.SubagentType,
+		TaskDescription:     task.TaskDescription,
+		AgentType:           ag.Type(),
 	}
 
 	if err := GetStrategy(logCtx).SaveTaskStep(logCtx, taskStepCtx); err != nil {
 		logging.Warn(logCtx, "failed to save incremental snapshot for in-flight task",
 			slog.String("tool_use_id", task.ToolUseID),
 			slog.String("error", err.Error()))
+		return
+	}
+
+	// Persist the captured size so a subsequent turn-end with an unchanged
+	// transcript can skip re-scanning and re-committing (the dedup above).
+	// The marker must still exist under its own ToolUseID: incremental
+	// snapshots never claim/remove it (only Final captures do via
+	// claimInFlightTask). The only way it could be gone here is a Final
+	// capture racing this same call between the earlier LoadSessionState in
+	// captureInFlightTasks and now — tolerated the same way the rest of this
+	// path tolerates a vanished marker (nothing to update).
+	mutErr := strategy.MutateSessionState(logCtx, sessionID, func(state *strategy.SessionState) error {
+		marker := state.FindInFlightTask(task.ToolUseID)
+		if marker == nil {
+			return nil
+		}
+		marker.LastCapturedTranscriptBytes = transcriptSize
+		return nil
+	})
+	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		logging.Warn(logCtx, "failed to persist captured transcript size for in-flight task",
+			slog.String("tool_use_id", task.ToolUseID),
+			slog.String("error", mutErr.Error()))
 	}
 }
 

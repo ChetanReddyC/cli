@@ -59,23 +59,62 @@ func formatSubagentMessage(verb, agentType, description, toolUseID string) strin
 	return fmt.Sprintf("%s agent: %s (%s)", verb, description, toolUseID)
 }
 
-// FormatIncrementalSubject formats the commit message subject for incremental checkpoints.
-// Delegates to FormatIncrementalMessage.
-//
-// Note: The incrementalType, subagentType, and taskDescription parameters are kept for
-// API compatibility but are not currently used. They may be used in the future for
-// different checkpoint types.
+// IncrementalTypeBackgroundProgress is the TaskStepContext.IncrementalType
+// stamped on turn-end backstop snapshots of an in-flight background task
+// (cli's captureInFlightTaskIncremental). It lives here, not in cli, because
+// FormatIncrementalSubject is the single place that needs to match on it to
+// pick a rendering — keep this the one definition callers stamp and compare
+// against.
+const IncrementalTypeBackgroundProgress = "background_progress"
+
+// FormatIncrementalSubject formats the commit message subject for incremental
+// checkpoints. incrementalType selects the rendering:
+//   - IncrementalTypeBackgroundProgress: delegates to
+//     FormatBackgroundProgressSubject, which renders subagentType/
+//     taskDescription — this checkpoint has no todo content to fall back to.
+//   - anything else (e.g. "TodoWrite", the post-todo incremental's tool
+//     name): delegates to FormatIncrementalMessage, ignoring subagentType/
+//     taskDescription — unchanged from before IncrementalTypeBackgroundProgress
+//     existed.
 func FormatIncrementalSubject(
-	incrementalType string, //nolint:unparam // kept for API compatibility
-	subagentType string, //nolint:unparam // kept for API compatibility
-	taskDescription string, //nolint:unparam // kept for API compatibility
+	incrementalType string,
+	subagentType string,
+	taskDescription string,
 	todoContent string,
 	incrementalSequence int,
 	shortToolUseID string,
 ) string {
-	// Currently all incremental checkpoints use the same format
-	_, _, _ = incrementalType, subagentType, taskDescription // Silence unused warnings
+	if incrementalType == IncrementalTypeBackgroundProgress {
+		return FormatBackgroundProgressSubject(subagentType, taskDescription, shortToolUseID)
+	}
 	return FormatIncrementalMessage(todoContent, incrementalSequence, shortToolUseID)
+}
+
+// FormatBackgroundProgressSubject formats the commit message subject for a
+// turn-end incremental snapshot of an in-flight background task. Unlike
+// per-todo incrementals (FormatIncrementalMessage, driven by todo content),
+// this checkpoint has no todo text to render — the description comes from
+// the in-flight marker recorded at the task's launch time.
+//
+// Edge cases:
+//   - Both present: "Background <subagent-type> task: <description> (<tool-use-id>)"
+//   - Empty description: "Background <subagent-type> task (<tool-use-id>)"
+//   - Empty subagentType: "Background task: <description> (<tool-use-id>)"
+//   - Both empty: "Background task (<tool-use-id>)"
+func FormatBackgroundProgressSubject(subagentType, taskDescription, shortToolUseID string) string {
+	if taskDescription != "" {
+		taskDescription = TruncateDescription(taskDescription, MaxDescriptionLength)
+	}
+	switch {
+	case subagentType != "" && taskDescription != "":
+		return fmt.Sprintf("Background %s task: %s (%s)", subagentType, taskDescription, shortToolUseID)
+	case subagentType != "":
+		return fmt.Sprintf("Background %s task (%s)", subagentType, shortToolUseID)
+	case taskDescription != "":
+		return fmt.Sprintf("Background task: %s (%s)", taskDescription, shortToolUseID)
+	default:
+		return fmt.Sprintf("Background task (%s)", shortToolUseID)
+	}
 }
 
 // FormatIncrementalMessage formats a commit message for an incremental checkpoint.

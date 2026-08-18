@@ -275,6 +275,26 @@ func TestFormatIncrementalSubject(t *testing.T) {
 			shortToolUseID:      "toolu_01CJhrr",
 			want:                "Checkpoint #3: toolu_01CJhrr",
 		},
+		// TodoWrite cases above must stay byte-identical after
+		// IncrementalTypeBackgroundProgress was taught its own rendering —
+		// only that one incrementalType value picks a different branch.
+		{
+			name:                "background progress renders subagentType and taskDescription, ignoring todoContent",
+			incrementalType:     IncrementalTypeBackgroundProgress,
+			subagentType:        "dev",
+			taskDescription:     "Implement widget",
+			todoContent:         "should be ignored for this incrementalType",
+			incrementalSequence: 1,
+			shortToolUseID:      "toolu_01CJhrr",
+			want:                "Background dev task: Implement widget (toolu_01CJhrr)",
+		},
+		{
+			name:                "background progress with no subagentType or taskDescription",
+			incrementalType:     IncrementalTypeBackgroundProgress,
+			incrementalSequence: 1,
+			shortToolUseID:      "toolu_01CJhrr",
+			want:                "Background task (toolu_01CJhrr)",
+		},
 	}
 
 	for _, tt := range tests {
@@ -289,6 +309,60 @@ func TestFormatIncrementalSubject(t *testing.T) {
 			)
 			if got != tt.want {
 				t.Errorf("FormatIncrementalSubject() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFormatBackgroundProgressSubject exercises the four-way fallback matrix
+// FormatIncrementalSubject delegates to for IncrementalTypeBackgroundProgress.
+func TestFormatBackgroundProgressSubject(t *testing.T) {
+	tests := []struct {
+		name            string
+		subagentType    string
+		taskDescription string
+		shortToolUseID  string
+		want            string
+	}{
+		{
+			name:            "both present",
+			subagentType:    "reviewer",
+			taskDescription: "Review the diff",
+			shortToolUseID:  "toolu_01ABC",
+			want:            "Background reviewer task: Review the diff (toolu_01ABC)",
+		},
+		{
+			name:           "only subagentType",
+			subagentType:   "reviewer",
+			shortToolUseID: "toolu_01ABC",
+			want:           "Background reviewer task (toolu_01ABC)",
+		},
+		{
+			name:            "only taskDescription",
+			taskDescription: "Review the diff",
+			shortToolUseID:  "toolu_01ABC",
+			want:            "Background task: Review the diff (toolu_01ABC)",
+		},
+		{
+			name:           "both empty",
+			shortToolUseID: "toolu_01ABC",
+			want:           "Background task (toolu_01ABC)",
+		},
+		{
+			name:            "long taskDescription is truncated",
+			subagentType:    "dev",
+			taskDescription: "This is a very long task description that definitely exceeds the sixty rune truncation limit applied to descriptions",
+			shortToolUseID:  "toolu_01ABC",
+			want:            "Background dev task: " + TruncateDescription("This is a very long task description that definitely exceeds the sixty rune truncation limit applied to descriptions", MaxDescriptionLength) + " (toolu_01ABC)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatBackgroundProgressSubject(tt.subagentType, tt.taskDescription, tt.shortToolUseID)
+			if got != tt.want {
+				t.Errorf("FormatBackgroundProgressSubject(%q, %q, %q) = %q, want %q",
+					tt.subagentType, tt.taskDescription, tt.shortToolUseID, got, tt.want)
 			}
 		})
 	}

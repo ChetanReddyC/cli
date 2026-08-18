@@ -403,6 +403,16 @@ type InFlightTask struct {
 	// fields only when the marker is absent.
 	SubagentType    string `json:"subagent_type,omitempty"`
 	TaskDescription string `json:"task_description,omitempty"`
+
+	// LastCapturedTranscriptBytes is the subagent transcript file's size, in
+	// bytes, as of the last turn-end incremental snapshot that actually wrote
+	// a checkpoint (captureInFlightTaskIncremental). Lets a later turn-end
+	// skip re-scanning and re-committing a transcript that hasn't grown since
+	// then — without this, every turn-end after a task's last real progress
+	// re-extracts the whole transcript and creates a content-identical
+	// checkpoint. Zero (the default) always triggers the first capture: a
+	// resolved subagent transcript is never a zero-byte file in practice.
+	LastCapturedTranscriptBytes int64 `json:"last_captured_transcript_bytes,omitempty"`
 }
 
 // AddInFlightTask records a background subagent launch, replacing any

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -3137,6 +3138,100 @@ func TestHandleLifecycleTurnEnd_InFlightTask_MissingTranscriptSkipsSilently(t *t
 	assert.False(t, found, "no transcript means no incremental checkpoint should be written")
 }
 
+// TestHandleLifecycleTurnEnd_InFlightTask_DedupsUnchangedTranscript is the
+// regression for the growth-dedup fix-up: before it, every turn-end after a
+// task's last real progress re-scanned the whole subagent transcript and
+// wrote a content-identical incremental checkpoint — a per-turn cost that
+// grows with the transcript, plus pure noise in the checkpoint history. A
+// turn-end whose subagent transcript is byte-for-byte unchanged since the
+// last capture must skip entirely (no analyzer scan, no shadow-branch write);
+// once the transcript grows again, the next turn-end must capture it.
+func TestHandleLifecycleTurnEnd_InFlightTask_DedupsUnchangedTranscript(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "turnend-dedup-session"
+	toolUseID := "toolu_dedup1"
+	agentID := "agent-dedup1"
+
+	transcriptDir := t.TempDir()
+	mainTranscriptPath := filepath.Join(transcriptDir, "main.jsonl")
+	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"do something"}}`+"\n"), 0o600))
+
+	subagentTranscriptPath := filepath.Join(transcriptDir, "agent-"+agentID+".jsonl")
+	require.NoError(t, os.WriteFile(subagentTranscriptPath, []byte(`{"type":"assistant"}`+"\n"), 0o600))
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: headHash,
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseActive,
+		InFlightTasks: []session.InFlightTask{
+			{ToolUseID: toolUseID, AgentID: agentID, StartedAt: time.Now(), SubagentType: "dev", TaskDescription: "Implement widget"},
+		},
+	}))
+
+	testutil.WriteFile(t, repoDir, "widget.txt", "written by background subagent")
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerFiles:      []string{"widget.txt"},
+	}
+
+	newEvent := func() *agent.Event {
+		return &agent.Event{
+			Type:       agent.TurnEnd,
+			SessionID:  sessionID,
+			SessionRef: mainTranscriptPath,
+			Timestamp:  time.Now(),
+		}
+	}
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	cpPath := ".entire/metadata/" + sessionID + "/tasks/" + toolUseID + "/checkpoints/001-" + toolUseID + ".json"
+
+	// First turn-end: the marker has never recorded a captured size (0) and
+	// the transcript is non-empty, so this must capture.
+	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, newEvent()))
+	firstContent, found := readShadowBranchFile(t, repoDir, shadowBranch, cpPath)
+	require.True(t, found, "expected an incremental checkpoint after the first turn-end")
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	marker := state.FindInFlightTask(toolUseID)
+	require.NotNil(t, marker)
+	firstSize := marker.LastCapturedTranscriptBytes
+	require.NotZero(t, firstSize, "the marker must record the captured transcript's size")
+
+	// Second turn-end: the subagent transcript is byte-for-byte unchanged, so
+	// this must be a no-op — the checkpoint blob must not be rewritten and the
+	// marker's recorded size must not move.
+	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, newEvent()))
+	secondContent, found := readShadowBranchFile(t, repoDir, shadowBranch, cpPath)
+	require.True(t, found)
+	assert.Equal(t, firstContent, secondContent, "an unchanged transcript must not produce a second incremental capture")
+
+	state, loadErr = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	marker = state.FindInFlightTask(toolUseID)
+	require.NotNil(t, marker)
+	assert.Equal(t, firstSize, marker.LastCapturedTranscriptBytes, "an unchanged transcript must not update the recorded size")
+
+	// Grow the subagent transcript: the next turn-end must capture again.
+	require.NoError(t, os.WriteFile(subagentTranscriptPath,
+		[]byte(`{"type":"assistant"}`+"\n"+`{"type":"assistant","more":"progress"}`+"\n"), 0o600))
+	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, newEvent()))
+	thirdContent, found := readShadowBranchFile(t, repoDir, shadowBranch, cpPath)
+	require.True(t, found)
+	assert.NotEqual(t, secondContent, thirdContent, "a grown transcript must produce a new incremental capture")
+
+	state, loadErr = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	marker = state.FindInFlightTask(toolUseID)
+	require.NotNil(t, marker)
+	assert.Greater(t, marker.LastCapturedTranscriptBytes, firstSize, "the marker must record the grown transcript's new size")
+}
+
 // TestHandleLifecycleSessionEnd_InFlightTask_FinalCapture is the regression
 // Task 3 fixes: a session that ended before SubagentStop arrived used to lose
 // the whole subagent transcript — the in-flight marker just sat there
@@ -3205,4 +3300,46 @@ func TestHandleLifecycleSessionEnd_InFlightTask_FinalCapture(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "the final in-flight task capture must reach permanent checkpoint storage")
+}
+
+// TestCaptureInFlightTasks_FinalPathIsUncapped is the regression for the
+// uncapped-final-path fix-up: unlike the turn-end incremental path, which
+// clips to maxInFlightTasksPerCapture and defers the remainder to a later
+// turn-end (or SessionEnd), a Final (SessionEnd) capture has no later chance
+// to defer to — it's the last opportunity to keep each task's transcript
+// before the marker's information is gone for good. It must claim and
+// capture every in-flight marker, not just the first maxInFlightTasksPerCapture.
+func TestCaptureInFlightTasks_FinalPathIsUncapped(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "uncapped-final-session"
+
+	const taskCount = maxInFlightTasksPerCapture + 1
+	tasks := make([]session.InFlightTask, 0, taskCount)
+	for i := range taskCount {
+		tasks = append(tasks, session.InFlightTask{
+			ToolUseID: fmt.Sprintf("toolu_uncapped%d", i),
+			AgentID:   fmt.Sprintf("agent-uncapped%d", i),
+			StartedAt: time.Now(),
+		})
+	}
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:     sessionID,
+		BaseCommit:    headHash,
+		StartedAt:     time.Now(),
+		Phase:         session.PhaseActive,
+		InFlightTasks: tasks,
+	}))
+
+	ag := newMockAgent()
+	captureInFlightTasks(ctx, ag, sessionID, "", true)
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	assert.Empty(t, state.InFlightTasks,
+		"a Final capture must clear every in-flight marker (got %d remaining), not just the first %d",
+		len(state.InFlightTasks), maxInFlightTasksPerCapture)
 }
