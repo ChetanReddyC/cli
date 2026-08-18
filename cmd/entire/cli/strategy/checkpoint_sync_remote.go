@@ -171,11 +171,15 @@ func hintGatedCheckpointSync(ctx context.Context, pushRemote string) {
 	// open a PR would be told to publish session transcripts there, which is the
 	// leak the single-remote gate exists to prevent.
 	//
-	// Since capture now takes a declared destination on the first push that
-	// agrees with it, this gate leaves the hint speaking for exactly what capture
-	// cannot fix: a declared remote that capture will not elect because a capture
-	// is already in force (phase-1 first-capture-sticks), where naming the setting
-	// really is the only way to re-route.
+	// Since capture takes a declared destination on the first push that agrees
+	// with it AND delivers checkpoints there, this gate leaves the hint speaking
+	// for exactly what capture cannot fix: a declared remote capture will not
+	// elect because a capture is already in force (phase-1
+	// first-capture-sticks), where naming the setting really is the only way to
+	// re-route. A push that capture is about to elect never reaches the hint —
+	// the gate admits it on the pending capture — so a failed delivery does not
+	// produce advice to hand-configure what the next successful push will do by
+	// itself.
 	if declaredPushDestination(ctx) != pushRemote {
 		logging.Debug(ctx, "gated checkpoint sync hint suppressed: push target is not this branch's declared destination",
 			slog.String("push_remote", pushRemote),
