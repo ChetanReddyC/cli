@@ -13,6 +13,7 @@ import (
 type TmuxSession struct {
 	name         string
 	stableAtSend string   // stable content snapshot when Send was last called
+	rawAtSend    string   // unstripped snapshot from the same moment
 	cleanups     []func() // run on Close
 }
 
@@ -79,6 +80,7 @@ func (s *TmuxSession) Send(input string) error {
 	// on prompt characters (e.g. ❯) in the echoed input. Taken before Enter so
 	// it can never include response output from a fast agent.
 	s.stableAtSend = stableContent(settled)
+	s.rawAtSend = settled
 
 	// Verify the pane reacted to Enter; a swallowed Enter leaves the prompt
 	// sitting unsubmitted in the input box. Retry a couple of times — TUIs
@@ -191,8 +193,12 @@ func (s *TmuxSession) WaitFor(pattern string, timeout time.Duration) (string, er
 			continue
 		}
 
-		// Detect content change since Send was called
-		if !contentChanged && stable != s.stableAtSend {
+		// Detect content change since Send was called. The stripped compare
+		// aliases when a fast agent's entire response fits in the stripped
+		// tail (a 2-line echo is identical before and after "Working/Done/>"
+		// are appended and stripped), so also compare the raw pane: appended
+		// output always changes it, while the unsubmitted echo does not.
+		if !contentChanged && (stable != s.stableAtSend || (s.rawAtSend != "" && content != s.rawAtSend)) {
 			contentChanged = true
 		}
 
