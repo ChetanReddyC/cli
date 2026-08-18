@@ -586,6 +586,35 @@ relPath := paths.ToRelativePath("/repo/api/file.ts", repoRoot)  // returns "api/
 
 Test case in `state_test.go`: `TestFilterAndNormalizePaths_SiblingDirectories` documents this bug pattern.
 
+#### Invoking Commands on Windows - Never Put a Dynamic Value on a cmd.exe Line
+
+**When Entire performs the exec itself, do not go through `cmd.exe`.** Pass the
+program and its arguments as separate argv elements (`exec.Command(prog, arg)`),
+or call the Win32 API directly.
+
+cmd.exe treats `&`, `|`, `<`, `>` as command separators/redirections and expands
+`%VAR%`, and **Go's argv escaping will not protect you**: `syscall.EscapeArg`
+only quotes an argument containing a space, tab, quote, or backslash. A URL,
+a percent-encoded path, or any `&`-bearing string therefore reaches cmd.exe bare
+and is silently cut at the first metacharacter. That is exactly how
+`entire login` shipped a Windows build that opened
+`…/authorize?client_id=entire-cli` and got rejected for a missing
+`redirect_uri` — the `cmd /c start "" <url>` launcher lost everything from the
+first `&` on, and because the truncation happened inside the released child, the
+CLI saw a successful launch and printed no fallback URL.
+
+Escaping is the right tool in exactly one situation: **a third party owns the
+exec.** When Entire writes a command into an agent's config file (Cursor/Codex
+`hooks.json`) and that agent runs it through cmd.exe, there is no shell to
+avoid — use `agent.escapeWindowsCMD`. Reviewers should flag any new
+`exec.Command("cmd", …)` / `"cmd.exe"` call site that interpolates a
+non-constant value.
+
+Key files: `cmd/entire/cli/browser_open_windows.go` (ShellExecute, the
+avoid-the-shell side) and `cmd/entire/cli/agent/hook_command.go`
+(`escapeWindowsCMD`, the third-party-exec side). Each doc comment points at the
+other.
+
 ### Control-Plane Core Resolution (which core am I talking to?)
 
 Control-plane commands dial one of three cores: the active context's
