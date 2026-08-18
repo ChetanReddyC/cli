@@ -135,6 +135,35 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 		assert.Nil(t, s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s)))
 	})
 
+	t.Run("nested agent beats outer agent: nearest ancestor wins over recency", func(t *testing.T) {
+		// Two real ancestors at different depths stand in for a nested agent
+		// (nearer the commit) and the outer agent that spawned it. Depth must
+		// decide the winner; interaction recency is only a tiebreak within one
+		// depth — so the nearer, less recently interacting session wins.
+		identityTestRepo(t)
+		ancestry, ok := proclive.CurrentAncestry()
+		require.True(t, ok)
+		chain := ancestry.Chain()
+		if len(chain) < 2 {
+			t.Skip("test process has fewer than two introspectable ancestors")
+		}
+		nested, outer := chain[0], chain[1]
+		old := time.Now().Add(-2 * time.Hour)
+		saveIdentitySession(t, "sess-nested", func(st *SessionState) {
+			st.Owner = &nested
+			st.LastInteractionTime = &old
+		})
+		saveIdentitySession(t, "sess-outer", func(st *SessionState) {
+			st.Owner = &outer
+		})
+
+		s := NewManualCommitStrategy()
+		got := s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s))
+		require.NotNil(t, got)
+		assert.Equal(t, "sess-nested", got.SessionID,
+			"the session whose agent is closest to the commit is its author, regardless of which interacted last")
+	})
+
 	t.Run("same agent recorded by two sessions: latest interaction wins", func(t *testing.T) {
 		// A resumed agent process produces a new session ID with the same
 		// ancestry; the commit belongs to the one currently interacting.

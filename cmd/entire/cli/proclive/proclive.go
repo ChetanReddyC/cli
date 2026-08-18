@@ -216,48 +216,90 @@ func IdentityOf(pid int) (Identity, bool) {
 	return Identity{PID: pid, Start: start, Boot: boot, Host: host, Name: name}, true
 }
 
-// HasAncestor reports whether id names a live ancestor of the current
-// process. Where Check asks "is the recorded owner still alive", HasAncestor
-// asks "was the current process spawned (however indirectly) by the recorded
-// owner" — the commit-attribution question: a git hook whose ancestry
-// contains a session's owner was started by that session's agent, in
-// whatever worktree.
-//
-// Matching requires the full identity to hold: same host, same boot (when
-// recorded), and the ancestor's start fingerprint equal to the recorded one —
-// so a recycled PID or an identity from another machine can never match.
-// Best-effort like ResolveOwner: any introspection failure reports false, and
-// the caller falls back to whatever non-identity matching it has.
-func HasAncestor(id Identity) bool {
-	if id.PID <= 0 || id.Start == "" || id.Host == "" {
-		return false
-	}
+// Ancestry is a one-shot snapshot of the current process's ancestor chain.
+// It exists for callers that match many identities against the same chain
+// (commit attribution across every session state): capturing once means one
+// hostname read, one boot-id read, and one proc walk, instead of repeating
+// all three per candidate. Snapshot then match with Depth.
+type Ancestry struct {
+	host  string
+	boot  string
+	chain []Identity // nearest-first, excluding the current process
+}
+
+// CurrentAncestry fingerprints the current process's ancestors (nearest
+// first, up to maxAncestorDepth, stopping at init or on any introspection
+// failure). Returns ok=false when the platform cannot introspect processes
+// or the host is unknown — callers then skip identity matching entirely,
+// the same fallback a false HasAncestor provides.
+func CurrentAncestry() (Ancestry, bool) {
 	host, err := os.Hostname()
-	if err != nil || host != id.Host {
-		return false
+	if err != nil || host == "" {
+		return Ancestry{}, false
 	}
-	if id.Boot != "" {
-		boot, err := bootID()
-		if err != nil || boot == "" || boot != id.Boot {
-			return false
-		}
+	boot, err := bootID()
+	if err != nil {
+		boot = ""
 	}
 	candidate, _, _, err := procStat(os.Getpid())
 	if err != nil {
-		return false
+		return Ancestry{}, false
 	}
+	ancestry := Ancestry{host: host, boot: boot}
 	for range maxAncestorDepth {
 		if candidate <= 1 {
-			return false
+			break
 		}
-		parent, _, start, err := procStat(candidate)
+		parent, name, start, err := procStat(candidate)
 		if err != nil {
-			return false
+			break
 		}
-		if candidate == id.PID {
-			return start != "" && start == id.Start
-		}
+		ancestry.chain = append(ancestry.chain, Identity{PID: candidate, Start: start, Boot: boot, Host: host, Name: name})
 		candidate = parent
 	}
-	return false
+	return ancestry, true
+}
+
+// Depth returns id's position in the snapshot chain — 0 is the nearest
+// ancestor (the current process's parent) — or -1 when id is not an
+// ancestor. Matching requires the full identity to hold: same host, same
+// boot (when the identity recorded one), and the start fingerprint equal to
+// the recorded one — so a recycled PID or an identity from another machine
+// can never match.
+func (a Ancestry) Depth(id Identity) int {
+	if id.PID <= 0 || id.Start == "" || id.Host == "" || id.Host != a.host {
+		return -1
+	}
+	if id.Boot != "" && (a.boot == "" || a.boot != id.Boot) {
+		return -1
+	}
+	for depth, ancestor := range a.chain {
+		if ancestor.PID == id.PID {
+			if ancestor.Start != "" && ancestor.Start == id.Start {
+				return depth
+			}
+			return -1 // same PID, different start: recycled, and a parent chain never repeats a PID
+		}
+	}
+	return -1
+}
+
+// Chain returns a copy of the snapshot's ancestor identities, nearest first.
+// Diagnostic surface (and the way tests obtain real identities at known
+// depths); matching goes through Depth.
+func (a Ancestry) Chain() []Identity {
+	out := make([]Identity, len(a.chain))
+	copy(out, a.chain)
+	return out
+}
+
+// HasAncestor reports whether id names a live ancestor of the current
+// process — the single-identity convenience over CurrentAncestry. Where
+// Check asks "is the recorded owner still alive", HasAncestor asks "was the
+// current process spawned (however indirectly) by the recorded owner".
+// Best-effort like ResolveOwner: any introspection failure reports false,
+// and the caller falls back to whatever non-identity matching it has.
+func HasAncestor(id Identity) bool {
+	ancestry, ok := CurrentAncestry()
+	return ok && ancestry.Depth(id) >= 0
 }

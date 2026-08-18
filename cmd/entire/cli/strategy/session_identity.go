@@ -63,26 +63,40 @@ func linkingSetContains(states []*SessionState, id string) bool {
 // whose ancestry contains a session's owner was spawned (however indirectly)
 // by that session's agent, in whatever worktree the commit happens.
 //
-// When several sessions record the same owner process (an agent hosting more
-// than one session over its lifetime, or a nested agent whose outer agent is
-// also an ancestor), the most recently interacting session wins — the one
-// whose turn this commit concludes. Imported sessions are historical records
-// and adopted-away tombstones belong to another store; neither ever matches.
-// Returns nil when no session's owner is in our ancestry (the linking set is
-// then the worktree-matched sessions alone) — including on platforms where
-// proclive cannot introspect processes (Windows), which deliberately fall
-// back to worktree matching rather than trusting unverifiable ancestry.
+// When owners at different depths of the ancestry both match — a nested
+// agent and the outer agent that spawned it — the nearest ancestor wins: the
+// process closest to the commit is its author. Recency only breaks ties
+// within one depth (the same agent process hosting several sessions over its
+// lifetime, e.g. after a resume): there the most recently interacting
+// session wins — the one whose turn this commit concludes. Imported sessions
+// are historical records and adopted-away tombstones belong to another
+// store; neither ever matches. Returns nil when no session's owner is in our
+// ancestry (the linking set is then the worktree-matched sessions alone) —
+// including on platforms where proclive cannot introspect processes
+// (Windows), which deliberately fall back to worktree matching rather than
+// trusting unverifiable ancestry.
+//
+// The ancestry is snapshotted once (proclive.CurrentAncestry) and every
+// candidate matched in memory: this runs in the commit hook with one state
+// file per session in the shared store, so a per-candidate walk would repeat
+// the hostname/boot/proc reads dozens of times per commit.
 func (s *ManualCommitStrategy) findSessionByCommitAncestry(ctx context.Context, states []*SessionState) *SessionState {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok {
+		return nil
+	}
 	var best *SessionState
+	bestDepth := -1
 	for _, state := range states {
 		if state.Kind.IsImported() || state.AdoptedIntoWorktreePath != "" || state.Owner == nil {
 			continue
 		}
-		if !proclive.HasAncestor(*state.Owner) {
+		depth := ancestry.Depth(*state.Owner)
+		if depth < 0 {
 			continue
 		}
-		if best == nil || interactedAfter(state, best) {
-			best = state
+		if best == nil || depth < bestDepth || (depth == bestDepth && interactedAfter(state, best)) {
+			best, bestDepth = state, depth
 		}
 	}
 	if best != nil {

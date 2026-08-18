@@ -164,3 +164,30 @@ func TestHasAncestor_EmptyIdentityNeverMatches(t *testing.T) {
 		t.Fatal("the zero identity must never match")
 	}
 }
+
+func TestCurrentAncestry_DepthAndGuards(t *testing.T) {
+	ancestry, ok := CurrentAncestry()
+	if !ok {
+		t.Fatal("CurrentAncestry should resolve on a supported platform")
+	}
+	parent, ok := IdentityOf(os.Getppid())
+	if !ok {
+		t.Fatal("IdentityOf(parent) should resolve")
+	}
+	if depth := ancestry.Depth(parent); depth != 0 {
+		t.Fatalf("the parent must be the nearest ancestor (depth 0), got %d", depth)
+	}
+	recycled := parent
+	recycled.Start += "-recycled"
+	if depth := ancestry.Depth(recycled); depth != -1 {
+		t.Fatalf("same PID with a different start fingerprint must not match, got depth %d", depth)
+	}
+	foreign := parent
+	foreign.Host += "-elsewhere"
+	if depth := ancestry.Depth(foreign); depth != -1 {
+		t.Fatalf("an identity recorded on another host must not match, got depth %d", depth)
+	}
+	if chain := ancestry.Chain(); len(chain) == 0 || chain[0].PID != os.Getppid() {
+		t.Fatalf("the chain must start at the parent, got %+v", chain)
+	}
+}
