@@ -116,9 +116,8 @@ func NewRootCmd() *cobra.Command {
 		CompletionOptions: cobra.CompletionOptions{
 			HiddenDefaultCmd: true,
 		},
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
 			initRootLogging(cmd)
-			return nil
 		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
 			// Flush the buffered .entire/logs writer the root PersistentPreRunE

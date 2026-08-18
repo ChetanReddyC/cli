@@ -29,10 +29,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// agentHookLogCleanup stores the cleanup function for agent hook logging.
-// Set by PersistentPreRunE, called by PersistentPostRunE.
-var agentHookLogCleanup func()
-
 // currentHookAgentName stores the agent name for the currently executing hook.
 // Set by newAgentHookVerbCmdWithLogging before calling the handler.
 // This allows handlers to know which agent invoked the hook without guessing.
@@ -61,20 +57,11 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 		Use:    string(agentName),
 		Short:  handler.Description() + " hook handlers",
 		Hidden: true,
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			// Cobra invokes this PersistentPreRunE with the leaf command, so
-			// SetContext hands the logger-carrying context straight to the
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			// Cobra invokes this PersistentPreRun with the leaf command, so
+			// SetContext hands the session-stamped context straight to the
 			// hook verb's RunE via cmd.Context().
-			logCtx, cleanup := initHookLogging(cmd.Context())
-			cmd.SetContext(logCtx)
-			agentHookLogCleanup = cleanup
-			return nil
-		},
-		PersistentPostRunE: func(_ *cobra.Command, _ []string) error {
-			if agentHookLogCleanup != nil {
-				agentHookLogCleanup()
-			}
-			return nil
+			cmd.SetContext(withHookSession(cmd.Context()))
 		},
 	}
 
@@ -101,12 +88,14 @@ func getHookType(hookName string) string {
 }
 
 // executeAgentHook runs the core hook execution logic for a given agent and hook name.
-// It handles git repo checks, enabled checks, logging, event parsing, and lifecycle dispatch.
+// It handles git repo checks, enabled checks, the hook logging context, event
+// parsing, and lifecycle dispatch.
 // Used by both the registered subcommand path and the RunE fallback for external agents.
-// When initLogging is true, it initializes and cleans up hook logging (used by the RunE fallback
-// since it doesn't go through PersistentPreRunE). Built-in agent subcommands pass false since
-// their parent command's PersistentPreRunE already handles logging.
-func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, initLogging bool) error {
+// When stampSession is true, it attaches the hook session context itself (used by
+// the RunE fallback since it doesn't go through PersistentPreRunE). Built-in agent
+// subcommands pass false since their parent command's PersistentPreRunE already
+// did it.
+func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, stampSession bool) error {
 	// Skip silently if not in a git repository - hooks shouldn't prevent the agent from working
 	worktreeRoot, err := paths.WorktreeRoot(cmd.Context())
 	if err != nil {
@@ -127,10 +116,8 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		return nil
 	}
 
-	if initLogging {
-		logCtx, cleanup := initHookLogging(cmd.Context())
-		cmd.SetContext(logCtx)
-		defer cleanup()
+	if stampSession {
+		cmd.SetContext(withHookSession(cmd.Context()))
 	}
 
 	// Initialize logging context with agent name
