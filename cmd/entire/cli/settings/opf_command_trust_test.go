@@ -2,6 +2,7 @@ package settings
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -418,4 +419,36 @@ func TestLocalLayer_CaseVariantIsStillTracked(t *testing.T) {
 	assert.Empty(t, s.Redaction.OpenAIPrivacyFilter.Command,
 		"a case-variant committed path must not be read as an untracked local file")
 	assert.Contains(t, s.LocalLayerRejection(), "tracked in git")
+}
+
+// rawHasKey walks nested objects and is used by the trust predicates, so its
+// edge cases matter. The no-key case is absent deliberately: the signature
+// makes it a compile error rather than a runtime panic.
+func TestRawHasKey(t *testing.T) {
+	t.Parallel()
+	decode := func(s string) map[string]json.RawMessage {
+		var m map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal([]byte(s), &m))
+		return m
+	}
+	cases := []struct {
+		name string
+		doc  string
+		path []string
+		want bool
+	}{
+		{"single key present", `{"a":1}`, []string{"a"}, true},
+		{"single key absent", `{"a":1}`, []string{"b"}, false},
+		{"nested present", `{"a":{"b":{"c":1}}}`, []string{"a", "b", "c"}, true},
+		{"nested leaf absent", `{"a":{"b":{}}}`, []string{"a", "b", "c"}, false},
+		{"intermediate absent", `{"a":{}}`, []string{"a", "b", "c"}, false},
+		{"intermediate not an object", `{"a":{"b":7}}`, []string{"a", "b", "c"}, false},
+		{"null value still counts as present", `{"a":{"b":null}}`, []string{"a", "b"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, rawHasKey(decode(tc.doc), tc.path[0], tc.path[1:]...))
+		})
+	}
 }

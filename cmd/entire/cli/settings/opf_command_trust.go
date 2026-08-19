@@ -111,11 +111,19 @@ func localSetsOPFCommand(data []byte) bool {
 //
 // Presence is the question, not value: two layers may set the same string, so
 // comparing effective values after a merge would misattribute provenance.
-func rawHasKey(parent map[string]json.RawMessage, path ...string) bool {
-	for _, key := range path[:len(path)-1] {
+//
+// The first key is a separate parameter rather than part of the variadic so
+// that "no key at all" cannot be expressed. A plain `path ...string` accepted
+// an empty call that indexed out of range at run time — a latent panic in a
+// predicate that gates a security boundary. This shape makes the compiler
+// reject it instead of relying on every caller to pass enough arguments.
+func rawHasKey(parent map[string]json.RawMessage, first string, rest ...string) bool {
+	key := first
+	for _, next := range rest {
 		parent = rawObject(parent, key)
+		key = next
 	}
-	_, ok := parent[path[len(path)-1]]
+	_, ok := parent[key]
 	return ok
 }
 
