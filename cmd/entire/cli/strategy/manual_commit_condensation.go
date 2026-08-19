@@ -371,7 +371,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
-	writeRequest := condensationSessionWriteRequest(state, checkpointID, writeOpts)
+	writeRequest := condensationSessionWriteRequest(writeOpts)
 	if err := store.Write(writeCtx, writeRequest); err != nil {
 		writeCommittedSpan.RecordError(err)
 		writeCommittedSpan.End()
@@ -409,11 +409,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}, nil
 }
 
-func condensationSessionWriteRequest(state *SessionState, checkpointID id.CheckpointID, opts cpkg.WriteOptions) cpkg.WriteRequest {
-	if state.CondensationAttemptID != id.EmptyCheckpointID && state.CondensationAttemptID == checkpointID {
-		return cpkg.ReservedSession(opts)
-	}
-	return cpkg.Session(opts)
+func condensationSessionWriteRequest(opts cpkg.WriteOptions) cpkg.WriteRequest {
+	// Condensation receives a checkpoint ID chosen before the write begins. Route
+	// every session sharing that ID through the same ID-derived backend.
+	return cpkg.ReservedSession(opts)
 }
 
 func buildCondensationWriteOptions(

@@ -14,8 +14,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/stretchr/testify/assert"
@@ -670,6 +672,44 @@ func TestPrepareCommitMsg_ReusesReservedAttemptAfterSessionResume(t *testing.T) 
 	checkpointID, found := trailers.ParseCheckpoint(string(content))
 	require.True(t, found)
 	assert.Equal(t, reservedID, checkpointID)
+}
+
+func TestCondensationSessionWrites_KeepSharedReservedCheckpointInOneBackend(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	ctx := settings.WithWorktreeRoot(t.Context(), dir)
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	require.NoError(t, err)
+
+	// The ULID was selected while git-refs was primary; the current default
+	// primary is git-branch. Both sessions share the preselected checkpoint ID.
+	checkpointID := id.MustCheckpointID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+
+	write := func(sessionID string) {
+		t.Helper()
+		opts := checkpoint.WriteOptions{
+			CheckpointID: checkpointID,
+			SessionID:    sessionID,
+			Strategy:     StrategyNameManualCommit,
+			AuthorName:   "Test",
+			AuthorEmail:  "test@example.com",
+		}
+		require.NoError(t, stores.Persistent.Write(ctx, condensationSessionWriteRequest(opts)))
+	}
+
+	write("reserved-session")
+	write("ordinary-session")
+
+	summary, err := stores.Persistent.Read(ctx, checkpointID)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.Len(t, summary.Sessions, 2, "all sessions sharing a checkpoint ID must remain visible together")
 }
 
 func TestCondenseSessionByID_DoesNotReuseCheckpointAfterSessionAdvances(t *testing.T) {

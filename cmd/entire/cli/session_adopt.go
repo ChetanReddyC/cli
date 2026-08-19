@@ -478,6 +478,8 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	adopted.TurnID = ""
 	adopted.TurnCheckpointIDs = nil
 	adopted.LastCheckpointID = id.EmptyCheckpointID
+	adopted.CondensationAttemptID = id.EmptyCheckpointID
+	adopted.CondensationRecoveryPending = false
 	adopted.LastCheckpointCommitHash = ""
 	adopted.CheckpointTokenUsage = nil
 	// Re-baseline the subagent cumulative for the fresh target-local window. The

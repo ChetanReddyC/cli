@@ -205,6 +205,47 @@ func TestKindRoutingStore_ReservedSessionUsesOriginalBackendAfterConfigChange(t 
 	}
 }
 
+func TestKindRoutingStore_ReservedSessionRetryUpdatesBothBackendsOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := newGitRefsStore(repo)
+	writeRoutingCheckpoint(t, branch, checkpointID, "reserved-session")
+	writeRoutingCheckpoint(t, refs, checkpointID, "reserved-session")
+
+	branchBefore, _, err := branch.getSessionsBranchRef()
+	require.NoError(t, err)
+	writer := newFanoutStore(refs, []Writer{branch})
+	router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs)
+	require.NoError(t, router.Write(ctx, ReservedSession(WriteOptions{
+		CheckpointID: checkpointID,
+		SessionID:    "reserved-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("new transcript from retry")),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	})))
+
+	branchContent, err := branch.ReadSessionContent(ctx, checkpointID, 0)
+	require.NoError(t, err)
+	require.Contains(t, string(branchContent.Transcript), "new transcript from retry")
+
+	visibleContent, err := router.ReadSessionContent(ctx, checkpointID, 0)
+	require.NoError(t, err)
+	require.Contains(t, string(visibleContent.Transcript), "new transcript from retry",
+		"a successful retry must be visible through normal refs-first reads")
+
+	branchAfter, _, err := branch.getSessionsBranchRef()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(branchAfter)
+	require.NoError(t, err)
+	require.Equal(t, []plumbing.Hash{branchBefore}, commit.ParentHashes,
+		"the required original-backend write must not be repeated by mirror fan-out")
+}
+
 func TestKindRoutingStore_ListUnionsBothBackends(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -968,6 +968,8 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 		TurnID:                      "source-turn",
 		TurnCheckpointIDs:           []string{"abc123def456"},
 		LastCheckpointID:            id.MustCheckpointID("abc123def456"),
+		CondensationAttemptID:       id.MustCheckpointID("fedcba987654"),
+		CondensationRecoveryPending: true,
 		LastCheckpointCommitHash:    "source-commit",
 		CheckpointTokenUsage:        &agent.TokenUsage{InputTokens: 100, OutputTokens: 25, APICallCount: 1},
 		UntrackedFilesAtStart:       []string{"source-only.txt"},
@@ -1043,6 +1045,12 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 	}
 	if !adopted.LastCheckpointID.IsEmpty() {
 		t.Fatalf("LastCheckpointID = %s, want empty", adopted.LastCheckpointID.String())
+	}
+	if !adopted.CondensationAttemptID.IsEmpty() {
+		t.Fatalf("CondensationAttemptID = %s, want empty", adopted.CondensationAttemptID.String())
+	}
+	if adopted.CondensationRecoveryPending {
+		t.Fatal("CondensationRecoveryPending = true, want false")
 	}
 	if adopted.LastCheckpointCommitHash != "" {
 		t.Fatalf("LastCheckpointCommitHash = %q, want empty", adopted.LastCheckpointCommitHash)
