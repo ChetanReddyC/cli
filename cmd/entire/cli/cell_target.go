@@ -149,12 +149,18 @@ func cellTargetFromCluster(cluster coreapi.Cluster) (*auth.CellTarget, error) {
 	return &auth.CellTarget{BaseURL: apiURL, Jurisdiction: jurisdiction}, nil
 }
 
-// errRepoNotOnboarded signals that fullName has no entry at all in the
-// control plane's repos index — a definitive, not transient, negative.
-// Callers that persist a per-repo enabled/disabled decision (trails'
-// background enablement cache) should treat this the same way they'd treat
-// an explicit "not found" from the data API, rather than leaving the
-// decision unresolved forever.
+// errRepoNotOnboarded signals that fullName has no processing placement to
+// resolve, in any of its three shapes: no entry at all in the control plane's
+// repos index, a Candidate row (on the forge, never onboarded), or a row whose
+// primaries name no processing placement. Callers that persist a per-repo
+// enabled/disabled decision (trails' background enablement cache) should treat
+// this the same way they'd treat an explicit "not found" from the data API,
+// rather than leaving the decision unresolved forever.
+//
+// The third shape can be transient (a repo mid-onboarding has placements
+// before its primaries are set) and is still grouped with the permanent two
+// deliberately: repo-scoped data is unreachable either way, and the one
+// consumer caches under a TTL, so a completed onboarding self-heals.
 var errRepoNotOnboarded = errors.New("repo is not onboarded to Entire")
 
 // resolveProcessingPlacement resolves fullName's PROCESSING placement — the
@@ -191,9 +197,11 @@ func resolveProcessingPlacement(ctx context.Context, c cellCoreClient, fullName 
 	if _, isCandidate := entry.Candidate.Get(); isCandidate {
 		return coreapi.RepoPlacement{}, fmt.Errorf("%s: %w", fullName, errRepoNotOnboarded)
 	}
-	primaries, ok := entry.Primaries.Get()
-	processingID := strings.TrimSpace(primaries.Processing)
-	if !ok || processingID == "" {
+	var processingID string
+	if primaries, ok := entry.Primaries.Get(); ok {
+		processingID = strings.TrimSpace(primaries.Processing)
+	}
+	if processingID == "" {
 		return coreapi.RepoPlacement{}, fmt.Errorf("%s has no processing placement: %w", fullName, errRepoNotOnboarded)
 	}
 	for _, p := range entry.Placements {

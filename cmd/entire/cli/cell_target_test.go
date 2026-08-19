@@ -425,7 +425,8 @@ func processingResolutionErrorCases() []processingResolutionErrorCase {
 				e.Primaries = coreapi.OptRepoPrimaries{} // unset
 				return e
 			}()),
-			clusters: clustersWithSlugs(),
+			clusters:         clustersWithSlugs(),
+			wantNotOnboarded: true,
 		},
 		{
 			name: "processing placement failed",
@@ -472,8 +473,8 @@ func TestResolveRepoCellTarget_OwnerRepo_ProcessingResolutionErrors(t *testing.T
 			if target != nil {
 				t.Fatalf("expected a nil target alongside the error, got %+v", target)
 			}
-			if tc.wantNotOnboarded && !errors.Is(err, errRepoNotOnboarded) {
-				t.Fatalf("expected errRepoNotOnboarded, got: %v", err)
+			if got := errors.Is(err, errRepoNotOnboarded); got != tc.wantNotOnboarded {
+				t.Fatalf("errors.Is(err, errRepoNotOnboarded) = %v, want %v (err: %v)", got, tc.wantNotOnboarded, err)
 			}
 		})
 	}
@@ -487,8 +488,8 @@ func TestResolveRepoCellPlacement_ProcessingResolutionErrors(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected an error")
 			}
-			if tc.wantNotOnboarded && !errors.Is(err, errRepoNotOnboarded) {
-				t.Fatalf("expected errRepoNotOnboarded, got: %v", err)
+			if got := errors.Is(err, errRepoNotOnboarded); got != tc.wantNotOnboarded {
+				t.Fatalf("errors.Is(err, errRepoNotOnboarded) = %v, want %v (err: %v)", got, tc.wantNotOnboarded, err)
 			}
 		})
 	}
