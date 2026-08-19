@@ -161,6 +161,14 @@ type HookFreshness interface {
 	CheckHookConfig(ctx context.Context) HookConfigState
 }
 
+// RepositorySharedHooks is implemented when an agent's hook configuration is
+// shared by every linked worktree of the repository.
+type RepositorySharedHooks interface {
+	Agent
+
+	HooksSharedAcrossWorktrees(ctx context.Context) bool
+}
+
 // FileWatcher is implemented by agents that use file-based detection.
 // Agents like Aider that don't support hooks can use file watching
 // to detect session activity.

@@ -611,6 +611,7 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 		} else {
 			successfullyAddedAgents = append(successfullyAddedAgents, ag)
+			writeSharedHooksNote(ctx, w, ag)
 		}
 	}
 
@@ -620,6 +621,7 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 		} else {
 			successfullyReinstalledAgents = append(successfullyReinstalledAgents, ag)
+			writeSharedHooksNote(ctx, w, ag)
 		}
 	}
 
@@ -1568,7 +1570,7 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 		return fmt.Errorf("agent %s does not support hooks", name)
 	}
 
-	if !hookAgent.AreHooksInstalled(ctx) {
+	if !hooksPresentOrOutdated(ctx, hookAgent, ag) {
 		fmt.Fprintf(w, "%s hooks are not installed.\n", ag.Type())
 		return nil
 	}
@@ -1577,7 +1579,7 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 		return fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err)
 	}
 
-	fmt.Fprintf(w, "Removed %s hooks.\n", ag.Type())
+	fmt.Fprintf(w, "Removed %s hooks%s.\n", ag.Type(), sharedHooksRemovalSuffix(ctx, ag))
 	return nil
 }
 
@@ -1630,7 +1632,7 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 		if err := hookAgent.UninstallHooks(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to uninstall %s hooks: %w", ag.Type(), err))
 		} else {
-			fmt.Fprintf(w, "Removed %s hooks\n", ag.Type())
+			fmt.Fprintf(w, "Removed %s hooks%s\n", ag.Type(), sharedHooksRemovalSuffix(ctx, ag))
 		}
 	}
 	return errors.Join(errs...)
@@ -1650,6 +1652,29 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int,
 	}
 
 	return count, nil
+}
+
+func hooksPresentOrOutdated(ctx context.Context, hookAgent agent.HookSupport, ag agent.Agent) bool {
+	if hookAgent.AreHooksInstalled(ctx) {
+		return true
+	}
+	freshness, ok := ag.(agent.HookFreshness)
+	return ok && freshness.CheckHookConfig(ctx) == agent.HooksOutdated
+}
+
+func sharedHooksRemovalSuffix(ctx context.Context, ag agent.Agent) string {
+	shared, ok := ag.(agent.RepositorySharedHooks)
+	if !ok || !shared.HooksSharedAcrossWorktrees(ctx) {
+		return ""
+	}
+	return " from the repository-wide configuration; this affects all linked worktrees"
+}
+
+func writeSharedHooksNote(ctx context.Context, w io.Writer, ag agent.Agent) {
+	shared, ok := ag.(agent.RepositorySharedHooks)
+	if ok && shared.HooksSharedAcrossWorktrees(ctx) {
+		fmt.Fprintf(w, "  %s hooks are stored once for the repository and apply to all linked worktrees.\n", ag.Type())
+	}
 }
 
 // promptAgentSelection shows the interactive multi-select agent picker and
@@ -1966,6 +1991,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		}
 		fmt.Fprintf(w, "  %s\n", msg)
 	}
+	writeSharedHooksNote(ctx, w, ag)
 
 	fmt.Fprintln(w, "  ✓ Configured project")
 	fmt.Fprintf(w, "    %s\n", configDisplay)
@@ -2500,11 +2526,11 @@ func removeAgentHooks(ctx context.Context, w io.Writer) error {
 		if !ok {
 			continue
 		}
-		wasInstalled := hs.AreHooksInstalled(ctx)
+		wasInstalled := hooksPresentOrOutdated(ctx, hs, ag)
 		if err := hs.UninstallHooks(ctx); err != nil {
 			errs = append(errs, err)
 		} else if wasInstalled {
-			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
+			fmt.Fprintf(w, "  Removed %s hooks%s\n", ag.Type(), sharedHooksRemovalSuffix(ctx, ag))
 		}
 	}
 	return errors.Join(errs...)
