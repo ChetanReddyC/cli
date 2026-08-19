@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/format/index"
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -287,12 +287,10 @@ func probeLocalSettingsIsVersioned(ctx context.Context, path string, deep bool) 
 	if err != nil {
 		return false, fmt.Errorf("read index: %w", err)
 	}
-	_, err = idx.Entry(EntireSettingsLocalFile)
-	if err == nil {
-		return true, nil
-	}
-	if !errors.Is(err, index.ErrEntryNotFound) {
-		return false, fmt.Errorf("look up %s in index: %w", EntireSettingsLocalFile, err)
+	for _, entry := range idx.Entries {
+		if pathsEqualFold(entry.Name, EntireSettingsLocalFile) {
+			return true, nil
+		}
 	}
 	if !deep {
 		return false, nil
@@ -315,11 +313,59 @@ func probeLocalSettingsIsVersioned(ctx context.Context, path string, deep bool) 
 	if err != nil {
 		return false, fmt.Errorf("read HEAD tree: %w", err)
 	}
-	if _, err := tree.FindEntry(EntireSettingsLocalFile); err != nil {
-		if errors.Is(err, object.ErrEntryNotFound) || errors.Is(err, object.ErrDirectoryNotFound) {
+	return treeHasPathFold(tree, strings.Split(EntireSettingsLocalFile, "/"))
+}
+
+// pathsEqualFold compares two repo-relative git paths for equality as the
+// filesystem would see them.
+//
+// The comparison must NOT be exact. On a case-insensitive volume (the macOS
+// and Windows default) a pull request can commit `.entire/Settings.Local.json`:
+// checkout materializes a file that readConfined then opens through the
+// canonical name, while an exact index lookup misses it — so the file would be
+// read as settings and simultaneously judged untracked, which is precisely the
+// bypass this whole gate exists to prevent.
+//
+// Folding unconditionally rather than probing the volume is deliberate. A
+// case-variant of this filename is never legitimate content, so treating one
+// as tracked on a case-sensitive volume too costs at most an ignored local
+// layer plus a warning, and it keeps the security-relevant path free of a
+// filesystem-capability check that could itself be wrong.
+//
+// Residual limit worth knowing: this handles Unicode simple case folding, not
+// every normalization a filesystem might apply (e.g. NFC/NFD equivalence).
+// The filename is pure ASCII, so the realistic vector is case.
+func pathsEqualFold(a, b string) bool {
+	return strings.EqualFold(a, b)
+}
+
+// treeHasPathFold walks a tree comparing each component case-insensitively,
+// the tree-side counterpart of pathsEqualFold. object.Tree.FindEntry matches
+// exactly, so it cannot be used here.
+func treeHasPathFold(tree *object.Tree, parts []string) (bool, error) {
+	current := tree
+	for i, part := range parts {
+		var match *object.TreeEntry
+		for j := range current.Entries {
+			if pathsEqualFold(current.Entries[j].Name, part) {
+				match = &current.Entries[j]
+				break
+			}
+		}
+		if match == nil {
 			return false, nil
 		}
-		return false, fmt.Errorf("look up %s in HEAD: %w", EntireSettingsLocalFile, err)
+		if i == len(parts)-1 {
+			return true, nil
+		}
+		sub, err := current.Tree(match.Name)
+		if err != nil {
+			if errors.Is(err, object.ErrDirectoryNotFound) {
+				return false, nil
+			}
+			return false, fmt.Errorf("read %s in HEAD: %w", match.Name, err)
+		}
+		current = sub
 	}
-	return true, nil
+	return false, nil
 }

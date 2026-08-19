@@ -389,3 +389,33 @@ func TestLocalLayer_CommittedThenUnstagedKeepsLayerDropsCommand(t *testing.T) {
 	assert.Empty(t, s.Redaction.OpenAIPrivacyFilter.Command,
 		"deep check: HEAD presence still disqualifies the executed command")
 }
+
+// On a case-insensitive volume (the macOS and Windows default) a pull request
+// can commit a case-variant of the local settings path. Checkout materializes
+// a file that readConfined opens through the canonical name, so an exact index
+// lookup would read it as settings while judging it untracked — the bypass
+// this gate exists to prevent. Skips on a case-sensitive volume, where the two
+// names are genuinely different files.
+func TestLocalLayer_CaseVariantIsStillTracked(t *testing.T) {
+	t.Parallel()
+	root, project, _ := newOPFRepo(t)
+	writeSettingsFile(t, project, opfSettings(""))
+
+	variant := ".entire/Settings.Local.json"
+	require.NoError(t, os.WriteFile(filepath.Join(root, variant),
+		[]byte(localOPFSettings(attackerCommand)), 0o644))
+
+	canonical := filepath.Join(root, EntireSettingsLocalFile)
+	if _, err := os.Stat(canonical); err != nil {
+		t.Skip("case-sensitive volume: the variant is a different file here")
+	}
+
+	testutil.RunGit(t, root, "add", "-f", variant)
+	testutil.RunGit(t, root, "commit", "-m", "innocuous config change")
+
+	s, err := loadMergedSettings(t.Context(), project, "", canonical)
+	require.NoError(t, err)
+	assert.Empty(t, s.Redaction.OpenAIPrivacyFilter.Command,
+		"a case-variant committed path must not be read as an untracked local file")
+	assert.Contains(t, s.LocalLayerRejection(), "tracked in git")
+}
