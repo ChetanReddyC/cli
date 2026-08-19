@@ -574,6 +574,10 @@ func filterFilesTouched(sessionData *ExtractedSessionData, committedFiles map[st
 // recorded a checkpoint (StepCount > 0). False means the session was likely
 // registered but never did anything; treating such a session as the author of
 // the committed files would attribute another session's work to it.
+// TranscriptOnlyTaskSteps deliberately does NOT count here: those steps by
+// definition touched no files, so letting them qualify the session for the
+// committed-files fallback would be the exact mis-attribution this guard
+// prevents.
 func sessionHasEvidenceOfWork(sessionData *ExtractedSessionData, state *SessionState) bool {
 	if len(sessionData.Transcript) > 0 {
 		return true
@@ -1371,7 +1375,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			return ErrMutationSkip
 		}
 
-		if state.StepCount <= 0 {
+		if state.StepCount <= 0 && state.TranscriptOnlyTaskSteps <= 0 {
 			state.FullyCondensed = true
 			return nil
 		}
@@ -1387,6 +1391,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 				slog.String("shadow_branch", shadowBranchName),
 			)
 			state.StepCount = 0
+			state.TranscriptOnlyTaskSteps = 0
 			state.FullyCondensed = true
 			return nil
 		}
@@ -1468,8 +1473,9 @@ func (s *ManualCommitStrategy) cleanupShadowBranchIfUnused(ctx context.Context, 
 			continue
 		}
 		otherShadow := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		if otherShadow == shadowBranchName && state.StepCount > 0 {
-			// Another session still needs this shadow branch
+		if otherShadow == shadowBranchName && (state.StepCount > 0 || state.TranscriptOnlyTaskSteps > 0) {
+			// Another session still needs this shadow branch (transcript-only
+			// task steps live on it too, not just SaveStep checkpoints)
 			return nil
 		}
 	}

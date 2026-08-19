@@ -445,7 +445,7 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 | `Compaction` | `SessionID` | `SessionRef`, `Metadata` |
 | `SessionEnd` | `SessionID` | `SessionRef`, `Metadata` |
 | `SubagentStart` | `SessionID`, `SessionRef`, `ToolUseID` | `ToolInput`, `Metadata` |
-| `SubagentEnd` | `SessionID`, `SessionRef`, `ToolUseID` | `SubagentID`, `ToolInput`, `Metadata`, `SubagentTranscript` (authoritative subagent transcript path when the hook payload supplies one), `Final` (true only for a true-completion signal, e.g. Claude Code's `SubagentStop`; false for a launch-time stub) |
+| `SubagentEnd` | `SessionID`, `SessionRef`, `ToolUseID` | `SubagentID`, `ToolInput`, `Metadata`, `SubagentTranscript` (authoritative subagent transcript path when the hook payload supplies one), `Final` (only for agents with a two-signal subagent model — a launch-time stub plus a separate true-completion signal, e.g. Claude Code's `SubagentStop`: the stub sets false, the completion signal sets true; single-signal agents leave it false) |
 
 `Metadata` (`map[string]string`) holds agent-specific state that the framework stores and makes available on subsequent events. Use it for agent-internal tracking (e.g., cursor positions, background agent flags) that doesn't map to a dedicated Event field.
 

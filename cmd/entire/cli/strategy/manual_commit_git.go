@@ -277,20 +277,22 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 		// A transcript-only task step (a background read-only subagent, saved
 		// via the SubagentStop Final path's no-changes bypass) touches no
 		// files, so the FilesTouched merge above is a no-op for it: it would
-		// otherwise register with neither FilesTouched nor StepCount. Every
-		// condensation trigger keys on one of those two signals —
-		// CondenseAndMarkFullyCondensed's StepCount<=0 shortcut, PostCommit's
-		// FilesTouched check, doctor's classifySession, and the zombie sweep —
-		// so a step touching neither is invisible to all of them: it sits on a
-		// shadow branch that gets marked FullyCondensed via the shortcut
-		// without ever being condensed, then destroyed as an orphan.
-		// Incrementing StepCount here is what makes CondenseAndMarkFullyCondensed
-		// take the real condense path instead of the shortcut. Incremental
-		// checkpoints are excluded: they intentionally stay invisible to
-		// condensation until a session-level step counts them, matching the
-		// existing per-todo incremental behavior.
+		// otherwise register with neither FilesTouched nor StepCount, and every
+		// condensation trigger keys on one of those two signals — so it would
+		// sit on a shadow branch that gets marked FullyCondensed via
+		// CondenseAndMarkFullyCondensed's shortcut without ever being
+		// condensed, then destroyed as an orphan. TranscriptOnlyTaskSteps is
+		// the dedicated signal that makes those triggers take the real
+		// condense path. It is NOT StepCount: StepCount's ==0/==1 values carry
+		// first-checkpoint-baseline and transcript-anchor semantics in
+		// SaveStep (see SaveStep above), so incrementing StepCount here
+		// would make a background capture landing before the session's first
+		// SaveStep silently kill both. Incremental checkpoints are excluded:
+		// they intentionally stay invisible to condensation until a
+		// session-level step counts them, matching the existing per-todo
+		// incremental behavior.
 		if !step.IsIncremental && len(step.ModifiedFiles) == 0 && len(step.NewFiles) == 0 && len(step.DeletedFiles) == 0 {
-			state.StepCount++
+			state.TranscriptOnlyTaskSteps++
 		}
 
 		if !branchExisted {
@@ -412,6 +414,7 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 // condenseAndUpdateState) so the baseline capture cannot drift between them.
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
+	state.TranscriptOnlyTaskSteps = 0
 	state.CheckpointTokenUsage = nil
 	state.RebaselineSubagentTokens()
 }

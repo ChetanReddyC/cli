@@ -471,6 +471,7 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	// this repo would let amend and turn-finalization paths operate on unrelated
 	// checkpoints.
 	adopted.StepCount = 0
+	adopted.TranscriptOnlyTaskSteps = 0
 	adopted.CheckpointTranscriptStart = 0
 	adopted.CheckpointTranscriptSize = 0
 	adopted.TranscriptIdentifierAtStart = ""

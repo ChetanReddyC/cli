@@ -71,9 +71,9 @@ type postToolHookInputRaw struct {
 // subagentStopHookInputRaw is the JSON structure from the SubagentStop hook.
 // Per the Agent SDK docs this also carries hook_event_name and cwd, which
 // entire has no use for and so doesn't parse. agent_transcript_path is
-// SDK-documented but unverified for Claude Code's settings-file hook
-// payloads, so it is parsed defensively: an absent field just leaves
-// AgentTranscriptPath empty rather than erroring.
+// parsed defensively: an absent field just leaves AgentTranscriptPath empty
+// rather than erroring, and the lifecycle layer then falls back to resolving
+// the subagent transcript from AgentID.
 type subagentStopHookInputRaw struct {
 	SessionID           string `json:"session_id"`
 	TranscriptPath      string `json:"transcript_path"`

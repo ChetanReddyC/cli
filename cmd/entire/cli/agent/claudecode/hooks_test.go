@@ -860,10 +860,9 @@ func TestInstallHooks_UsesCurrentToolMatchers(t *testing.T) {
 // TestInstallHooks_SubagentStop_FreshInstall is the regression for wiring up
 // the real background-subagent-completion signal (SubagentStop fires at true
 // completion, even for background subagents whose PostToolUse fires seconds
-// after launch at the launch stub — see
-// docs/superpowers/plans/2026-08-17-subagent-stop-capture.md). A fresh install
-// must write the SubagentStop hook with the same empty-matcher,
-// availability-guarded `sh -c` shape as Stop.
+// after launch at the launch stub). A fresh install must write the
+// SubagentStop hook with the same empty-matcher, availability-guarded
+// `sh -c` shape as Stop.
 func TestInstallHooks_SubagentStop_FreshInstall(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
@@ -886,6 +885,87 @@ func TestInstallHooks_SubagentStop_FreshInstall(t *testing.T) {
 	}
 	if got := settings.Hooks.SubagentStop[0].Hooks[0].Timeout; got != 0 {
 		t.Errorf("SubagentStop timeout = %d, want 0 (no explicit timeout, same as Stop)", got)
+	}
+}
+
+// TestInstallHooks_SubagentStop_UpgradeInPlace is the upgrade-path regression:
+// a settings file written by a pre-SubagentStop CLI carries the seven other
+// Entire hooks, current and healthy. A plain `entire enable` (InstallHooks
+// with force=false) must repair it — add exactly the missing SubagentStop
+// entry (count == 1) and leave every other hook type untouched. Existing
+// installs must be repaired by enable, not just flagged by doctor forever.
+func TestInstallHooks_SubagentStop_UpgradeInPlace(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	a := &ClaudeCodeAgent{}
+
+	// Produce a full current install, then delete the SubagentStop entry to
+	// reproduce a settings file written by a pre-SubagentStop CLI. Using the
+	// installer's own output (rather than a hand-written fixture) keeps the
+	// other seven hook entries in exactly the shape a real old install left.
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("initial InstallHooks() error = %v", err)
+	}
+	settingsPath := filepath.Join(tempDir, ".claude", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("failed to read settings.json: %v", err)
+	}
+	var rawSettings map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawSettings); err != nil {
+		t.Fatalf("failed to parse settings.json: %v", err)
+	}
+	var rawHooks map[string]json.RawMessage
+	if err := json.Unmarshal(rawSettings["hooks"], &rawHooks); err != nil {
+		t.Fatalf("failed to parse hooks: %v", err)
+	}
+	if _, ok := rawHooks["SubagentStop"]; !ok {
+		t.Fatal("precondition: full install must contain a SubagentStop entry")
+	}
+	delete(rawHooks, "SubagentStop")
+	before := make(map[string]string, len(rawHooks))
+	for hookType, raw := range rawHooks {
+		before[hookType] = string(raw)
+	}
+	hooksJSON, err := json.Marshal(rawHooks)
+	if err != nil {
+		t.Fatalf("failed to marshal hooks: %v", err)
+	}
+	rawSettings["hooks"] = hooksJSON
+	settingsJSON, err := json.Marshal(rawSettings)
+	if err != nil {
+		t.Fatalf("failed to marshal settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, settingsJSON, 0o600); err != nil {
+		t.Fatalf("failed to write pre-SubagentStop settings: %v", err)
+	}
+
+	count, err := a.InstallHooks(context.Background(), false)
+	if err != nil {
+		t.Fatalf("upgrade InstallHooks() error = %v", err)
+	}
+	if count != 1 {
+		t.Errorf("upgrade InstallHooks() count = %d, want exactly 1 (the SubagentStop entry)", count)
+	}
+
+	after := testutil.ReadRawHooks(t, tempDir, ".claude")
+	wantCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")
+	var subagentStop []ClaudeHookMatcher
+	if err := json.Unmarshal(after["SubagentStop"], &subagentStop); err != nil {
+		t.Fatalf("failed to parse repaired SubagentStop entry: %v", err)
+	}
+	assertHookExists(t, subagentStop, "", wantCmd, "repaired SubagentStop hook")
+
+	for hookType, beforeRaw := range before {
+		afterRaw, ok := after[hookType]
+		if !ok {
+			t.Errorf("hook type %s disappeared during the upgrade", hookType)
+			continue
+		}
+		if string(afterRaw) != beforeRaw {
+			t.Errorf("hook type %s was rewritten during the upgrade:\nbefore: %s\nafter:  %s", hookType, beforeRaw, afterRaw)
+		}
 	}
 }
 

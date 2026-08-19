@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -193,7 +194,7 @@ func TestIsBackgroundLaunch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := isBackgroundLaunch([]byte(tt.toolInput)); got != tt.want {
+			if got := isBackgroundLaunch(context.Background(), []byte(tt.toolInput)); got != tt.want {
 				t.Errorf("isBackgroundLaunch(%q) = %v, want %v", tt.toolInput, got, tt.want)
 			}
 		})

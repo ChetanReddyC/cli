@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -59,13 +62,15 @@ type backgroundTaskToolInput struct {
 // run_in_background: true. Mirrors ParseSubagentTypeAndDescription's
 // ToolInput parsing. Returns false (foreground) when toolInput is empty or
 // invalid — defaulting to the existing foreground behavior is always safe.
-func isBackgroundLaunch(toolInput json.RawMessage) bool {
+func isBackgroundLaunch(ctx context.Context, toolInput json.RawMessage) bool {
 	if len(toolInput) == 0 {
 		return false
 	}
 
 	var input backgroundTaskToolInput
 	if err := json.Unmarshal(toolInput, &input); err != nil {
+		logging.Debug(ctx, "failed to parse tool_input for background-launch detection; treating as foreground",
+			slog.String("error", err.Error()))
 		return false
 	}
 

@@ -2800,6 +2800,10 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_CapturesUsingLaunchRecordedLabe
 	require.NoError(t, loadErr)
 	require.NotNil(t, state)
 	assert.Empty(t, state.InFlightTasks, "subagent-stop must clear the in-flight marker")
+	assert.Equal(t, 1, state.TranscriptOnlyTaskSteps,
+		"a no-changes Final capture must register as a transcript-only task step so condensation triggers see it")
+	assert.Zero(t, state.StepCount,
+		"a transcript-only task step must NOT consume StepCount — its ==0/==1 values carry SaveStep's first-checkpoint-baseline and transcript-anchor semantics")
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_NoMarker_SkipsDuplicateCapture
@@ -2889,11 +2893,12 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect(t
 //
 // Uses a read-only capture (no file changes) — the headline motivating case,
 // a background reviewer that edits nothing. Before the fix in
-// strategy.SaveTaskStep (registering a transcript-only task step with
-// StepCount), such a step touched neither FilesTouched nor StepCount, so
-// CondenseAndMarkFullyCondensed took its StepCount<=0 shortcut: it marked the
-// session FullyCondensed WITHOUT ever reading the shadow branch, stranding
-// the just-captured transcript there to be destroyed as an orphan. The
+// strategy.SaveTaskStep (registering a transcript-only task step via
+// state.TranscriptOnlyTaskSteps), such a step touched neither FilesTouched
+// nor any step counter, so CondenseAndMarkFullyCondensed took its no-steps
+// shortcut: it marked the session FullyCondensed WITHOUT ever reading the
+// shadow branch, stranding the just-captured transcript there to be destroyed
+// as an orphan. The
 // session state carries a real transcript path and a registered agent type
 // so CondenseSession has actual content to condense instead of hitting its
 // own "nothing to condense" skip gate — proving the shadow branch's content
@@ -3037,6 +3042,20 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_Background_ExcludesForeignWorkt
 	ctx := context.Background()
 	sessionID := "bg-foreign-session"
 	toolUseID := "toolu_foreign1"
+	agentID := "agent-foreign1"
+
+	// The subagent's transcript must exist at the resolvable path: a background
+	// Final capture is analyzer-only, and when the subagent transcript is
+	// unresolvable it deliberately skips the analyzer scan entirely rather
+	// than falling back to the parent transcript (see the unresolvable-
+	// transcript test below), so attribution here requires the real file.
+	transcriptDir := t.TempDir()
+	mainTranscriptPath := filepath.Join(transcriptDir, sessionID+".jsonl")
+	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"implement widget"}}`+"\n"), 0o600))
+	subagentsDir := paths.SubagentsDir(transcriptDir, sessionID)
+	require.NoError(t, os.MkdirAll(subagentsDir, 0o755))
+	subagentTranscriptPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
+	require.NoError(t, os.WriteFile(subagentTranscriptPath, []byte(`{"type":"assistant","message":{"content":"wrote agent-work.txt"}}`+"\n"), 0o600))
 
 	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
 		SessionID:  sessionID,
@@ -3046,7 +3065,7 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_Background_ExcludesForeignWorkt
 		InFlightTasks: []session.InFlightTask{
 			{
 				ToolUseID:       toolUseID,
-				AgentID:         "agent-foreign1",
+				AgentID:         agentID,
 				StartedAt:       time.Now(),
 				SubagentType:    "dev",
 				TaskDescription: "Implement widget",
@@ -3071,8 +3090,9 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_Background_ExcludesForeignWorkt
 	event := &agent.Event{
 		Type:       agent.SubagentEnd,
 		SessionID:  sessionID,
+		SessionRef: mainTranscriptPath,
 		ToolUseID:  toolUseID,
-		SubagentID: "agent-foreign1",
+		SubagentID: agentID,
 		Final:      true,
 		Timestamp:  time.Now(),
 	}
@@ -3086,6 +3106,213 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_Background_ExcludesForeignWorkt
 
 	_, gotForeign := readShadowBranchFile(t, repoDir, shadowBranch, "foreign.txt")
 	assert.False(t, gotForeign, "a background Final capture must not absorb a foreign worktree file via the whole-worktree DetectFileChanges scan — that is another agent's or the parent's work, not this task's")
+}
+
+// TestHandleLifecycleSubagentEnd_SubagentStop_TranscriptOnlyBeforeFirstSaveStep_PreservesBaseline
+// is the regression for overloading StepCount with transcript-only task
+// steps: StepCount's ==0 value drives SaveStep's IsFirstCheckpoint (the FIRST
+// shadow checkpoint snapshots the user's whole pre-existing uncommitted
+// worktree state — checkpoint/ephemeral.go's collectChangedFiles baseline)
+// and its ==1 value anchors TranscriptIdentifierAtStart. A transcript-only
+// background Final landing BEFORE the session's first SaveStep must therefore
+// register on the dedicated TranscriptOnlyTaskSteps counter, not StepCount —
+// otherwise the subsequent first SaveStep sees StepCount==1, skips the
+// baseline capture (silently dropping the user's pre-existing dirt from every
+// checkpoint), and never sets the transcript anchor.
+func TestHandleLifecycleSubagentEnd_SubagentStop_TranscriptOnlyBeforeFirstSaveStep_PreservesBaseline(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "baseline-order-session"
+	toolUseID := "toolu_baseline1"
+
+	// The user's pre-existing uncommitted work, on disk BEFORE the session
+	// saves anything. Only the first SaveStep's baseline capture picks it up.
+	testutil.WriteFile(t, repoDir, "user-dirt.txt", "pre-existing uncommitted work")
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: headHash,
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseActive,
+		InFlightTasks: []session.InFlightTask{
+			{ToolUseID: toolUseID, AgentID: "agent-baseline1", StartedAt: time.Now(), SubagentType: "reviewer"},
+		},
+	}))
+
+	// A read-only background subagent completes first: transcript-only Final
+	// capture (no file changes; subagent transcript unresolvable is fine here —
+	// the point is the step registers without touching StepCount).
+	ag := newMockAgent()
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  sessionID,
+		ToolUseID:  toolUseID,
+		SubagentID: "agent-baseline1",
+		Final:      true,
+		Timestamp:  time.Now(),
+	}))
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Zero(t, state.StepCount, "transcript-only task step must not consume StepCount")
+	require.Equal(t, 1, state.TranscriptOnlyTaskSteps, "transcript-only task step must register on its dedicated counter")
+
+	// Now the session's FIRST SaveStep. It must still get first-checkpoint
+	// semantics: baseline capture of user-dirt.txt and the transcript anchor.
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(repoDir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName),
+		[]byte(`{"type":"human","message":{"content":"do the work"}}`+"\n"), 0o644))
+
+	require.NoError(t, GetStrategy(ctx).SaveStep(ctx, strategy.StepContext{
+		SessionID:                sessionID,
+		ModifiedFiles:            []string{},
+		NewFiles:                 []string{},
+		DeletedFiles:             []string{},
+		MetadataDir:              metadataDir,
+		MetadataDirAbs:           metadataDirAbs,
+		CommitMessage:            "Checkpoint 1",
+		AuthorName:               "Test",
+		AuthorEmail:              "test@test.com",
+		StepTranscriptIdentifier: "anchor-uuid-1",
+	}))
+
+	state, err = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, 1, state.StepCount, "the first SaveStep must be checkpoint #1")
+	assert.Equal(t, "anchor-uuid-1", state.TranscriptIdentifierAtStart,
+		"the first SaveStep must set the transcript anchor (StepCount==1 semantics)")
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	content, gotDirt := readShadowBranchFile(t, repoDir, shadowBranch, "user-dirt.txt")
+	assert.True(t, gotDirt,
+		"the first SaveStep must snapshot pre-existing uncommitted state (IsFirstCheckpoint baseline) even after a transcript-only task step")
+	assert.Equal(t, "pre-existing uncommitted work", content)
+}
+
+// TestHandleLifecycleSubagentEnd_SubagentStop_UnresolvableTranscript_SkipsParentAttribution
+// pins the no-parent-fallback rule for background Final captures: when the
+// subagent transcript is unresolvable (payload carried none and the AgentID
+// resolves to no file), the analyzer must NOT fall back to scanning
+// event.SessionRef — the PARENT transcript — from offset 0. In
+// analyzer-files-only mode that fallback would attribute the whole session's
+// file activity to this one background task. The capture must proceed
+// transcript-less and file-less instead.
+func TestHandleLifecycleSubagentEnd_SubagentStop_UnresolvableTranscript_SkipsParentAttribution(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "bg-unresolvable-session"
+	toolUseID := "toolu_unresolvable1"
+
+	// A parent transcript that names a file (via the mock analyzer). No
+	// subagent transcript exists anywhere for this AgentID.
+	transcriptDir := t.TempDir()
+	mainTranscriptPath := filepath.Join(transcriptDir, sessionID+".jsonl")
+	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"assistant","message":{"content":"parent wrote parent-work.txt"}}`+"\n"), 0o600))
+
+	// The file the parent's transcript would attribute, present on disk so it
+	// WOULD be committed if the parent scan ran.
+	testutil.WriteFile(t, repoDir, "parent-work.txt", "the parent session's work")
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: headHash,
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseActive,
+		InFlightTasks: []session.InFlightTask{
+			{ToolUseID: toolUseID, AgentID: "agent-unresolvable1", StartedAt: time.Now(), SubagentType: "reviewer"},
+		},
+	}))
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerFiles:      []string{"parent-work.txt"},
+	}
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  sessionID,
+		SessionRef: mainTranscriptPath,
+		ToolUseID:  toolUseID,
+		SubagentID: "agent-unresolvable1",
+		Final:      true,
+		Timestamp:  time.Now(),
+	}))
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	_, gotParentWork := readShadowBranchFile(t, repoDir, shadowBranch, "parent-work.txt")
+	assert.False(t, gotParentWork,
+		"an unresolvable subagent transcript must not trigger a parent-transcript scan that attributes the whole session's files to one background task")
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	assert.Empty(t, state.InFlightTasks, "the marker is still claimed — the capture ran, just without file attribution")
+	assert.Equal(t, 1, state.TranscriptOnlyTaskSteps,
+		"the capture must still save a (file-less) task step so the transcript-side record isn't lost")
+}
+
+// TestHandleLifecycleSubagentEnd_SubagentStop_AnalyzerError_FailsInsteadOfEmptyStep
+// pins the analyzer-error semantics for background Final captures: the
+// analyzer scan is the capture's ONLY file source (analyzer-files-only mode
+// has no worktree-diff backup), so a transient read error must fail the
+// capture — a saved zero-file task step would permanently misstate the task
+// as read-only while looking perfectly healthy. The claimed marker is lost by
+// design: that is the accepted claim-loss semantics documented at the claim
+// site (claimInFlightTask) — the SessionEnd sweep does not retry it.
+func TestHandleLifecycleSubagentEnd_SubagentStop_AnalyzerError_FailsInsteadOfEmptyStep(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "bg-analyzer-error-session"
+	toolUseID := "toolu_analyzererr1"
+
+	// The subagent transcript exists (so the analyzer is actually consulted);
+	// the analyzer itself fails, simulating a transient read/parse error.
+	transcriptDir := t.TempDir()
+	subagentTranscriptPath := filepath.Join(transcriptDir, "agent-analyzererr1.jsonl")
+	require.NoError(t, os.WriteFile(subagentTranscriptPath, []byte(`{"type":"assistant","message":{"content":"did work"}}`+"\n"), 0o600))
+
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: headHash,
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseActive,
+		InFlightTasks: []session.InFlightTask{
+			{ToolUseID: toolUseID, AgentID: "agent-analyzererr1", StartedAt: time.Now(), SubagentType: "dev"},
+		},
+	}))
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerErr:        errors.New("transient transcript read failure"),
+	}
+	err := handleLifecycleSubagentEnd(ctx, ag, &agent.Event{
+		Type:               agent.SubagentEnd,
+		SessionID:          sessionID,
+		SubagentTranscript: subagentTranscriptPath,
+		ToolUseID:          toolUseID,
+		SubagentID:         "agent-analyzererr1",
+		Final:              true,
+		Timestamp:          time.Now(),
+	})
+	require.Error(t, err, "an analyzer error in analyzer-files-only mode must fail the capture, not save a clean-looking empty checkpoint")
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	if testutil.BranchExists(t, repoDir, shadowBranch) {
+		t.Error("no task step may be written when the analyzer scan failed — a zero-file checkpoint would permanently misstate the task as read-only")
+	}
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	assert.Empty(t, state.InFlightTasks,
+		"the marker was claimed before the capture failed — lost by design (accepted claim-loss semantics; the SessionEnd sweep does not retry)")
+	assert.Zero(t, state.TranscriptOnlyTaskSteps, "no step was saved, so nothing may register with condensation triggers")
 }
 
 // TestHandleLifecycleTurnEnd_InFlightTask_IncrementalSnapshot is the
@@ -3444,6 +3671,19 @@ func TestHandleLifecycleSessionEnd_InFlightTask_FinalCapture(t *testing.T) {
 	mainTranscriptPath := filepath.Join(transcriptDir, "main.jsonl")
 	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"please review the diff"}}`+"\n"), 0o600))
 
+	// The subagent's own transcript, at the path the marker's AgentID resolves
+	// to (ResolveAgentTranscriptPath, keyed off the MAIN transcript's dir and
+	// session ID). This pins the marker.AgentID → transcript-resolution
+	// plumbing: the SessionEnd sweep's synthesized event carries no
+	// SubagentTranscript, so the stored transcript can only get there via
+	// resolution from the marker's AgentID.
+	const subagentSentinel = "reviewed the diff; verdict: LGTM-sentinel"
+	subagentsDir := paths.SubagentsDir(filepath.Dir(mainTranscriptPath), sessionID)
+	require.NoError(t, os.MkdirAll(subagentsDir, 0o755))
+	subagentTranscriptPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
+	require.NoError(t, os.WriteFile(subagentTranscriptPath,
+		[]byte(`{"type":"assistant","message":{"content":"`+subagentSentinel+`"}}`+"\n"), 0o600))
+
 	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
 		SessionID:      sessionID,
 		BaseCommit:     headHash,
@@ -3457,6 +3697,36 @@ func TestHandleLifecycleSessionEnd_InFlightTask_FinalCapture(t *testing.T) {
 	}))
 
 	ag := newMockAgent()
+
+	// First: run the sweep's final capture directly (the exact call
+	// handleLifecycleSessionEnd makes) so the shadow branch is still
+	// inspectable before endSessionNow's eager condense consumes and deletes
+	// it. The stored task metadata must include the subagent's transcript —
+	// which can only have gotten there by resolving the marker's AgentID to
+	// the file on disk, since the sweep's synthesized event carries no
+	// SubagentTranscript of its own.
+	captureInFlightTasks(ctx, ag, sessionID, mainTranscriptPath, true)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	storedTranscriptPath := ".entire/metadata/" + sessionID + "/tasks/" + toolUseID + "/" + paths.AgentTranscriptFileName(agentID)
+	storedTranscript, gotTranscript := readShadowBranchFile(t, repoDir, shadowBranch, storedTranscriptPath)
+	assert.True(t, gotTranscript,
+		"the SessionEnd final capture must store the subagent transcript resolved from the marker's AgentID")
+	assert.Contains(t, storedTranscript, subagentSentinel,
+		"the stored subagent transcript must carry the subagent's actual content")
+
+	// Re-arm a second in-flight marker so the full SessionEnd handler below
+	// still demonstrably performs the sweep itself (the first marker was
+	// claimed by the direct call above — the same dedup a racing/duplicate
+	// Final event hits).
+	secondToolUseID := "toolu_sessionend2"
+	require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		state.AddInFlightTask(session.InFlightTask{
+			ToolUseID: secondToolUseID, AgentID: "agent-sessionend2", StartedAt: time.Now(), SubagentType: "reviewer",
+		})
+		return nil
+	}))
+
 	event := &agent.Event{
 		Type:       agent.SessionEnd,
 		SessionID:  sessionID,
@@ -3477,7 +3747,6 @@ func TestHandleLifecycleSessionEnd_InFlightTask_FinalCapture(t *testing.T) {
 	// checkpoint and deletes the shadow branch — so the real assertion is that
 	// the task step reached permanent storage, not that the shadow branch
 	// still exists.
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
 	if testutil.BranchExists(t, repoDir, shadowBranch) {
 		t.Error("condensation must delete the shadow branch once its content is consumed into a permanent checkpoint")
 	}

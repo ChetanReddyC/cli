@@ -272,9 +272,12 @@ any work — the true completion signal arrives later, out of band, as
    stays; the task is still running. To avoid rescanning an unchanged
    transcript every turn, the marker records the subagent transcript size at
    last capture and skips the scan (and the save) when it hasn't grown. Capped
-   at 8 tasks per invocation, oldest first — the remainder is picked up next
-   turn or, at worst, by the SessionEnd final capture below, so nothing is
-   lost, only delayed.
+   at 8 tasks per invocation, selected least-recently-attempted first
+   (never-attempted markers sort ahead of everything, matching
+   `selectInFlightTasksForSnapshot`), so the selection rotates from turn-end
+   to turn-end instead of starving whatever launched beyond the cap — the
+   remainder is picked up on a later turn or, at worst, by the SessionEnd
+   final capture below, so nothing is lost, only delayed.
 3. **SubagentStop (final, authoritative).** The real completion signal.
    `handleSubagentStopFinal` **claims** the in-flight marker (atomic
    find-and-remove keyed by `ToolUseID`) before capturing:
@@ -285,7 +288,12 @@ any work — the true completion signal arrives later, out of band, as
    - **Marker claimed** — save the full, non-incremental task step (transcript
      included) and bypass the normal "no changes, skip" gate: a read-only
      subagent (a reviewer, a search agent) still produced a transcript worth
-     keeping, and this is the only chance to capture it.
+     keeping, and this is the only chance to capture it. File attribution is
+     analyzer-only (the subagent's own transcript; never the whole-worktree
+     scan, which would sweep in whatever the parent or another agent changed
+     between launch and completion). The accepted trade: shell side-effect
+     files the transcript never names are under-captured, and deletions by
+     the subagent are also uncapturable in analyzer-only mode.
    - **Late-arrival guard.** A `SubagentStop` can arrive after the parent
      session already ended (or was swept). Session state missing entirely →
      skip the capture outright — the subagent's own transcript is still on

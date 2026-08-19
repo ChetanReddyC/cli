@@ -7,7 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -205,16 +205,15 @@ func (c *ClaudeCodeAgent) parseSubagentStop(ctx context.Context, stdin io.Reader
 	// Debug log of the RAW payload's key names (never values), not the parsed
 	// struct's non-empty fields: a parsed-struct view can't tell key-absent
 	// from key-present-but-empty, and can't reveal an alternate key spelling
-	// in the real settings-file payload — exactly the uncertainty this log
-	// exists to resolve before the dogfood verification (the settings-file
-	// payload shape is SDK-documented but unverified for this hook).
+	// in the real settings-file payload. Removable once real-payload key sets
+	// have been observed and the parse below is confirmed against them.
 	var rawMap map[string]json.RawMessage
 	if err := json.Unmarshal(rawBytes, &rawMap); err == nil {
 		keys := make([]string, 0, len(rawMap))
 		for k := range rawMap {
 			keys = append(keys, k)
 		}
-		sort.Strings(keys)
+		slices.Sort(keys)
 		logCtx := logging.WithComponent(ctx, "agent.claudecode")
 		logging.Debug(logCtx, "subagent-stop payload keys present",
 			slog.Any("keys", keys),
@@ -224,6 +223,17 @@ func (c *ClaudeCodeAgent) parseSubagentStop(ctx context.Context, stdin io.Reader
 	var raw subagentStopHookInputRaw
 	if err := json.Unmarshal(rawBytes, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	// Tripwire for the defensive-parse assumption: a well-formed SubagentStop
+	// payload always carries these two fields, so an empty value here means
+	// the payload shape diverged from what this parse expects (e.g. an
+	// alternate key spelling — see the key-name log above).
+	if raw.ToolUseID == "" || raw.SessionID == "" {
+		logging.Warn(logging.WithComponent(ctx, "agent.claudecode"),
+			"subagent-stop payload missing tool_use_id or session_id — structurally impossible for a well-formed payload",
+			slog.Bool("has_tool_use_id", raw.ToolUseID != ""),
+			slog.Bool("has_session_id", raw.SessionID != ""))
 	}
 
 	return &agent.Event{
