@@ -110,9 +110,14 @@ func TestStripIDEContextTags(t *testing.T) {
 			expected: "fix it",
 		},
 		{
-			name:     "multi-line timestamp span preserved",
-			input:    "rename the <timestamp> element\nand update </timestamp> closers too",
-			expected: "rename the <timestamp> element\nand update </timestamp> closers too",
+			name:     "multi-line timestamp at start preserved",
+			input:    "<timestamp> element\nand update </timestamp> closers too",
+			expected: "<timestamp> element\nand update </timestamp> closers too",
+		},
+		{
+			name:     "pasted timestamp at head of user_query preserved",
+			input:    "<user_query>\n<timestamp>2026-01-01</timestamp> marks when\n</user_query>",
+			expected: "<timestamp>2026-01-01</timestamp> marks when",
 		},
 		{
 			name:     "timestamp mid-text preserved",
