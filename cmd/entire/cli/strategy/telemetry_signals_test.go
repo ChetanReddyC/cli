@@ -72,3 +72,27 @@ func TestPriorAICommitTouchedFiles(t *testing.T) {
 		t.Error("not a git repository; want best-effort false")
 	}
 }
+
+func TestPriorAICommitTouchedFiles_NonASCIIPath(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+
+	// Without -z git quotes non-ASCII names in --name-only output
+	// ("caf\303\251.go"), which can never match the unquoted FilesTouched
+	// form — a systematic false negative this test pins down.
+	testutil.WriteFile(t, tmpDir, "café.go", "package main")
+	testutil.GitAdd(t, tmpDir, "café.go")
+	cpID := id.MustCheckpointID("abcdef123456")
+	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("ai change", cpID))
+
+	// HEAD commit that --skip=1 excludes.
+	testutil.WriteFile(t, tmpDir, "head.txt", "head content")
+	testutil.GitAdd(t, tmpDir, "head.txt")
+	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
+
+	if !priorAICommitTouchedFiles(t.Context(), tmpDir, []string{"café.go"}) {
+		t.Error("café.go was touched by a prior checkpoint commit; want true")
+	}
+}

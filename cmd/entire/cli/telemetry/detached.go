@@ -162,11 +162,19 @@ func spawnDetachedAnalyticsBatch(payloads []*EventPayload) {
 	flush()
 }
 
+// IsEnvOptedOut reports whether the ENTIRE_TELEMETRY_OPTOUT environment
+// opt-out is set. Every tracker honors it internally; callers that do
+// expensive work before tracking (e.g. a git-log probe) should check it
+// first so an opted-out user never pays for signal computation.
+func IsEnvOptedOut() bool {
+	return os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != ""
+}
+
 // TrackCommandDetached tracks a command execution by spawning a detached subprocess.
 // This returns immediately without blocking the CLI.
 func TrackCommandDetached(cmd *cobra.Command, agent string, isEntireEnabled bool, version string) {
 	// Check opt-out environment variables
-	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+	if IsEnvOptedOut() {
 		return
 	}
 
@@ -220,7 +228,7 @@ func BuildPluginEventPayload(pluginName string, isEntireEnabled bool, version st
 // TrackPluginDetached records a plugin invocation. Call sites must gate
 // on the plugin allowlist — this function does no name filtering itself.
 func TrackPluginDetached(pluginName string, isEntireEnabled bool, version string) {
-	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+	if IsEnvOptedOut() {
 		return
 	}
 
@@ -302,7 +310,7 @@ func BuildSkillEventPayload(inv SkillInvocation, isEntireEnabled bool, version s
 // backlog in one call, and a dropped event is never re-reported because the
 // dedupe in session state has already recorded it.
 func TrackSkillInvocationsDetached(invocations []SkillInvocation, isEntireEnabled bool, version string) {
-	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+	if IsEnvOptedOut() {
 		return
 	}
 
@@ -375,7 +383,7 @@ func BuildCheckpointCondensedPayload(sig CheckpointCondensedSignal, isEntireEnab
 // signal. Like TrackPluginDetached, it only honors the env opt-out itself —
 // call sites must gate on the user's opt-in telemetry setting.
 func TrackCheckpointCondensedDetached(sig CheckpointCondensedSignal, isEntireEnabled bool, version string) {
-	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+	if IsEnvOptedOut() {
 		return
 	}
 
