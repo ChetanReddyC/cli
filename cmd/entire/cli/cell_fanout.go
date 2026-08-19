@@ -62,9 +62,9 @@ type cellGroup struct {
 // Cell/Jurisdiction/ID are used (backward compat for index responses that
 // predate placements).
 //
-// skipped names repos whose canonical placement is explicitly not ready
-// (processing/failed/suspended) — not routable, nothing searchable there yet.
-// Callers surface these as warnings so the narrowed scope is visible.
+// skipped names repos with no routable canonical placement — the placement is
+// explicitly not ready (processing/failed/suspended) or carries no ID.
+// Callers surface these so the narrowed scope is visible.
 func groupReposByCell(repos []coreapi.RepoIndexEntry) (cells []cellGroup, skipped []string) {
 	byCell := make(map[string]*cellGroup)
 
@@ -135,16 +135,23 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) (cells []cellGroup, skippe
 // namespace for the same repo. Selection must never key on the Mirror flag:
 // real /repos rows mark every placement Mirror:true, canonical included.
 //
-// ok is false when the chosen placement is explicitly not ready — an unready
-// placement is not routable, and a ready mirror is no substitute (it may
-// predate the clone). An empty status (older cores) stays routable.
+// ok is false when the chosen placement is not routable: it carries no ID, or
+// it is not ready (a ready mirror is no substitute — it may predate the
+// clone). Status is required over the wire, so the empty-status arm is
+// defensive; any unrecognized future status is treated as not ready, which
+// skips the repo WITH a report rather than searching an unknown state.
 func canonicalRepoPlacement(r coreapi.RepoIndexEntry) (coreapi.RepoPlacement, bool) {
 	p := r.Placements[0]
-	for _, c := range r.Placements {
-		if c.ID == r.ID {
-			p = c
-			break
+	if r.ID != "" {
+		for _, c := range r.Placements {
+			if c.ID == r.ID {
+				p = c
+				break
+			}
 		}
+	}
+	if strings.TrimSpace(p.ID) == "" {
+		return coreapi.RepoPlacement{}, false
 	}
 	if p.Status != "" && p.Status != coreapi.RepoPlacementStatusReady {
 		return coreapi.RepoPlacement{}, false

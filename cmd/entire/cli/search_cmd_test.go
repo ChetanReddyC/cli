@@ -724,12 +724,12 @@ func TestMergeSearchResults_DeduplicatesOverlappingCells(t *testing.T) {
 func TestMergeSearchResults_MirrorPlacementsDoNotDoubleCount(t *testing.T) {
 	t.Parallel()
 
-	// A US-homed repo with an EU mirror indexes the same content, so the
-	// fan-out queries both cells and each returns the SAME matches. Merged
-	// results dedupe by repo+path+line; the stats must dedupe too, or the
-	// summary reports "6 matches across 4 files in 2 repos" for 3 unique
-	// results (and falsely claims truncation). Regression guard for the
-	// mirror fan-out this trail introduced.
+	// Two cells answering with the SAME repo's content (the fan-out is
+	// canonical-only since ENT-1672, but overlapping cell scopes — e.g. an
+	// empty-jurisdiction group queried via both home and an explicit cell —
+	// can still do this). Merged results dedupe by repo+path+line; the stats
+	// must dedupe too, or the summary reports "6 matches across 4 files in
+	// 2 repos" for 3 unique results (and falsely claims truncation).
 	matches := []codesearch.Result{
 		{Repo: "acme/web", Path: "main.go", Line: 1, Column: 0, Score: 0.9},
 		{Repo: "acme/web", Path: "main.go", Line: 2, Column: 0, Score: 0.8},

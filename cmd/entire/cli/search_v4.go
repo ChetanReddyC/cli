@@ -124,7 +124,17 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 		cells, skipped = groupReposByCell(index.Repos)
 	}
 	if len(skipped) > 0 {
-		warnings = append(warnings, fmt.Sprintf("skipped %d repo(s) whose placement is not ready yet: %s", len(skipped), strings.Join(skipped, ", ")))
+		if scoped {
+			// Scoped queries pin each cell to explicit repo IDs, so a skipped
+			// repo is genuinely excluded — tell the user.
+			warnings = append(warnings, fmt.Sprintf("skipped %d repo(s) with no searchable placement (missing or not ready): %s", len(skipped), strings.Join(skipped, ", ")))
+		} else {
+			// Unfiltered queries send no repo param — each queried cell
+			// searches everything it holds, so a skipped repo only stops
+			// contributing to WHICH cells are queried; claiming it was
+			// excluded would be wrong. Debug-log for diagnosability.
+			logging.Debug(ctx, "semantic search: repos without a routable canonical placement", "repos", strings.Join(skipped, ","))
+		}
 	}
 
 	if len(cells) == 0 {
@@ -518,10 +528,13 @@ func sortTier0Rows(tier0 []tier0Row) {
 	})
 }
 
-// dedupSemanticResults removes cross-cell duplicates by type+id (a repo
-// mirrored across cells returns the same logical result from each), keeping
-// the first (higher-ranked) copy. Results without an id are always kept. The
-// per-type dupe tally feeds the total/count corrections.
+// dedupSemanticResults removes cross-cell duplicates by type+id, keeping the
+// first (higher-ranked) copy. The fan-out routes each repo to one canonical
+// cell (ENT-1672), so per-repo rows no longer repeat — this guards the cases
+// that still can: a crosslinked session attached to repos in different cells,
+// and unfiltered queries where overlapping cell scopes return the same row.
+// Results without an id are always kept. The per-type dupe tally feeds the
+// total/count corrections.
 func dedupSemanticResults(merged []search.Result) ([]search.Result, map[string]int) {
 	seen := make(map[string]bool, len(merged))
 	dupesByType := make(map[string]int)
