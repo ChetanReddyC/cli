@@ -124,6 +124,16 @@ func TestToMetadataMapsTypePriorityReviewers(t *testing.T) {
 	}
 }
 
+// TestTrailApprovalDecodesStringAuthor pins the current entire-api approvals
+// wire shape. Re-verified against entire-api's TrailApprovalWire: the HTTP
+// response uses commitSha/createdAt and a bare login string for author. The
+// server's similarly named storedTrailApproval remains snake_case, but is an
+// internal JSONB shape that is converted before the response is written.
+//
+// Author deliberately remains a string rather than *trail.Author. A populated
+// approvals response otherwise fails to decode even though an empty response
+// appears healthy, breaking both `trail approvals` and the post-write response
+// from `trail approve`.
 func TestTrailApprovalDecodesStringAuthor(t *testing.T) {
 	t.Parallel()
 
@@ -158,6 +168,7 @@ func TestTrailApprovalDecodesStringAuthor(t *testing.T) {
 	}
 }
 
+// The submit response embeds the same camelCase TrailApprovalWire shape.
 func TestTrailApprovalResponseDecodesStringAuthor(t *testing.T) {
 	t.Parallel()
 
