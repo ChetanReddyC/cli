@@ -3,6 +3,7 @@ package textutil
 import "testing"
 
 func TestStripIDEContextTags(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    string
@@ -98,10 +99,36 @@ func TestStripIDEContextTags(t *testing.T) {
 			input:    "<user_query>\nhello world\n</user_query>",
 			expected: "hello world",
 		},
+		{
+			name:     "cursor timestamp block removed, user_query unwrapped",
+			input:    "<timestamp>Tuesday, Aug 18, 2026, 2:37 PM GMT+2</timestamp>\n<user_query>\nfix the login bug\n</user_query>",
+			expected: "fix the login bug",
+		},
+		{
+			name:     "timestamp with attributes stripped",
+			input:    "<timestamp tz=\"GMT+2\">Tuesday, Aug 18, 2026, 2:37 PM</timestamp>\nfix it",
+			expected: "fix it",
+		},
+		{
+			name:     "multi-line timestamp span preserved",
+			input:    "rename the <timestamp> element\nand update </timestamp> closers too",
+			expected: "rename the <timestamp> element\nand update </timestamp> closers too",
+		},
+		{
+			name:     "timestamps wrapper tag not mangled",
+			input:    "see <timestamps><timestamp>a</timestamp></timestamps> nested",
+			expected: "see <timestamps></timestamps> nested",
+		},
+		{
+			name:     "single-line timestamp inside pasted xml still stripped",
+			input:    "```xml\n<event>\n  <timestamp>2026-01-01</timestamp>\n  <level>ERROR</level>\n</event>\n```",
+			expected: "```xml\n<event>\n  \n  <level>ERROR</level>\n</event>\n```",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			result := StripIDEContextTags(tt.input)
 			if result != tt.expected {
 				t.Errorf("StripIDEContextTags() = %q, want %q", result, tt.expected)
