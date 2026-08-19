@@ -286,6 +286,10 @@ func TestUninstallHooks(t *testing.T) {
 	if !agent.AreHooksInstalled(context.Background()) {
 		t.Error("hooks should be installed before uninstall")
 	}
+	settings := readClaudeSettings(t, tempDir)
+	if !hasEntireHook(settings.Hooks.SubagentStop) {
+		t.Fatal("SubagentStop hook should be installed before uninstall")
+	}
 
 	// Uninstall
 	err = agent.UninstallHooks(context.Background())
@@ -297,6 +301,16 @@ func TestUninstallHooks(t *testing.T) {
 	if agent.AreHooksInstalled(context.Background()) {
 		t.Error("hooks should not be installed after uninstall")
 	}
+
+	// RemovesSubagentStop: `entire disable` must strip the SubagentStop hook
+	// installed by InstallHooks — without threading it through UninstallHooks,
+	// disabling Entire would leave this hook behind.
+	t.Run("removes SubagentStop", func(t *testing.T) {
+		settings := readClaudeSettings(t, tempDir)
+		if hasEntireHook(settings.Hooks.SubagentStop) {
+			t.Error("SubagentStop hook should be removed after uninstall")
+		}
+	})
 }
 
 func TestUninstallHooks_NoSettingsFile(t *testing.T) {
@@ -855,37 +869,28 @@ func TestInstallHooks_UsesCurrentToolMatchers(t *testing.T) {
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "post-task subagent hook")
 	assertHookExists(t, settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate",
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "post-todo task-list hook")
-}
 
-// TestInstallHooks_SubagentStop_FreshInstall is the regression for wiring up
-// the real background-subagent-completion signal (SubagentStop fires at true
-// completion, even for background subagents whose PostToolUse fires seconds
-// after launch at the launch stub). A fresh install must write the
-// SubagentStop hook with the same empty-matcher, availability-guarded
-// `sh -c` shape as Stop.
-func TestInstallHooks_SubagentStop_FreshInstall(t *testing.T) {
-	tempDir := t.TempDir()
-	t.Chdir(tempDir)
+	// SubagentStop fresh install is the regression for wiring up the real
+	// background-subagent-completion signal (SubagentStop fires at true
+	// completion, even for background subagents whose PostToolUse fires
+	// seconds after launch at the launch stub). A fresh install must write the
+	// SubagentStop hook with the same empty-matcher, availability-guarded
+	// `sh -c` shape as Stop.
+	t.Run("SubagentStop fresh install", func(t *testing.T) {
+		wantCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")
+		assertHookExists(t, settings.Hooks.SubagentStop, "", wantCmd, "SubagentStop hook")
 
-	a := &ClaudeCodeAgent{}
-	if _, err := a.InstallHooks(context.Background(), false); err != nil {
-		t.Fatalf("InstallHooks() error = %v", err)
-	}
-
-	settings := readClaudeSettings(t, tempDir)
-	wantCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")
-	assertHookExists(t, settings.Hooks.SubagentStop, "", wantCmd, "SubagentStop hook")
-
-	// Same shape as Stop: single command, empty matcher, no timeout.
-	if len(settings.Hooks.SubagentStop) != 1 || settings.Hooks.SubagentStop[0].Matcher != "" {
-		t.Fatalf("SubagentStop = %+v, want a single matcher with an empty string matcher (same shape as Stop)", settings.Hooks.SubagentStop)
-	}
-	if len(settings.Hooks.SubagentStop[0].Hooks) != 1 {
-		t.Fatalf("SubagentStop hooks = %d, want 1", len(settings.Hooks.SubagentStop[0].Hooks))
-	}
-	if got := settings.Hooks.SubagentStop[0].Hooks[0].Timeout; got != 0 {
-		t.Errorf("SubagentStop timeout = %d, want 0 (no explicit timeout, same as Stop)", got)
-	}
+		// Same shape as Stop: single command, empty matcher, no timeout.
+		if len(settings.Hooks.SubagentStop) != 1 || settings.Hooks.SubagentStop[0].Matcher != "" {
+			t.Fatalf("SubagentStop = %+v, want a single matcher with an empty string matcher (same shape as Stop)", settings.Hooks.SubagentStop)
+		}
+		if len(settings.Hooks.SubagentStop[0].Hooks) != 1 {
+			t.Fatalf("SubagentStop hooks = %d, want 1", len(settings.Hooks.SubagentStop[0].Hooks))
+		}
+		if got := settings.Hooks.SubagentStop[0].Hooks[0].Timeout; got != 0 {
+			t.Errorf("SubagentStop timeout = %d, want 0 (no explicit timeout, same as Stop)", got)
+		}
+	})
 }
 
 // TestInstallHooks_SubagentStop_UpgradeInPlace is the upgrade-path regression:
@@ -995,32 +1000,6 @@ func TestCheckHookConfig_Outdated_MissingSubagentStop(t *testing.T) {
 
 	if got := CheckHookConfig(context.Background()); got != HooksOutdated {
 		t.Errorf("CheckHookConfig() = %v, want HooksOutdated (missing SubagentStop)", got)
-	}
-}
-
-// TestUninstallHooks_RemovesSubagentStop verifies `entire disable` strips the
-// SubagentStop hook installed by InstallHooks — without threading it through
-// UninstallHooks, disabling Entire would leave this hook behind.
-func TestUninstallHooks_RemovesSubagentStop(t *testing.T) {
-	tempDir := t.TempDir()
-	t.Chdir(tempDir)
-
-	a := &ClaudeCodeAgent{}
-	if _, err := a.InstallHooks(context.Background(), false); err != nil {
-		t.Fatalf("InstallHooks() error = %v", err)
-	}
-	settings := readClaudeSettings(t, tempDir)
-	if !hasEntireHook(settings.Hooks.SubagentStop) {
-		t.Fatal("SubagentStop hook should be installed before uninstall")
-	}
-
-	if err := a.UninstallHooks(context.Background()); err != nil {
-		t.Fatalf("UninstallHooks() error = %v", err)
-	}
-
-	settings = readClaudeSettings(t, tempDir)
-	if hasEntireHook(settings.Hooks.SubagentStop) {
-		t.Error("SubagentStop hook should be removed after uninstall")
 	}
 }
 

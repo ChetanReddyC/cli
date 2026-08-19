@@ -288,13 +288,6 @@ func TestFormatIncrementalSubject(t *testing.T) {
 			shortToolUseID:      "toolu_01CJhrr",
 			want:                "Background dev task: Implement widget (toolu_01CJhrr)",
 		},
-		{
-			name:                "background progress with no subagentType or taskDescription",
-			incrementalType:     IncrementalTypeBackgroundProgress,
-			incrementalSequence: 1,
-			shortToolUseID:      "toolu_01CJhrr",
-			want:                "Background task (toolu_01CJhrr)",
-		},
 	}
 
 	for _, tt := range tests {

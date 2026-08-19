@@ -827,44 +827,39 @@ func TestState_AddInFlightTask_DedupByToolUseID(t *testing.T) {
 	require.Len(t, s.InFlightTasks, 2)
 }
 
-// TestState_RemoveInFlightTask pins removal semantics: the matching marker is
-// cleared, other markers survive, and removing a ToolUseID with no marker
-// (the foreground-task / double-fire case) is a safe no-op rather than a panic
-// or error.
-func TestState_RemoveInFlightTask(t *testing.T) {
+// TestState_InFlightTaskAccessors pins Remove/Find marker semantics: Remove
+// clears only the matching marker; Find returns the marker by reference (the
+// Final-path handler reads its launch-recorded label without copying). Both
+// treat an unknown ToolUseID safely — no-op / nil, not a panic — the
+// foreground-task / double-fire "no marker" case the Final-path dedup relies on.
+func TestState_InFlightTaskAccessors(t *testing.T) {
 	t.Parallel()
-	s := &State{InFlightTasks: []InFlightTask{
-		{ToolUseID: "toolu_1"},
-		{ToolUseID: "toolu_2"},
-	}}
 
-	s.RemoveInFlightTask("toolu_1")
-	require.Len(t, s.InFlightTasks, 1)
-	assert.Equal(t, "toolu_2", s.InFlightTasks[0].ToolUseID)
+	t.Run("find", func(t *testing.T) {
+		t.Parallel()
+		s := &State{InFlightTasks: []InFlightTask{{ToolUseID: "toolu_1", SubagentType: "reviewer"}, {ToolUseID: "toolu_2", SubagentType: "dev"}}}
 
-	// No-op when the ToolUseID has no marker.
-	s.RemoveInFlightTask("does-not-exist")
-	require.Len(t, s.InFlightTasks, 1)
+		got := s.FindInFlightTask("toolu_2")
+		require.NotNil(t, got)
+		assert.Equal(t, "dev", got.SubagentType)
 
-	s.RemoveInFlightTask("toolu_2")
-	assert.Empty(t, s.InFlightTasks)
-}
+		// Nil (not a panic) on a ToolUseID with no marker.
+		assert.Nil(t, s.FindInFlightTask("does-not-exist"))
+	})
 
-// TestState_FindInFlightTask pins lookup semantics: the matching marker is
-// returned by reference (so the Final-path handler can read its launch-
-// recorded label without copying), and a ToolUseID with no marker returns nil
-// rather than panicking — the same "no marker" case the Final-path dedup
-// depends on.
-func TestState_FindInFlightTask(t *testing.T) {
-	t.Parallel()
-	s := &State{InFlightTasks: []InFlightTask{
-		{ToolUseID: "toolu_1", SubagentType: "reviewer"},
-		{ToolUseID: "toolu_2", SubagentType: "dev"},
-	}}
+	t.Run("remove", func(t *testing.T) {
+		t.Parallel()
+		s := &State{InFlightTasks: []InFlightTask{{ToolUseID: "toolu_1"}, {ToolUseID: "toolu_2"}}}
 
-	got := s.FindInFlightTask("toolu_2")
-	require.NotNil(t, got)
-	assert.Equal(t, "dev", got.SubagentType)
+		s.RemoveInFlightTask("toolu_1")
+		require.Len(t, s.InFlightTasks, 1)
+		assert.Equal(t, "toolu_2", s.InFlightTasks[0].ToolUseID)
 
-	assert.Nil(t, s.FindInFlightTask("does-not-exist"))
+		// No-op when the ToolUseID has no marker.
+		s.RemoveInFlightTask("does-not-exist")
+		require.Len(t, s.InFlightTasks, 1)
+
+		s.RemoveInFlightTask("toolu_2")
+		assert.Empty(t, s.InFlightTasks)
+	})
 }

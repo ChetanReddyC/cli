@@ -592,12 +592,12 @@ func TestSubagentCheckpoints_TurnEndBackstop_ThenSubagentStop(t *testing.T) {
 		t.Fatalf("SimulateSubagentStop failed: %v", err)
 	}
 
-	// Final capture landed; marker cleared.
-	shadowBranch = env.GetShadowBranchName()
+	// Final capture landed; marker cleared. The full final-capture assertions
+	// (stored subagent transcript, captured file content) live in
+	// TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop.
 	if !env.FileExistsInBranch(shadowBranch, finalCheckpointPath) {
 		t.Fatalf("final task checkpoint missing after subagent-stop: %s", finalCheckpointPath)
 	}
-
 	state, err = env.GetSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
