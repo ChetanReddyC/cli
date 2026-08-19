@@ -111,6 +111,13 @@ type mockAnalyzerAgent struct {
 
 	analyzerFiles []string
 	analyzerErr   error
+
+	// onExtract, when set, is invoked from inside ExtractModifiedFilesFromOffset
+	// — i.e. mid-capture, after handleSubagentStopFinal has loaded its initial
+	// (pre-capture) session state snapshot but before captureSubagentTaskStep
+	// returns. Tests use it to simulate a racing SessionEnd landing exactly in
+	// that window.
+	onExtract func()
 }
 
 var _ agent.TranscriptAnalyzer = (*mockAnalyzerAgent)(nil)
@@ -118,6 +125,9 @@ var _ agent.TranscriptAnalyzer = (*mockAnalyzerAgent)(nil)
 func (m *mockAnalyzerAgent) GetTranscriptPosition(_ string) (int, error) { return 0, nil }
 
 func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(_ string, _ int) ([]string, int, error) {
+	if m.onExtract != nil {
+		m.onExtract()
+	}
 	if m.analyzerErr != nil {
 		return nil, 0, m.analyzerErr
 	}
@@ -2956,6 +2966,84 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_PhaseEnded_TriggersEagerCondens
 		}
 	}
 	assert.True(t, found, "the transcript-only task step must reach permanent checkpoint storage, not be stranded and discarded")
+}
+
+// TestHandleLifecycleSubagentEnd_SubagentStop_SessionEndsMidCapture_StillCondenses
+// is the regression for the eager-condense decision using a pre-capture phase
+// snapshot: handleSubagentStopFinal loads session state once at function
+// entry, then runs claimInFlightTask and captureSubagentTaskStep, and only
+// THEN decided whether to eagerly condense — using that stale, pre-capture
+// snapshot. If a racing SessionEnd flips the session to PhaseEnded during
+// that capture window (both serialize on the per-session gate, so the
+// interleaving reduces to ordering), the stale snapshot still said idle, the
+// eager condense was skipped, and the task step just captured became
+// post-condensation zombie shadow data.
+//
+// The session here starts idle (PhaseActive, via saveInFlightTranscriptSession),
+// not ended — unlike the sibling PhaseEnded_TriggersEagerCondense test above,
+// which starts already ended. The mock analyzer's onExtract callback fires
+// from inside ExtractModifiedFilesFromOffset, i.e. mid-way through
+// captureSubagentTaskStep, and flips the persisted session to PhaseEnded via
+// strategy.MutateSessionState — simulating exactly where a racing SessionEnd
+// would land. It deliberately does not run a full endSessionNow; only the
+// phase transition matters here.
+func TestHandleLifecycleSubagentEnd_SubagentStop_SessionEndsMidCapture_StillCondenses(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "midcapture-session"
+	toolUseID := "toolu_midcapture1"
+	agentID := "agent-midcapture1"
+
+	// Real transcript content so CondenseSession has something to condense —
+	// proving the shadow branch's content was genuinely consumed into a
+	// permanent checkpoint, not merely that FullyCondensed flipped true via
+	// CondenseAndMarkFullyCondensed's no-steps shortcut.
+	mainTranscriptPath, subagentTranscriptPath := writeSubagentTranscripts(t, agentID)
+
+	saveInFlightTranscriptSession(ctx, t, sessionID, headHash, session.PhaseActive, mainTranscriptPath,
+		session.InFlightTask{ToolUseID: toolUseID, AgentID: agentID, StartedAt: time.Now(), SubagentType: "reviewer"})
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		onExtract: func() {
+			require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(s *strategy.SessionState) error {
+				s.Phase = session.PhaseEnded
+				return nil
+			}))
+		},
+	}
+
+	event := finalSubagentEvent(sessionID, toolUseID, agentID)
+	event.SubagentTranscript = subagentTranscriptPath
+
+	err := handleLifecycleSubagentEnd(ctx, ag, event)
+	require.NoError(t, err)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	assert.Empty(t, state.InFlightTasks, "in-flight marker must be cleared regardless of the condense outcome")
+	assert.True(t, state.FullyCondensed, "a SessionEnd landing mid-capture must still trigger the eager condense: the decision must use the phase as of AFTER capture, not the snapshot loaded at function entry")
+
+	// The real assertion: condensation must have CONSUMED the shadow branch's
+	// content, not merely marked FullyCondensed via a skip/shortcut path.
+	if testutil.BranchExists(t, repoDir, shadowBranch) {
+		t.Error("condensation must delete the shadow branch once its content is consumed into a permanent checkpoint")
+	}
+
+	checkpoints, listErr := strategy.ListCheckpoints(ctx)
+	require.NoError(t, listErr)
+	found := false
+	for _, cp := range checkpoints {
+		if cp.SessionID == sessionID {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "the task step captured mid-race must reach permanent checkpoint storage, not be stranded as zombie shadow data")
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_ClaimPreventsDoubleCapture pins

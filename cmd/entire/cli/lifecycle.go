@@ -1315,6 +1315,14 @@ func claimInFlightTask(logCtx context.Context, sessionID, toolUseID string) (ses
 // subagent still produced a transcript worth a task step) and clears the
 // in-flight marker via claimInFlightTask, which also closes the race between
 // two Final events for the same ToolUseID (see its doc comment).
+//
+// The state loaded at the top of the function is only good for the zombie
+// guard above (state missing entirely) and for logging: it predates
+// claimInFlightTask and the capture that follows, and a racing SessionEnd can
+// land during that window (both serialize on the per-session gate, so the
+// interleaving reduces to ordering). The eager-condense decision near the end
+// of the function therefore reloads session state and decides on that fresh
+// phase, never on this initial snapshot.
 func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agent.Event) error {
 	state, err := strategy.LoadSessionState(logCtx, event.SessionID)
 	if err != nil {
@@ -1395,10 +1403,35 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		return captureErr
 	}
 
-	if state.Phase == session.PhaseEnded {
-		// The session ended before this SubagentStop arrived. Trigger the same
-		// eager condense SessionEnd uses so the newly-captured task step doesn't
-		// linger as post-condensation zombie shadow data.
+	// The eager-condense decision below must use the FRESH phase, not the
+	// snapshot loaded at the top of this function. That snapshot is only
+	// valid for the zombie guard (missing state) and logging above — the
+	// capture we just did (claimInFlightTask + captureSubagentTaskStep) is
+	// exactly the window where a racing SessionEnd can flip the session to
+	// PhaseEnded (both serialize on the per-session gate, so this reduces to
+	// ordering). Deciding on the stale pre-capture phase would miss that
+	// transition and skip the eager condense, leaving the task step we just
+	// wrote as post-condensation zombie shadow data.
+	freshPhase := state.Phase
+	if freshState, reloadErr := strategy.LoadSessionState(logCtx, event.SessionID); reloadErr != nil {
+		// A read hiccup here must not silently skip the condense decision: if
+		// the stale snapshot already said ended, fall back to it rather than
+		// treating the reload failure as "not ended".
+		logging.Warn(logCtx, "failed to reload session state after subagent-stop capture; falling back to pre-capture phase for condense decision",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("error", reloadErr.Error()))
+	} else if freshState != nil {
+		freshPhase = freshState.Phase
+	}
+	// freshState == nil (state swept between capture and reload) falls back
+	// to the pre-capture phase for the same fail-conservative reason.
+
+	if freshPhase == session.PhaseEnded {
+		// The session ended before or during this SubagentStop's capture.
+		// Trigger the same eager condense SessionEnd uses so the
+		// newly-captured task step doesn't linger as post-condensation
+		// zombie shadow data.
 		if condErr := GetStrategy(logCtx).CondenseAndMarkFullyCondensed(logCtx, event.SessionID); condErr != nil {
 			logging.Warn(logCtx, "eager condense after late subagent-stop capture failed",
 				slog.String("session_id", event.SessionID),
