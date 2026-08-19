@@ -182,10 +182,8 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli":
 			writeTrailResumeIntegrationJSON(t, w, api.TrailListResponse{
-				Trails:       []api.TrailResource{trail},
-				Total:        1,
-				Limit:        200,
-				RepoFullName: "entireio/cli",
+				Trails: []api.TrailResource{trail},
+				Total:  1,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/321":
 			writeTrailResumeIntegrationJSON(t, w, trail)
