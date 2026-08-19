@@ -324,56 +324,93 @@ func probeLocalSettingsIsVersioned(ctx context.Context, path string, deep bool) 
 	return treeHasPathFold(tree, strings.Split(EntireSettingsLocalFile, "/"))
 }
 
-// pathsEqualFold compares two repo-relative git paths for equality as the
-// filesystem would see them.
+// pathsEqualFold reports whether two repo-relative git paths can name the same
+// working-tree file once the filesystem has had its say.
 //
-// The comparison must NOT be exact. On a case-insensitive volume (the macOS
-// and Windows default) a pull request can commit `.entire/Settings.Local.json`:
-// checkout materializes a file that readConfined then opens through the
-// canonical name, while an exact index lookup misses it — so the file would be
-// read as settings and simultaneously judged untracked, which is precisely the
-// bypass this whole gate exists to prevent.
+// The comparison must NOT be exact, because git records the committed name
+// while readConfined opens the canonical one, and several filesystems map the
+// two together:
 //
-// Folding unconditionally rather than probing the volume is deliberate. A
-// case-variant of this filename is never legitimate content, so treating one
-// as tracked on a case-sensitive volume too costs at most an ignored local
-// layer plus a warning, and it keeps the security-relevant path free of a
-// filesystem-capability check that could itself be wrong.
+//   - Case. On a case-insensitive volume (the macOS and Windows default) a pull
+//     request can commit `.entire/Settings.Local.json`; checkout materializes a
+//     file that readConfined opens through the canonical name.
+//   - Trailing dots and spaces. Win32 strips them, so a committed
+//     `.entire/settings.local.json.` also lands on disk under the canonical
+//     name. This is the class core.protectNTFS defends, but that setting only
+//     guards .git-family names, not ours.
 //
-// Residual limit worth knowing: this handles Unicode simple case folding, not
-// every normalization a filesystem might apply (e.g. NFC/NFD equivalence).
-// The filename is pure ASCII, so the realistic vector is case.
+// Either way the file would be read as settings while an exact lookup judged
+// it untracked — precisely the bypass this gate exists to prevent, and for the
+// trailing-dot case reachable through an ordinary pull request, since it
+// defeats the index check rather than only the HEAD one.
+//
+// Normalizing unconditionally rather than probing the platform is deliberate:
+// no variant of this filename is ever legitimate content, so treating one as
+// tracked on Linux too costs at most an ignored local layer plus a warning,
+// and it keeps the security-relevant path free of a capability check that
+// could itself be wrong.
+//
+// Residual limits worth knowing. This covers Unicode simple case folding and
+// the Win32 trailing-character rule, not every equivalence a filesystem might
+// apply (NFC/NFD, for instance); the filename is pure ASCII, so those are not
+// the realistic vectors. NTFS alternate data streams are a read-side suffix
+// rather than a committable name, and 8.3 short names are generated aliases
+// for long names rather than the reverse, so neither is a route in.
 func pathsEqualFold(a, b string) bool {
-	return strings.EqualFold(a, b)
+	return strings.EqualFold(normalizePathForFilesystemCompare(a), normalizePathForFilesystemCompare(b))
 }
 
-// treeHasPathFold walks a tree comparing each component case-insensitively,
-// the tree-side counterpart of pathsEqualFold. object.Tree.FindEntry matches
-// exactly, so it cannot be used here.
-func treeHasPathFold(tree *object.Tree, parts []string) (bool, error) {
-	current := tree
+// normalizePathForFilesystemCompare drops the trailing dots and spaces Win32
+// strips, per path component. A component that is nothing but those characters
+// (".", "..") is left alone: emptying it would change the path's meaning.
+func normalizePathForFilesystemCompare(path string) string {
+	parts := strings.Split(path, "/")
 	for i, part := range parts {
-		var match *object.TreeEntry
-		for j := range current.Entries {
-			if pathsEqualFold(current.Entries[j].Name, part) {
-				match = &current.Entries[j]
-				break
-			}
+		if trimmed := strings.TrimRight(part, ". "); trimmed != "" {
+			parts[i] = trimmed
 		}
-		if match == nil {
-			return false, nil
+	}
+	return strings.Join(parts, "/")
+}
+
+// treeHasPathFold reports whether any fold-matching chain of tree entries
+// spells parts. object.Tree.FindEntry matches exactly, so it cannot be used.
+//
+// It must try EVERY fold-matching entry at each level, not just the first.
+// Git objects are case-sensitive, so one tree can legitimately hold both
+// `.Entire` and `.entire`, and git sorts uppercase first — so a decoy that
+// sorts earlier (a blob by that name, or a directory missing the child) would
+// otherwise mask the real sibling and produce a false negative. That is the
+// "any variant is tracked" semantics the index scan already has; the two sides
+// of this predicate must not disagree.
+func treeHasPathFold(tree *object.Tree, parts []string) (bool, error) {
+	if len(parts) == 0 {
+		return false, nil
+	}
+	part, rest := parts[0], parts[1:]
+
+	for i := range tree.Entries {
+		entry := &tree.Entries[i]
+		if !pathsEqualFold(entry.Name, part) {
+			continue
 		}
-		if i == len(parts)-1 {
+		if len(rest) == 0 {
 			return true, nil
 		}
-		sub, err := current.Tree(match.Name)
+		sub, err := tree.Tree(entry.Name)
 		if err != nil {
 			if errors.Is(err, object.ErrDirectoryNotFound) {
-				return false, nil
+				continue // a blob where a directory was expected: try siblings
 			}
-			return false, fmt.Errorf("read %s in HEAD: %w", match.Name, err)
+			return false, fmt.Errorf("read %s in HEAD: %w", entry.Name, err)
 		}
-		current = sub
+		found, err := treeHasPathFold(sub, rest)
+		if err != nil {
+			return false, err
+		}
+		if found {
+			return true, nil
+		}
 	}
 	return false, nil
 }

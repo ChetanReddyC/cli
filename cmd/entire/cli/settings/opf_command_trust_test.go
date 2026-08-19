@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -477,4 +478,85 @@ func TestOPFCommandTrust_LocallyRedeclaredValueIsHonored(t *testing.T) {
 
 	assert.Equal(t, trustedCommand, loadedOPF(t, project, local).Command,
 		"the same string chosen locally is the developer's own choice")
+}
+
+// stageBlobAt puts content at a repo-relative path directly into the index.
+// Used to build index/tree shapes the working tree cannot hold — a
+// case-insensitive volume cannot carry `.Entire/` and `.entire/` at once, and
+// a trailing-dot name is not portable.
+func stageBlobAt(t *testing.T, root, repoPath string) {
+	t.Helper()
+	scratch := filepath.Join(root, "scratch.tmp")
+	require.NoError(t, os.WriteFile(scratch, []byte("{}"), 0o644))
+	blob := strings.TrimSpace(testutil.RunGit(t, root, "hash-object", "-w", scratch))
+	require.NoError(t, os.Remove(scratch))
+	testutil.RunGit(t, root, "update-index", "--add", "--cacheinfo", "100644,"+blob+","+repoPath)
+}
+
+// commitIndexAndClear commits whatever is staged, then empties the index, so a
+// probe must consult HEAD rather than the index.
+func commitIndexAndClear(t *testing.T, root string, stagedPaths ...string) {
+	t.Helper()
+	tree := strings.TrimSpace(testutil.RunGit(t, root, "write-tree"))
+	commit := strings.TrimSpace(testutil.RunGit(t, root, "commit-tree", tree, "-m", "decoy"))
+	testutil.RunGit(t, root, "update-ref", "HEAD", commit)
+	for _, p := range stagedPaths {
+		testutil.RunGit(t, root, "update-index", "--force-remove", p)
+	}
+}
+
+// Git objects are case-sensitive, so one tree can hold both `.Entire` and
+// `.entire`, and git sorts uppercase first. A decoy that sorts earlier must not
+// mask the real sibling: the tree walk has to try every fold-match, matching
+// the index scan's "any variant is tracked" semantics.
+func TestPathIsVersioned_DecoySiblingDoesNotMaskRealEntry(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		decoy string
+	}{
+		{"decoy directory lacking the child", ".Entire/unrelated.json"},
+		{"decoy blob where a directory is expected", ".Entire"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			testutil.InitRepo(t, root)
+			stageBlobAt(t, root, tc.decoy)
+			stageBlobAt(t, root, EntireSettingsLocalFile)
+			commitIndexAndClear(t, root, tc.decoy, EntireSettingsLocalFile)
+
+			ClearVersionedPathCache()
+			got, err := probeLocalSettingsIsVersioned(
+				t.Context(), filepath.Join(root, EntireSettingsLocalFile), true)
+			require.NoError(t, err)
+			assert.True(t, got, "the real entry must be found past the earlier-sorting decoy")
+		})
+	}
+}
+
+// Win32 strips trailing dots and spaces, so a committed
+// `.entire/settings.local.json.` lands on a Windows disk under the canonical
+// name and is read as settings. The index check — the one a pull request
+// actually reaches — must treat it as tracked.
+func TestPathIsVersioned_Win32TrailingCharVariantsAreTracked(t *testing.T) {
+	t.Parallel()
+	for _, variant := range []string{
+		EntireSettingsLocalFile + ".",
+		EntireSettingsLocalFile + " ",
+		".entire./settings.local.json",
+	} {
+		t.Run(variant, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			testutil.InitRepo(t, root)
+			stageBlobAt(t, root, variant)
+
+			ClearVersionedPathCache()
+			got, err := probeLocalSettingsIsVersioned(
+				t.Context(), filepath.Join(root, EntireSettingsLocalFile), false)
+			require.NoError(t, err)
+			assert.True(t, got, "a Win32-equivalent committed name must count as tracked")
+		})
+	}
 }
