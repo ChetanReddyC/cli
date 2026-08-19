@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,8 +9,8 @@ import (
 	"strings"
 )
 
-// HookTrustGaps returns the snake_case event labels declared in
-// <repoRoot>/.codex/hooks.json that don't have a matching
+// HookTrustGaps returns the snake_case event labels declared in Codex's
+// authoritative hooks.json that don't have a matching
 // `[hooks.state."<hooks.json>:<event>:0:0"]` entry in the user's Codex
 // config.toml — i.e. events the local user hasn't approved yet.
 //
@@ -24,32 +25,55 @@ import (
 //   - .codex/hooks.json doesn't exist (entire isn't installed in this repo)
 //   - The user's config.toml can't be read
 //   - Every declared event already has a state entry
-func HookTrustGaps(repoRoot string) []string {
-	hooksJSONPath := filepath.Join(repoRoot, ".codex", "hooks.json")
+func HookTrustGaps(ctx context.Context) []string {
+	return InspectHookTrust(ctx).Gaps
+}
+
+// HookTrustInspection is a structural view of Codex's local approval records.
+// It never computes or copies trusted hashes.
+type HookTrustInspection struct {
+	Declared []string
+	Gaps     []string
+	Known    bool
+}
+
+// InspectHookTrust reports declared events and whether the user's Codex config
+// contains approval records for them. Known is false when config.toml cannot be
+// read, so callers do not mistake an unavailable trust check for active hooks.
+func InspectHookTrust(ctx context.Context) HookTrustInspection {
+	location, err := ResolveHookLocation(ctx)
+	if err != nil || !location.ProjectLayerExists() {
+		return HookTrustInspection{}
+	}
+	return inspectHookTrust(location.HooksPath)
+}
+
+func inspectHookTrust(hooksJSONPath string) HookTrustInspection {
 	declared, ok := declaredCodexEvents(hooksJSONPath)
 	if !ok || len(declared) == 0 {
-		return nil
+		return HookTrustInspection{}
 	}
+	inspection := HookTrustInspection{Declared: declared}
 
 	configPath := codexConfigPath()
 	if configPath == "" {
-		return nil
+		return inspection
 	}
 	trusted, ok := readCodexTrustedKeys(configPath)
 	if !ok {
-		return nil
+		return inspection
 	}
+	inspection.Known = true
 
-	var gaps []string
 	for _, ev := range declared {
 		// Match any handler index — Codex's state key is
 		// "<path>:<event>:<group>:<handler>". Trust on any handler counts.
 		prefix := hooksJSONPath + ":" + ev + ":"
 		if !codexAnyKeyHasPrefix(trusted, prefix) {
-			gaps = append(gaps, ev)
+			inspection.Gaps = append(inspection.Gaps, ev)
 		}
 	}
-	return gaps
+	return inspection
 }
 
 func codexConfigPath() string {
@@ -94,37 +118,76 @@ func declaredCodexEvents(hooksJSONPath string) ([]string, bool) {
 	return events, true
 }
 
-// MissingEntireHooks returns the snake_case event labels the CLI's
-// canonical install ships today (SessionStart, SessionEnd,
-// UserPromptSubmit, Stop, PostToolUse) that aren't backed by an
-// Entire-managed hook command in <repoRoot>/.codex/hooks.json. Surfaces
-// drift when the user enabled Codex on an older release and the install
-// set has since grown — SessionEnd is exactly that case today.
+// MissingEntireHooks returns the snake_case event labels the CLI's canonical
+// install ships today that aren't backed by an Entire-managed hook command in
+// Codex's authoritative hooks.json. Surfaces drift when the user enabled Codex
+// on an older release and the install set has since grown.
 //
 // Returns nil when hooks.json is missing or unreadable — those cases
 // are "Codex isn't enabled here", which is a different problem.
-func MissingEntireHooks(repoRoot string) []string {
-	hooksJSONPath := filepath.Join(repoRoot, ".codex", "hooks.json")
+func MissingEntireHooks(ctx context.Context) []string {
+	location, err := ResolveHookLocation(ctx)
+	if err != nil {
+		return nil
+	}
+	return missingEntireHooks(location.HooksPath)
+}
+
+func missingEntireHooks(hooksJSONPath string) []string {
 	data, err := os.ReadFile(hooksJSONPath) //nolint:gosec // path constructed from caller-controlled repo root
 	if err != nil {
 		return nil
 	}
-	var file HooksFile
-	if err := json.Unmarshal(data, &file); err != nil {
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(data, &topLevel); err != nil {
+		return nil
+	}
+	var rawHooks map[string]json.RawMessage
+	if err := json.Unmarshal(topLevel["hooks"], &rawHooks); err != nil {
 		return nil
 	}
 	var missing []string
-	check := func(label string, groups []MatcherGroup) {
+	for _, hook := range managedHooks {
+		var groups []MatcherGroup
+		if err := parseHookType(rawHooks, hook.event, &groups); err != nil {
+			return nil
+		}
 		if !hasEntireHook(groups) {
-			missing = append(missing, label)
+			missing = append(missing, hook.label)
 		}
 	}
-	check("session_start", file.Hooks.SessionStart)
-	check("session_end", file.Hooks.SessionEnd)
-	check("user_prompt_submit", file.Hooks.UserPromptSubmit)
-	check("stop", file.Hooks.Stop)
-	check("post_tool_use", file.Hooks.PostToolUse)
 	return missing
+}
+
+// HasLegacyEntireHooks reports whether this linked checkout still has an
+// Entire-managed hook in the obsolete worktree-local file.
+func HasLegacyEntireHooks(ctx context.Context) bool {
+	location, err := ResolveHookLocation(ctx)
+	if err != nil || location.LegacyHooksPath == "" {
+		return false
+	}
+	return hasEntireHooksAtPath(location.LegacyHooksPath)
+}
+
+// HasWorktreeLocalEntireHooks reports whether the current checkout has an
+// Entire-managed Codex hook without assuming that location is authoritative.
+func HasWorktreeLocalEntireHooks(ctx context.Context) bool {
+	path, err := worktreeLocalHooksPath(ctx)
+	return err == nil && hasEntireHooksAtPath(path)
+}
+
+func hasEntireHooksAtPath(path string) bool {
+	document, err := readHooksDocument(path)
+	if err != nil || !document.exists {
+		return false
+	}
+	for _, raw := range document.rawHooks {
+		var groups []MatcherGroup
+		if json.Unmarshal(raw, &groups) == nil && hasEntireHook(groups) {
+			return true
+		}
+	}
+	return false
 }
 
 // codexTrustStateHeaderRegex matches `[hooks.state."<key>"]` headers in

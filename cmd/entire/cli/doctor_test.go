@@ -5,11 +5,13 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -583,7 +585,8 @@ trusted_hash = "sha256:ddd"
 
 	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
-	require.Contains(t, stdout.String(), "✓ Codex hook trust: OK")
+	require.Contains(t, stdout.String(), "✓ Codex hooks: INSTALLED")
+	require.Contains(t, stdout.String(), "✓ Codex hook approval records: PRESENT")
 }
 
 // TestCheckCodexHookTrust_ListsMissingEvents prints the gap list when a
@@ -621,9 +624,122 @@ trusted_hash = "sha256:ccc"
 
 	out := stdout.String()
 	require.Contains(t, out, "Codex hook trust: REVIEW NEEDED")
-	require.Contains(t, out, "1 hook(s) declared")
+	require.Contains(t, out, "1 installed hook(s)")
 	require.Contains(t, out, "- post_tool_use")
 	require.Contains(t, out, "Open /hooks inside Codex")
+}
+
+func TestCheckCodexHookTrust_UnknownWhenApprovalRecordsUnreadable(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".codex"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".codex", "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "missing-codex-home"))
+
+	cmd, stdout := newTestCmd(t)
+	checkCodexHookTrust(cmd)
+	require.Contains(t, stdout.String(), "✓ Codex hooks: INSTALLED")
+	require.Contains(t, stdout.String(), "Codex hook trust: UNKNOWN")
+	require.Contains(t, stdout.String(), "review their active state")
+}
+
+func TestCheckCodexHookTrust_LinkedWorktreeReportsLegacyFile(t *testing.T) {
+	tmp, _, linkedRoot := setupLinkedRepoForDoctorTest(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(linkedRoot, ".codex"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(linkedRoot, ".codex", "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
+	t.Chdir(linkedRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	cmd, stdout := newTestCmd(t)
+	checkCodexHookTrust(cmd)
+	require.Contains(t, stdout.String(), "Codex hooks: MISPLACED")
+	require.Contains(t, stdout.String(), "current Codex ignores")
+	require.NotContains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
+	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
+}
+
+func TestCheckCodexHookTrust_LinkedWorktreeReadsAuthoritativeMissingHooks(t *testing.T) {
+	tmp, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".codex"), 0o750))
+	require.NoError(t, os.MkdirAll(filepath.Join(linkedRoot, ".codex"), 0o750))
+	stale := `{"hooks":{
+  "SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-start"}]}],
+  "UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit"}]}],
+  "Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop"}]}]
+}}`
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".codex", "hooks.json"), []byte(stale), 0o600))
+	t.Chdir(linkedRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	cmd, stdout := newTestCmd(t)
+	checkCodexHookTrust(cmd)
+	require.Contains(t, stdout.String(), "Codex hooks: OUT OF DATE")
+	require.Contains(t, stdout.String(), "- post_tool_use")
+	require.NotContains(t, stdout.String(), "MISPLACED")
+}
+
+func TestCheckCodexHookTrust_LinkedWorktreeReportsMissingProjectLayer(t *testing.T) {
+	tmp, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".codex"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".codex", "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
+	t.Chdir(linkedRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	cmd, stdout := newTestCmd(t)
+	checkCodexHookTrust(cmd)
+	require.Contains(t, stdout.String(), "Codex hooks: PROJECT LAYER MISSING")
+	require.NotContains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
+	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
+}
+
+func TestCheckCodexHookTrust_LinkedSubmoduleReportsUnsafeAuthority(t *testing.T) {
+	tmp := t.TempDir()
+	subjectRoot := filepath.Join(tmp, "subject")
+	superRoot := filepath.Join(tmp, "super")
+	submoduleRoot := filepath.Join(superRoot, "sub")
+	linkedSubmoduleRoot := filepath.Join(tmp, "linked-sub")
+	for _, repoRoot := range []string{subjectRoot, superRoot} {
+		testutil.InitRepo(t, repoRoot)
+		testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
+		testutil.GitAdd(t, repoRoot, "README.md")
+		testutil.GitCommit(t, repoRoot, "initial")
+	}
+	runGitForDoctorTest(t, superRoot, "-c", "protocol.file.allow=always", "submodule", "add", subjectRoot, "sub")
+	testutil.GitAdd(t, superRoot, ".gitmodules", "sub")
+	testutil.GitCommit(t, superRoot, "add submodule")
+	runGitForDoctorTest(t, submoduleRoot, "worktree", "add", "-b", "linked", linkedSubmoduleRoot)
+	require.NoError(t, os.MkdirAll(filepath.Join(linkedSubmoduleRoot, ".codex"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(linkedSubmoduleRoot, ".codex", "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
+	t.Chdir(linkedSubmoduleRoot)
+
+	cmd, stdout := newTestCmd(t)
+	checkCodexHookTrust(cmd)
+	require.Contains(t, stdout.String(), "UNSUPPORTED LINKED SUBMODULE")
+	require.Contains(t, stdout.String(), "will not write there")
+	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
+}
+
+func setupLinkedRepoForDoctorTest(t *testing.T) (tmp, repoRoot, linkedRoot string) {
+	t.Helper()
+	tmp = t.TempDir()
+	repoRoot = filepath.Join(tmp, "repo")
+	linkedRoot = filepath.Join(tmp, "linked")
+	testutil.InitRepo(t, repoRoot)
+	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, repoRoot, "README.md")
+	testutil.GitCommit(t, repoRoot, "initial")
+	runGitForDoctorTest(t, repoRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	return tmp, repoRoot, linkedRoot
+}
+
+func runGitForDoctorTest(t *testing.T, repoRoot string, args ...string) {
+	t.Helper()
+	commandArgs := append([]string{"-C", repoRoot}, args...)
+	gitCmd := exec.CommandContext(t.Context(), "git", commandArgs...)
+	gitCmd.Dir = repoRoot
+	gitCmd.Env = testutil.GitIsolatedEnv()
+	output, err := gitCmd.CombinedOutput()
+	require.NoError(t, err, "%s", output)
 }
 
 // TestCheckHookDrift_SilentWhenNotInstalled — the generalized drift check

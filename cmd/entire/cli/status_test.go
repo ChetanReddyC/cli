@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -1787,6 +1788,45 @@ func TestRunStatusJSON_HooksOutdated(t *testing.T) {
 	}
 	if !slices.Contains(result.HooksOutdated, "claude-code") {
 		t.Errorf("Expected hooks_outdated to contain 'claude-code', got %v", result.HooksOutdated)
+	}
+}
+
+func TestRunStatusJSON_CodexLegacyLinkedWorktreeHooksAreNotInstalled(t *testing.T) {
+	setupTestRepo(t)
+	repoRoot, err := paths.WorktreeRoot(context.Background())
+	if err != nil {
+		t.Fatalf("WorktreeRoot() error = %v", err)
+	}
+	linkedRoot := filepath.Join(t.TempDir(), "linked")
+	cmd := exec.CommandContext(t.Context(), "git", "worktree", "add", "-b", "codex-linked-status", linkedRoot)
+	cmd.Dir = repoRoot
+	cmd.Env = testutil.GitIsolatedEnv()
+	if output, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
+		t.Fatalf("git worktree add: %v: %s", cmdErr, output)
+	}
+	t.Chdir(linkedRoot)
+	writeSettings(t, testSettingsEnabled)
+	if err := os.MkdirAll(".codex", 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	legacy := `{"hooks":{"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop"}]}]}}`
+	if err := os.WriteFile(filepath.Join(".codex", "hooks.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if slices.Contains(result.Agents, "Codex") {
+		t.Fatalf("ignored worktree-local hooks must not report Codex installed: %v", result.Agents)
+	}
+	if !slices.Contains(result.HooksOutdated, "codex") {
+		t.Fatalf("expected legacy Codex hooks under hooks_outdated, got %v", result.HooksOutdated)
 	}
 }
 

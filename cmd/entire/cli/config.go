@@ -126,15 +126,14 @@ func InstalledAgentDisplayNames(ctx context.Context) []string {
 // are skipped: absence of a drift check reads as "nothing to report", never as
 // a warning.
 //
-// Scoped to agents AreHooksInstalled reports as installed here. Note what that
-// means for generated-file agents (Pi, OpenCode): the committed file *is* the
-// installation, so a repo that ships one gets drift warnings even where nobody
-// ran `entire agent add`. That is the intent — such a repo is relying on the
-// committed file to work — but it does mean this is not scoped to people who
-// opted in on this machine.
+// Every freshness implementation is asked directly so it can report a stale
+// artifact that no longer qualifies as an active installation. For generated-
+// file agents (Pi, OpenCode), the committed file *is* the installation, so a
+// repo that ships one gets drift warnings even where nobody ran
+// `entire agent add`.
 func OutdatedHookAgents(ctx context.Context) []types.AgentName {
 	var outdated []types.AgentName
-	for _, name := range GetAgentsWithHooksInstalled(ctx) {
+	for _, name := range agent.List() {
 		ag, err := agent.Get(name)
 		if err != nil {
 			continue

@@ -8,6 +8,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/stretchr/testify/require"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -45,6 +46,182 @@ func TestInstallHooks_CreatesHooksJSONOnly(t *testing.T) {
 	projectConfig := filepath.Join(tempDir, ".codex", "config.toml")
 	_, err = os.Stat(projectConfig)
 	require.True(t, os.IsNotExist(err), "install must not create .codex/config.toml")
+}
+
+func TestInstallHooks_LinkedWorktreeUsesAuthoritativeRoot(t *testing.T) {
+	tmp := t.TempDir()
+	repoRoot := filepath.Join(tmp, "repo")
+	linkedRoot := filepath.Join(tmp, "linked")
+	testutil.InitRepo(t, repoRoot)
+	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, repoRoot, "README.md")
+	testutil.GitCommit(t, repoRoot, "initial")
+
+	cmd := exec.CommandContext(t.Context(), "git", "worktree", "add", "-b", "feature", linkedRoot)
+	cmd.Dir = repoRoot
+	cmd.Env = testutil.GitIsolatedEnv()
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+
+	t.Chdir(linkedRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.Equal(t, len(managedHooks), count)
+	require.FileExists(t, filepath.Join(repoRoot, ".codex", HooksFileName))
+	require.DirExists(t, filepath.Join(linkedRoot, ".codex"))
+	require.NoFileExists(t, filepath.Join(linkedRoot, ".codex", HooksFileName))
+}
+
+func TestInstallHooks_LinkedWorktreeMigratesLegacyConfig(t *testing.T) {
+	repoRoot, linkedRoot := setupLinkedWorktreeEnv(t)
+	authoritativePath := filepath.Join(repoRoot, ".codex", HooksFileName)
+	legacyPath := filepath.Join(linkedRoot, ".codex", HooksFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(authoritativePath), 0o750))
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0o750))
+	require.NoError(t, os.WriteFile(authoritativePath, []byte(`{
+  "$schema": "destination-schema",
+  "user_setting": {"keep": true},
+  "hooks": {
+    "PreToolUse": [{"matcher": "^Bash$", "hooks": [{"type": "command", "command": "user-destination-hook"}]}]
+  }
+}`), 0o600))
+	require.NoError(t, os.WriteFile(legacyPath, []byte(`{
+  "$schema": "legacy-schema",
+  "legacy_setting": {"keep": true},
+  "hooks": {
+    "Stop": [{"matcher": null, "hooks": [
+      {"type": "command", "command": "entire hooks codex stop", "timeout": 30},
+      {"type": "command", "command": "user-legacy-hook"}
+    ]}]
+  }
+}`), 0o600))
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.Equal(t, len(managedHooks), count)
+
+	authoritative := readFile(t, authoritativePath)
+	require.Contains(t, authoritative, "destination-schema")
+	require.Contains(t, authoritative, "user_setting")
+	require.Contains(t, authoritative, "user-destination-hook")
+	require.Contains(t, authoritative, "entire hooks codex stop")
+	require.NotContains(t, authoritative, "legacy-schema")
+
+	legacy := readFile(t, legacyPath)
+	require.Contains(t, legacy, "legacy-schema")
+	require.Contains(t, legacy, "legacy_setting")
+	require.Contains(t, legacy, "user-legacy-hook")
+	require.NotContains(t, legacy, "entire hooks codex")
+
+	count, err = ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.Zero(t, count)
+	require.Equal(t, authoritative, readFile(t, authoritativePath))
+	require.Equal(t, legacy, readFile(t, legacyPath))
+}
+
+func TestInstallHooks_LinkedWorktreeDeletesManagedOnlyLegacyFile(t *testing.T) {
+	_, linkedRoot := setupLinkedWorktreeEnv(t)
+	legacyPath := filepath.Join(linkedRoot, ".codex", HooksFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0o750))
+	require.NoError(t, os.WriteFile(legacyPath, []byte(`{
+  "hooks": {
+    "Stop": [{"matcher": null, "hooks": [{"type": "command", "command": "entire hooks codex stop", "timeout": 30}]}]
+  }
+}`), 0o600))
+
+	ag := &CodexAgent{}
+	_, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.NoFileExists(t, legacyPath)
+	require.DirExists(t, filepath.Dir(legacyPath))
+}
+
+func TestUninstallHooks_LinkedWorktreeUpdatesSharedFile(t *testing.T) {
+	repoRoot, linkedRoot := setupLinkedWorktreeEnv(t)
+	authoritativePath := filepath.Join(repoRoot, ".codex", HooksFileName)
+
+	ag := &CodexAgent{}
+	_, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.True(t, ag.AreHooksInstalled(context.Background()))
+
+	var topLevel map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(readFile(t, authoritativePath)), &topLevel))
+	topLevel["user_setting"] = json.RawMessage(`{"keep":true}`)
+	output, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, jsonutil.WriteFileAtomic(authoritativePath, output, 0o600))
+
+	require.NoError(t, ag.UninstallHooks(context.Background()))
+	require.False(t, ag.AreHooksInstalled(context.Background()))
+	require.FileExists(t, authoritativePath)
+	remaining := readFile(t, authoritativePath)
+	require.Contains(t, remaining, "user_setting")
+	require.NotContains(t, remaining, "entire hooks codex")
+	require.NoFileExists(t, filepath.Join(linkedRoot, ".codex", HooksFileName))
+}
+
+func TestInstallHooks_BareLayoutUpdatesOneSharedFile(t *testing.T) {
+	layoutRoot, mainRoot, featureRoot := setupBareWorktreeLayout(t)
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+	ag := &CodexAgent{}
+
+	t.Chdir(mainRoot)
+	count, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.Equal(t, len(managedHooks), count)
+
+	t.Chdir(featureRoot)
+	count, err = ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.Zero(t, count)
+	require.True(t, ag.AreHooksInstalled(context.Background()))
+	require.FileExists(t, filepath.Join(layoutRoot, ".codex", HooksFileName))
+	require.DirExists(t, filepath.Join(mainRoot, ".codex"))
+	require.DirExists(t, filepath.Join(featureRoot, ".codex"))
+	require.NoFileExists(t, filepath.Join(mainRoot, ".codex", HooksFileName))
+	require.NoFileExists(t, filepath.Join(featureRoot, ".codex", HooksFileName))
+}
+
+func TestInstallHooks_OrdinarySubmoduleUsesLocalRoot(t *testing.T) {
+	ordinarySubmoduleRoot, _ := setupSubmoduleWorktrees(t)
+	t.Chdir(ordinarySubmoduleRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.Equal(t, len(managedHooks), count)
+	require.FileExists(t, filepath.Join(ordinarySubmoduleRoot, ".codex", HooksFileName))
+}
+
+func TestInstallHooks_LinkedSubmoduleRefusesGitInternalPath(t *testing.T) {
+	_, linkedSubmoduleRoot := setupSubmoduleWorktrees(t)
+	t.Chdir(linkedSubmoduleRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+	canonicalLinkedRoot, err := canonicalPath(linkedSubmoduleRoot)
+	require.NoError(t, err)
+	gitDir, err := readGitDirFile(filepath.Join(canonicalLinkedRoot, ".git"), canonicalLinkedRoot)
+	require.NoError(t, err)
+	unsafeRoot := filepath.Dir(filepath.Dir(filepath.Dir(gitDir)))
+
+	ag := &CodexAgent{}
+	_, err = ag.InstallHooks(context.Background(), false)
+	require.ErrorIs(t, err, ErrLinkedSubmoduleHooksUnsupported)
+	require.NoDirExists(t, filepath.Join(unsafeRoot, ".codex"))
+
+	localPath := filepath.Join(linkedSubmoduleRoot, ".codex", HooksFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPath), 0o750))
+	require.NoError(t, os.WriteFile(localPath, []byte(`{"hooks":{"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop"}]}]}}`), 0o600))
+	require.Equal(t, agentpkg.HooksOutdated, ag.CheckHookConfig(context.Background()))
+	require.NoError(t, ag.UninstallHooks(context.Background()))
+	require.NoFileExists(t, localPath)
+	require.NoDirExists(t, filepath.Join(unsafeRoot, ".codex"))
 }
 
 func TestInstallHooks_WindowsWrapperProbeSuccessKeepsWrappedCommands(t *testing.T) {
@@ -295,7 +472,7 @@ func TestAreHooksInstalled_WithHooks(t *testing.T) {
 	require.True(t, ag.AreHooksInstalled(context.Background()))
 }
 
-func TestAreHooksInstalled_PartialHooks(t *testing.T) {
+func TestAreHooksInstalled_PartialHooksAreOutdated(t *testing.T) {
 	tempDir := setupTestEnv(t)
 
 	codexDir := filepath.Join(tempDir, ".codex")
@@ -315,6 +492,7 @@ func TestAreHooksInstalled_PartialHooks(t *testing.T) {
 
 	ag := &CodexAgent{}
 	require.False(t, ag.AreHooksInstalled(context.Background()))
+	require.Equal(t, agentpkg.HooksOutdated, ag.CheckHookConfig(context.Background()))
 }
 
 // TestAreHooksInstalled_PreSessionEndInstall — a user who enabled Codex before
@@ -337,7 +515,7 @@ func TestAreHooksInstalled_PreSessionEndInstall(t *testing.T) {
 
 	ag := &CodexAgent{}
 	require.True(t, ag.AreHooksInstalled(context.Background()))
-	require.Equal(t, []string{"session_end"}, MissingEntireHooks(tempDir))
+	require.Equal(t, []string{"session_end"}, MissingEntireHooks(context.Background()))
 }
 
 func TestInstallHooks_PreservesExistingHooksJSON(t *testing.T) {
@@ -495,6 +673,26 @@ func withCodexHookEnvironment(t *testing.T, goos string, wrapperWorks bool) {
 func withCodexHookEnvironmentFunc(t *testing.T, goos string, wrapperWorks func(context.Context, string) bool) {
 	t.Helper()
 	t.Cleanup(agentpkg.SetWindowsHookProbeForTesting(goos, wrapperWorks))
+}
+
+func setupLinkedWorktreeEnv(t *testing.T) (repoRoot, linkedRoot string) {
+	t.Helper()
+	tmp := t.TempDir()
+	repoRoot = filepath.Join(tmp, "repo")
+	linkedRoot = filepath.Join(tmp, "linked")
+	testutil.InitRepo(t, repoRoot)
+	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, repoRoot, "README.md")
+	testutil.GitCommit(t, repoRoot, "initial")
+
+	cmd := exec.CommandContext(t.Context(), "git", "worktree", "add", "-b", "feature", linkedRoot)
+	cmd.Dir = repoRoot
+	cmd.Env = testutil.GitIsolatedEnv()
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+	t.Chdir(linkedRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+	return repoRoot, linkedRoot
 }
 
 // TestInstallHooks_DropsLegacyHookAlongsideCurrent is the regression test for

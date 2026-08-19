@@ -13,19 +13,19 @@ import (
 // the user config without touching ~/.codex on the dev machine. Tests
 // that need a config.toml write it themselves into CODEX_HOME after
 // the call.
-func writeTrustFixture(t *testing.T, hooksJSON string) (repoRoot, hooksPath string) {
+func writeTrustFixture(t *testing.T, hooksJSON string) string {
 	t.Helper()
 	tmp := t.TempDir()
-	repoRoot = filepath.Join(tmp, "repo")
+	repoRoot := filepath.Join(tmp, "repo")
 	codexHome := filepath.Join(tmp, "codex-home")
 	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".codex"), 0o750))
 	require.NoError(t, os.MkdirAll(codexHome, 0o750))
 
-	hooksPath = filepath.Join(repoRoot, ".codex", "hooks.json")
+	hooksPath := filepath.Join(repoRoot, ".codex", "hooks.json")
 	require.NoError(t, os.WriteFile(hooksPath, []byte(hooksJSON), 0o600))
 
 	t.Setenv("CODEX_HOME", codexHome)
-	return repoRoot, hooksPath
+	return hooksPath
 }
 
 // TestHookTrustGaps_FlagsMissingEvent is the primary case: the user
@@ -42,7 +42,7 @@ func TestHookTrustGaps_FlagsMissingEvent(t *testing.T) {
     "PostToolUse": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}]
   }
 }`
-	repoRoot, hooksPath := writeTrustFixture(t, hooksJSON)
+	hooksPath := writeTrustFixture(t, hooksJSON)
 
 	configTOML := `[hooks.state."` + hooksPath + `:session_start:0:0"]
 trusted_hash = "sha256:aaa"
@@ -55,7 +55,7 @@ trusted_hash = "sha256:ccc"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte(configTOML), 0o600))
 
-	gaps := HookTrustGaps(repoRoot)
+	gaps := inspectHookTrust(hooksPath).Gaps
 	require.Equal(t, []string{"post_tool_use"}, gaps)
 }
 
@@ -74,7 +74,7 @@ func TestHookTrustGaps_FlagsUntrustedSessionEnd(t *testing.T) {
     "PostToolUse": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}]
   }
 }`
-	repoRoot, hooksPath := writeTrustFixture(t, hooksJSON)
+	hooksPath := writeTrustFixture(t, hooksJSON)
 
 	// The trust state a user carries over from before SessionEnd existed.
 	configTOML := `[hooks.state."` + hooksPath + `:session_start:0:0"]
@@ -91,7 +91,7 @@ trusted_hash = "sha256:ddd"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte(configTOML), 0o600))
 
-	require.Equal(t, []string{"session_end"}, HookTrustGaps(repoRoot))
+	require.Equal(t, []string{"session_end"}, inspectHookTrust(hooksPath).Gaps)
 }
 
 // TestMissingEntireHooks_FlagsAbsentSessionEnd covers the other half of the
@@ -106,9 +106,9 @@ func TestMissingEntireHooks_FlagsAbsentSessionEnd(t *testing.T) {
     "PostToolUse": [{"matcher": null, "hooks": [{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]
   }
 }`
-	repoRoot, _ := writeTrustFixture(t, hooksJSON)
+	hooksPath := writeTrustFixture(t, hooksJSON)
 
-	require.Equal(t, []string{"session_end"}, MissingEntireHooks(repoRoot))
+	require.Equal(t, []string{"session_end"}, missingEntireHooks(hooksPath))
 }
 
 // TestHookTrustGaps_NoGapsWhenAllTrusted returns nil when every declared
@@ -120,7 +120,7 @@ func TestHookTrustGaps_NoGapsWhenAllTrusted(t *testing.T) {
     "PostToolUse": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}]
   }
 }`
-	repoRoot, hooksPath := writeTrustFixture(t, hooksJSON)
+	hooksPath := writeTrustFixture(t, hooksJSON)
 
 	// Trust both, plus an unrelated entry from another repo to make sure
 	// readCodexTrustedKeys doesn't get confused by parallel installs.
@@ -135,7 +135,7 @@ trusted_hash = "sha256:ccc"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte(configTOML), 0o600))
 
-	gaps := HookTrustGaps(repoRoot)
+	gaps := inspectHookTrust(hooksPath).Gaps
 	require.Empty(t, gaps)
 }
 
@@ -144,7 +144,7 @@ trusted_hash = "sha256:ccc"
 func TestHookTrustGaps_NilWhenHooksJSONMissing(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("CODEX_HOME", tmp)
-	require.Nil(t, HookTrustGaps(tmp))
+	require.Empty(t, inspectHookTrust(filepath.Join(tmp, "hooks.json")).Gaps)
 }
 
 // TestHookTrustGaps_NilWhenConfigUnreadable — first-run users have no
@@ -160,7 +160,7 @@ func TestHookTrustGaps_NilWhenConfigUnreadable(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(tmp, "repo", ".codex", "hooks.json"), []byte(hooksJSON), 0o600))
 	t.Setenv("CODEX_HOME", codexHome)
 
-	require.Nil(t, HookTrustGaps(filepath.Join(tmp, "repo")))
+	require.Empty(t, inspectHookTrust(filepath.Join(tmp, "repo", ".codex", "hooks.json")).Gaps)
 }
 
 // TestMissingEntireHooks_FlagsStaleFile — user enabled Codex on an older
@@ -173,8 +173,8 @@ func TestMissingEntireHooks_FlagsStaleFile(t *testing.T) {
 		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}]
 	}}`
-	repoRoot, _ := writeTrustFixture(t, hooksJSON)
-	require.Equal(t, []string{"session_end", "post_tool_use"}, MissingEntireHooks(repoRoot))
+	hooksPath := writeTrustFixture(t, hooksJSON)
+	require.Equal(t, []string{"session_end", "post_tool_use"}, missingEntireHooks(hooksPath))
 }
 
 // TestMissingEntireHooks_NilWhenAllPresent returns nil when every
@@ -189,15 +189,15 @@ func TestMissingEntireHooks_NilWhenAllPresent(t *testing.T) {
 		        {"matcher":null,"hooks":[{"type":"command","command":"my-custom-tool","timeout":30}]}],
 		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]
 	}}`
-	repoRoot, _ := writeTrustFixture(t, hooksJSON)
-	require.Empty(t, MissingEntireHooks(repoRoot))
+	hooksPath := writeTrustFixture(t, hooksJSON)
+	require.Empty(t, missingEntireHooks(hooksPath))
 }
 
 // TestMissingEntireHooks_NilWhenFileMissing — Codex isn't enabled for
 // this repo. Stay silent so doctor doesn't tell users to refresh hooks
 // they never installed.
 func TestMissingEntireHooks_NilWhenFileMissing(t *testing.T) {
-	require.Nil(t, MissingEntireHooks(t.TempDir()))
+	require.Nil(t, missingEntireHooks(filepath.Join(t.TempDir(), "hooks.json")))
 }
 
 // TestMissingEntireHooks_IgnoresNonEntireCommands — a hooks.json that
@@ -212,8 +212,8 @@ func TestMissingEntireHooks_IgnoresNonEntireCommands(t *testing.T) {
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}],
 		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex post-tool-use","timeout":30}]}]
 	}}`
-	repoRoot, _ := writeTrustFixture(t, hooksJSON)
-	require.Equal(t, []string{"session_start"}, MissingEntireHooks(repoRoot))
+	hooksPath := writeTrustFixture(t, hooksJSON)
+	require.Equal(t, []string{"session_start"}, missingEntireHooks(hooksPath))
 }
 
 // TestHookTrustGaps_HandlesNonzeroHandlerIndex — the state-key prefix
@@ -222,10 +222,10 @@ func TestMissingEntireHooks_IgnoresNonEntireCommands(t *testing.T) {
 // handler in first group) should still satisfy the gap check.
 func TestHookTrustGaps_HandlesNonzeroHandlerIndex(t *testing.T) {
 	hooksJSON := `{"hooks":{"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"x","timeout":30}]}]}}`
-	repoRoot, hooksPath := writeTrustFixture(t, hooksJSON)
+	hooksPath := writeTrustFixture(t, hooksJSON)
 	configTOML := `[hooks.state."` + hooksPath + `:post_tool_use:0:1"]
 trusted_hash = "sha256:aaa"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte(configTOML), 0o600))
-	require.Empty(t, HookTrustGaps(repoRoot))
+	require.Empty(t, inspectHookTrust(hooksPath).Gaps)
 }

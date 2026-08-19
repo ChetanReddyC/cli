@@ -192,10 +192,8 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// this machine. Trust state is keyed by the absolute hooks.json
 	// path, so missing entries here flag exactly that case.
 	if ag.Name() == agent.AgentNameCodex {
-		if root, err := paths.WorktreeRoot(ctx); err == nil {
-			if gaps := codex.HookTrustGaps(root); len(gaps) > 0 {
-				message += fmt.Sprintf(" %d new hook(s) await approval (%s). Open /hooks to trust them.", len(gaps), strings.Join(gaps, ", "))
-			}
+		if gaps := codex.HookTrustGaps(ctx); len(gaps) > 0 {
+			message += fmt.Sprintf(" %d new hook(s) await approval (%s). Open /hooks to trust them.", len(gaps), strings.Join(gaps, ", "))
 		}
 	}
 

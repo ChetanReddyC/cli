@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"charm.land/huh/v2"
@@ -14,7 +13,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -623,36 +621,44 @@ func checkHookDrift(cmd *cobra.Command) {
 	}
 }
 
-// checkCodexHookTrust warns about two kinds of drift in the Codex hook
-// setup:
-//
-//  1. .codex/hooks.json is stale relative to what the CLI installs
-//     today (e.g. a release added PostToolUse after the user enabled
-//     Codex). Fix: re-run `entire enable`.
-//
-//  2. A declared hook lacks a `trusted_hash` entry in the user's Codex
-//     config — either a fresh clone or a newer hook on the file the
-//     user hasn't approved yet. Fix: open /hooks in Codex.
-//
-// Both checks are structural (file/key presence). Stays silent when
-// this repo doesn't have codex hooks installed or when we can't
-// resolve the worktree root. Warn-only.
+// checkCodexHookTrust reports whether Codex can discover the authoritative
+// hooks file, whether its Entire-managed event set is current, and whether the
+// local Codex config has approval records for every declared hook. All checks
+// are structural; Entire never computes or copies Codex trust hashes.
 func checkCodexHookTrust(cmd *cobra.Command) {
-	repoRoot, err := paths.WorktreeRoot(cmd.Context())
+	location, err := codex.ResolveHookLocation(cmd.Context())
 	if err != nil {
+		if errors.Is(err, codex.ErrLinkedSubmoduleHooksUnsupported) && codex.HasWorktreeLocalEntireHooks(cmd.Context()) {
+			w := cmd.OutOrStdout()
+			fmt.Fprintln(w, "Codex hooks: UNSUPPORTED LINKED SUBMODULE")
+			fmt.Fprintln(w, "  Current Codex resolves this checkout's hook root inside Git's internal submodule storage.")
+			fmt.Fprintln(w, "  Entire will not write there. Remove the ignored local hooks with `entire agent remove codex`.")
+		}
 		return
 	}
-	if _, statErr := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); statErr != nil {
+	legacy := codex.HasLegacyEntireHooks(cmd.Context())
+	if _, statErr := os.Stat(location.HooksPath); statErr != nil {
+		if legacy {
+			w := cmd.OutOrStdout()
+			fmt.Fprintln(w, "Codex hooks: MISPLACED")
+			fmt.Fprintln(w, "  Entire hooks exist only in this linked checkout's worktree-local .codex/hooks.json,")
+			fmt.Fprintln(w, "  which current Codex ignores. Run `entire enable` to migrate them to the shared repository hook file.")
+		}
 		return
 	}
 
 	w := cmd.OutOrStdout()
-	missing := codex.MissingEntireHooks(repoRoot)
-	gaps := codex.HookTrustGaps(repoRoot)
-
-	if len(missing) == 0 && len(gaps) == 0 {
-		fmt.Fprintln(w, "✓ Codex hook trust: OK")
+	if !location.ProjectLayerExists() {
+		fmt.Fprintln(w, "Codex hooks: PROJECT LAYER MISSING")
+		fmt.Fprintln(w, "  The authoritative hooks file exists, but this linked checkout has no .codex directory,")
+		fmt.Fprintln(w, "  so current Codex does not discover it. Run `entire enable` from this checkout.")
 		return
+	}
+	missing := codex.MissingEntireHooks(cmd.Context())
+	trust := codex.InspectHookTrust(cmd.Context())
+
+	if len(missing) == 0 {
+		fmt.Fprintln(w, "✓ Codex hooks: INSTALLED")
 	}
 
 	if len(missing) > 0 {
@@ -664,13 +670,25 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 		fmt.Fprintln(w, "  Run `entire enable` to refresh the hooks file.")
 	}
 
-	if len(gaps) > 0 {
+	switch {
+	case len(trust.Declared) > 0 && !trust.Known:
+		fmt.Fprintln(w, "Codex hook trust: UNKNOWN")
+		fmt.Fprintln(w, "  The hooks are installed, but Codex's local approval records could not be read.")
+		fmt.Fprintln(w, "  Open /hooks inside Codex to review their active state.")
+	case len(trust.Gaps) > 0:
 		fmt.Fprintln(w, "Codex hook trust: REVIEW NEEDED")
-		fmt.Fprintf(w, "  %d hook(s) declared in .codex/hooks.json have no trusted_hash entry yet:\n", len(gaps))
-		for _, ev := range gaps {
+		fmt.Fprintf(w, "  %d installed hook(s) have no approval record at the authoritative path:\n", len(trust.Gaps))
+		for _, ev := range trust.Gaps {
 			fmt.Fprintf(w, "    - %s\n", ev)
 		}
 		fmt.Fprintln(w, "  Open /hooks inside Codex to approve them.")
+	case len(trust.Declared) > 0:
+		fmt.Fprintln(w, "✓ Codex hook approval records: PRESENT")
+	}
+
+	if legacy {
+		fmt.Fprintln(w, "Codex hooks: LEGACY COPY FOUND")
+		fmt.Fprintln(w, "  Run `entire enable` to remove only Entire-managed entries from this checkout's ignored legacy file.")
 	}
 }
 
