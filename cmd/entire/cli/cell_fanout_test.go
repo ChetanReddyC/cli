@@ -39,7 +39,7 @@ func TestGroupReposByCell(t *testing.T) {
 		{ID: "01D", Jurisdiction: "eu"},
 		{ID: "01E", Jurisdiction: "us"},
 	}
-	cells, _ := groupReposByCell(repos)
+	cells, _ := groupReposByCell(repos, routeCanonical)
 	if len(cells) != 4 {
 		t.Fatalf("groups = %d, want 4: %+v", len(cells), cells)
 	}
@@ -88,7 +88,7 @@ func TestGroupReposByCell_Placements(t *testing.T) {
 			ID: "01LEGACY", Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us",
 		},
 	}
-	cells, skipped := groupReposByCell(repos)
+	cells, skipped := groupReposByCell(repos, routeCanonical)
 	if len(skipped) != 0 {
 		t.Fatalf("skipped = %v, want none", skipped)
 	}
@@ -109,11 +109,12 @@ func TestGroupReposByCell_Placements(t *testing.T) {
 	}
 }
 
-// TestGroupReposByCell_ProcessingPrimaryPreferred verifies that core's
-// explicit primaries.processing ULID outranks the row-ID convention: when the
-// two disagree, the processing primary wins (it names the cell doing the
-// repo's heavy lifting — where searchable content originates). An unknown
-// processing ULID (not among the placements) falls back to the convention.
+// TestGroupReposByCell_ProcessingPrimaryPreferred verifies that under
+// routeByElection core's explicit primaries.processing ULID outranks the
+// row-ID convention: when the two disagree, the processing primary wins (it
+// names the cell doing the repo's heavy lifting — where searchable content
+// originates). An unknown processing ULID (not among the placements) falls
+// back to the convention.
 func TestGroupReposByCell_ProcessingPrimaryPreferred(t *testing.T) {
 	t.Parallel()
 	repos := []coreapi.RepoIndexEntry{
@@ -136,7 +137,7 @@ func TestGroupReposByCell_ProcessingPrimaryPreferred(t *testing.T) {
 			},
 		},
 	}
-	cells, skipped := groupReposByCell(repos)
+	cells, skipped := groupReposByCell(repos, routeByElection)
 	if len(skipped) != 0 {
 		t.Fatalf("skipped = %v, want none", skipped)
 	}
@@ -150,6 +151,39 @@ func TestGroupReposByCell_ProcessingPrimaryPreferred(t *testing.T) {
 	}
 	if us.cell != usEastCell || strings.Join(us.repoIDs, ",") != testPlacementFallback {
 		t.Fatalf("us group = %+v, want row-ID fallback 01FALLBACK", us)
+	}
+}
+
+// TestGroupReposByCell_CanonicalModeIgnoresElection verifies routeCanonical
+// picks by the row-ID convention even when core elected a different
+// processing primary. Broad (pin-less) fan-out and code search must route
+// this way: the leaves narrow a pin-less search to the placements canonical
+// in their own cell, so following the election there would search a
+// divergently elected repo nowhere — and the BFF's code-search.ts ignores the
+// election for the same rows (ENT-1672).
+func TestGroupReposByCell_CanonicalModeIgnoresElection(t *testing.T) {
+	t.Parallel()
+	repos := []coreapi.RepoIndexEntry{
+		{
+			// Row ID says US, primaries.processing says EU — US must win here.
+			ID: testPlacementUS, Jurisdiction: "us",
+			Primaries: coreapi.NewOptRepoPrimaries(coreapi.RepoPrimaries{Processing: testPlacementEU}),
+			Placements: []coreapi.RepoPlacement{
+				{ID: testPlacementUS, Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us", Mirror: true, Status: coreapi.RepoPlacementStatusReady},
+				{ID: testPlacementEU, Cell: euCentralCell, ClusterSlug: testClusterSlugEU, Jurisdiction: "eu", Mirror: true, Status: coreapi.RepoPlacementStatusReady},
+			},
+		},
+	}
+	cells, skipped := groupReposByCell(repos, routeCanonical)
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %v, want none", skipped)
+	}
+	if len(cells) != 1 {
+		t.Fatalf("groups = %d, want 1 (canonical cell only): %+v", len(cells), cells)
+	}
+	us := cells[0]
+	if us.cell != usEastCell || strings.Join(us.repoIDs, ",") != testPlacementUS {
+		t.Fatalf("group = %+v, want canonical %s despite the EU election", us, testPlacementUS)
 	}
 }
 
@@ -178,7 +212,7 @@ func TestGroupReposByCell_CanonicalNotFirst(t *testing.T) {
 			},
 		},
 	}
-	cells, skipped := groupReposByCell(repos)
+	cells, skipped := groupReposByCell(repos, routeByElection)
 	if len(skipped) != 0 {
 		t.Fatalf("skipped = %v, want none", skipped)
 	}
@@ -217,7 +251,7 @@ func TestGroupReposByCell_UnreadyCanonicalSkipped(t *testing.T) {
 			},
 		},
 	}
-	cells, skipped := groupReposByCell(repos)
+	cells, skipped := groupReposByCell(repos, routeCanonical)
 	// The unready canonical is skipped entirely — a ready mirror is NOT a
 	// substitute (it may predate the clone; the BFF treats the repo as
 	// unroutable the same way).
@@ -246,7 +280,7 @@ func TestGroupReposByCell_PlacementEmptyID(t *testing.T) {
 			},
 		},
 	}
-	cells, skipped := groupReposByCell(repos)
+	cells, skipped := groupReposByCell(repos, routeCanonical)
 	if len(cells) != 0 {
 		t.Fatalf("groups = %d, want 0 (all placement IDs empty): %+v", len(cells), cells)
 	}
@@ -272,7 +306,7 @@ func TestGroupReposByCell_PlacementUsesOwnSlug(t *testing.T) {
 			},
 		},
 	}
-	cells, _ := groupReposByCell(repos)
+	cells, _ := groupReposByCell(repos, routeCanonical)
 	if len(cells) != 1 {
 		t.Fatalf("groups = %d, want 1: %+v", len(cells), cells)
 	}

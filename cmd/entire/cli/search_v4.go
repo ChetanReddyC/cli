@@ -108,7 +108,10 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 		if err != nil {
 			return nil, err
 		}
-		cells, skipped = groupReposByCell(entries)
+		// Scoped requests pin the picked placement's ULID (repoIDs below), so
+		// the elected processing primary is safe to route by — the BFF's
+		// filtered path applies the same rule.
+		cells, skipped = groupReposByCell(entries, routeByElection)
 	} else {
 		index, err := s.listFullIndex(ctx)
 		if err != nil {
@@ -121,7 +124,11 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 			logging.Debug(ctx, "semantic search: repo index truncated; cross-repo results may be incomplete")
 			warnings = append(warnings, "repo index truncated; cross-repo results may be incomplete")
 		}
-		cells, skipped = groupReposByCell(index.Repos)
+		// Broad requests send no repo pins, and query-serve narrows a pin-less
+		// search to the placements canonical in its own cell — routing by the
+		// election would search a divergently elected repo nowhere. Canonical
+		// convention, like the BFF's unfiltered path (see routeCanonical).
+		cells, skipped = groupReposByCell(index.Repos, routeCanonical)
 	}
 	if len(skipped) > 0 {
 		if scoped {
