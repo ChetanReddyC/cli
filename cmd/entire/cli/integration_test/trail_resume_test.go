@@ -27,7 +27,7 @@ import (
 
 // trailResumeIntegrationClusterSlug is the fake processing placement's
 // cluster, used to join /api/v1/repos' RepoPlacement.ClusterSlug to
-// /api/v1/clusters' Cluster.Slug (see cell_target.go's cellTargetForClusterSlug).
+// /api/v1/clusters' Cluster.Slug (see cell_target.go's cellTargetForPlacement).
 const trailResumeIntegrationClusterSlug = "trail-resume-cluster"
 
 func TestTrailResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T) {
