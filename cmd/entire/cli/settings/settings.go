@@ -46,6 +46,13 @@ func WithWorktreeRoot(ctx context.Context, worktreeRoot string) context.Context 
 	return context.WithValue(ctx, worktreeRootContextKey{}, filepath.Clean(worktreeRoot))
 }
 
+// WorktreeRoot returns the explicit worktree root carried by ctx. Consumers
+// that combine settings resolution with repo-local git commands use this to
+// keep both operations scoped to the same repository.
+func WorktreeRoot(ctx context.Context) (string, bool) {
+	return worktreeRootFromContext(ctx)
+}
+
 func worktreeRootFromContext(ctx context.Context) (string, bool) {
 	root, ok := ctx.Value(worktreeRootContextKey{}).(string)
 	return root, ok && root != ""
@@ -65,8 +72,14 @@ type EntireSettings struct {
 	// show a disabled message and hooks exit silently. Defaults to true.
 	Enabled bool `json:"enabled"`
 
-	// LocalDev indicates whether to use "go run" instead of the "entire" binary
-	// This is used for development when the binary is not installed
+	// Deprecated: no longer used, and deliberately not read anywhere — not even
+	// merged from an override (see mergeScalarFields). Kept so the strict loader
+	// (DisallowUnknownFields) still accepts a "local_dev" key in settings files
+	// written before it was removed.
+	//
+	// It let a tracked settings file decide that hooks run repo content; see
+	// agent.LegacyLocalDevHookScript for the full rationale. Do not reintroduce a
+	// setting that influences hook command generation.
 	LocalDev bool `json:"local_dev,omitempty"`
 
 	// LogLevel sets the logging verbosity (debug, info, warn, error).
@@ -956,9 +969,8 @@ func mergeScalarFields(settings *EntireSettings, raw map[string]json.RawMessage)
 	if err := mergeRawBool(raw, "enabled", &settings.Enabled); err != nil {
 		return err
 	}
-	if err := mergeRawBool(raw, "local_dev", &settings.LocalDev); err != nil {
-		return err
-	}
+	// "local_dev" is deliberately absent — a deprecated no-op, see
+	// EntireSettings.LocalDev.
 	if err := mergeRawBool(raw, "absolute_git_hook_path", &settings.AbsoluteGitHookPath); err != nil {
 		return err
 	}

@@ -1,7 +1,6 @@
 package strategy
 
 import (
-	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -16,17 +15,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// captureStderrWriter redirects the strategy package's user-facing stderr into
-// a buffer for the duration of the test.
-func captureStderrWriter(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buf bytes.Buffer
-	oldWriter := stderrWriter
-	stderrWriter = &buf
-	t.Cleanup(func() { stderrWriter = oldWriter })
-	return &buf
-}
 
 // identityTestRepo initializes an isolated repo and chdirs into it.
 func identityTestRepo(t *testing.T) string {

@@ -274,6 +274,7 @@ mise run dev
 
 # In this repo, point the CLI at the local API. The login flow targets
 # the local server via --server (the default is the production
+# auth.entire.io, which dispatches to a regional login server such as
 # us.auth.entire.io).
 cd ../cli
 export ENTIRE_API_BASE_URL=http://localhost:8787
@@ -485,7 +486,7 @@ Entire derives the git URL automatically using the same protocol (SSH or HTTPS) 
 
 - Fetch the checkpoint branch locally if it exists on the remote but not locally (one-time)
 - Push `entire/checkpoints/v1` to the checkpoint repo instead of your default push remote
-- Ignore the setting if it looks inherited rather than yours, and push checkpoints to your own push remote instead. `checkpoint_remote` is normally committed in `.entire/settings.json`, so forking a project inherits it — without this, a contributor's session data would be pushed into the upstream project's checkpoint repo. A setting is treated as yours when it lives in the gitignored `.entire/settings.local.json`, or when your `origin` remote is owned by the same account or org as the checkpoint repo
+- Ignore the setting if it looks inherited rather than yours, and push checkpoints to your own push remote instead. `checkpoint_remote` is normally committed in `.entire/settings.json`, so cloning or forking a project inherits it — without this, a contributor's session data would be pushed into the upstream project's checkpoint repo. A setting is treated as yours when it lives in the gitignored `.entire/settings.local.json`, or when your `origin` **and every push URL** of the remote you are pushing to are owned by the same account or org as the checkpoint repo. Requiring the push destination too covers contributors who cloned the upstream repo and added their own fork, where `origin` belongs to the upstream project rather than to them; requiring every push URL covers mirror-style remotes that fan out to several repositories
 - If your checkpoint repo is owned by a different account or org than `origin`, configure it in `.entire/settings.local.json` so it is always honored
 - If the remote is unreachable, warn and continue without blocking your main push
 
