@@ -3892,16 +3892,17 @@ func TestCaptureInFlightTasksForCommit_FilesPresent_RegistersViaFilesTouched(t *
 	assert.NotNil(t, preState, "commit-snapshot capture must not clean up pre-task state")
 }
 
-// TestCaptureInFlightTasksForCommit_ReadOnly_RegistersViaStepCount is scenario
+// TestCaptureInFlightTasksForCommit_ReadOnly_RegistersViaTranscriptOnlyTaskSteps is scenario
 // (b) from Step 2.2: the analyzer reports no modified files (the realistic
 // shape when the subagent's own commit already landed everything it wrote, or
 // the subagent is read-only, e.g. a reviewer). SaveTaskStep's registration
-// rule bumps StepCount instead of FilesTouched when a non-incremental step
-// touches zero files (manual_commit_git.go:292) — this is what makes the
-// step visible to condensation triggers even without any file changes to
-// point at. The transcript must still be stored: a read-only subagent still
+// rule bumps TranscriptOnlyTaskSteps (deliberately NOT StepCount, whose
+// ==0/==1 values carry first-checkpoint-baseline and transcript-anchor
+// semantics in SaveStep) when a non-incremental step touches zero files —
+// this is what makes the step visible to condensation triggers even without
+// any file changes to point at. The transcript must still be stored: a read-only subagent still
 // produced content worth backing the trailer with.
-func TestCaptureInFlightTasksForCommit_ReadOnly_RegistersViaStepCount(t *testing.T) {
+func TestCaptureInFlightTasksForCommit_ReadOnly_RegistersViaTranscriptOnlyTaskSteps(t *testing.T) {
 	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
 	repoDir, headHash := setupSubagentEndTestRepo(t)
 	ctx := context.Background()
@@ -3942,8 +3943,10 @@ func TestCaptureInFlightTasksForCommit_ReadOnly_RegistersViaStepCount(t *testing
 	require.NotNil(t, state)
 	assert.Empty(t, state.FilesTouched,
 		"the read-only case must not register via FilesTouched")
-	assert.Equal(t, 1, state.StepCount,
-		"the read-only case must register via StepCount, or the step is invisible to every condensation trigger")
+	assert.Equal(t, 1, state.TranscriptOnlyTaskSteps,
+		"the read-only case must register via TranscriptOnlyTaskSteps, or the step is invisible to every condensation trigger")
+	assert.Zero(t, state.StepCount,
+		"StepCount is the SaveStep counter with first-checkpoint-baseline semantics; task steps must never touch it")
 
 	marker := state.FindInFlightTask(toolUseID)
 	require.NotNil(t, marker, "commit-snapshot capture must not claim (remove) the in-flight marker")
