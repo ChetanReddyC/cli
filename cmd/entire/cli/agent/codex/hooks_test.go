@@ -48,6 +48,22 @@ func TestInstallHooks_CreatesHooksJSONOnly(t *testing.T) {
 	require.True(t, os.IsNotExist(err), "install must not create .codex/config.toml")
 }
 
+func TestInstallHooks_RepositoryLockDoesNotPolluteWorktree(t *testing.T) {
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	testutil.InitRepo(t, repoRoot)
+	t.Chdir(repoRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+
+	ag := &CodexAgent{}
+	_, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.NoFileExists(t, filepath.Join(repoRoot, ".codex", HooksFileName+".lock"))
+	require.FileExists(t, filepath.Join(repoRoot, ".git", "entire-codex-hooks.lock"))
+
+	require.NoError(t, ag.UninstallHooks(context.Background()))
+	require.NoFileExists(t, filepath.Join(repoRoot, ".codex", HooksFileName+".lock"))
+}
+
 func TestInstallHooks_LinkedWorktreeUsesAuthoritativeRoot(t *testing.T) {
 	tmp := t.TempDir()
 	repoRoot := filepath.Join(tmp, "repo")

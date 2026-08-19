@@ -71,7 +71,7 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 			return 0, fmt.Errorf("create linked-worktree .codex project layer: %w", err)
 		}
 	}
-	release, err := acquireHooksLock(ctx, location.HooksPath+".lock")
+	release, err := acquireHooksLock(ctx, location.LockPath)
 	if err != nil {
 		return 0, fmt.Errorf("lock Codex hooks file: %w", err)
 	}
@@ -131,11 +131,11 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 			if !fileExists(localPath) {
 				return nil
 			}
-			return uninstallHooksFiles(ctx, localPath, localPath)
+			return uninstallHooksFiles(ctx, location.LockPath, localPath)
 		}
 		return err
 	}
-	return uninstallHooksFiles(ctx, location.HooksPath, location.HooksPath, location.LegacyHooksPath)
+	return uninstallHooksFiles(ctx, location.LockPath, location.HooksPath, location.LegacyHooksPath)
 }
 
 func uninstallHooksFiles(ctx context.Context, lockPath string, hooksPaths ...string) error {
@@ -147,9 +147,9 @@ func uninstallHooksFiles(ctx context.Context, lockPath string, hooksPaths ...str
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o750); err != nil {
-		return fmt.Errorf("create .codex directory: %w", err)
+		return fmt.Errorf("create Codex hooks lock directory: %w", err)
 	}
-	release, err := acquireHooksLock(ctx, lockPath+".lock")
+	release, err := acquireHooksLock(ctx, lockPath)
 	if err != nil {
 		return fmt.Errorf("lock Codex hooks file: %w", err)
 	}

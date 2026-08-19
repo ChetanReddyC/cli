@@ -19,6 +19,7 @@ func TestResolveHookLocation_NormalCheckout(t *testing.T) {
 	location, err := resolveHookLocation(repoRoot)
 	require.NoError(t, err)
 	require.Equal(t, canonicalHooksPath(t, repoRoot), location.HooksPath)
+	require.Equal(t, canonicalLockPath(t, repoRoot), location.LockPath)
 	require.Empty(t, location.LegacyHooksPath)
 	require.False(t, location.Shared)
 }
@@ -35,6 +36,7 @@ func TestResolveHookLocation_ConventionalLinkedWorktree(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, canonicalHooksPath(t, repoRoot), location.HooksPath)
 	require.Equal(t, canonicalHooksPath(t, linkedRoot), location.LegacyHooksPath)
+	require.Equal(t, canonicalLockPath(t, repoRoot), location.LockPath)
 	require.True(t, location.Shared)
 }
 
@@ -153,4 +155,11 @@ func canonicalHooksPath(t *testing.T, root string) string {
 	canonicalRoot, err := canonicalPath(root)
 	require.NoError(t, err)
 	return filepath.Join(canonicalRoot, ".codex", HooksFileName)
+}
+
+func canonicalLockPath(t *testing.T, root string) string {
+	t.Helper()
+	canonicalRoot, err := canonicalPath(root)
+	require.NoError(t, err)
+	return filepath.Join(canonicalRoot, ".git", "entire-codex-hooks.lock")
 }

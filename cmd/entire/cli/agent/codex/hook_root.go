@@ -21,6 +21,7 @@ var ErrLinkedSubmoduleHooksUnsupported = errors.New("codex hooks are not support
 type HookLocation struct {
 	HooksPath       string
 	LegacyHooksPath string
+	LockPath        string
 	Shared          bool
 }
 
@@ -77,6 +78,7 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 	location := HookLocation{
 		HooksPath: filepath.Join(worktreeRoot, ".codex", HooksFileName),
 	}
+	location.LockPath = location.HooksPath + ".lock"
 	dotGitPath := filepath.Join(worktreeRoot, ".git")
 	info, err := os.Stat(dotGitPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -86,6 +88,11 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 		return HookLocation{}, fmt.Errorf("stat .git path: %w", err)
 	}
 	if info.IsDir() {
+		gitDir, resolveErr := canonicalPath(dotGitPath)
+		if resolveErr != nil {
+			return HookLocation{}, fmt.Errorf("resolve Git directory: %w", resolveErr)
+		}
+		location.LockPath = filepath.Join(gitDir, "entire-codex-hooks.lock")
 		return location, nil
 	}
 
@@ -93,6 +100,7 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 	if err != nil {
 		return HookLocation{}, err
 	}
+	location.LockPath = filepath.Join(gitDir, "entire-codex-hooks.lock")
 	worktreesDir := filepath.Dir(gitDir)
 	if filepath.Base(worktreesDir) != "worktrees" {
 		return location, nil
@@ -112,17 +120,18 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 	if !looksLikeGitDir(commonDir) {
 		return HookLocation{}, fmt.Errorf("linked worktree common directory %q is not a Git directory", commonDir)
 	}
+	location.LockPath = filepath.Join(commonDir, "entire-codex-hooks.lock")
+	location.LegacyHooksPath = filepath.Join(worktreeRoot, ".codex", HooksFileName)
 
 	authoritativeRoot, err := canonicalPath(filepath.Dir(commonDir))
 	if err != nil {
 		return HookLocation{}, fmt.Errorf("resolve Codex hook root: %w", err)
 	}
 	if isInsideGitMetadata(authoritativeRoot) {
-		return HookLocation{}, fmt.Errorf("%w: refusing unsafe hook root %q", ErrLinkedSubmoduleHooksUnsupported, authoritativeRoot)
+		return location, fmt.Errorf("%w: refusing unsafe hook root %q", ErrLinkedSubmoduleHooksUnsupported, authoritativeRoot)
 	}
 
 	location.HooksPath = filepath.Join(authoritativeRoot, ".codex", HooksFileName)
-	location.LegacyHooksPath = filepath.Join(worktreeRoot, ".codex", HooksFileName)
 	location.Shared = true
 	return location, nil
 }
