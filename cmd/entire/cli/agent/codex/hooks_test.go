@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -89,6 +90,29 @@ func TestInstallHooks_LinkedWorktreeUsesAuthoritativeRoot(t *testing.T) {
 	require.FileExists(t, filepath.Join(repoRoot, ".codex", HooksFileName))
 	require.DirExists(t, filepath.Join(linkedRoot, ".codex"))
 	require.NoFileExists(t, filepath.Join(linkedRoot, ".codex", HooksFileName))
+}
+
+func TestInstallHooks_LinkedWorktreeDoesNotCleanAliasedAuthoritativeFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory symlinks require privileges on Windows")
+	}
+	repoRoot, linkedRoot := setupLinkedWorktreeEnv(t)
+	ag := &CodexAgent{}
+
+	t.Chdir(repoRoot)
+	_, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	authoritativePath := filepath.Join(repoRoot, ".codex", HooksFileName)
+	require.FileExists(t, authoritativePath)
+
+	require.NoError(t, os.Symlink(filepath.Join(repoRoot, ".codex"), filepath.Join(linkedRoot, ".codex")))
+	t.Chdir(linkedRoot)
+	count, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.Zero(t, count)
+	require.FileExists(t, authoritativePath)
+	require.True(t, ag.AreHooksInstalled(context.Background()))
+	require.Equal(t, agentpkg.HooksCurrent, ag.CheckHookConfig(context.Background()))
 }
 
 func TestHooksSharedAcrossWorktrees_PrimaryCheckoutWithLinkedWorktree(t *testing.T) {

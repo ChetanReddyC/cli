@@ -134,6 +134,30 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 
 	location.HooksPath = filepath.Join(authoritativeRoot, ".codex", HooksFileName)
 	location.RepositoryWide = true
+	return omitAliasedLegacyHooks(location)
+}
+
+func omitAliasedLegacyHooks(location HookLocation) (HookLocation, error) {
+	if location.LegacyHooksPath == "" || filepath.Base(location.HooksPath) != filepath.Base(location.LegacyHooksPath) {
+		return location, nil
+	}
+	authoritativeDir, err := os.Stat(filepath.Dir(location.HooksPath))
+	if errors.Is(err, os.ErrNotExist) {
+		return location, nil
+	}
+	if err != nil {
+		return HookLocation{}, fmt.Errorf("stat authoritative Codex directory: %w", err)
+	}
+	legacyDir, err := os.Stat(filepath.Dir(location.LegacyHooksPath))
+	if errors.Is(err, os.ErrNotExist) {
+		return location, nil
+	}
+	if err != nil {
+		return HookLocation{}, fmt.Errorf("stat legacy Codex directory: %w", err)
+	}
+	if os.SameFile(authoritativeDir, legacyDir) {
+		location.LegacyHooksPath = ""
+	}
 	return location, nil
 }
 

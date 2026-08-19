@@ -80,6 +80,10 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 			return 0, fmt.Errorf("create linked-worktree .codex project layer: %w", err)
 		}
 	}
+	location, err = omitAliasedLegacyHooks(location)
+	if err != nil {
+		return 0, err
+	}
 	release, err := acquireHooksLock(ctx, location.LockPath)
 	if err != nil {
 		return 0, fmt.Errorf("lock Codex hooks file: %w", err)
