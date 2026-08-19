@@ -97,7 +97,7 @@ func TestCloudClient_CreateDispatch_SetsVersionedUserAgent(t *testing.T) {
 
 	client := newTestCloudClient(t, srv.URL, "t")
 	_, err := client.CreateDispatch(ctx, CreateDispatchRequest{
-		Repos:    []string{"entireio/cli"},
+		Repos:    []string{testRepoFullName},
 		Since:    "2026-04-09T00:00:00Z",
 		Until:    "2026-04-16T00:00:00Z",
 		Generate: true,
