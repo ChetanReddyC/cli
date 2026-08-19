@@ -18,8 +18,8 @@ var systemTagRegexes = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)<command-message[^>]*>.*?</command-message>`),
 	regexp.MustCompile(`(?s)<command-args[^>]*>.*?</command-args>`),
 	regexp.MustCompile(`(?s)<local-command-stdout[^>]*>.*?</local-command-stdout>`),
-	regexp.MustCompile(`</?user_query>`),                              // Cursor wraps user text in <user_query> tags; strip tags but keep content
-	regexp.MustCompile(`<timestamp(\s[^>]*)?>[^<\n]*</timestamp\s*>`), // Cursor-injected send-time date; single-line body only
+	regexp.MustCompile(`</?user_query>`),                                   // Cursor wraps user text in <user_query> tags; strip tags but keep content
+	regexp.MustCompile(`\A\s*<timestamp(\s[^>]*)?>[^<\n]*</timestamp\s*>`), // Cursor-injected send-time date; anchored to the start of the message ("timestamp" is common XML vocabulary, so position is the only safe discriminator)
 }
 
 // StripIDEContextTags removes IDE-injected context tags from prompt text.

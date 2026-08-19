@@ -115,14 +115,14 @@ func TestStripIDEContextTags(t *testing.T) {
 			expected: "rename the <timestamp> element\nand update </timestamp> closers too",
 		},
 		{
-			name:     "timestamps wrapper tag not mangled",
+			name:     "timestamp mid-text preserved",
 			input:    "see <timestamps><timestamp>a</timestamp></timestamps> nested",
-			expected: "see <timestamps></timestamps> nested",
+			expected: "see <timestamps><timestamp>a</timestamp></timestamps> nested",
 		},
 		{
-			name:     "single-line timestamp inside pasted xml still stripped",
-			input:    "```xml\n<event>\n  <timestamp>2026-01-01</timestamp>\n  <level>ERROR</level>\n</event>\n```",
-			expected: "```xml\n<event>\n  \n  <level>ERROR</level>\n</event>\n```",
+			name:     "leading timestamp stripped, timestamp in pasted xml preserved",
+			input:    "<timestamp>Tuesday, Aug 18, 2026, 2:37 PM GMT+2</timestamp>\n```xml\n<event>\n  <timestamp>2026-01-01</timestamp>\n  <level>ERROR</level>\n</event>\n```",
+			expected: "```xml\n<event>\n  <timestamp>2026-01-01</timestamp>\n  <level>ERROR</level>\n</event>\n```",
 		},
 	}
 
