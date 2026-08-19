@@ -167,10 +167,12 @@ func TrackPluginDetached(pluginName string, isEntireEnabled bool, version string
 
 // SkillInvocation is the content-free view of one recorded skill event: which
 // skill fired, on which agent, and how it was detected. Deliberately no prompt
-// text, arguments, or transcript content — mirroring BuildPluginEventPayload's
-// name-only rule.
+// text, arguments, or transcript content — and the skill name itself is only
+// sent verbatim when allowlisted (see skillNameForTelemetry), because custom
+// slash-command names are user content too.
 type SkillInvocation struct {
-	// Skill is the invoked skill's name (e.g. "search").
+	// Skill is the invoked skill's name (e.g. "entire"). Names outside the
+	// official allowlist are reported as "custom".
 	Skill string
 	// Agent is the agent that surfaced the signal (e.g. "claude-code").
 	Agent string
@@ -202,7 +204,7 @@ func BuildSkillEventPayload(inv SkillInvocation, isEntireEnabled bool, version s
 	}
 
 	properties := map[string]any{
-		"skill":           inv.Skill,
+		"skill":           skillNameForTelemetry(inv.Skill),
 		"agent":           agentName,
 		"signal":          inv.Signal,
 		"event_type":      inv.EventType,

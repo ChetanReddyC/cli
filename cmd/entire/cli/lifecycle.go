@@ -29,9 +29,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
-	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/perf"
 )
 
@@ -1928,10 +1926,15 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agen
 		// save flushes those changes. Any reentrant MutateSessionState calls
 		// it makes on this session ID share this state pointer via the gate.
 		strat := GetStrategy(ctx)
+		// The turn-end finalize extracts skill events from the full transcript
+		// and appends the new ones to state.SkillEvents — snapshot its growth
+		// so those events reach telemetry alongside the hook-provided ones.
+		skillEventsBefore := len(state.SkillEvents)
 		if err := strat.HandleTurnEnd(ctx, state); err != nil {
 			logging.Warn(logCtx, "turn-end action dispatch failed",
 				slog.String("error", err.Error()))
 		}
+		appendedSkillEvents = append(appendedSkillEvents, state.SkillEvents[skillEventsBefore:]...)
 		return nil
 	})
 	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
@@ -2104,33 +2107,13 @@ func appendEventSkillEventsToState(event *agent.Event, state *strategy.SessionSt
 }
 
 // trackSkillInvocations forwards newly-recorded skill events to telemetry.
-// Gated on the same opt-in telemetry setting as command tracking (root.go's
-// PersistentPostRun). Hook-driven lifecycle paths never produce
-// cli_command_executed events — the hooks tree is hidden — so this is the only
-// telemetry signal that a skill fired. Skill names and signal kinds only,
-// never prompt text or transcript content.
-//
-// Call this AFTER the surrounding MutateSessionState returns, never inside its
-// closure: the settings load (disk I/O) and detached-process spawn must not
-// extend the session gate hold time and block concurrent hooks.
+// Hook-driven lifecycle paths never produce cli_command_executed events — the
+// hooks tree is hidden — so this and the strategy-side condensation emission
+// are the only telemetry signals that a skill fired. See
+// strategy.EmitSkillInvocationTelemetry for the gating and the
+// after-the-session-gate calling contract.
 func trackSkillInvocations(ctx context.Context, appended []agent.SkillEvent) {
-	if len(appended) == 0 {
-		return
-	}
-	s, err := LoadEntireSettings(ctx)
-	if err != nil || s.Telemetry == nil || !*s.Telemetry {
-		return
-	}
-	invocations := make([]telemetry.SkillInvocation, 0, len(appended))
-	for _, ev := range appended {
-		invocations = append(invocations, telemetry.SkillInvocation{
-			Skill:     ev.Skill.Name,
-			Agent:     ev.Source.Agent,
-			Signal:    ev.Source.Signal,
-			EventType: ev.EventType,
-		})
-	}
-	telemetry.TrackSkillInvocationsDetached(invocations, s.Enabled, versioninfo.Version)
+	strategy.EmitSkillInvocationTelemetry(ctx, appended)
 }
 
 func skillEventExists(events []agent.SkillEvent, candidate agent.SkillEvent) bool {

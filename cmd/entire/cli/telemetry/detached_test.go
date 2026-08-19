@@ -183,7 +183,7 @@ func TestParseGitVersion(t *testing.T) {
 func TestBuildSkillEventPayload(t *testing.T) {
 	t.Parallel()
 	payload := BuildSkillEventPayload(SkillInvocation{
-		Skill:     "search",
+		Skill:     "entire",
 		Agent:     "claude-code",
 		Signal:    "prompt_slash_command",
 		EventType: "prompt_invocation",
@@ -195,8 +195,8 @@ func TestBuildSkillEventPayload(t *testing.T) {
 	if payload.Event != "cli_skill_invoked" {
 		t.Errorf("Event = %q, want %q", payload.Event, "cli_skill_invoked")
 	}
-	if got := payload.Properties["skill"]; got != "search" {
-		t.Errorf("skill property = %v, want %q", got, "search")
+	if got := payload.Properties["skill"]; got != "entire" {
+		t.Errorf("skill property = %v, want %q", got, "entire")
 	}
 	if got := payload.Properties["agent"]; got != "claude-code" {
 		t.Errorf("agent property = %v, want %q", got, "claude-code")
@@ -226,5 +226,30 @@ func TestBuildSkillEventPayload_EmptySkill(t *testing.T) {
 	t.Parallel()
 	if got := BuildSkillEventPayload(SkillInvocation{Agent: "claude-code"}, true, "1.0.0"); got != nil {
 		t.Errorf("expected nil for empty skill name, got %+v", got)
+	}
+}
+
+func TestBuildSkillEventPayload_UnlistedSkillNameIsNotSent(t *testing.T) {
+	t.Parallel()
+	// Skill names are user-defined tokens: a custom slash command like
+	// /customer-acme-incident-123 can carry sensitive identifiers, so only
+	// allowlisted names pass through verbatim.
+	payload := BuildSkillEventPayload(SkillInvocation{
+		Skill:     "customer-acme-incident-123",
+		Agent:     "claude-code",
+		Signal:    "prompt_slash_command",
+		EventType: "prompt_invocation",
+	}, true, "1.2.3")
+	if payload == nil {
+		t.Fatal("BuildSkillEventPayload returned nil")
+		return
+	}
+	if got := payload.Properties["skill"]; got != "custom" {
+		t.Errorf("skill property = %v, want %q", got, "custom")
+	}
+	for _, v := range payload.Properties {
+		if s, ok := v.(string); ok && s == "customer-acme-incident-123" {
+			t.Errorf("raw skill name leaked into payload property %v", v)
+		}
 	}
 }
