@@ -529,7 +529,8 @@ func TestCheckHookConfig_MalformedAuthorityIsOutdated(t *testing.T) {
 }
 
 // TestAreHooksInstalled_PreSessionEndInstall — a user who enabled Codex before
-// SessionEnd joined the install set still counts as installed, so Codex keeps
+// SessionEnd and the subagent hooks joined the install set still counts as
+// installed, so Codex keeps
 // appearing in `entire status` and the agent pickers instead of vanishing until
 // they re-run enable. The gap is drift, and MissingEntireHooks reports it.
 func TestAreHooksInstalled_PreSessionEndInstall(t *testing.T) {
@@ -548,7 +549,7 @@ func TestAreHooksInstalled_PreSessionEndInstall(t *testing.T) {
 
 	ag := &CodexAgent{}
 	require.True(t, ag.AreHooksInstalled(context.Background()))
-	require.Equal(t, []string{"session_end"}, MissingEntireHooks(context.Background()))
+	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, MissingEntireHooks(context.Background()))
 }
 
 func TestInstallHooks_PreservesExistingHooksJSON(t *testing.T) {

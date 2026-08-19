@@ -115,6 +115,8 @@ func declaredCodexEvents(hooksJSONPath string) ([]string, bool) {
 	add("stop", file.Hooks.Stop)
 	add("pre_tool_use", file.Hooks.PreToolUse)
 	add("post_tool_use", file.Hooks.PostToolUse)
+	add("subagent_start", file.Hooks.SubagentStart)
+	add("subagent_stop", file.Hooks.SubagentStop)
 	return events, true
 }
 
