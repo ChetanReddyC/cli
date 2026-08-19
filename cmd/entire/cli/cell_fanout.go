@@ -54,13 +54,12 @@ type cellGroup struct {
 // collapse across jurisdictions into one group routed by whichever repo came
 // first — they stay per-jurisdiction and route via the jurisdiction fallback.
 //
-// A RepoIndexEntry with Placements routes to its CANONICAL placement only
-// (canonicalRepoPlacement). Mirror placements are replicated copies of the
+// A RepoIndexEntry with Placements routes to its PROCESSING-PRIMARY placement
+// only (primaryRepoPlacement). Mirror placements are replicated copies of the
 // same content indexed under their own namespaces — searching them returns
-// duplicate and stale rows, and diverges from the web, whose BFF routes
-// canonical-only (ENT-1672). When Placements is empty, the top-level
-// Cell/Jurisdiction/ID are used (backward compat for index responses that
-// predate placements).
+// duplicate and stale rows, and diverges from the web (ENT-1672). When
+// Placements is empty, the top-level Cell/Jurisdiction/ID are used (backward
+// compat for index responses that predate placements).
 //
 // skipped names repos with no routable canonical placement — the placement is
 // explicitly not ready (processing/failed/suspended) or carries no ID.
@@ -97,7 +96,7 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) (cells []cellGroup, skippe
 
 	for _, r := range repos {
 		if len(r.Placements) > 0 {
-			p, ok := canonicalRepoPlacement(r)
+			p, ok := primaryRepoPlacement(r)
 			if !ok {
 				label := r.FullName
 				if label == "" {
@@ -129,26 +128,45 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) (cells []cellGroup, skippe
 	return cells, skipped
 }
 
-// canonicalRepoPlacement picks the entry's canonical placement: the one whose
-// ID equals the entry's own ID, else the first — the BFF's exact rule
-// (list-repos-index.ts canonicalPlacement), so web and CLI search the same
-// namespace for the same repo. Selection must never key on the Mirror flag:
-// real /repos rows mark every placement Mirror:true, canonical included.
+// primaryRepoPlacement picks the entry's PROCESSING-PRIMARY placement — the
+// cell that does the repo's heavy lifting (trails, runners, checkpoint
+// ingest), which is where searchable content originates. Selection order:
+//
+//  1. the placement named by core's explicit `primaries.processing` ULID;
+//  2. fallback for rows predating that field: the placement whose ID equals
+//     the entry's own ID, else the first (the BFF's canonicalPlacement
+//     convention, which processing-primary formalizes).
+//
+// Selection must never key on the Mirror flag: real /repos rows mark every
+// placement Mirror:true, primary included. (The other primary, data_primary,
+// is the git-data writer — GitHub itself for github mirrors — so it can never
+// route a search.)
 //
 // ok is false when the chosen placement is not routable: it carries no ID, or
 // it is not ready (a ready mirror is no substitute — it may predate the
 // clone). Status is required over the wire, so the empty-status arm is
 // defensive; any unrecognized future status is treated as not ready, which
 // skips the repo WITH a report rather than searching an unknown state.
-func canonicalRepoPlacement(r coreapi.RepoIndexEntry) (coreapi.RepoPlacement, bool) {
+func primaryRepoPlacement(r coreapi.RepoIndexEntry) (coreapi.RepoPlacement, bool) {
 	p := r.Placements[0]
-	if r.ID != "" {
+	pick := func(id string) bool {
+		if id == "" {
+			return false
+		}
 		for _, c := range r.Placements {
-			if c.ID == r.ID {
+			if c.ID == id {
 				p = c
-				break
+				return true
 			}
 		}
+		return false
+	}
+	picked := false
+	if primaries, ok := r.Primaries.Get(); ok {
+		picked = pick(strings.TrimSpace(primaries.Processing))
+	}
+	if !picked {
+		pick(r.ID)
 	}
 	if strings.TrimSpace(p.ID) == "" {
 		return coreapi.RepoPlacement{}, false

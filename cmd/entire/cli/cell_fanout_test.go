@@ -16,6 +16,7 @@ import (
 
 // Placement ULIDs reused across the canonical-placement tests.
 const (
+	testPlacementFallback = "01FALLBACK"
 	testClusterSlugEU     = "eu-prod"
 	testPlacementUS       = "01US"
 	testPlacementA        = "01A"
@@ -108,9 +109,54 @@ func TestGroupReposByCell_Placements(t *testing.T) {
 	}
 }
 
-// TestGroupReposByCell_CanonicalNotFirst verifies canonical selection scans all
-// placements for the ID match rather than assuming position, and that with no
-// ID match the first placement serves as fallback (the BFF's exact rule:
+// TestGroupReposByCell_ProcessingPrimaryPreferred verifies that core's
+// explicit primaries.processing ULID outranks the row-ID convention: when the
+// two disagree, the processing primary wins (it names the cell doing the
+// repo's heavy lifting — where searchable content originates). An unknown
+// processing ULID (not among the placements) falls back to the convention.
+func TestGroupReposByCell_ProcessingPrimaryPreferred(t *testing.T) {
+	t.Parallel()
+	repos := []coreapi.RepoIndexEntry{
+		{
+			// Row ID says US, primaries.processing says EU — EU must win.
+			ID: testPlacementUS, Jurisdiction: "us",
+			Primaries: coreapi.NewOptRepoPrimaries(coreapi.RepoPrimaries{Processing: testPlacementEU}),
+			Placements: []coreapi.RepoPlacement{
+				{ID: testPlacementUS, Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us", Mirror: true, Status: coreapi.RepoPlacementStatusReady},
+				{ID: testPlacementEU, Cell: euCentralCell, ClusterSlug: testClusterSlugEU, Jurisdiction: "eu", Mirror: true, Status: coreapi.RepoPlacementStatusReady},
+			},
+		},
+		{
+			// primaries.processing names a ULID that is not among the
+			// placements (inconsistent row) — fall back to the row-ID match.
+			ID: testPlacementFallback, Jurisdiction: "us",
+			Primaries: coreapi.NewOptRepoPrimaries(coreapi.RepoPrimaries{Processing: "01ELSEWHERE"}),
+			Placements: []coreapi.RepoPlacement{
+				{ID: testPlacementFallback, Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us", Status: coreapi.RepoPlacementStatusReady},
+			},
+		},
+	}
+	cells, skipped := groupReposByCell(repos)
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %v, want none", skipped)
+	}
+	if len(cells) != 2 {
+		t.Fatalf("groups = %d, want 2: %+v", len(cells), cells)
+	}
+	// Sorted: aws-eu-central-1 < aws-us-east-2.
+	eu, us := cells[0], cells[1]
+	if eu.cell != euCentralCell || strings.Join(eu.repoIDs, ",") != testPlacementEU {
+		t.Fatalf("eu group = %+v, want processing primary %s", eu, testPlacementEU)
+	}
+	if us.cell != usEastCell || strings.Join(us.repoIDs, ",") != testPlacementFallback {
+		t.Fatalf("us group = %+v, want row-ID fallback 01FALLBACK", us)
+	}
+}
+
+// TestGroupReposByCell_CanonicalNotFirst verifies fallback selection (rows
+// predating primaries.processing) scans all placements for the row-ID match
+// rather than assuming position, and that with no ID match the first
+// placement serves as fallback (the BFF's canonicalPlacement convention:
 // placements.find(p => p.id === row.id) ?? placements[0]).
 func TestGroupReposByCell_CanonicalNotFirst(t *testing.T) {
 	t.Parallel()
