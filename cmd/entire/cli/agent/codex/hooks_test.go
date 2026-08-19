@@ -91,6 +91,13 @@ func TestInstallHooks_LinkedWorktreeUsesAuthoritativeRoot(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(linkedRoot, ".codex", HooksFileName))
 }
 
+func TestHooksSharedAcrossWorktrees_PrimaryCheckoutWithLinkedWorktree(t *testing.T) {
+	repoRoot, _ := setupLinkedWorktreeEnv(t)
+	t.Chdir(repoRoot)
+
+	require.True(t, (&CodexAgent{}).HooksSharedAcrossWorktrees(context.Background()))
+}
+
 func TestInstallHooks_LinkedWorktreeMigratesLegacyConfig(t *testing.T) {
 	repoRoot, linkedRoot := setupLinkedWorktreeEnv(t)
 	authoritativePath := filepath.Join(repoRoot, ".codex", HooksFileName)

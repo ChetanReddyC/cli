@@ -21,7 +21,7 @@ func TestResolveHookLocation_NormalCheckout(t *testing.T) {
 	require.Equal(t, canonicalHooksPath(t, repoRoot), location.HooksPath)
 	require.Equal(t, canonicalLockPath(t, repoRoot), location.LockPath)
 	require.Empty(t, location.LegacyHooksPath)
-	require.False(t, location.Shared)
+	require.False(t, location.RepositoryWide)
 }
 
 func TestResolveHookLocation_ConventionalLinkedWorktree(t *testing.T) {
@@ -37,7 +37,7 @@ func TestResolveHookLocation_ConventionalLinkedWorktree(t *testing.T) {
 	require.Equal(t, canonicalHooksPath(t, repoRoot), location.HooksPath)
 	require.Equal(t, canonicalHooksPath(t, linkedRoot), location.LegacyHooksPath)
 	require.Equal(t, canonicalLockPath(t, repoRoot), location.LockPath)
-	require.True(t, location.Shared)
+	require.True(t, location.RepositoryWide)
 }
 
 func TestResolveHookLocation_RelativeGitDirAndCommonDir(t *testing.T) {
@@ -70,7 +70,7 @@ func TestResolveHookLocation_BareWorktreeLayout(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, canonicalHooksPath(t, layoutRoot), location.HooksPath)
 		require.Equal(t, canonicalHooksPath(t, worktreeRoot), location.LegacyHooksPath)
-		require.True(t, location.Shared)
+		require.True(t, location.RepositoryWide)
 	}
 }
 
@@ -81,7 +81,7 @@ func TestResolveHookLocation_Submodules(t *testing.T) {
 	ordinary, err := resolveHookLocation(ordinarySubmoduleRoot)
 	require.NoError(t, err)
 	require.Equal(t, canonicalHooksPath(t, ordinarySubmoduleRoot), ordinary.HooksPath)
-	require.False(t, ordinary.Shared)
+	require.False(t, ordinary.RepositoryWide)
 
 	_, err = resolveHookLocation(linkedSubmoduleRoot)
 	require.ErrorIs(t, err, ErrLinkedSubmoduleHooksUnsupported)

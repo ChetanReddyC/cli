@@ -695,6 +695,9 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 			}
 			fmt.Fprintf(w, "✓ Removed agents: %s\n", strings.Join(names, ", "))
 		}
+		for _, ag := range uninstalledAgents {
+			writeSharedHooksRemovalNote(ctx, w, ag)
+		}
 	}
 
 	vercelSettingsTarget, _ := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
@@ -1674,6 +1677,13 @@ func writeSharedHooksNote(ctx context.Context, w io.Writer, ag agent.Agent) {
 	shared, ok := ag.(agent.RepositorySharedHooks)
 	if ok && shared.HooksSharedAcrossWorktrees(ctx) {
 		fmt.Fprintf(w, "  %s hooks are stored once for the repository and apply to all linked worktrees.\n", ag.Type())
+	}
+}
+
+func writeSharedHooksRemovalNote(ctx context.Context, w io.Writer, ag agent.Agent) {
+	shared, ok := ag.(agent.RepositorySharedHooks)
+	if ok && shared.HooksSharedAcrossWorktrees(ctx) {
+		fmt.Fprintf(w, "  %s hooks were removed from the repository-wide configuration; this affects all linked worktrees.\n", ag.Type())
 	}
 }
 

@@ -22,7 +22,7 @@ type HookLocation struct {
 	HooksPath       string
 	LegacyHooksPath string
 	LockPath        string
-	Shared          bool
+	RepositoryWide  bool
 }
 
 // ProjectLayerExists reports whether Codex will construct a project config
@@ -93,6 +93,7 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 			return HookLocation{}, fmt.Errorf("resolve Git directory: %w", resolveErr)
 		}
 		location.LockPath = filepath.Join(gitDir, "entire-codex-hooks.lock")
+		location.RepositoryWide = hasRegisteredLinkedWorktree(gitDir)
 		return location, nil
 	}
 
@@ -132,8 +133,21 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 	}
 
 	location.HooksPath = filepath.Join(authoritativeRoot, ".codex", HooksFileName)
-	location.Shared = true
+	location.RepositoryWide = true
 	return location, nil
+}
+
+func hasRegisteredLinkedWorktree(commonDir string) bool {
+	entries, err := os.ReadDir(filepath.Join(commonDir, "worktrees"))
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 func readGitDirFile(dotGitPath, worktreeRoot string) (string, error) {

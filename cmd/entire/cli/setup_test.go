@@ -2289,6 +2289,74 @@ func TestUninstallDeselectedAgentHooks(t *testing.T) {
 	}
 }
 
+func TestRunRemoveAgent_CodexPrimaryCheckoutReportsRepositoryWideEffect(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+
+	var output bytes.Buffer
+	if err := runRemoveAgent(context.Background(), &output, string(agent.AgentNameCodex)); err != nil {
+		t.Fatalf("remove Codex agent: %v", err)
+	}
+	if !strings.Contains(output.String(), "affects all linked worktrees") {
+		t.Fatalf("removal output did not report repository-wide effect: %s", output.String())
+	}
+}
+
+func TestApplyAgentChanges_CodexRemovalReportsRepositoryWideEffect(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+
+	var output bytes.Buffer
+	if err := applyAgentChanges(
+		context.Background(),
+		&output,
+		nil,
+		[]types.AgentName{agent.AgentNameCodex},
+		EnableOptions{},
+	); err != nil {
+		t.Fatalf("apply agent removal: %v", err)
+	}
+	if !strings.Contains(output.String(), "affects all linked worktrees") {
+		t.Fatalf("interactive removal output did not report repository-wide effect: %s", output.String())
+	}
+}
+
+func setupCodexRepositoryWithLinkedWorktree(t *testing.T) {
+	t.Helper()
+	tmp := setupTestDir(t)
+	repoRoot := filepath.Join(tmp, "repo")
+	linkedRoot := filepath.Join(tmp, "linked")
+	testutil.InitRepo(t, repoRoot)
+	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, repoRoot, "README.md")
+	testutil.GitCommit(t, repoRoot, "initial")
+
+	cmd := exec.CommandContext(t.Context(), "git", "-C", repoRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	cmd.Env = testutil.GitIsolatedEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("create linked worktree: %v: %s", err, output)
+	}
+	if err := os.MkdirAll(filepath.Join(linkedRoot, ".codex"), 0o750); err != nil {
+		t.Fatalf("create linked Codex project layer: %v", err)
+	}
+
+	t.Chdir(repoRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	if _, err := hookAgent.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("install Codex hooks: %v", err)
+	}
+}
+
 func TestUninstallDeselectedAgentHooks_KeepsSelectedAgents(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir
 	setupTestRepo(t)

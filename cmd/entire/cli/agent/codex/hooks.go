@@ -263,11 +263,11 @@ func (c *CodexAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState 
 	return agent.HooksAbsent
 }
 
-// HooksSharedAcrossWorktrees reports whether Codex resolves this checkout to a
-// repository-authoritative hook file outside the current worktree.
+// HooksSharedAcrossWorktrees reports whether this mutation changes hooks used
+// by another registered checkout of the same repository.
 func (c *CodexAgent) HooksSharedAcrossWorktrees(ctx context.Context) bool {
 	location, err := ResolveHookLocation(ctx)
-	return err == nil && location.Shared
+	return err == nil && location.RepositoryWide
 }
 
 type managedHookSpec struct {
