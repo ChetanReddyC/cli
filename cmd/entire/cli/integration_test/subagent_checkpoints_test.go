@@ -607,8 +607,7 @@ func TestSubagentCheckpoints_TurnEndBackstop_ThenSubagentStop(t *testing.T) {
 	}
 }
 
-// TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce resolves Open
-// Item 2 from the subagent-stop-capture plan empirically: a foreground task
+// TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce: a foreground task
 // (no run_in_background) is captured immediately at post-task time and never
 // records an in-flight marker. Claude Code fires SubagentStop for every
 // completed Task, foreground and background alike, so entire also sees a

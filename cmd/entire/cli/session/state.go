@@ -389,11 +389,12 @@ type State struct {
 // completion signal (SubagentStop) has not arrived yet. Entire's launch-time
 // post-task hook fires at the background launch STUB, so between launch and
 // SubagentStop this is the only record that the session has live background
-// work. Consumed by the turn-end incremental snapshot and the SessionEnd
-// final capture (this PR, Task 3) and by commit linkage (follow-up PR).
-// Cleared ONLY by a Final capture: the SubagentStop handler (every exit path,
-// including the no-changes skip) or the SessionEnd final capture. Turn-end
-// snapshots leave it in place.
+// work. Consumed by the turn-end incremental snapshot
+// (captureInFlightTaskIncremental) and the Final captures — the SubagentStop
+// handler (handleSubagentStopFinal) and the SessionEnd sweep
+// (captureInFlightTaskFinal). A Final capture claims (removes) the marker
+// up-front via claimInFlightTask before capturing, so it is cleared
+// regardless of capture outcome. Turn-end snapshots leave it in place.
 type InFlightTask struct {
 	// ToolUseID is the Task tool invocation's tool_use_id — the same ID used
 	// to key TaskMetadataDir. Dedup key for AddInFlightTask.
@@ -416,13 +417,15 @@ type InFlightTask struct {
 	TaskDescription string `json:"task_description,omitempty"`
 
 	// LastCapturedTranscriptBytes is the subagent transcript file's size, in
-	// bytes, as of the last turn-end incremental snapshot that actually wrote
-	// a checkpoint (captureInFlightTaskIncremental). Lets a later turn-end
-	// skip re-scanning and re-committing a transcript that hasn't grown since
-	// then — without this, every turn-end after a task's last real progress
-	// re-extracts the whole transcript and creates a content-identical
-	// checkpoint. Zero (the default) always triggers the first capture: a
-	// resolved subagent transcript is never a zero-byte file in practice.
+	// bytes, as of the last turn-end scan that fully accounted for the
+	// transcript — whether or not that scan wrote a checkpoint (the
+	// zero-files skip records it too; see persistCapturedTranscriptSize in
+	// the cli package). Lets a later turn-end skip re-scanning and
+	// re-committing a transcript that hasn't grown since then — without this,
+	// every turn-end after a task's last real progress re-extracts the whole
+	// transcript (and, for a read-only subagent, rescans it forever). Zero
+	// (the default) always triggers the first capture: a resolved subagent
+	// transcript is never a zero-byte file in practice.
 	LastCapturedTranscriptBytes int64 `json:"last_captured_transcript_bytes,omitempty"`
 
 	// LastSnapshotAttempt is when captureInFlightTasks last SELECTED this
@@ -455,8 +458,7 @@ func (s *State) AddInFlightTask(task InFlightTask) {
 }
 
 // RemoveInFlightTask clears the in-flight marker for toolUseID, if present.
-// No-op when no marker matches, so it is safe to call speculatively on every
-// SubagentStop exit path — including foreground tasks, which never had one.
+// No-op when no marker matches.
 func (s *State) RemoveInFlightTask(toolUseID string) {
 	for i, existing := range s.InFlightTasks {
 		if existing.ToolUseID == toolUseID {

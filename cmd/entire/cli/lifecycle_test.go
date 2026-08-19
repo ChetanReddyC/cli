@@ -3671,6 +3671,19 @@ func TestHandleLifecycleSessionEnd_InFlightTask_FinalCapture(t *testing.T) {
 	mainTranscriptPath := filepath.Join(transcriptDir, "main.jsonl")
 	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"please review the diff"}}`+"\n"), 0o600))
 
+	// The subagent's own transcript, at the path the marker's AgentID resolves
+	// to (ResolveAgentTranscriptPath, keyed off the MAIN transcript's dir and
+	// session ID). This pins the marker.AgentID → transcript-resolution
+	// plumbing: the SessionEnd sweep's synthesized event carries no
+	// SubagentTranscript, so the stored transcript can only get there via
+	// resolution from the marker's AgentID.
+	const subagentSentinel = "reviewed the diff; verdict: LGTM-sentinel"
+	subagentsDir := paths.SubagentsDir(filepath.Dir(mainTranscriptPath), sessionID)
+	require.NoError(t, os.MkdirAll(subagentsDir, 0o755))
+	subagentTranscriptPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
+	require.NoError(t, os.WriteFile(subagentTranscriptPath,
+		[]byte(`{"type":"assistant","message":{"content":"`+subagentSentinel+`"}}`+"\n"), 0o600))
+
 	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
 		SessionID:      sessionID,
 		BaseCommit:     headHash,
@@ -3684,6 +3697,36 @@ func TestHandleLifecycleSessionEnd_InFlightTask_FinalCapture(t *testing.T) {
 	}))
 
 	ag := newMockAgent()
+
+	// First: run the sweep's final capture directly (the exact call
+	// handleLifecycleSessionEnd makes) so the shadow branch is still
+	// inspectable before endSessionNow's eager condense consumes and deletes
+	// it. The stored task metadata must include the subagent's transcript —
+	// which can only have gotten there by resolving the marker's AgentID to
+	// the file on disk, since the sweep's synthesized event carries no
+	// SubagentTranscript of its own.
+	captureInFlightTasks(ctx, ag, sessionID, mainTranscriptPath, true)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	storedTranscriptPath := ".entire/metadata/" + sessionID + "/tasks/" + toolUseID + "/" + paths.AgentTranscriptFileName(agentID)
+	storedTranscript, gotTranscript := readShadowBranchFile(t, repoDir, shadowBranch, storedTranscriptPath)
+	assert.True(t, gotTranscript,
+		"the SessionEnd final capture must store the subagent transcript resolved from the marker's AgentID")
+	assert.Contains(t, storedTranscript, subagentSentinel,
+		"the stored subagent transcript must carry the subagent's actual content")
+
+	// Re-arm a second in-flight marker so the full SessionEnd handler below
+	// still demonstrably performs the sweep itself (the first marker was
+	// claimed by the direct call above — the same dedup a racing/duplicate
+	// Final event hits).
+	secondToolUseID := "toolu_sessionend2"
+	require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		state.AddInFlightTask(session.InFlightTask{
+			ToolUseID: secondToolUseID, AgentID: "agent-sessionend2", StartedAt: time.Now(), SubagentType: "reviewer",
+		})
+		return nil
+	}))
+
 	event := &agent.Event{
 		Type:       agent.SessionEnd,
 		SessionID:  sessionID,
@@ -3704,7 +3747,6 @@ func TestHandleLifecycleSessionEnd_InFlightTask_FinalCapture(t *testing.T) {
 	// checkpoint and deletes the shadow branch — so the real assertion is that
 	// the task step reached permanent storage, not that the shadow branch
 	// still exists.
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
 	if testutil.BranchExists(t, repoDir, shadowBranch) {
 		t.Error("condensation must delete the shadow branch once its content is consumed into a permanent checkpoint")
 	}
