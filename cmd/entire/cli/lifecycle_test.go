@@ -2414,12 +2414,12 @@ func TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile(t *testing.T) {
 		"background refresh failure must be diagnosable in .entire/logs/entire.log")
 }
 
-// TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree guards the file-init
-// against running outside a resolvable worktree. logging.Init falls back to the
-// current directory when paths.WorktreeRoot fails, so the root
-// PersistentPreRunE — the single Init site — must gate on WorktreeRoot, or a
-// child whose worktree was removed/relocated between spawn and exec would
-// MkdirAll a stray .entire/logs/ wherever it happens to be running.
+// TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree guards log-file
+// creation against running outside a resolvable worktree. The root
+// PersistentPreRun — the single logger-construction site — must gate on
+// WorktreeRoot, or a child whose worktree was removed/relocated between spawn
+// and exec would MkdirAll a stray .entire/logs/ wherever it happens to be
+// running.
 //
 // Run through the real root: the gate lives there now, so constructing the
 // subcommand alone would pass without ever reaching the code under test.

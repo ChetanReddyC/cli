@@ -135,7 +135,7 @@ func TestEnableOffersImport_NotOfferedOnReEnable(t *testing.T) {
 }
 
 // TestEnable_RoutesLoggingToLogFile pins that `entire enable` initializes file
-// logging like every other command — see the logging.Init call in enable's
+// logging like every other command — see the logger enable builds in its
 // RunE for why its absence put operational warnings on the user's terminal
 // instead of in the log.
 func TestEnable_RoutesLoggingToLogFile(t *testing.T) {

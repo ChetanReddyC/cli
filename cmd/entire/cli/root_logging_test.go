@@ -3,9 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
-	"log/slog"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -69,7 +70,7 @@ func setUpRepoForRootLogging(t *testing.T) string {
 // The probe is Hidden so that hook's parent-chain Hidden walk short-circuits
 // before the telemetry and version-check calls, which would otherwise reach the
 // network mid-test.
-func runProbeUnder(t *testing.T, parents ...string) *slog.Logger {
+func runProbeUnder(t *testing.T, parents ...string) *logging.Logger {
 	t.Helper()
 
 	root := NewRootCmd()
@@ -82,7 +83,7 @@ func runProbeUnder(t *testing.T, parents ...string) *slog.Logger {
 		parent = found
 	}
 
-	var observed *slog.Logger
+	var observed *logging.Logger
 	probe := &cobra.Command{
 		Use:    "__root_logging_probe",
 		Hidden: true,
@@ -90,7 +91,7 @@ func runProbeUnder(t *testing.T, parents ...string) *slog.Logger {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			observed = logging.LoggerFromContext(cmd.Context())
 			if observed != nil {
-				observed.Warn(probeMarker)
+				observed.Slog().Warn(probeMarker)
 			}
 			return nil
 		},
@@ -107,12 +108,11 @@ func runProbeUnder(t *testing.T, parents ...string) *slog.Logger {
 }
 
 // TestRootPreRun_InjectsLoggerIntoCommandContext pins the contract every command
-// now depends on instead of calling logging.Init itself: after the root
+// now depends on instead of building a logger itself: after the root
 // PersistentPreRunE, the executing command's context carries the initialized
 // logger, and lines written through it land in .entire/logs/entire.log.
 func TestRootPreRun_InjectsLoggerIntoCommandContext(t *testing.T) {
 	dir := setUpRepoForRootLogging(t)
-	defer logging.Close()
 
 	if runProbeUnder(t) == nil {
 		t.Fatal("LoggerFromContext() = nil after the root PersistentPreRunE ran")
@@ -136,7 +136,6 @@ func TestRootPreRun_InjectsLoggerIntoCommandContext(t *testing.T) {
 // into .entire/logs/ set out to stop.
 func TestRootPreRun_ReachesLeafUnderGroupWithOwnPreRun(t *testing.T) {
 	setUpRepoForRootLogging(t)
-	defer logging.Close()
 
 	for _, group := range []string{"checkpoint", "session", "agent"} {
 		t.Run(group, func(t *testing.T) {
@@ -148,7 +147,7 @@ func TestRootPreRun_ReachesLeafUnderGroupWithOwnPreRun(t *testing.T) {
 }
 
 // TestInitRootLogging_SkipsRepoThatNeverEnabledEntire pins the gate that keeps
-// `enable` owning its own logging.Init: Init CREATES .entire/logs/, so a repo
+// `enable` owning its own logger: building one CREATES .entire/logs/, so a repo
 // that never set Entire up must come out of an unrelated command untouched
 // rather than seeded with an untracked directory no gitignore entry covers yet.
 func TestInitRootLogging_SkipsRepoThatNeverEnabledEntire(t *testing.T) {
@@ -158,12 +157,106 @@ func TestInitRootLogging_SkipsRepoThatNeverEnabledEntire(t *testing.T) {
 	testutil.GitAdd(t, dir, "f.txt")
 	testutil.GitCommit(t, dir, "init")
 	t.Chdir(dir)
-	defer logging.Close()
 
 	if runProbeUnder(t) != nil {
 		t.Error("LoggerFromContext() must be nil in a repo that never enabled Entire")
 	}
 	if _, err := os.Stat(filepath.Join(dir, paths.EntireDir)); !os.IsNotExist(err) {
 		t.Errorf(".entire/ must not be created in a repo that never enabled Entire (stat err = %v)", err)
+	}
+}
+
+// TestExecutedCommandCarriesLoggerOnFailure pins the flush main.go depends on.
+// Cobra returns out of Command.execute as soon as RunE errors, and as soon as
+// required-flag validation fails — both before its PersistentPostRun loop, so
+// root's flush never runs on either. With no package global left, the command
+// ExecuteContextC hands back is the only route to the logger, and a failing
+// hook's diagnostics are exactly the lines worth not losing in the 8KB buffer.
+//
+// Errors raised before any pre-run (unknown flag or subcommand, bad args) return
+// a command carrying no logger, which is harmless: none was built, so there is
+// nothing buffered to lose.
+func TestExecutedCommandCarriesLoggerOnFailure(t *testing.T) {
+	tests := []struct {
+		name          string
+		requireFlag   bool
+		runE          func(cmd *cobra.Command, args []string) error
+		wantErrSubstr string
+	}{
+		{
+			name: "RunE returns an error",
+			runE: func(cmd *cobra.Command, _ []string) error {
+				logging.Warn(cmd.Context(), probeMarker)
+				return errors.New("probe failed")
+			},
+			wantErrSubstr: "probe failed",
+		},
+		{
+			// Validated after the pre-runs, so a logger exists and has buffered
+			// content by the time cobra bails out.
+			name:        "required flag missing",
+			requireFlag: true,
+			runE: func(*cobra.Command, []string) error {
+				return errors.New("RunE must not be reached")
+			},
+			wantErrSubstr: `required flag(s) "must" not set`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setUpRepoForRootLogging(t)
+
+			root := NewRootCmd()
+			probe := &cobra.Command{
+				Use:    "__root_logging_failure_probe",
+				Hidden: true,
+				RunE:   tt.runE,
+			}
+			if tt.requireFlag {
+				// Log from the pre-run instead: RunE is never reached here.
+				probe.PersistentPreRun = func(cmd *cobra.Command, _ []string) {
+					logging.Warn(cmd.Context(), probeMarker)
+				}
+				probe.Flags().String("must", "", "a required flag")
+				if err := probe.MarkFlagRequired("must"); err != nil {
+					t.Fatalf("MarkFlagRequired: %v", err)
+				}
+			}
+			root.AddCommand(probe)
+			root.SetOut(&bytes.Buffer{})
+			root.SetErr(&bytes.Buffer{})
+			root.SetArgs([]string{probe.Use})
+
+			executed, err := root.ExecuteContextC(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSubstr) {
+				t.Fatalf("err = %v, want one containing %q", err, tt.wantErrSubstr)
+			}
+			if executed == nil {
+				t.Fatal("ExecuteContextC returned no command; main.go would have nothing to close")
+			}
+
+			logFile := filepath.Join(dir, paths.EntireDir, "logs", "entire.log")
+			buffered, readErr := os.ReadFile(logFile)
+			if readErr != nil {
+				t.Fatalf("read entire.log: %v", readErr)
+			}
+			if bytes.Contains(buffered, []byte(probeMarker)) {
+				t.Skip("line reached the file without a flush; this test can no longer prove main.go's close is what flushes it")
+			}
+
+			// Exactly what main.go does after ExecuteContextC.
+			if closeErr := logging.LoggerFromContext(executed.Context()).Close(); closeErr != nil {
+				t.Fatalf("Close() error = %v", closeErr)
+			}
+
+			flushed, readErr := os.ReadFile(logFile)
+			if readErr != nil {
+				t.Fatalf("read entire.log after close: %v", readErr)
+			}
+			if !bytes.Contains(flushed, []byte(probeMarker)) {
+				t.Errorf("line logged before the failure was lost: %s", flushed)
+			}
+		})
 	}
 }

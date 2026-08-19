@@ -53,32 +53,30 @@ func inGroup(c *cobra.Command, groupID string) *cobra.Command {
 // initRootLogging routes every command's logging.* calls into
 // .entire/logs/entire.log and attaches the initialized logger to the
 // command's context, so downstream packages that take a *slog.Logger (redact)
-// receive it by injection via logging.LoggerFromContext instead of each RunE
-// re-initializing logging for itself.
+// receive it by injection via logging.SessionLoggerFromContext instead of each
+// RunE building a logger for itself.
 //
-// Both gates are load-bearing, because Init CREATES .entire/logs/:
-//   - WorktreeRoot: never write into a non-repository directory.
-//   - IsSetUpAny: a repo that has never enabled Entire must stay untouched.
-//     Otherwise `entire version` in someone else's clone seeds an untracked
-//     .entire/ that no gitignore entry covers yet. This is also why `enable`
-//     keeps its own Init: during setup the repo is by definition not set up
-//     yet, and that call is deliberately placed after every check that can
-//     still reject the invocation.
+// The IsSetUpAny gate is load-bearing, because building the logger CREATES
+// .entire/logs/: a repo that has never enabled Entire must stay untouched, or
+// `entire version` in someone else's clone seeds an untracked .entire/ that no
+// gitignore entry covers yet. This is also why `enable` builds its own logger —
+// during setup the repo is by definition not set up yet, so its call is placed
+// after every check that can still reject the invocation.
 //
-// Failure is non-fatal and deliberately silent — logging.Init falls back to
-// stderr internally, and a command must not die because a log file could not
-// be opened.
+// Running outside a repository needs no gate here: newRepoLogger resolves the
+// worktree root to build the log directory path, so it fails before creating
+// anything, and IsSetUpAny is already false when the root cannot be resolved.
+//
+// Failure is non-fatal and deliberately silent: a command must not die because
+// a log file could not be opened, and with no logger in the context the
+// package-level helpers fall through to slog.Default() on stderr.
 func initRootLogging(cmd *cobra.Command) {
 	ctx := cmd.Context()
-	if _, err := paths.WorktreeRoot(ctx); err != nil {
-		return
-	}
 	if !settings.IsSetUpAny(ctx) {
 		return
 	}
-	logging.SetLogLevelGetter(GetLogLevel)
-	l, err := logging.Init(ctx)
-	if err != nil || l == nil {
+	l, err := newRepoLogger(ctx)
+	if err != nil {
 		return
 	}
 	cmd.SetContext(logging.WithLogger(ctx, l))
@@ -86,7 +84,7 @@ func initRootLogging(cmd *cobra.Command) {
 
 // Run every ancestor's persistent hooks, root first, instead of only the closest
 // one cobra picks by default. This is what makes the root PersistentPreRunE the
-// single logging.Init site: `hooks`, `checkpoint`, `session`, and `agent` all
+// single logger-construction site: `hooks`, `checkpoint`, `session`, and `agent` all
 // define their own PersistentPreRunE, and under the default behaviour each of
 // those would shadow the root hook — silently, since a skipped Init only shows
 // up as missing log lines. Cobra runs pre-runs root→leaf, so the logger is in
@@ -120,13 +118,14 @@ func NewRootCmd() *cobra.Command {
 			initRootLogging(cmd)
 		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
-			// Flush the buffered .entire/logs writer the root PersistentPreRunE
-			// opened. Deferred so it runs after everything else in this hook —
-			// the telemetry and version-check calls below log too — and so the
-			// hidden-command early return below still flushes. main.go closes
+			// Flush the buffered .entire/logs writer the root PersistentPreRun
+			// opened, resolved from the context that carries it rather than from
+			// package state. Deferred so it runs after everything else in this
+			// hook — the telemetry and version-check calls below log too — and so
+			// the hidden-command early return below still flushes. main.go closes
 			// again for the RunE-returned-an-error path, which cobra never
-			// reaches this hook on; Close is idempotent.
-			defer logging.Close()
+			// reaches this hook on; Close is idempotent and nil-safe.
+			defer func() { _ = logging.LoggerFromContext(cmd.Context()).Close() }()
 
 			// Skip for hidden commands (walk parent chain — Cobra doesn't propagate Hidden)
 			for c := cmd; c != nil; c = c.Parent() {

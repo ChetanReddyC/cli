@@ -1,26 +1,33 @@
 // Package logging provides structured logging for the Entire CLI using slog.
 //
+// A Logger owns one log file. Construct it once at the entry point, put it in
+// the context, and close it there — nothing in this package is process-global,
+// so two loggers can coexist and a command cannot be affected by what another
+// one configured.
+//
 // Usage:
 //
-//	// Initialize logging (typically at the cobra entry point) and inject the
-//	// logger it returns, so downstream code receives it from the context.
-//	l, err := logging.Init(ctx)
+//	// At the cobra entry point: build the logger and inject it, so downstream
+//	// code receives it from the context.
+//	l, err := logging.New(logging.Config{Dir: dir, Level: level})
 //	if err != nil {
 //	    // handle error
 //	}
-//	if l != nil {
-//	    ctx = logging.WithLogger(ctx, l)
-//	}
-//	defer logging.Close()
+//	ctx = logging.WithLogger(ctx, l)
 //
-//	// Later, once the session ID is known (no need to re-Init)
-//	ctx = logging.WithSessionID(ctx, sessionID)
+//	// At the exit point, from the context rather than package state.
+//	defer func() {
+//	    if l := logging.LoggerFromContext(ctx); l != nil {
+//	        _ = l.Close()
+//	    }
+//	}()
 //
 //	// Add context values
+//	ctx = logging.WithSessionID(ctx, sessionID)
 //	ctx = logging.WithComponent(ctx, "hooks")
 //	ctx = logging.WithAgent(ctx, agentName)
 //
-//	// Log with context - component/agent extracted automatically
+//	// Log with context - session/component/agent extracted automatically
 //	logging.Info(ctx, "hook invoked",
 //	    slog.String("hook", hookName),
 //	    slog.String("branch", branch),
@@ -30,15 +37,13 @@ package logging
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // LogLevelEnvVar is the environment variable that controls log level.
@@ -47,218 +52,143 @@ const LogLevelEnvVar = "ENTIRE_LOG_LEVEL"
 // LogsDir is the directory where log files are stored (relative to repo root).
 const LogsDir = ".entire/logs"
 
-var (
-	// logger is the package-level logger instance
-	logger *slog.Logger
+// logFileName is the single file every Logger appends to inside Config.Dir.
+const logFileName = "entire.log"
 
-	// logFile holds the current log file handle for cleanup
-	logFile *os.File
+// writeBufferSize batches writes so a hook doing many small log calls pays one
+// syscall per 8KB rather than one per line.
+const writeBufferSize = 8192
 
-	// logBufWriter wraps logFile with buffered I/O for performance
-	logBufWriter *bufio.Writer
+// Config describes a Logger to build.
+type Config struct {
+	// Dir is the directory to create the log file in, created if absent.
+	// Required: an empty Dir is an error rather than a silent default, because
+	// the caller is the only thing that knows whether writing here is allowed
+	// (never outside a repository, never in a repo that has not enabled Entire).
+	Dir string
 
-	// mu protects logger, logFile, and logBufWriter, and serializes writes to
-	// logBufWriter (see liveWriter)
-	mu sync.RWMutex
+	// Level is the minimum level to emit. The zero value is slog.LevelInfo.
+	// Resolve it from the environment and settings with ParseLevel.
+	Level slog.Level
+}
 
-	// logLevelGetter is an optional callback to get log level from settings.
-	// Set by SetLogLevelGetter before Init is called.
-	logLevelGetter func() string
-)
-
-// liveWriter routes each write to whichever buffered log file Init most
-// recently opened, resolved per write under the read lock. Loggers Init hands
-// out — the package-level one and the copy it puts in the context — are bound
-// to this indirection rather than straight to a *bufio.Writer, which buys two
-// things:
+// Logger owns a log file, the buffered writer in front of it, and the slog
+// handler that writes through them.
 //
-//   - They survive a second Init. Init flushes and drops the previous
-//     bufio.Writer, so a logger holding that object directly would keep writing
-//     into an orphaned buffer nothing ever flushes, silently losing every line.
-//     Nothing re-initializes in a live process today — attaching a session ID
-//     goes through WithSessionID precisely so it need not — but the indirection
-//     keeps that from being a landmine for whoever calls Init twice next.
-//   - Writes are serialized. bufio.Writer is not goroutine-safe, so two
-//     goroutines logging at once — or one logging while Close flushes — corrupt
-//     the buffer. The lock is exclusive, not a read lock, precisely because
-//     concurrent writers are the problem; a read lock would admit them all at
-//     once. This also covers holders of the logger that never go through log(),
-//     which is how the redact package uses the injected one.
-//
-// After Close there is no writer, and writes are dropped rather than erroring:
-// losing a log line must never surface as a failure in the caller.
-//
-// Init and Close hold the same lock, so nothing they call may log through here.
-// Today neither does — Init's invalid-level warning goes straight to os.Stderr.
-type liveWriter struct{}
+// Safe for concurrent use: slog handlers may be called from several goroutines
+// and bufio.Writer is not goroutine-safe, so every write and Close is
+// serialized. Writes after Close are dropped rather than failing — losing a log
+// line must never surface as an error in the caller.
+type Logger struct {
+	slog *slog.Logger
 
-func (liveWriter) Write(p []byte) (int, error) {
-	mu.Lock()
-	defer mu.Unlock()
+	// mu serializes writes to buf and guards the buf/file handles against a
+	// concurrent Close. Exclusive rather than an RWMutex: concurrent writers are
+	// exactly the problem, so admitting them together would defeat it.
+	mu   sync.Mutex
+	buf  *bufio.Writer
+	file *os.File
+}
 
-	if logBufWriter == nil {
+// New opens cfg.Dir/entire.log for appending and returns a Logger writing JSON
+// to it.
+//
+// Errors are real errors: the caller decides whether a missing log file is
+// fatal (it generally is not) and what to do instead. Nothing falls back to
+// stderr here, because a logger that writes to the terminal would splash
+// operational lines over the user's output once injected.
+func New(cfg Config) (*Logger, error) {
+	if cfg.Dir == "" {
+		return nil, errors.New("logging: Config.Dir is required")
+	}
+	if err := os.MkdirAll(cfg.Dir, 0o750); err != nil {
+		return nil, fmt.Errorf("create log directory: %w", err)
+	}
+	path := filepath.Join(cfg.Dir, logFileName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // fixed filename under a caller-vetted directory
+	if err != nil {
+		return nil, fmt.Errorf("open log file: %w", err)
+	}
+
+	l := &Logger{
+		buf:  bufio.NewWriterSize(f, writeBufferSize),
+		file: f,
+	}
+	l.slog = slog.New(slog.NewJSONHandler(logWriter{l}, &slog.HandlerOptions{Level: cfg.Level}))
+	return l, nil
+}
+
+// Slog returns the underlying *slog.Logger, for packages that take one by
+// injection (redact) and should not depend on this wrapper type.
+func (l *Logger) Slog() *slog.Logger {
+	if l == nil {
+		return nil
+	}
+	return l.slog
+}
+
+// Close flushes the buffer and closes the log file. Idempotent, and safe to
+// call concurrently with logging: later writes are dropped.
+func (l *Logger) Close() error {
+	if l == nil {
+		return nil
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var flushErr error
+	if l.buf != nil {
+		if err := l.buf.Flush(); err != nil {
+			flushErr = fmt.Errorf("flush log buffer: %w", err)
+		}
+		l.buf = nil
+	}
+	if l.file != nil {
+		if err := l.file.Close(); err != nil && flushErr == nil {
+			flushErr = fmt.Errorf("close log file: %w", err)
+		}
+		l.file = nil
+	}
+	return flushErr
+}
+
+// logWriter adapts a Logger to io.Writer for its slog handler without putting
+// Write on Logger's own public surface.
+type logWriter struct{ l *Logger }
+
+func (w logWriter) Write(p []byte) (int, error) {
+	w.l.mu.Lock()
+	defer w.l.mu.Unlock()
+
+	if w.l.buf == nil {
 		return len(p), nil
 	}
-	n, err := logBufWriter.Write(p)
+	n, err := w.l.buf.Write(p)
 	if err != nil {
 		return n, fmt.Errorf("write to log buffer: %w", err)
 	}
 	return n, nil
 }
 
-// SetLogLevelGetter sets a callback function to get the log level from settings.
-// This allows the logging package to read settings without a circular dependency.
-// The callback is only used if ENTIRE_LOG_LEVEL env var is not set.
-func SetLogLevelGetter(getter func() string) {
-	mu.Lock()
-	defer mu.Unlock()
-	logLevelGetter = getter
-}
-
-// Init opens the log sink, writing JSON logs to .entire/logs/entire.log.
-//
-// If the log file cannot be created, falls back to stderr.
-// Log level is controlled by ENTIRE_LOG_LEVEL environment variable.
-//
-// Returns the initialized logger for the caller to put in its context with
-// WithLogger — Init sets up the sink, the caller decides where the handle
-// lives. Packages that take an injected *slog.Logger, like redact, then
-// receive it from that context.
-//
-// Init takes no session ID: the log path is fixed, so there is nothing about a
-// session for it to act on. Attach one with WithSessionID when it becomes
-// known, which on the hook path is after this has already run.
-//
-// A nil logger with a nil error means logging is not file-backed: Init fell
-// back to stderr. Callers must not inject that, because a logger in the
-// context asserts "writes go to .entire/logs/", never to the terminal.
-func Init(ctx context.Context) (*slog.Logger, error) {
-	mu.Lock()
-	defer mu.Unlock()
-
-	// Close any existing log file (flush buffer first)
-	if logBufWriter != nil {
-		_ = logBufWriter.Flush()
-		logBufWriter = nil
-	}
-	if logFile != nil {
-		_ = logFile.Close()
-		logFile = nil
-	}
-
-	// Get log level from environment first, then settings
-	levelStr := os.Getenv(LogLevelEnvVar)
-	if levelStr == "" && logLevelGetter != nil {
-		levelStr = logLevelGetter()
-	}
-	level := parseLogLevel(levelStr)
-
-	// Warn if invalid level was provided
-	if levelStr != "" && !isValidLogLevel(levelStr) {
-		fmt.Fprintf(os.Stderr, "[entire] Warning: invalid log level %q, defaulting to INFO\n", levelStr)
-	}
-
-	// Determine log file path
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		// Fall back to current directory
-		repoRoot = "."
-	}
-
-	logsPath := filepath.Join(repoRoot, LogsDir)
-	if err := os.MkdirAll(logsPath, 0o750); err != nil {
-		// Fall back to stderr for the package-level helpers, but hand the
-		// caller nothing to inject.
-		logger = createLogger(os.Stderr, level)
-		//nolint:nilnil // Documented signal, not an oversight: no logger and no
-		// error means "initialized, but not file-backed". It cannot be an error
-		// — callers must still proceed (the hook path configures redaction here
-		// regardless) — and it must not be the stderr logger, which callers
-		// would then inject and splash INFO lines onto the terminal.
-		return nil, nil
-	}
-
-	logFilePath := filepath.Join(logsPath, "entire.log")
-	f, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // fixed filename, not user-controlled
-	if err != nil {
-		// Fall back to stderr (see the fallback above for why nil, nil).
-		logger = createLogger(os.Stderr, level)
-		//nolint:nilnil // see above
-		return nil, nil
-	}
-
-	logFile = f
-	logBufWriter = bufio.NewWriterSize(f, 8192) // 8KB buffer for batched writes
-	logger = createLogger(liveWriter{}, level)
-
-	return logger, nil
-}
-
-// Close closes the log file if one is open.
-// Flushes any buffered data before closing.
-// Safe to call multiple times.
-func Close() {
-	mu.Lock()
-	defer mu.Unlock()
-
-	if logBufWriter != nil {
-		_ = logBufWriter.Flush()
-		logBufWriter = nil
-	}
-	if logFile != nil {
-		_ = logFile.Close()
-		logFile = nil
-	}
-}
-
-// resetLogger resets the logger to nil (for testing).
-func resetLogger() {
-	mu.Lock()
-	defer mu.Unlock()
-	logger = nil
-	if logBufWriter != nil {
-		_ = logBufWriter.Flush()
-		logBufWriter = nil
-	}
-	if logFile != nil {
-		_ = logFile.Close()
-		logFile = nil
-	}
-}
-
-// createLogger creates a JSON logger writing to the given writer at the specified level.
-func createLogger(w io.Writer, level slog.Level) *slog.Logger {
-	opts := &slog.HandlerOptions{
-		Level: level,
-	}
-	handler := slog.NewJSONHandler(w, opts)
-	return slog.New(handler)
-}
-
-// parseLogLevel parses a log level string to slog.Level.
-// Returns slog.LevelInfo for empty or invalid values.
-func parseLogLevel(s string) slog.Level {
+// ParseLevel maps a log level name to a slog.Level. ok is false for a non-empty
+// name that is not recognized, so the caller can warn about a typo rather than
+// silently logging at the default level. An empty name is the default, INFO,
+// and reports ok.
+func ParseLevel(s string) (level slog.Level, ok bool) {
 	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "":
+		return slog.LevelInfo, true
 	case "DEBUG":
-		return slog.LevelDebug
+		return slog.LevelDebug, true
 	case "INFO":
-		return slog.LevelInfo
+		return slog.LevelInfo, true
 	case "WARN", "WARNING":
-		return slog.LevelWarn
+		return slog.LevelWarn, true
 	case "ERROR":
-		return slog.LevelError
+		return slog.LevelError, true
 	default:
-		return slog.LevelInfo
-	}
-}
-
-// isValidLogLevel checks if the given string is a valid log level.
-func isValidLogLevel(s string) bool {
-	switch strings.ToUpper(strings.TrimSpace(s)) {
-	case "DEBUG", "INFO", "WARN", "WARNING", "ERROR", "":
-		return true
-	default:
-		return false
+		return slog.LevelInfo, false
 	}
 }
 
@@ -284,29 +214,18 @@ func Error(ctx context.Context, msg string, attrs ...any) {
 
 // log is the internal logging function that extracts context values and logs.
 //
-// The logger comes from the context when the entry point put one there
-// (logging.Init → WithLogger), which is the same logger downstream packages
-// receive by injection — one resolution path, so a caller cannot log somewhere
-// other than where redact does. The package-level logger is the fallback for
-// contexts built before Init or derived from context.Background(), and
-// slog.Default() the last resort when nothing initialized logging at all.
+// The logger comes from the context, which is the same logger downstream
+// packages receive by injection — one resolution path, so a caller cannot log
+// somewhere other than where redact does. slog.Default() is the fallback for a
+// context built before the entry point ran or derived from context.Background();
+// that one is the runtime's own global, not state this package owns.
 //
 // Context attributes lose to caller-supplied ones: slog does not dedupe attrs,
 // so emitting session_id from the context on top of a call site that passes its
 // own would put the key in the line twice. Over a hundred call sites pass one
 // by hand, so the collision is the common case, not the corner.
-//
-// No lock is held across l.Log: writes reach the log file through liveWriter,
-// which takes the read lock per write, so Init/Close cannot flush the buffer
-// mid-write. Only the globals read below need synchronizing.
 func log(ctx context.Context, level slog.Level, msg string, attrs ...any) {
-	mu.RLock()
-	l := logger
-	mu.RUnlock()
-
-	if ctxLogger := LoggerFromContext(ctx); ctxLogger != nil {
-		l = ctxLogger
-	}
+	l := LoggerFromContext(ctx).Slog()
 	if l == nil {
 		l = slog.Default()
 	}

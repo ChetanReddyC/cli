@@ -40,18 +40,17 @@ func TestWithHookSession_StampsMostRecentSession(t *testing.T) {
 
 	// Stand in for the root prerun, which is now the only thing that opens the
 	// log sink.
-	l, err := logging.Init(context.Background())
+	l, err := logging.New(logging.Config{Dir: filepath.Join(entireDir, "logs")})
 	if err != nil {
-		t.Fatalf("logging.Init() error = %v", err)
+		t.Fatalf("logging.New() error = %v", err)
 	}
-	if l == nil {
-		t.Fatal("logging.Init() returned no logger for a writable log directory")
-	}
-	t.Cleanup(logging.Close)
+	t.Cleanup(func() { _ = l.Close() })
 
 	ctx := withHookSession(logging.WithLogger(context.Background(), l))
 	logging.Warn(ctx, "hook session stamped")
-	logging.Close()
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
 
 	content, err := os.ReadFile(filepath.Join(entireDir, "logs", "entire.log"))
 	if err != nil {

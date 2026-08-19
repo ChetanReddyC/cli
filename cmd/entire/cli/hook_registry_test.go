@@ -85,11 +85,12 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	// Enable debug logging
 	t.Setenv(logging.LogLevelEnvVar, "DEBUG")
 
-	// Open the log sink (normally done by the root PersistentPreRunE)
-	if _, err := logging.Init(context.Background()); err != nil {
-		t.Fatalf("logging.Init() error = %v", err)
+	// Open the log sink (normally done by the root PersistentPreRun)
+	l, err := logging.New(logging.Config{Dir: logsDir, Level: resolveLogLevel(context.Background())})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
 	}
-	defer logging.Close()
+	defer func() { _ = l.Close() }()
 
 	// Create a transcript file for the hook input
 	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
@@ -112,14 +113,18 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
+	// Executing the verb directly skips the root PersistentPreRun, so inject the
+	// logger it would have put in the context. Nothing resolves through package
+	// state any more: a hook logs where its context says, or nowhere.
+	cmd.SetContext(logging.WithLogger(context.Background(), l))
+
 	// Execute the command
-	err := cmd.Execute()
-	if err != nil {
+	if err := cmd.Execute(); err != nil {
 		t.Fatalf("command execution failed: %v", err)
 	}
 
 	// Close logging to flush
-	logging.Close()
+	_ = l.Close()
 
 	// Verify log file was created and contains expected content
 	logFile := filepath.Join(logsDir, "entire.log")

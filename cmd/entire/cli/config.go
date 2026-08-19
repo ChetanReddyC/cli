@@ -3,10 +3,15 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
@@ -74,12 +79,47 @@ func GetStrategy(_ context.Context) *strategy.ManualCommitStrategy {
 // GetLogLevel returns the configured log level from settings.
 // Returns empty string if not configured (caller should use default).
 // Note: ENTIRE_LOG_LEVEL env var takes precedence; check it first.
-func GetLogLevel() string {
-	s, err := settings.Load(context.TODO()) //nolint:contextcheck // Called as a callback via SetLogLevelGetter, no ctx available
+func GetLogLevel(ctx context.Context) string {
+	s, err := settings.Load(ctx)
 	if err != nil {
 		return ""
 	}
 	return s.LogLevel
+}
+
+// resolveLogLevel resolves the level for a new logger: the environment first,
+// then repo settings. An unrecognized name warns on stderr rather than logging,
+// because there is no logger yet to warn through.
+func resolveLogLevel(ctx context.Context) slog.Level {
+	name := os.Getenv(logging.LogLevelEnvVar)
+	if name == "" {
+		name = GetLogLevel(ctx)
+	}
+	level, ok := logging.ParseLevel(name)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: invalid log level %q, defaulting to INFO\n", name)
+	}
+	return level
+}
+
+// newRepoLogger opens .entire/logs/entire.log for the current worktree.
+//
+// It CREATES the log directory, so every caller must already have decided that
+// writing into this repo is allowed — see the gates in initRootLogging and the
+// placement note in the enable flow.
+func newRepoLogger(ctx context.Context) (*logging.Logger, error) {
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve worktree root: %w", err)
+	}
+	l, err := logging.New(logging.Config{
+		Dir:   filepath.Join(root, logging.LogsDir),
+		Level: resolveLogLevel(ctx),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open log sink: %w", err)
+	}
+	return l, nil
 }
 
 // GetAgentsWithHooksInstalled returns names of agents that have hooks installed.

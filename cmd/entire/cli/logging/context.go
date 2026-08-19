@@ -23,28 +23,27 @@ const (
 // (see log).
 const sessionIDAttrKey = "session_id"
 
-// WithLogger attaches an initialized logger to the context. Init calls this
-// on the context it returns; entry points (cobra PreRun/RunE) pass that
-// context down so downstream code receives the logger by injection instead
-// of probing package state for readiness.
+// WithLogger attaches a Logger to the context. Entry points (cobra
+// PreRun/RunE) build one with New and pass the resulting context down so
+// downstream code receives the logger by injection instead of probing package
+// state for readiness.
 //
-// The logger writes through an indirection onto whichever log file Init most
-// recently opened (see liveWriter), so it stays valid across a re-Init and is
-// safe to hold and to write to concurrently. After Close there is no file and
-// its writes are dropped, so don't stash it anywhere that outlives the command.
-func WithLogger(ctx context.Context, l *slog.Logger) context.Context {
+// The exit point closes it by reading it back out of the context — the logger
+// has no other owner — so don't stash it anywhere that outlives the command.
+func WithLogger(ctx context.Context, l *Logger) context.Context {
 	return context.WithValue(ctx, loggerKey, l)
 }
 
-// LoggerFromContext returns the logger attached by WithLogger, or nil when
-// the entry point never initialized file-backed logging (including Init's
-// stderr fallback). A nil result is the signal to skip log lines that would
-// otherwise fall through to a stderr logger and surface as terminal noise.
-func LoggerFromContext(ctx context.Context) *slog.Logger {
+// LoggerFromContext returns the Logger attached by WithLogger, or nil when the
+// entry point never set up file-backed logging. A nil result is the signal to
+// skip log lines that would otherwise fall through to the stderr default logger
+// and surface as terminal noise. Its methods are nil-safe, so a nil result can
+// be closed or asked for its Slog without a guard.
+func LoggerFromContext(ctx context.Context) *Logger {
 	if ctx == nil {
 		return nil
 	}
-	if l, ok := ctx.Value(loggerKey).(*slog.Logger); ok {
+	if l, ok := ctx.Value(loggerKey).(*Logger); ok {
 		return l
 	}
 	return nil
@@ -79,7 +78,7 @@ func WithSessionID(ctx context.Context, sessionID string) context.Context {
 // its own lines with component=redaction, and slog does not dedupe attrs, so
 // re-adding it from the context would emit the key twice.
 func SessionLoggerFromContext(ctx context.Context) *slog.Logger {
-	l := LoggerFromContext(ctx)
+	l := LoggerFromContext(ctx).Slog()
 	if l == nil {
 		return nil
 	}
