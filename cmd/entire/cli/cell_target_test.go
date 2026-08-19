@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -83,8 +84,9 @@ type fakeCellCore struct {
 	clustersErr error
 	repos       *coreapi.ListReposOutputBody
 	reposErr    error
-	// blockUntilCtxDone makes ListRepos hang until the caller's deadline
-	// fires, standing in for a reachable-but-slow control plane. Off by
+	// blockUntilCtxDone makes ListRepos and GetRepo hang until the caller's
+	// deadline fires, standing in for a reachable-but-slow control plane —
+	// both, so the owner/repo and ULID paths can each be tested. Off by
 	// default, so existing tests are unaffected.
 	blockUntilCtxDone bool
 	// lastListReposParams records the params passed to the most recent
@@ -103,7 +105,10 @@ func (f *fakeCellCore) waitIfBlocking(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (f *fakeCellCore) GetRepo(context.Context, coreapi.GetRepoParams) (*coreapi.Repo, error) {
+func (f *fakeCellCore) GetRepo(ctx context.Context, _ coreapi.GetRepoParams) (*coreapi.Repo, error) {
+	if err := f.waitIfBlocking(ctx); err != nil {
+		return nil, err
+	}
 	return f.repo, f.repoErr
 }
 
@@ -429,6 +434,17 @@ func processingResolutionErrorCases() []processingResolutionErrorCase {
 			wantNotOnboarded: true,
 		},
 		{
+			// The defensive branch: primaries names a processing placement that
+			// is absent from the same response's placement list. Should not be
+			// reachable via the control plane, but it is the difference between
+			// a clear error and a zero-value placement resolving to no cell.
+			name: "processing placement id absent from the placement list",
+			repos: reposOutput(repoIndexFixture("acme/widget", "mirror-vanished",
+				placementFixture{id: "mirror-eu", slug: euClusterSlug},
+			)),
+			clusters: clustersWithSlugs(),
+		},
+		{
 			name: "processing placement failed",
 			repos: reposOutput(repoIndexFixture("acme/widget", "mirror-eu",
 				placementFixture{id: "mirror-eu", slug: euClusterSlug, status: coreapi.RepoPlacementStatusFailed},
@@ -551,6 +567,41 @@ func TestResolveRepoCellPlacement_MultiHomedRepo_ResolvesProcessingPlacement(t *
 	}
 }
 
+// The not-onboarded error is what a user in a non-onboarded repo sees, and the
+// fail-loud path made it the most common failure — so it must not read like a
+// stack trace. Each resolution layer naming the repo produced
+// "resolve processing placement for acme/widget: acme/widget: repo is not
+// onboarded to Entire"; the name belongs to exactly one layer.
+func TestResolveRepoCellPlacement_NotOnboardedNamesTheRepoOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		repos *coreapi.ListReposOutputBody
+	}{
+		{name: "no row in the repos index", repos: reposOutput()},
+		{name: "candidate row", repos: reposOutput(candidateRepoIndexFixture("acme/widget"))},
+		{
+			name: "row with no processing primary",
+			repos: reposOutput(func() coreapi.RepoIndexEntry {
+				e := repoIndexFixture("acme/widget", "", placementFixture{id: "mirror-eu", slug: euClusterSlug})
+				e.Primaries = coreapi.OptRepoPrimaries{}
+				return e
+			}()),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFakeCellCore(t, &fakeCellCore{repos: tc.repos, clusters: clustersWithSlugs()})
+
+			_, err := resolveRepoCellPlacement(context.Background(), "acme", "widget")
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := strings.Count(err.Error(), "acme/widget"); got != 1 {
+				t.Errorf("error = %q names the repo %d times, want exactly 1", err, got)
+			}
+		})
+	}
+}
+
 // Trail #1003 finding: resolveRepoCellPlacement was the one cell-resolution
 // entry point with no deadline, and the coreapi HTTP client sets only a dial
 // timeout — so a reachable-but-slow control plane stalled `explain --repo`
@@ -580,6 +631,53 @@ func TestResolveRepoCellPlacement_BoundedByDeadline(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("error = %q, want it to wrap context.DeadlineExceeded", err)
+	}
+}
+
+// The ULID path resolves a placement the caller already named, so it skips the
+// processing-placement lookup entirely — but a stalled control plane must still
+// report a timeout as a timeout, in the same words as the owner/repo path. The
+// two paths reaching different wording for the same failure is what made the
+// shared cellPlacementError worth routing both through.
+func TestResolveRepoCellTarget_ULIDPathReportsTimeoutAsTimeout(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{blockUntilCtxDone: true, clusters: euClusters()})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := resolveRepoCellTarget(ctx, "", "01J000000000000000000000")
+	if err == nil {
+		t.Fatal("expected a timeout error from a stalled control plane")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("resolveRepoCellTarget waited %s; the ULID lookup is not bounded", elapsed)
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q, want it to name a timeout like the owner/repo path does", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %q, want it to wrap context.DeadlineExceeded", err)
+	}
+}
+
+// A cancelled context is a Ctrl+C, not a slow control plane; calling it a
+// timeout sends the user debugging the wrong thing.
+func TestCellPlacementError_CancellationIsNotReportedAsTimeout(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	fallback := fmt.Errorf("list repos: %w", context.Canceled)
+	err := cellPlacementError(ctx, "acme/widget", fallback)
+
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q, want a cancellation not to be labelled a timeout", err)
+	}
+	// The Canceled chain has to survive: renderDataAPIAuthError silences on it.
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %q, want it to still wrap context.Canceled", err)
 	}
 }
 

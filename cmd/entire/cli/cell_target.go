@@ -78,7 +78,7 @@ func resolveRepoCellTarget(ctx context.Context, fullName, ulid string) (*auth.Ce
 		}
 		repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: ulid})
 		if err != nil {
-			return nil, fmt.Errorf("resolve the Entire cell for %s: %w", ulid, err)
+			return nil, cellPlacementError(ctx, ulid, fmt.Errorf("resolve the Entire cell for %s: %w", ulid, err))
 		}
 		clusterHost := strings.TrimSpace(repo.ClusterHost.Or(""))
 		if clusterHost == "" {
@@ -86,7 +86,7 @@ func resolveRepoCellTarget(ctx context.Context, fullName, ulid string) (*auth.Ce
 		}
 		target, err := cellTargetForClusterHost(ctx, c, clusterHost)
 		if err != nil {
-			return nil, fmt.Errorf("resolve the Entire cell for %s: %w", ulid, err)
+			return nil, cellPlacementError(ctx, ulid, fmt.Errorf("resolve the Entire cell for %s: %w", ulid, err))
 		}
 		return target, nil
 	}
@@ -169,13 +169,17 @@ var errRepoNotOnboarded = errors.New("repo is not onboarded to Entire")
 // mirroring the entire.io BFF's processingPlacement() selection
 // (list-repos-index.ts). A repo can be mirrored in several regions; only this
 // one placement is guaranteed to hold the repo's actual data.
+//
+// Its errors deliberately omit fullName: every caller already wraps them with
+// the repo name, and naming it here too is what produced the doubled
+// "resolve processing placement for X: X: repo is not onboarded" output.
 func resolveProcessingPlacement(ctx context.Context, c cellCoreClient, fullName string) (coreapi.RepoPlacement, error) {
 	out, err := c.ListRepos(ctx, coreapi.ListReposParams{Filter: coreapi.NewOptString(fullName)})
 	if err != nil {
 		return coreapi.RepoPlacement{}, fmt.Errorf("list repos: %w", err)
 	}
 	if len(out.Repos) == 0 {
-		return coreapi.RepoPlacement{}, fmt.Errorf("%s: %w", fullName, errRepoNotOnboarded)
+		return coreapi.RepoPlacement{}, errRepoNotOnboarded
 	}
 	entry := out.Repos[0]
 	// Filter is documented as an exact-match lookup restricted to fullName, so
@@ -195,27 +199,27 @@ func resolveProcessingPlacement(ctx context.Context, c cellCoreClient, fullName 
 	// shape — a repo a developer just happens to work in — as opposed to the
 	// zero-rows case below (caller can't see it, or it doesn't exist at all).
 	if _, isCandidate := entry.Candidate.Get(); isCandidate {
-		return coreapi.RepoPlacement{}, fmt.Errorf("%s: %w", fullName, errRepoNotOnboarded)
+		return coreapi.RepoPlacement{}, errRepoNotOnboarded
 	}
 	var processingID string
 	if primaries, ok := entry.Primaries.Get(); ok {
 		processingID = strings.TrimSpace(primaries.Processing)
 	}
 	if processingID == "" {
-		return coreapi.RepoPlacement{}, fmt.Errorf("%s has no processing placement: %w", fullName, errRepoNotOnboarded)
+		return coreapi.RepoPlacement{}, errRepoNotOnboarded
 	}
 	for _, p := range entry.Placements {
 		if p.ID != processingID {
 			continue
 		}
 		if p.Status == coreapi.RepoPlacementStatusFailed || p.Status == coreapi.RepoPlacementStatusSuspended {
-			return coreapi.RepoPlacement{}, fmt.Errorf("%s's processing placement is %s", fullName, p.Status)
+			return coreapi.RepoPlacement{}, fmt.Errorf("processing placement is %s", p.Status)
 		}
 		return p, nil
 	}
 	// Defensive: primaries.processing should always name a placement present
 	// in the same response.
-	return coreapi.RepoPlacement{}, fmt.Errorf("%s's processing placement %q is not in its placement list", fullName, processingID)
+	return coreapi.RepoPlacement{}, fmt.Errorf("processing placement %q is not in the repo's placement list", processingID)
 }
 
 // repoCellPlacement is a repo's processing placement: the id entire-api keys
@@ -257,11 +261,11 @@ func resolveRepoCellPlacement(ctx context.Context, owner, repo string) (repoCell
 	fullName := owner + "/" + repo
 	placement, err := resolveProcessingPlacement(ctx, c, fullName)
 	if err != nil {
-		return repoCellPlacement{}, cellPlacementError(ctx, owner, repo, fmt.Errorf("resolve processing placement for %s: %w", fullName, err))
+		return repoCellPlacement{}, cellPlacementError(ctx, fullName, fmt.Errorf("resolve processing placement for %s: %w", fullName, err))
 	}
 	target, err := cellTargetForClusterSlug(ctx, c, placement.ClusterSlug)
 	if err != nil {
-		return repoCellPlacement{}, cellPlacementError(ctx, owner, repo, fmt.Errorf("resolve cell for %s: %w", fullName, err))
+		return repoCellPlacement{}, cellPlacementError(ctx, fullName, fmt.Errorf("resolve cell for %s: %w", fullName, err))
 	}
 	return repoCellPlacement{RepoID: placement.ID, Target: target}, nil
 }
@@ -269,10 +273,16 @@ func resolveRepoCellPlacement(ctx context.Context, owner, repo string) (repoCell
 // cellPlacementError reports a timeout as a timeout: without this, a fired
 // deadline surfaces as whichever "not found"/"no processing placement" error
 // the caller's lookup happened to return, and the user goes looking for a
-// missing mirror instead of a slow control plane.
-func cellPlacementError(ctx context.Context, owner, repo string, fallback error) error {
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return fmt.Errorf("resolving the Entire cell for %s/%s timed out: %w", owner, repo, ctxErr)
+// missing mirror instead of a slow control plane. subject is the repo the
+// lookup was for, named however the caller addressed it (owner/repo or ULID).
+//
+// Only DeadlineExceeded is relabelled. A cancelled context is a Ctrl+C, not a
+// timeout, and calling it one sends the user hunting a slow control plane that
+// was never the problem; the cancelled in-flight call's own error already
+// carries context.Canceled, which is what renderDataAPIAuthError silences on.
+func cellPlacementError(ctx context.Context, subject string, fallback error) error {
+	if ctxErr := ctx.Err(); errors.Is(ctxErr, context.DeadlineExceeded) {
+		return fmt.Errorf("resolving the Entire cell for %s timed out: %w", subject, ctxErr)
 	}
 	return fallback
 }

@@ -29,12 +29,21 @@ func runAuthenticatedDataAPI(ctx context.Context, errW io.Writer, insecureHTTP b
 // context.DeadlineExceeded) even though the caller's context is perfectly
 // live. Silencing on that alone would print nothing for a slow-but-reachable
 // control plane — a worse outcome than the error it would otherwise show.
+//
+// The not-onboarded case is replaced rather than wrapped: it is the most common
+// way a repo-scoped command fails, its raw chain is a stack of internal
+// resolution steps the user can do nothing with, and every caller reaching here
+// is scoped to the current repo, so the line needs no repo name.
 func renderDataAPIAuthError(ctx context.Context, errW io.Writer, err error) error {
 	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 		return NewSilentError(err)
 	}
 	if errors.Is(err, auth.ErrNotLoggedIn) {
 		fmt.Fprintln(errW, "Not logged in. Run 'entire login' to authenticate.")
+		return NewSilentError(err)
+	}
+	if errors.Is(err, errRepoNotOnboarded) {
+		fmt.Fprintln(errW, "This repository is not onboarded to Entire. Run 'entire repo mirror create' to onboard it.")
 		return NewSilentError(err)
 	}
 	return err

@@ -28,8 +28,8 @@ type expertsAPIClient interface {
 }
 
 // newExpertsAPIClient builds the entire-api cell client. fullName (owner/repo)
-// and/or ulid identify the repo so the client can route to the cell that hosts
-// it (see NewAuthenticatedEntireAPICellClient).
+// or ulid identifies the repo so the client can route to the cell that hosts
+// it; one of them is required (see NewAuthenticatedEntireAPICellClient).
 var newExpertsAPIClient = func(ctx context.Context, insecureHTTP bool, fullName, ulid string) (expertsAPIClient, error) {
 	return NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, ulid)
 }
