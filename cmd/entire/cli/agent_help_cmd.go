@@ -355,7 +355,8 @@ func refreshAgentHelpTrailsEnabledCacheIfStaleForScope(ctx context.Context, scop
 	if notOnboarded {
 		// Definitive negative: cache it for trailEnablementCacheTTL rather than
 		// falling into the short refresh-failure backoff, which would re-pay the
-		// whole control-plane round trip every 5 minutes forever.
+		// whole control-plane round trip every 5 minutes forever. The save itself
+		// survives this refresh's spent deadline — see saveTrailsEnabledForScope.
 		return saveTrailsEnabledForScope(ctx, scope, false, time.Now())
 	}
 	if err != nil {

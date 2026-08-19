@@ -1073,18 +1073,15 @@ func reportEnableToBackend(ctx context.Context, insecureHTTPAuth bool, info *git
 // trailRefreshAPIClient (see its doc for why) rather than the generic
 // data-API/BFF client.
 func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, info *gitremote.Info) {
-	// The deadline bounds the NETWORK work only. The cache writes below are
-	// local and are the whole point of the probe, so they run on a context that
-	// outlives the budget — otherwise a probe that spent its allowance would
-	// resolve an answer and then fail to record it, leaving the cache unknown
-	// and re-forking a refresh child on the next SessionStart.
+	// The deadline bounds the NETWORK work only. The cache writes keep the
+	// caller's ctx: saveTrailsEnabledForScope, the single writer they funnel
+	// through, already guarantees a spent deadline cannot lose the answer.
 	probeCtx, cancel := context.WithTimeout(ctx, enableTrailsProbeBudget)
 	defer cancel()
-	saveCtx := context.WithoutCancel(ctx)
 
 	client, notOnboarded, err := trailsCellClient(probeCtx, insecureHTTPAuth, info.Owner+"/"+info.Repo)
 	if notOnboarded {
-		if saveErr := saveTrailsEnabledForRemote(saveCtx, info.Forge, info.Owner, info.Repo, false); saveErr != nil {
+		if saveErr := saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, false); saveErr != nil {
 			logging.Debug(ctx, "failed to cache trails enablement", "error", saveErr)
 		}
 		return
@@ -1098,7 +1095,7 @@ func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, i
 		logging.Debug(ctx, "trails enablement probe failed", "error", err)
 		return
 	}
-	if err := saveTrailsEnabledForRemote(saveCtx, info.Forge, info.Owner, info.Repo, enabled); err != nil {
+	if err := saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, enabled); err != nil {
 		logging.Debug(ctx, "failed to cache trails enablement", "error", err)
 	}
 }

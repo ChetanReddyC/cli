@@ -196,7 +196,20 @@ func saveTrailsEnabledForRemote(ctx context.Context, forge, owner, repo string, 
 	return saveTrailsEnabledForScope(ctx, scope, enabled, time.Now())
 }
 
+// saveTrailsEnabledForScope is the single writer behind every trails-enablement
+// cache save (saveTrailsEnabledForRepo/ForRemote both funnel here), which is why
+// the outlives-the-deadline guarantee lives at this one point rather than at
+// each call site.
+//
+// The write is not purely local: ClonePreferencesPath resolves the git common
+// dir with `git rev-parse` under the passed ctx (session.getGitCommonDir). So a
+// refresh that answers the question at 2.9s of a 3s budget could then fail to
+// STORE the answer, leaving the cache "unknown" — precisely the state the
+// callers' branches exist to escape, and the one that makes SessionStart
+// re-fork a refresh child on every invocation. Losing the answer is strictly
+// worse than spending a few extra milliseconds past the deadline to keep it.
 func saveTrailsEnabledForScope(ctx context.Context, scope trailEnablementScope, enabled bool, checkedAt time.Time) error {
+	ctx = context.WithoutCancel(ctx)
 	enabledCopy := enabled
 	checkedAtUTC := checkedAt.UTC()
 	if err := settings.ModifyClonePreferences(ctx, func(prefs *settings.ClonePreferences) error {
