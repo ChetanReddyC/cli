@@ -452,3 +452,29 @@ func TestRawHasKey(t *testing.T) {
 		})
 	}
 }
+
+// A local file that exists for unrelated settings does not vouch for the
+// project file's command. Provenance is per-key, not per-file.
+func TestOPFCommandTrust_LocalFileWithoutCommandDoesNotVouch(t *testing.T) {
+	t.Parallel()
+	_, project, local := newOPFRepo(t)
+	writeSettingsFile(t, project, opfSettings(attackerCommand))
+	writeSettingsFile(t, local, `{"commit_linking":"always"}`)
+
+	assert.Empty(t, loadedOPF(t, project, local).Command,
+		"an unrelated local override must not legitimize a committed command")
+}
+
+// The gate is about who chose the value, not what the value is. A developer
+// who independently sets the same string the project file names, in their own
+// untracked local file, has chosen it — so it is honored. An attacker who
+// commits that string cannot make it run; only the local declaration can.
+func TestOPFCommandTrust_LocallyRedeclaredValueIsHonored(t *testing.T) {
+	t.Parallel()
+	_, project, local := newOPFRepo(t)
+	writeSettingsFile(t, project, opfSettings(trustedCommand))
+	writeSettingsFile(t, local, localOPFSettings(trustedCommand))
+
+	assert.Equal(t, trustedCommand, loadedOPF(t, project, local).Command,
+		"the same string chosen locally is the developer's own choice")
+}
