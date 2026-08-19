@@ -297,6 +297,16 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 	}
 	client, err := trailRefreshAPIClient(ctx, false, scope.Owner+"/"+scope.Repo)
 	if err != nil {
+		if errors.Is(err, errRepoNotOnboarded) {
+			// A definitive, permanent negative: without this, every
+			// SessionStart re-forks a refresh child for this repo forever
+			// (see trailRefreshSpawnThrottle above), because the cache is
+			// never written and so never leaves "unknown".
+			if saveErr := saveTrailsEnabledForScope(ctx, scope, false, time.Now()); saveErr != nil {
+				logging.Debug(logCtx, "trails enablement refresh failed to save not-onboarded scope", "error", saveErr.Error())
+			}
+			return nil
+		}
 		logging.Debug(logCtx, "trails enablement refresh skipped: authenticated client unavailable", "error", err.Error())
 		return nil
 	}
@@ -485,7 +495,7 @@ func runAuthenticatedTrailAPI(ctx context.Context, errW io.Writer, insecureHTTP 
 	}
 	client, err := newTrailAPIClient(ctx, insecureHTTP, owner+"/"+repo)
 	if err != nil {
-		return renderDataAPIAuthError(errW, err)
+		return renderDataAPIAuthError(ctx, errW, err)
 	}
 	err = fn(ctx, client)
 	if repoOverride == "" {

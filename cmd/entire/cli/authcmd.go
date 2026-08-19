@@ -16,13 +16,21 @@ import (
 func runAuthenticatedDataAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, fn func(context.Context, *api.Client) error) error {
 	client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
 	if err != nil {
-		return renderDataAPIAuthError(errW, err)
+		return renderDataAPIAuthError(ctx, errW, err)
 	}
 	return fn(ctx, client)
 }
 
-func renderDataAPIAuthError(errW io.Writer, err error) error {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+// renderDataAPIAuthError decides whether err should print or stay silent.
+// Silence is reserved for the caller's own context actually firing (checked
+// via ctx.Err(), not errors.Is(err, ...)): a resolver called from inside err's
+// chain (e.g. resolveRepoCellTarget) runs under its own internal timeout, and
+// the resulting wrapped error still satisfies errors.Is(err,
+// context.DeadlineExceeded) even though the caller's context is perfectly
+// live. Silencing on that alone would print nothing for a slow-but-reachable
+// control plane — a worse outcome than the error it would otherwise show.
+func renderDataAPIAuthError(ctx context.Context, errW io.Writer, err error) error {
+	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 		return NewSilentError(err)
 	}
 	if errors.Is(err, auth.ErrNotLoggedIn) {

@@ -281,7 +281,7 @@ func runExperts(ctx context.Context, out, errOut io.Writer, args []string, f *ex
 
 	// Identify the repo for cell routing: a ULID goes on the ulid arg, an
 	// owner/repo on the fullName arg. The client uses whichever is set to reach
-	// the cell that hosts the repo (falling back to home-jurisdiction routing).
+	// the cell that hosts the repo's processing placement.
 	cellFullName, cellULID := "", ""
 	if repoIsULID {
 		cellULID = repoOverride
