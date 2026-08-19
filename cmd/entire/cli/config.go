@@ -102,12 +102,13 @@ func resolveLogLevel(ctx context.Context) slog.Level {
 	return level
 }
 
-// newRepoLogger opens .entire/logs/entire.log for the current worktree.
+// newLogger opens .entire/logs/entire.log for the current worktree.
 //
 // It CREATES the log directory, so every caller must already have decided that
-// writing into this repo is allowed — see the gates in initRootLogging and the
-// placement note in the enable flow.
-func newRepoLogger(ctx context.Context) (*logging.Logger, error) {
+// writing into this repo is allowed: the root PersistentPreRun gates on
+// IsSetUpAny, and enable calls this only after every check that can still reject
+// the invocation, so a rejected enable leaves an untouched repo untouched.
+func newLogger(ctx context.Context) (*logging.Logger, error) {
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)

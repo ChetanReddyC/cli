@@ -908,29 +908,10 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				selectedAgent = ag
 			}
 
-			// enable is the one command that legitimately runs before the repo
-			// is set up, which is exactly when the root PersistentPreRun's
-			// IsSetUpAny gate declines to build a logger. Without one here,
-			// every logging.* call under setup — agent detection, hook install,
-			// session import, the checkpoint layer's push/remote warnings —
-			// falls through to slog.Default() and prints straight onto the
-			// user's terminal mid-flow, writing nothing to the log file.
-			//
-			// Only when the root hook built none: re-enabling an already set-up
-			// repo passes that gate, and a second logger would mean two handles
-			// and two 8KB buffers appending to one file.
-			//
-			// Placement is load-bearing in both directions: after the git-repo
-			// check above so it cannot create .entire/logs/ outside a
-			// repository, and after every check that can still reject this
-			// invocation, because building a logger CREATES .entire/logs/ — a
-			// rejected enable must leave a previously untouched repo untouched
-			// rather than seeding it with an untracked directory Entire's
-			// gitignore entry does not exist yet to cover.
 			if logging.LoggerFromContext(ctx) == nil {
-				if l, err := newRepoLogger(ctx); err == nil {
+				if l, err := newLogger(ctx); err == nil {
 					ctx = logging.WithLogger(ctx, l)
-					defer func() { _ = l.Close() }()
+					cmd.SetContext(ctx)
 				}
 			}
 

@@ -50,38 +50,6 @@ func inGroup(c *cobra.Command, groupID string) *cobra.Command {
 	return c
 }
 
-// initRootLogging routes every command's logging.* calls into
-// .entire/logs/entire.log and attaches the initialized logger to the
-// command's context, so downstream packages that take a *slog.Logger (redact)
-// receive it by injection via logging.SessionLoggerFromContext instead of each
-// RunE building a logger for itself.
-//
-// The IsSetUpAny gate is load-bearing, because building the logger CREATES
-// .entire/logs/: a repo that has never enabled Entire must stay untouched, or
-// `entire version` in someone else's clone seeds an untracked .entire/ that no
-// gitignore entry covers yet. This is also why `enable` builds its own logger —
-// during setup the repo is by definition not set up yet, so its call is placed
-// after every check that can still reject the invocation.
-//
-// Running outside a repository needs no gate here: newRepoLogger resolves the
-// worktree root to build the log directory path, so it fails before creating
-// anything, and IsSetUpAny is already false when the root cannot be resolved.
-//
-// Failure is non-fatal and deliberately silent: a command must not die because
-// a log file could not be opened, and with no logger in the context the
-// package-level helpers fall through to slog.Default() on stderr.
-func initRootLogging(cmd *cobra.Command) {
-	ctx := cmd.Context()
-	if !settings.IsSetUpAny(ctx) {
-		return
-	}
-	l, err := newRepoLogger(ctx)
-	if err != nil {
-		return
-	}
-	cmd.SetContext(logging.WithLogger(ctx, l))
-}
-
 // Run every ancestor's persistent hooks, root first, instead of only the closest
 // one cobra picks by default. This is what makes the root PersistentPreRunE the
 // single logger-construction site: `hooks`, `checkpoint`, `session`, and `agent` all
@@ -115,7 +83,15 @@ func NewRootCmd() *cobra.Command {
 			HiddenDefaultCmd: true,
 		},
 		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
-			initRootLogging(cmd)
+			ctx := cmd.Context()
+			if !settings.IsSetUpAny(ctx) {
+				return
+			}
+			l, err := newLogger(ctx)
+			if err != nil {
+				return
+			}
+			cmd.SetContext(logging.WithLogger(ctx, l))
 		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
 			// Flush the buffered .entire/logs writer the root PersistentPreRun

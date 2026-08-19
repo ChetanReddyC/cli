@@ -96,25 +96,8 @@ func main() {
 	}
 
 	executed, err := rootCmd.ExecuteContextC(ctx)
-
-	// Backstop for the failure paths root's PersistentPostRun never runs on.
-	// Cobra returns out of Command.execute as soon as RunE errors — and as soon
-	// as required-flag/flag-group validation fails, which happens after the
-	// pre-runs — in both cases before reaching its PersistentPostRun loop. Either
-	// one would otherwise exit with up to 8KB of buffered diagnostics unwritten:
-	// exactly the lines explaining why a hook failed (pre-push aborting on an OPF
-	// runtime failure, say).
-	//
-	// The logger is reached through the executed command's context, where the
-	// root PersistentPreRun put it; on both paths above ExecuteContextC returns
-	// the leaf, so this is the same logger those lines went to. Errors raised
-	// before any pre-run — unknown flag or subcommand, bad args — return a
-	// command carrying no logger, and nothing was built, so nothing is lost.
-	//
-	// On success root's PersistentPostRun has already closed it and this is a
-	// no-op: Close is idempotent and nil-safe.
-	if executed != nil {
-		_ = logging.LoggerFromContext(executed.Context()).Close()
+	if l := logging.LoggerFromContext(executed.Context()); l != nil {
+		_ = l.Close()
 	}
 
 	if err != nil {

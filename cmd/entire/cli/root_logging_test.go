@@ -21,7 +21,7 @@ import (
 const probeMarker = "root prerun injected this logger"
 
 // markRepoSetUpForLogging writes the settings file that makes
-// settings.IsSetUpAny true for the repo at cwd — the gate initRootLogging uses
+// settings.IsSetUpAny true for the repo at cwd — the gate the root PersistentPreRun uses
 // to keep a never-enabled repo free of an .entire/ directory.
 func markRepoSetUpForLogging(t *testing.T) {
 	t.Helper()
@@ -48,7 +48,7 @@ func executeThroughRoot(t *testing.T, args ...string) error {
 }
 
 // setUpRepoForRootLogging makes cwd a git repo that Entire has been set up in,
-// which is what initRootLogging gates on.
+// which is what the root PersistentPreRun gates on.
 func setUpRepoForRootLogging(t *testing.T) string {
 	t.Helper()
 
