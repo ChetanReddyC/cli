@@ -1258,6 +1258,59 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 	}
 }
 
+// TestRunTrailUpdateClearsDescriptionWithEmptyBody covers `--body=`: an empty
+// description is a value to write, not an absence. Two things have to hold for
+// that, and neither is visible from a passing update test — the write must be
+// triggered by the flag having been set rather than by the text being non-empty,
+// and markdown must reach the wire as an empty string (with omitempty it would
+// drop out of the JSON and the server would reject the write as "exactly one of
+// markdown/contentJson is required"). Both failures silently do nothing.
+func TestRunTrailUpdateClearsDescriptionWithEmptyBody(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var put map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+				Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}},
+				Total:  1,
+			}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodPut && r.URL.Path == trailTestBasePath+"/7/body":
+			mu.Lock()
+			defer mu.Unlock()
+			if err := json.NewDecoder(r.Body).Decode(&put); err != nil {
+				t.Errorf("decode body request: %v", err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailBodyDocument{}); err != nil {
+				t.Errorf("encode body response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err := runTrailUpdateWithClient(t.Context(), &out, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		Branch:      "feature/x",
+		Body:        "",
+		BodyChanged: true,
+	})
+
+	require.NoError(t, err)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, map[string]any{"markdown": "", "overwrite": true}, put)
+	require.Contains(t, out.String(), "Updated trail for branch feature/x")
+}
+
 func TestValidateTrailUpdateFieldsRejectsEmptyTitle(t *testing.T) {
 	t.Parallel()
 	if err := validateTrailUpdateFields(trailUpdateInputs{TitleChanged: true, Title: "   "}); err == nil {
