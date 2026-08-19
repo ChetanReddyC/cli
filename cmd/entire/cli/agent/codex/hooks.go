@@ -193,34 +193,8 @@ func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 	if err != nil || !location.ProjectLayerExists() {
 		return false
 	}
-	data, err := os.ReadFile(location.HooksPath)
-	if err != nil {
-		return false
-	}
-	var topLevel map[string]json.RawMessage
-	if err := json.Unmarshal(data, &topLevel); err != nil {
-		return false
-	}
-	var rawHooks map[string]json.RawMessage
-	if hooksRaw, ok := topLevel["hooks"]; ok {
-		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-			return false
-		}
-	}
-
-	for _, h := range managedHooks {
-		if !h.core {
-			continue
-		}
-		var groups []MatcherGroup
-		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
-			return false
-		}
-		if !hasEntireHook(groups) {
-			return false
-		}
-	}
-	return true
+	inspection := inspectHookConfigAt(ctx, location.HooksPath)
+	return inspection.State == HookFileEntire && inspection.CoreInstalled
 }
 
 // CheckHookConfig reports whether Codex's authoritative hook configuration is
@@ -233,32 +207,20 @@ func (c *CodexAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState 
 		}
 		return agent.HooksAbsent
 	}
-	document, err := readHooksDocument(location.HooksPath)
-	if err != nil {
-		return agent.HooksAbsent
-	}
-	installed := false
-	current := location.ProjectLayerExists()
-	for _, spec := range managedHookSpecs(ctx) {
-		var groups []MatcherGroup
-		if err := parseHookType(document.rawHooks, spec.event, &groups); err != nil {
-			return agent.HooksOutdated
-		}
-		if hasEntireHook(groups) {
-			installed = true
-		}
-		if !managedHookIsCurrent(groups, spec.command, spec.timeout) {
-			current = false
-		}
-	}
-	if installed {
-		if current && !HasLegacyEntireHooks(ctx) {
+	inspection := inspectHookConfigAt(ctx, location.HooksPath)
+	switch inspection.State {
+	case HookFileInvalid:
+		return agent.HooksOutdated
+	case HookFileEntire:
+		if inspection.Current && location.ProjectLayerExists() && !HasLegacyEntireHooks(ctx) {
 			return agent.HooksCurrent
 		}
 		return agent.HooksOutdated
-	}
-	if HasLegacyEntireHooks(ctx) {
-		return agent.HooksOutdated
+	case HookFileAbsent, HookFileUserOnly:
+		if HasLegacyEntireHooks(ctx) {
+			return agent.HooksOutdated
+		}
+		return agent.HooksAbsent
 	}
 	return agent.HooksAbsent
 }
@@ -272,8 +234,31 @@ func (c *CodexAgent) HooksSharedAcrossWorktrees(ctx context.Context) bool {
 
 type managedHookSpec struct {
 	event   string
+	label   string
 	command string
 	timeout int
+	core    bool
+}
+
+// HookFileState distinguishes Entire's installation from unrelated user
+// configuration and from a file that cannot be inspected safely.
+type HookFileState uint8
+
+const (
+	HookFileAbsent HookFileState = iota
+	HookFileUserOnly
+	HookFileEntire
+	HookFileInvalid
+)
+
+// HookConfigInspection is the single parsed view used by Codex presence,
+// freshness, missing-hook, and doctor reporting.
+type HookConfigInspection struct {
+	State         HookFileState
+	Missing       []string
+	Current       bool
+	CoreInstalled bool
+	Err           error
 }
 
 type hooksDocument struct {
@@ -288,9 +273,64 @@ func managedHookSpecs(ctx context.Context) []managedHookSpec {
 	specs := make([]managedHookSpec, 0, len(managedHooks))
 	for _, hook := range managedHooks {
 		command := hook.wrap(cmdPrefix+hook.verb, useWindowsProductionHooks)
-		specs = append(specs, managedHookSpec{event: hook.event, command: command, timeout: hook.timeout})
+		specs = append(specs, managedHookSpec{
+			event:   hook.event,
+			label:   hook.label,
+			command: command,
+			timeout: hook.timeout,
+			core:    hook.core,
+		})
 	}
 	return specs
+}
+
+// InspectHookConfig resolves and parses Codex's authoritative hooks file.
+func InspectHookConfig(ctx context.Context) HookConfigInspection {
+	location, err := ResolveHookLocation(ctx)
+	if err != nil {
+		return HookConfigInspection{State: HookFileInvalid, Err: err}
+	}
+	return inspectHookConfigAt(ctx, location.HooksPath)
+}
+
+func inspectHookConfigAt(ctx context.Context, path string) HookConfigInspection {
+	document, err := readHooksDocument(path)
+	if err != nil {
+		return HookConfigInspection{State: HookFileInvalid, Err: err}
+	}
+	if !document.exists {
+		return HookConfigInspection{State: HookFileAbsent}
+	}
+
+	inspection := HookConfigInspection{
+		State:         HookFileUserOnly,
+		Current:       true,
+		CoreInstalled: true,
+	}
+	for _, spec := range managedHookSpecs(ctx) {
+		var groups []MatcherGroup
+		if err := parseHookType(document.rawHooks, spec.event, &groups); err != nil {
+			return HookConfigInspection{State: HookFileInvalid, Err: err}
+		}
+		installed := hasEntireHook(groups)
+		if installed {
+			inspection.State = HookFileEntire
+		} else {
+			inspection.Missing = append(inspection.Missing, spec.label)
+			if spec.core {
+				inspection.CoreInstalled = false
+			}
+		}
+		if !managedHookIsCurrent(groups, spec.command, spec.timeout) {
+			inspection.Current = false
+		}
+	}
+	if inspection.State == HookFileUserOnly {
+		inspection.Missing = nil
+		inspection.Current = false
+		inspection.CoreInstalled = false
+	}
+	return inspection
 }
 
 func readHooksDocument(path string) (*hooksDocument, error) {

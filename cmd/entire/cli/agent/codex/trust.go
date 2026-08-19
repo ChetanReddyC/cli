@@ -123,40 +123,14 @@ func declaredCodexEvents(hooksJSONPath string) ([]string, bool) {
 // Codex's authoritative hooks.json. Surfaces drift when the user enabled Codex
 // on an older release and the install set has since grown.
 //
-// Returns nil when hooks.json is missing or unreadable — those cases
-// are "Codex isn't enabled here", which is a different problem.
+// Returns nil when the authoritative file is absent, user-only, or invalid.
+// Callers that need to distinguish those states should use InspectHookConfig.
 func MissingEntireHooks(ctx context.Context) []string {
-	location, err := ResolveHookLocation(ctx)
-	if err != nil {
-		return nil
-	}
-	return missingEntireHooks(location.HooksPath)
+	return InspectHookConfig(ctx).Missing
 }
 
 func missingEntireHooks(hooksJSONPath string) []string {
-	data, err := os.ReadFile(hooksJSONPath) //nolint:gosec // path constructed from caller-controlled repo root
-	if err != nil {
-		return nil
-	}
-	var topLevel map[string]json.RawMessage
-	if err := json.Unmarshal(data, &topLevel); err != nil {
-		return nil
-	}
-	var rawHooks map[string]json.RawMessage
-	if err := json.Unmarshal(topLevel["hooks"], &rawHooks); err != nil {
-		return nil
-	}
-	var missing []string
-	for _, hook := range managedHooks {
-		var groups []MatcherGroup
-		if err := parseHookType(rawHooks, hook.event, &groups); err != nil {
-			return nil
-		}
-		if !hasEntireHook(groups) {
-			missing = append(missing, hook.label)
-		}
-	}
-	return missing
+	return inspectHookConfigAt(context.Background(), hooksJSONPath).Missing
 }
 
 // HasLegacyEntireHooks reports whether this linked checkout still has an

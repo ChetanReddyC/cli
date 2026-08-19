@@ -527,6 +527,36 @@ func TestCheckCodexHookTrust_SilentWhenCodexNotInstalled(t *testing.T) {
 	require.NotContains(t, stdout.String(), "Codex hook trust")
 }
 
+func TestCheckCodexHookTrust_MalformedAuthorityReportsInvalid(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".codex"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".codex", "hooks.json"), []byte(`{"hooks":`), 0o600))
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+
+	cmd, stdout := newTestCmd(t)
+	checkCodexHookTrust(cmd)
+	require.Contains(t, stdout.String(), "Codex hooks: INVALID")
+	require.NotContains(t, stdout.String(), "✓ Codex hooks: INSTALLED")
+	require.NotContains(t, stdout.String(), "Codex hook trust:")
+	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
+}
+
+func TestCheckCodexHookTrust_SilentForUserOnlyHooks(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".codex"), 0o750))
+	userOnly := `{"custom":true,"hooks":{"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"my-user-hook"}]}]}}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".codex", "hooks.json"), []byte(userOnly), 0o600))
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+
+	cmd, stdout := newTestCmd(t)
+	checkCodexHookTrust(cmd)
+	require.NotContains(t, stdout.String(), "Codex hooks:")
+	require.NotContains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
+	require.NotContains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
+}
+
 // resolvedHooksPath returns the .codex/hooks.json path under dir using the
 // symlink-resolved form `git rev-parse --show-toplevel` would return. Test
 // fixtures need this because t.TempDir() can produce a /var path while git
@@ -539,8 +569,8 @@ func resolvedHooksPath(t *testing.T, dir string) string {
 	return filepath.Join(resolved, ".codex", "hooks.json")
 }
 
-// canonicalCodexHooksJSON returns a hooks.json declaring all four
-// canonical Entire-managed events. Tests use this as the "current"
+// canonicalCodexHooksJSON returns a hooks.json declaring every canonical
+// Entire-managed event. Tests use this as the "current"
 // install baseline so the missing-hooks check passes.
 func canonicalCodexHooksJSON() string {
 	return `{"hooks":{

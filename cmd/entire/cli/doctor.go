@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"charm.land/huh/v2"
@@ -637,24 +636,31 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 		return
 	}
 	legacy := codex.HasLegacyEntireHooks(cmd.Context())
-	if _, statErr := os.Stat(location.HooksPath); statErr != nil {
+	inspection := codex.InspectHookConfig(cmd.Context())
+	w := cmd.OutOrStdout()
+	switch inspection.State {
+	case codex.HookFileAbsent, codex.HookFileUserOnly:
 		if legacy {
-			w := cmd.OutOrStdout()
 			fmt.Fprintln(w, "Codex hooks: MISPLACED")
 			fmt.Fprintln(w, "  Entire hooks exist only in this linked checkout's worktree-local .codex/hooks.json,")
 			fmt.Fprintln(w, "  which current Codex ignores. Run `entire enable` to migrate them to the shared repository hook file.")
 		}
 		return
+	case codex.HookFileInvalid:
+		fmt.Fprintln(w, "Codex hooks: INVALID")
+		fmt.Fprintf(w, "  The authoritative .codex/hooks.json cannot be inspected: %v\n", inspection.Err)
+		fmt.Fprintln(w, "  Fix or restore the file before running `entire enable`.")
+		return
+	case codex.HookFileEntire:
 	}
 
-	w := cmd.OutOrStdout()
 	if !location.ProjectLayerExists() {
 		fmt.Fprintln(w, "Codex hooks: PROJECT LAYER MISSING")
 		fmt.Fprintln(w, "  The authoritative hooks file exists, but this linked checkout has no .codex directory,")
 		fmt.Fprintln(w, "  so current Codex does not discover it. Run `entire enable` from this checkout.")
 		return
 	}
-	missing := codex.MissingEntireHooks(cmd.Context())
+	missing := inspection.Missing
 	trust := codex.InspectHookTrust(cmd.Context())
 
 	if len(missing) == 0 {

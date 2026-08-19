@@ -518,6 +518,16 @@ func TestAreHooksInstalled_PartialHooksAreOutdated(t *testing.T) {
 	require.Equal(t, agentpkg.HooksOutdated, ag.CheckHookConfig(context.Background()))
 }
 
+func TestCheckHookConfig_MalformedAuthorityIsOutdated(t *testing.T) {
+	tempDir := setupTestEnv(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, ".codex"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, ".codex", HooksFileName), []byte(`{"hooks":`), 0o600))
+
+	ag := &CodexAgent{}
+	require.False(t, ag.AreHooksInstalled(context.Background()))
+	require.Equal(t, agentpkg.HooksOutdated, ag.CheckHookConfig(context.Background()))
+}
+
 // TestAreHooksInstalled_PreSessionEndInstall — a user who enabled Codex before
 // SessionEnd joined the install set still counts as installed, so Codex keeps
 // appearing in `entire status` and the agent pickers instead of vanishing until

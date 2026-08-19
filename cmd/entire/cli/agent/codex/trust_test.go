@@ -216,6 +216,11 @@ func TestMissingEntireHooks_IgnoresNonEntireCommands(t *testing.T) {
 	require.Equal(t, []string{"session_start"}, missingEntireHooks(hooksPath))
 }
 
+func TestMissingEntireHooks_UserOnlyFileIsNotEntireDrift(t *testing.T) {
+	hooksPath := writeTrustFixture(t, `{"hooks":{"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"my-user-hook"}]}]}}`)
+	require.Nil(t, missingEntireHooks(hooksPath))
+}
+
 // TestHookTrustGaps_HandlesNonzeroHandlerIndex — the state-key prefix
 // match uses "<path>:<event>:" so any group/handler index counts as
 // trust. Pin that explicitly: a non-default index of `0:1` (second
