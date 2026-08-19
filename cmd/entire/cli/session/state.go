@@ -205,6 +205,17 @@ type State struct {
 	// JSON tag kept as "checkpoint_count" for backward compatibility with existing state files.
 	StepCount int `json:"checkpoint_count"`
 
+	// TranscriptOnlyTaskSteps counts non-incremental task steps saved with
+	// empty file lists — background read-only subagents captured via the
+	// SubagentStop Final path's no-changes bypass — which would otherwise be
+	// invisible to every condensation trigger (they register with neither
+	// FilesTouched nor StepCount). Deliberately separate from StepCount, whose
+	// ==0/==1 values carry first-checkpoint-baseline and transcript-anchor
+	// semantics in SaveStep: folding these steps into StepCount would make a
+	// background capture that lands before the session's first SaveStep
+	// silently kill the baseline capture and the transcript anchor.
+	TranscriptOnlyTaskSteps int `json:"transcript_only_task_steps,omitempty"`
+
 	// CheckpointTranscriptStart is the transcript line offset where the current
 	// checkpoint cycle began. Set to 0 at session start, updated to current
 	// transcript length after each condensation. Used to scope the transcript

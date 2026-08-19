@@ -128,7 +128,8 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 // isWarnableStaleEndedSession reports whether an ENDED session is still both
 // expensive in PostCommit and actionable via 'entire doctor'.
 func isWarnableStaleEndedSession(repo *git.Repository, state *SessionState) bool {
-	if state.Phase != session.PhaseEnded || state.FullyCondensed || state.StepCount <= 0 {
+	if state.Phase != session.PhaseEnded || state.FullyCondensed ||
+		(state.StepCount <= 0 && state.TranscriptOnlyTaskSteps <= 0) {
 		return false
 	}
 
@@ -525,7 +526,7 @@ func (s *ManualCommitStrategy) CountOtherActiveSessionsWithCheckpoints(ctx conte
 		// Sessions from different base commits are independent and shouldn't be counted
 		if state.SessionID != currentSessionID &&
 			state.WorktreePath == currentWorktree &&
-			state.StepCount > 0 &&
+			(state.StepCount > 0 || state.TranscriptOnlyTaskSteps > 0) &&
 			state.BaseCommit == currentHead {
 			count++
 		}

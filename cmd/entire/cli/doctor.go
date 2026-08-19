@@ -266,13 +266,15 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 			Reason:            reason,
 			ShadowBranch:      shadowBranch,
 			HasShadowBranch:   hasShadowBranch,
-			CheckpointCount:   state.StepCount,
+			CheckpointCount:   state.StepCount + state.TranscriptOnlyTaskSteps,
 			FilesTouchedCount: len(state.FilesTouched),
 		}
 
 	case state.Phase == session.PhaseEnded:
-		// Ended sessions are stuck if they have uncondensed data
-		if state.StepCount <= 0 || !hasShadowBranch {
+		// Ended sessions are stuck if they have uncondensed data — SaveStep
+		// checkpoints or transcript-only task steps, both live on the shadow
+		// branch.
+		if (state.StepCount <= 0 && state.TranscriptOnlyTaskSteps <= 0) || !hasShadowBranch {
 			return nil
 		}
 
@@ -281,7 +283,7 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 			Reason:            "ended with uncondensed checkpoint data",
 			ShadowBranch:      shadowBranch,
 			HasShadowBranch:   hasShadowBranch,
-			CheckpointCount:   state.StepCount,
+			CheckpointCount:   state.StepCount + state.TranscriptOnlyTaskSteps,
 			FilesTouchedCount: len(state.FilesTouched),
 		}
 
@@ -620,7 +622,7 @@ func canDeleteShadowBranch(ctx context.Context, shadowBranch, excludeSessionID s
 			continue
 		}
 		otherShadow := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		if otherShadow == shadowBranch && state.StepCount > 0 {
+		if otherShadow == shadowBranch && (state.StepCount > 0 || state.TranscriptOnlyTaskSteps > 0) {
 			return false, nil
 		}
 	}

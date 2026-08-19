@@ -1378,15 +1378,49 @@ func captureSubagentTaskStep(logCtx context.Context, ag agent.Agent, event *agen
 	// Extract modified files from hook payload and/or subagent transcript
 	var modifiedFiles []string
 	modifiedFiles = append(modifiedFiles, event.ModifiedFiles...)
-	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
+	switch analyzer, ok := agent.AsTranscriptAnalyzer(ag); {
+	case !ok:
+		// No analyzer: modifiedFiles stays event.ModifiedFiles only.
+	case opts.analyzerFilesOnly && subagentTranscriptPath == "":
+		// Background Final capture with no resolvable subagent transcript:
+		// falling back to scanning event.SessionRef (the PARENT transcript)
+		// from offset 0 would attribute the whole session's file activity to
+		// this one background task. Skip the analyzer scan entirely — the
+		// capture proceeds with only event.ModifiedFiles (typically empty,
+		// yielding a transcript-less, file-less task step). The foreground
+		// path (analyzerFilesOnly unset) keeps the parent-scan fallback: there
+		// the worktree-diff merge below dominates the file lists anyway.
+		logging.Warn(logCtx, "subagent transcript unresolvable; final capture proceeding without file attribution",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("agent_id", event.SubagentID))
+	default:
 		transcriptToScan := event.SessionRef
 		if subagentTranscriptPath != "" {
 			transcriptToScan = subagentTranscriptPath
 		}
-		if files, _, fileErr := analyzer.ExtractModifiedFilesFromOffset(transcriptToScan, 0); fileErr != nil {
+		files, _, fileErr := analyzer.ExtractModifiedFilesFromOffset(transcriptToScan, 0)
+		switch {
+		case fileErr != nil && opts.analyzerFilesOnly:
+			// The analyzer scan is this capture's ONLY file source (no
+			// worktree-diff backup in analyzer-only mode), so a transient
+			// read error here must fail the capture rather than save a
+			// clean-looking zero-file checkpoint that permanently misstates
+			// the task as read-only. The in-flight marker was already claimed
+			// by the caller, so this task's capture is lost — the accepted
+			// claim-loss semantics documented at the claim site
+			// (claimInFlightTask); the SessionEnd sweep does not retry it.
+			logging.Warn(logCtx, "failed to extract modified files from subagent; aborting final capture",
+				slog.String("session_id", event.SessionID),
+				slog.String("tool_use_id", event.ToolUseID),
+				slog.String("error", fileErr.Error()))
+			return fmt.Errorf("extract modified files from subagent transcript: %w", fileErr)
+		case fileErr != nil:
+			// Foreground path: the worktree-diff merge below is the backup
+			// file source, so the capture proceeds without the analyzer.
 			logging.Warn(logCtx, "failed to extract modified files from subagent",
 				slog.String("error", fileErr.Error()))
-		} else {
+		default:
 			modifiedFiles = mergeUnique(modifiedFiles, files)
 		}
 	}

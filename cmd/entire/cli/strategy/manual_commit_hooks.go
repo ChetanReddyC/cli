@@ -2083,12 +2083,14 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		}
 		activeSessions++
 		// Skip sessions that have no condensable content: no transcript path,
-		// no tracked files, and no shadow branch data (StepCount == 0). These
+		// no tracked files, and no shadow branch data (neither SaveStep
+		// checkpoints nor transcript-only task steps). These
 		// would produce a Skipped result in CondenseSession, leaving the
 		// Entire-Checkpoint trailer pointing to nothing on the metadata branch.
 		// NOTE: conservative approximation of the skip gate in CondenseSession
 		// (which checks extracted data, not raw state). Keep aligned.
-		if state.TranscriptPath == "" && len(state.FilesTouched) == 0 && state.StepCount == 0 {
+		if state.TranscriptPath == "" && len(state.FilesTouched) == 0 &&
+			state.StepCount == 0 && state.TranscriptOnlyTaskSteps == 0 {
 			emptyActiveSessions++
 			logging.Debug(logCtx, "prepare-commit-msg: fast path skipping empty session",
 				slog.String("session_id", state.SessionID),
