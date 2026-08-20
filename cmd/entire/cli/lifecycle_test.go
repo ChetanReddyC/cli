@@ -2833,13 +2833,17 @@ func TestNewRefreshTrailEnablementCmd_APIFailureExitsZero(t *testing.T) {
 // trail in .entire/logs/entire.log instead of vanishing. The command runs in a
 // repo with no origin remote, so the scope resolves-and-fails locally (no
 // network) and that failure has to be logged to the repo's log file.
+//
+// Executed through the real root command, because the root PersistentPreRunE is
+// what opens the log file (and its PersistentPostRun is what flushes it) — the
+// same path the detached child takes through main.go. Constructing the
+// subcommand alone would exercise a wiring production never uses.
 func TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile(t *testing.T) {
 	setupStopTestRepo(t)
+	markRepoSetUpForLogging(t)
 	t.Setenv("ENTIRE_LOG_LEVEL", "debug")
 
-	cmd := newRefreshTrailEnablementCmd()
-	cmd.SetArgs([]string{})
-	require.NoError(t, cmd.ExecuteContext(context.Background()))
+	require.NoError(t, executeThroughRoot(t, "__refresh_trail_enablement"))
 
 	root, err := paths.WorktreeRoot(context.Background())
 	require.NoError(t, err)
@@ -2849,12 +2853,15 @@ func TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile(t *testing.T) {
 		"background refresh failure must be diagnosable in .entire/logs/entire.log")
 }
 
-// TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree guards the file-init
-// against running outside a resolvable worktree. logging.Init falls back to the
-// current directory when paths.WorktreeRoot fails, so the command must guard on
-// WorktreeRoot (as resume/rewind/reset/explain do) or a child whose worktree was
-// removed/relocated between spawn and exec would MkdirAll a stray .entire/logs/
-// wherever it happens to be running.
+// TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree guards log-file
+// creation against running outside a resolvable worktree. The root
+// PersistentPreRun — the single logger-construction site — must gate on
+// WorktreeRoot, or a child whose worktree was removed/relocated between spawn
+// and exec would MkdirAll a stray .entire/logs/ wherever it happens to be
+// running.
+//
+// Run through the real root: the gate lives there now, so constructing the
+// subcommand alone would pass without ever reaching the code under test.
 func TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree(t *testing.T) {
 	dir := t.TempDir() // a plain temp dir, not a git worktree
 	t.Chdir(dir)
@@ -2862,9 +2869,7 @@ func TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree(t *testing.T) {
 	session.ClearGitCommonDirCache()
 	t.Setenv("ENTIRE_LOG_LEVEL", "debug")
 
-	cmd := newRefreshTrailEnablementCmd()
-	cmd.SetArgs([]string{})
-	require.NoError(t, cmd.ExecuteContext(context.Background()))
+	require.NoError(t, executeThroughRoot(t, "__refresh_trail_enablement"))
 
 	_, statErr := os.Stat(filepath.Join(dir, ".entire", "logs"))
 	require.True(t, os.IsNotExist(statErr),
