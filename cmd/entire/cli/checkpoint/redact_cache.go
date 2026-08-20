@@ -210,22 +210,22 @@ func redactIncrementally(
 	cache *redactCache,
 	content []byte,
 	treePath string,
-) redactResult {
+) (redactResult, error) {
 	if cache == nil || !incrementalRedactionCandidate(content, treePath) {
-		return redactResult{}
+		return redactResult{}, nil
 	}
 
 	// Only a file ending on a line boundary can be cached, because the reuse
 	// contract requires the stored prefix to end just after a "\n".
 	if content[len(content)-1] != '\n' {
-		return redactResult{}
+		return redactResult{}, nil
 	}
 
 	logCtx := logging.WithComponent(ctx, "redaction")
 
 	entry := cache.load(treePath)
 	if entry == nil || entry.Fingerprint != redactionFingerprint() || entry.SourceBytes > len(content) {
-		return redactResult{SourceHash: hashBytes(content), StorePrefix: true}
+		return redactResult{SourceHash: hashBytes(content), StorePrefix: true}, nil
 	}
 
 	// Hash the prefix and the remainder in one pass: Sum snapshots the digest
@@ -242,31 +242,36 @@ func redactIncrementally(
 	if prefixHash != entry.SourceHash {
 		logging.Debug(logCtx, "redaction prefix changed, redacting in full",
 			slog.String("path", treePath), slog.Int("prefix_bytes", entry.SourceBytes))
-		return redactResult{SourceHash: fullHash, StorePrefix: true}
+		return redactResult{SourceHash: fullHash, StorePrefix: true}, nil
 	}
 
-	prefix, err := readBlobBytes(repo, plumbing.NewHash(entry.RedactedBlob))
-	if err != nil {
+	prefix, readErr := readBlobBytes(repo, plumbing.NewHash(entry.RedactedBlob))
+	if readErr != nil {
 		logging.Debug(logCtx, "cached redacted prefix unreadable, redacting in full",
-			slog.String("path", treePath), slog.String("error", err.Error()))
-		return redactResult{SourceHash: fullHash, StorePrefix: true}
+			slog.String("path", treePath), slog.String("error", readErr.Error()))
+		return redactResult{SourceHash: fullHash, StorePrefix: true}, nil
 	}
 	// A prefix that does not end on a newline would corrupt the join, so refuse
 	// it rather than emit spliced output.
 	if len(prefix) > 0 && prefix[len(prefix)-1] != '\n' {
 		logging.Debug(logCtx, "cached redacted prefix does not end at a line boundary, redacting in full",
 			slog.String("path", treePath))
-		return redactResult{SourceHash: fullHash, StorePrefix: true}
+		return redactResult{SourceHash: fullHash, StorePrefix: true}, nil
 	}
 
 	if entry.SourceBytes == len(content) {
 		// Nothing appended since the last checkpoint: the stored entry already
 		// describes exactly this content, so there is nothing to re-record.
-		return redactResult{Redacted: prefix}
+		return redactResult{Redacted: prefix}, nil
 	}
 
 	suffix := content[entry.SourceBytes:]
-	redactedSuffix := RedactBlobBytes(ctx, suffix, treePath, false)
+	// A degraded scanner must not be spliced onto the reused prefix: fail the
+	// write instead of persisting an under-scanned suffix.
+	redactedSuffix, err := RedactBlobBytes(ctx, suffix, treePath, false)
+	if err != nil {
+		return redactResult{}, err
+	}
 	out := make([]byte, 0, len(prefix)+len(redactedSuffix))
 	out = append(out, prefix...)
 	out = append(out, redactedSuffix...)
@@ -276,7 +281,7 @@ func redactIncrementally(
 		slog.Int("reused_bytes", entry.SourceBytes),
 		slog.Int("redacted_bytes", len(suffix)))
 
-	return redactResult{Redacted: out, SourceHash: fullHash, StorePrefix: true}
+	return redactResult{Redacted: out, SourceHash: fullHash, StorePrefix: true}, nil
 }
 
 func hashBytes(b []byte) string {

@@ -2921,6 +2921,15 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	redactedTranscript, redactErr := redact.JSONLBytes(fullTranscript)
 	redactSpan.End()
 	if redactErr != nil {
+		if errors.Is(redactErr, redact.ErrScannerDegraded) {
+			// Keep TurnCheckpointIDs: the flag is per-process, so the next
+			// hook process retries.
+			logging.Warn(logCtx, "finalize: transcript redaction degraded, skipping",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", redactErr.Error()),
+			)
+			return 1
+		}
 		logging.Warn(logCtx, "finalize: transcript redaction failed, dropping transcript",
 			slog.String("session_id", state.SessionID),
 			slog.String("error", redactErr.Error()),

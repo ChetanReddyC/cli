@@ -160,7 +160,9 @@ var connectionStringRules = []connectionStringRule{
 
 // String replaces secrets and PII in s using layered detection:
 //  1. Entropy-based: high-entropy alphanumeric sequences (threshold 4.5)
-//  2. Pattern-based: betterleaks regex rules (260+ known secret formats)
+//  2. Pattern-based: scanner engines selected via ConfigureScanners —
+//     betterleaks regex rules (several hundred known secret formats) and/or the
+//     goredact engine; betterleaks-only when unconfigured
 //  3. Provider token prefixes: deterministic prefix rules for credential
 //     formats betterleaks misses in isolation (e.g. Supabase sb_secret_)
 //  4. Credentialed URIs: URLs containing userinfo passwords
@@ -174,8 +176,8 @@ func String(s string) string {
 	return applyRegions(s, detectAllLayers(s))
 }
 
-// detectAllLayers runs the eight always-on/opt-in regex-based redaction
-// layers and returns their tagged regions. The OpenAI Privacy Filter
+// detectAllLayers runs the always-on, opt-in, and scanner-configurable
+// detection layers and returns their tagged regions. The OpenAI Privacy Filter
 // (the final, network-backed layer) is NOT included — callers that want it
 // append detectOPF spans to the result before passing to applyRegions. See
 // StringWithPrivacyFilter for the augmented flow.
@@ -207,27 +209,32 @@ func detectAllLayers(s string) []taggedRegion {
 		}
 	}
 
-	// 2. Pattern-based detection via betterleaks (secrets — always on).
-	if d := getDetector(); d != nil {
-		for _, f := range d.DetectString(s) {
-			// Placeholder-valued findings (changeme, secret_here, mask runs)
-			// stay visible — but only on an exact match: splitting a greedy
-			// finding at a placeholder head can leak a real secret in the tail.
-			if isPlaceholderSecretValue(f.Secret) {
-				continue
-			}
-			searchFrom := 0
-			for {
-				idx := strings.Index(s[searchFrom:], f.Secret)
-				if idx < 0 {
-					break
+	// 2. Pattern-based detection via scanner engines (secrets — selected
+	// via ConfigureScanners; betterleaks-only when unconfigured).
+	if getScanners().betterleaks {
+		if d := getDetector(); d != nil {
+			for _, f := range d.DetectString(s) {
+				// Placeholder-valued findings (changeme, secret_here, mask runs)
+				// stay visible — but only on an exact match: splitting a greedy
+				// finding at a placeholder head can leak a real secret in the tail.
+				if isPlaceholderSecretValue(f.Secret) {
+					continue
 				}
-				absIdx := searchFrom + idx
-				regions = append(regions, taggedRegion{region: region{absIdx, absIdx + len(f.Secret)}})
-				searchFrom = absIdx + len(f.Secret)
+				searchFrom := 0
+				for {
+					idx := strings.Index(s[searchFrom:], f.Secret)
+					if idx < 0 {
+						break
+					}
+					absIdx := searchFrom + idx
+					regions = append(regions, taggedRegion{region: region{absIdx, absIdx + len(f.Secret)}})
+					searchFrom = absIdx + len(f.Secret)
+				}
 			}
 		}
 	}
+	// goredact engine findings (only runs when enabled via ConfigureScanners).
+	regions = append(regions, detectGoredact(s)...)
 
 	// 3. Provider-specific deterministic token prefixes (secrets — always on).
 	// Catches low-entropy credential formats (e.g. Supabase sb_secret_) that
@@ -515,11 +522,21 @@ func Bytes(b []byte) []byte {
 
 // JSONLBytes redacts secrets in JSONL-formatted byte content and returns
 // the result as RedactedBytes, certifying the output has been through redaction.
+// Returns ErrScannerDegraded when the goredact scanner degraded while
+// betterleaks is disabled.
 func JSONLBytes(b []byte) (RedactedBytes, error) {
 	s := string(b)
 	redacted, err := JSONLContent(s)
 	if err != nil {
+		// Degradation outranks a walk error: callers' errors.Is guards must
+		// see the sentinel so no error path can reach a Bytes fallback.
+		if scannerDegradedSole() {
+			return RedactedBytes{}, fmt.Errorf("%w (content walk also failed: %w)", ErrScannerDegraded, err)
+		}
 		return RedactedBytes{}, err
+	}
+	if scannerDegradedSole() {
+		return RedactedBytes{}, ErrScannerDegraded
 	}
 	if redacted == s {
 		return RedactedBytes{data: b}, nil
@@ -530,11 +547,20 @@ func JSONLBytes(b []byte) (RedactedBytes, error) {
 // JSONLBytesWithPrivacyFilter augments JSONLBytes with the OpenAI Privacy
 // Filter. Use only at condensation/export boundaries; per-turn writes must
 // use JSONLBytes.
+// Returns ErrScannerDegraded when the goredact scanner degraded while
+// betterleaks is disabled.
 func JSONLBytesWithPrivacyFilter(ctx context.Context, b []byte) (RedactedBytes, error) {
 	s := string(b)
 	redacted, err := JSONLContentWithPrivacyFilter(ctx, s)
 	if err != nil {
+		// Degradation outranks a walk error; see JSONLBytes.
+		if scannerDegradedSole() {
+			return RedactedBytes{}, fmt.Errorf("%w (content walk also failed: %w)", ErrScannerDegraded, err)
+		}
 		return RedactedBytes{}, err
+	}
+	if scannerDegradedSole() {
+		return RedactedBytes{}, ErrScannerDegraded
 	}
 	if redacted == s {
 		return RedactedBytes{data: b}, nil

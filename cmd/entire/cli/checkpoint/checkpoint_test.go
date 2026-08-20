@@ -4739,6 +4739,26 @@ func TestWriteTemporaryTask_SubagentTranscript_RedactsSecrets(t *testing.T) {
 	if !strings.Contains(content, "REDACTED") {
 		t.Error("subagent transcript on shadow branch should contain REDACTED")
 	}
+
+	// The same task write must fail closed instead of persisting a
+	// plain-redaction fallback blob like the write above.
+	t.Run("degraded sole scanner", func(t *testing.T) {
+		redact.WithScannerDegradedSole(t)
+		_, err := store.Write(context.Background(), TaskStep{
+			SessionID:              "degraded-task-session",
+			BaseCommit:             baseCommit,
+			ToolUseID:              "toolu_degraded",
+			AgentID:                "agent1",
+			SubagentTranscriptPath: transcriptPath,
+			CheckpointUUID:         "test-uuid-degraded",
+			CommitMessage:          "Task checkpoint",
+			AuthorName:             "Test",
+			AuthorEmail:            "test@test.com",
+		})
+		if !errors.Is(err, redact.ErrScannerDegraded) {
+			t.Fatalf("Write() under degraded sole scanner error = %v, want ErrScannerDegraded", err)
+		}
+	})
 }
 
 func TestAddDirectoryToChanges_PathTraversal(t *testing.T) {
@@ -5259,7 +5279,10 @@ func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	got := RedactBlobBytes(context.Background(), b, "metadata.json", false)
+	got, err := RedactBlobBytes(context.Background(), b, "metadata.json", false)
+	if err != nil {
+		t.Fatalf("RedactBlobBytes() error = %v", err)
+	}
 	if strings.Contains(string(got), "AKIAYRWQG5EJLPZLBYNP") {
 		t.Errorf("expected AWS key redacted in metadata.json blob, got %s", string(got))
 	}
@@ -5274,6 +5297,42 @@ func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 	}
 	if roundTripped["kind"] != "agent_review" {
 		t.Errorf(`expected "kind":"agent_review" preserved after redaction, got %v`, roundTripped["kind"])
+	}
+}
+
+// TestRedactBlobBytes_ScannerDegraded pins both directions of the sentinel
+// dispatch: a JSON-shaped path fails closed under a degraded sole scanner,
+// while a plain path still falls through to infallible redact.Bytes.
+func TestRedactBlobBytes_ScannerDegraded(t *testing.T) {
+	// No t.Parallel: mutates redact's process-global scanner state.
+	redact.WithScannerDegradedSole(t)
+
+	content := []byte(`{"msg":"hello"}` + "\n")
+	got, err := RedactBlobBytes(context.Background(), content, "full.jsonl", false)
+	if !errors.Is(err, redact.ErrScannerDegraded) {
+		t.Fatalf("RedactBlobBytes(.jsonl) error = %v, want ErrScannerDegraded", err)
+	}
+	if got != nil {
+		t.Errorf("RedactBlobBytes(.jsonl) content = %q, want nil under degradation", got)
+	}
+
+	// Non-JSON paths never hit the JSON-aware branch, so they stay infallible
+	// even while the flag is set — the sentinel is confined to transcript-shaped
+	// blobs whose only scanner produced no coverage. The AWS-key shaped secret
+	// is caught by the always-on regex layers, independent of scanner selection.
+	secretContent := []byte("credential leak: key=AKIAYRWQG5EJLPZLBYNP")
+	got, err = RedactBlobBytes(context.Background(), secretContent, "prompt.txt", false)
+	if err != nil {
+		t.Fatalf("RedactBlobBytes(.txt) error = %v, want nil", err)
+	}
+	if want := redact.Bytes(secretContent); string(got) != string(want) {
+		t.Errorf("RedactBlobBytes(.txt) = %q, want redact.Bytes output %q", got, want)
+	}
+	if strings.Contains(string(got), "AKIAYRWQG5EJLPZLBYNP") {
+		t.Error("RedactBlobBytes(.txt) left the secret unredacted")
+	}
+	if !strings.Contains(string(got), "REDACTED") {
+		t.Error("RedactBlobBytes(.txt) should contain REDACTED placeholder")
 	}
 }
 

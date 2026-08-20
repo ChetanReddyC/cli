@@ -96,7 +96,8 @@ func TestIncrementalRedaction_MatchesFullRedaction(t *testing.T) {
 		content += transcriptLines(round*10_000, 50)
 		got := writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
 
-		want := RedactBlobBytes(context.Background(), []byte(content), "full.jsonl", false)
+		want, wantErr := RedactBlobBytes(context.Background(), []byte(content), "full.jsonl", false)
+		require.NoError(t, wantErr)
 		require.Equal(t, string(want), string(got),
 			"round %d: incremental output must equal a full redaction", round)
 	}
@@ -121,7 +122,8 @@ func TestIncrementalRedaction_RewrittenPrefixFallsBack(t *testing.T) {
 	rewritten = append(rewritten, []byte(transcriptLines(9_999, 5))...)
 
 	got := writeAndRedact(t, repo, cache, dir, "full.jsonl", string(rewritten))
-	want := RedactBlobBytes(context.Background(), rewritten, "full.jsonl", false)
+	want, wantErr := RedactBlobBytes(context.Background(), rewritten, "full.jsonl", false)
+	require.NoError(t, wantErr)
 	require.Equal(t, string(want), string(got),
 		"a rewritten prefix must fall back to full redaction")
 }
@@ -143,7 +145,8 @@ func TestIncrementalRedaction_FingerprintMismatchFallsBack(t *testing.T) {
 
 	content += transcriptLines(500, 20)
 	got := writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
-	want := RedactBlobBytes(context.Background(), []byte(content), "full.jsonl", false)
+	want, wantErr := RedactBlobBytes(context.Background(), []byte(content), "full.jsonl", false)
+	require.NoError(t, wantErr)
 	require.Equal(t, string(want), string(got))
 }
 
@@ -158,7 +161,8 @@ func TestIncrementalRedaction_PartialTrailingLineNotCached(t *testing.T) {
 	partial := content + `{"i":999,"text":"half written sk-live-999abcdefghij`
 
 	got := writeAndRedact(t, repo, cache, dir, "full.jsonl", partial)
-	want := RedactBlobBytes(context.Background(), []byte(partial), "full.jsonl", false)
+	want, wantErr := RedactBlobBytes(context.Background(), []byte(partial), "full.jsonl", false)
+	require.NoError(t, wantErr)
 	require.Equal(t, string(want), string(got))
 	require.Nil(t, cache.load("full.jsonl"),
 		"content without a trailing newline must not be cached")
@@ -198,7 +202,9 @@ func TestIncrementalRedaction_SkippedUnlessLargeSessionTranscript(t *testing.T) 
 		"chunked transcript parts must not qualify")
 	require.True(t, incrementalRedactionCandidate([]byte(big), ".entire/metadata/s1/full.jsonl"))
 
-	require.Nil(t, redactIncrementally(ctx, repo, nil, []byte(big), "full.jsonl").Redacted,
+	noCacheResult, noCacheErr := redactIncrementally(ctx, repo, nil, []byte(big), "full.jsonl")
+	require.NoError(t, noCacheErr)
+	require.Nil(t, noCacheResult.Redacted,
 		"a nil cache must disable the incremental path")
 }
 
@@ -216,7 +222,8 @@ func TestRedactCache_IgnoresCorruptEntry(t *testing.T) {
 
 	content += transcriptLines(700, 10)
 	got := writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
-	want := RedactBlobBytes(context.Background(), []byte(content), "full.jsonl", false)
+	want, wantErr := RedactBlobBytes(context.Background(), []byte(content), "full.jsonl", false)
+	require.NoError(t, wantErr)
 	require.Equal(t, string(want), string(got))
 }
 
@@ -238,7 +245,8 @@ func TestRedactCache_MissingBlobFallsBack(t *testing.T) {
 
 	content += transcriptLines(800, 10)
 	got := writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
-	want := RedactBlobBytes(context.Background(), []byte(content), "full.jsonl", false)
+	want, wantErr := RedactBlobBytes(context.Background(), []byte(content), "full.jsonl", false)
+	require.NoError(t, wantErr)
 	require.Equal(t, string(want), string(got))
 }
 
