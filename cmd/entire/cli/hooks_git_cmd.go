@@ -141,7 +141,9 @@ func withHookSession(ctx context.Context) context.Context {
 	// IsSetUpAndEnabled, which already fails closed on the settings error that
 	// carries ErrScannerConfig, and the built-in goredact config cannot fail to
 	// construct — so this branch is unreachable from a hook. The loud paths for
-	// a bad scanner config are status, doctor, import, and attach.
+	// a bad scanner config are status, doctor, import, and attach. If a future
+	// engine constructor ever does fail here, the process falls back to the
+	// default betterleaks-only set: different coverage, not merely less.
 	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
 		logging.Error(logging.WithComponent(ctx, "redaction"),
 			"redaction scanner configuration failed",

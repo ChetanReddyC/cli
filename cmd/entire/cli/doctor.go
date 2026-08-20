@@ -63,7 +63,7 @@ For each stuck session, you can choose to:
 Use --force to condense all fixable sessions without prompting.  Sessions that can't
 be condensed will be discarded.`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			// Cobra runs the persistent pre-runs before a command's own PreRun,
+			// Cobra runs the persistent pre-runs before a command's own PreRunE,
 			// so the root hook has already put an initialized logger in this
 			// context: redaction diagnostics and the load-time summary land in
 			// .entire/logs/, which is where `entire doctor bundle` collects them

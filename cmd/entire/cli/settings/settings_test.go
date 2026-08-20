@@ -1530,6 +1530,33 @@ func TestIsSetUpAndEnabled_LocalSettingsOnly(t *testing.T) {
 	}
 }
 
+// The hook trees log rather than fail on a scanner-config error because this
+// gate already rejects it (see withHookSession). That makes the composition
+// load-bearing: pin it here, in the package that owns both halves.
+func TestIsSetUpAndEnabled_FalseOnInvalidScannerConfig(t *testing.T) {
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	entireDir := filepath.Join(root, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Enabled, but both scanners disabled: Load fails with ErrScannerConfig.
+	body := `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{"enabled":false}}}`
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(root)
+	paths.ClearWorktreeRootCache()
+
+	if _, err := Load(context.Background()); !errors.Is(err, ErrScannerConfig) {
+		t.Fatalf("precondition: Load error = %v, want ErrScannerConfig", err)
+	}
+	if IsSetUpAndEnabled(context.Background()) {
+		t.Fatal("IsSetUpAndEnabled must fail closed on an invalid scanner config")
+	}
+}
+
 func TestGetCheckpointPushRemote(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
