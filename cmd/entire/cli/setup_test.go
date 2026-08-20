@@ -1252,7 +1252,7 @@ func TestRunUninstall_Force_RemovesGitHooks(t *testing.T) {
 // registry-restore helper to hang it on yet. The name is unique per test, and
 // its binary is gone once TempDir cleanup runs, so a later AreHooksInstalled on
 // the leaked entry fails and reports false rather than a stale "installed".
-func installExternalAgentPluginForUninstall(t *testing.T, agentName string) {
+func installExternalAgentPluginForUninstall(t *testing.T, agentName string, hooksInstalled bool) {
 	t.Helper()
 
 	// The mock is a #!/bin/sh script.
@@ -1264,7 +1264,7 @@ func installExternalAgentPluginForUninstall(t *testing.T, agentName string) {
 	writeSettings(t, `{"enabled":true,"external_agents":true}`)
 
 	externalDir := t.TempDir()
-	writeExternalAgentBinaryEx(t, externalDir, agentName, true)
+	writeExternalAgentBinaryEx(t, externalDir, agentName, hooksInstalled)
 	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
@@ -1276,7 +1276,7 @@ func installExternalAgentPluginForUninstall(t *testing.T, agentName string) {
 func TestRunUninstall_RemovesExternalAgentHooks(t *testing.T) {
 	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
 	const agentName = "ext-uninstall-test"
-	installExternalAgentPluginForUninstall(t, agentName)
+	installExternalAgentPluginForUninstall(t, agentName, true)
 
 	execLog := filepath.Join(t.TempDir(), "exec.log")
 	t.Setenv("ENTIRE_TEST_EXEC_LOG", execLog)
@@ -1301,7 +1301,7 @@ func TestRunUninstall_RemovesExternalAgentHooks(t *testing.T) {
 func TestRunUninstall_SummaryNamesExternalAgent(t *testing.T) {
 	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
 	const agentName = "ext-uninstall-summary-test"
-	installExternalAgentPluginForUninstall(t, agentName)
+	installExternalAgentPluginForUninstall(t, agentName, true)
 
 	// force=false prints the summary and then prompts. Whether the prompt fails
 	// or answers no in a non-interactive test does not matter here: the summary
@@ -1317,6 +1317,34 @@ func TestRunUninstall_SummaryNamesExternalAgent(t *testing.T) {
 	}
 	if !strings.Contains(out, agentName) {
 		t.Errorf("summary must name the external agent %q whose hooks will be removed, got:\n%s", agentName, out)
+	}
+}
+
+// TestRunUninstall_SkipsUnenabledExternalAgent pins that uninstall leaves a
+// plugin alone when it reports no hooks installed. Discovery registers every
+// entire-agent-* binary on $PATH, not just the one `entire agent add` chose, so
+// calling the mutating uninstall-hooks on all of them runs a write command
+// against plugins the user never enabled.
+func TestRunUninstall_SkipsUnenabledExternalAgent(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-unenabled-test"
+	installExternalAgentPluginForUninstall(t, agentName, false)
+
+	execLog := filepath.Join(t.TempDir(), "exec.log")
+	t.Setenv("ENTIRE_TEST_EXEC_LOG", execLog)
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
+	}
+
+	// A missing log is a pass: it means the plugin was never executed at all.
+	data, err := os.ReadFile(execLog)
+	if err != nil {
+		return
+	}
+	if strings.Contains(string(data), "uninstall-hooks") {
+		t.Errorf("uninstall must not invoke uninstall-hooks on a plugin reporting no hooks installed, exec log:\n%s", data)
 	}
 }
 

@@ -2421,6 +2421,16 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		}
 		fmt.Fprintln(w)
 
+		// Without this guard the confirm below reaches huh, whose bubbletea
+		// program opens /dev/tty directly. A caller with no terminal gets a
+		// bubbletea internal error instead of the flag that unblocks them, and a
+		// `go test` run that happens to have a controlling terminal blocks on a
+		// rendered prompt.
+		if !interactive.CanPromptInteractively() {
+			fmt.Fprintln(errW, "No terminal available to confirm the uninstall. Re-run with --force to uninstall non-interactively.")
+			return NewSilentError(errors.New("uninstall confirmation requires a terminal"))
+		}
+
 		var confirmed bool
 		form := NewAccessibleForm(
 			huh.NewGroup(
@@ -2529,6 +2539,15 @@ func removeAgentHooks(ctx context.Context, w io.Writer) error {
 			continue
 		}
 		wasInstalled := hs.AreHooksInstalled(ctx)
+		// Built-in agents get the call unconditionally: it is an in-process,
+		// idempotent cleanup, and it still removes hooks a stale AreHooksInstalled
+		// fails to recognize. For an external agent it is a subprocess running the
+		// plugin's mutating uninstall-hooks, and discovery registered every
+		// entire-agent-* binary on $PATH, not just the one the user enabled — so a
+		// plugin reporting no hooks is left alone.
+		if !wasInstalled && external.IsExternal(ag) {
+			continue
+		}
 		if err := hs.UninstallHooks(ctx); err != nil {
 			errs = append(errs, err)
 		} else if wasInstalled {
