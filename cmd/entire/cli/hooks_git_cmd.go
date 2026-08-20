@@ -22,7 +22,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// gitHooksDisabled is set by PersistentPreRunE when Entire is not set up or disabled.
+// gitHooksDisabled is set by PersistentPreRun when Entire is not set up or disabled.
 // When true, all git hook commands return early without doing any work.
 var gitHooksDisabled bool
 
@@ -123,42 +123,33 @@ func (g *gitHookContext) skipUnreadableCheckpointPolicy(err error) bool {
 	return true
 }
 
-// initHookLogging initializes logging for hooks and configures redaction.
-// Returns a cleanup function to defer, and an error only for
-// scanner-configuration failures, which must fail the hook.
-// If Entire is not set up or disabled, returns a no-op.
-func initHookLogging(ctx context.Context) (func(), error) {
-	// Don't create any files if Entire is not set up or disabled.
-	// This is checked here as defense-in-depth (also checked in PersistentPreRunE).
-	if !settings.IsSetUpAndEnabled(ctx) {
-		return func() {}, nil
+// withHookSession adds the session the root pre-run cannot know without
+// scanning session state on every command, and configures redaction. Returns
+// the context to pass down with cmd.SetContext.
+//
+// Every caller must gate on settings.IsSetUpAndEnabled first — it scans session
+// state and loads redactors, neither of which may touch a repo that never
+// enabled Entire. The check is not repeated here: it costs an uncached
+// settings.Load, and this runs on the per-commit and per-turn paths.
+func withHookSession(ctx context.Context) context.Context {
+	ctx = logging.WithSessionID(ctx, strategy.FindMostRecentSession(ctx))
+
+	// Hooks are the checkpoint-writing path, so this cannot be left to the root
+	// pre-run: without it only always-on secret scanning would run.
+	//
+	// A scanner-config failure is logged, not propagated: callers gate on
+	// IsSetUpAndEnabled, which already fails closed on the settings error that
+	// carries ErrScannerConfig, and the built-in goredact config cannot fail to
+	// construct — so this branch is unreachable from a hook. The loud paths for
+	// a bad scanner config are status, doctor, import, and attach.
+	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
+		logging.Error(logging.WithComponent(ctx, "redaction"),
+			"redaction scanner configuration failed",
+			slog.String("error", err.Error()))
 	}
 
-	// Set up log level getter so logging can read from settings
-	logging.SetLogLevelGetter(GetLogLevel)
-
-	// Read session ID for the slog attribute (empty string is fine - log file is fixed)
-	sessionID := strategy.FindMostRecentSession(ctx)
-	initErr := logging.Init(ctx, sessionID)
-	// Configure redaction before acting on initErr: the hook writes
-	// checkpoints even when logging failed to initialize.
-	if err := strategy.EnsureRedactionConfigured(); err != nil {
-		if initErr == nil {
-			logging.Close() // flush the just-initialized logger before failing the hook
-		}
-		return func() {}, fmt.Errorf("configuring redaction: %w", err)
-	}
-	if initErr != nil {
-		// Init failed - logging will use stderr fallback
-		return func() {}, nil //nolint:nilerr // logging init failure is non-fatal by design
-	}
-
-	return logging.Close, nil
+	return ctx
 }
-
-// hookLogCleanup stores the cleanup function for hook logging.
-// Set by PersistentPreRunE, called by PersistentPostRunE.
-var hookLogCleanup func()
 
 func newHooksGitCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -166,14 +157,14 @@ func newHooksGitCmd() *cobra.Command {
 		Short:  "Git hook handlers",
 		Long:   "Commands called by git hooks. These delegate to the current strategy.",
 		Hidden: true, // Internal command, not for direct user use
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
 			ctx := cmd.Context()
 			// Check if Entire is set up and enabled before doing any work.
 			// This prevents global git hooks from doing anything in repos where
 			// Entire was never enabled or has been disabled.
 			if !settings.IsSetUpAndEnabled(ctx) {
 				gitHooksDisabled = true
-				return nil
+				return
 			}
 			// Discover external agent plugins so GetByAgentType works correctly
 			// during condensation (e.g. post-commit). Without this, external agents
@@ -182,15 +173,10 @@ func newHooksGitCmd() *cobra.Command {
 			discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			external.DiscoverAndRegister(discoveryCtx)
-			var err error
-			hookLogCleanup, err = initHookLogging(ctx)
-			return err
-		},
-		PersistentPostRunE: func(_ *cobra.Command, _ []string) error {
-			if hookLogCleanup != nil {
-				hookLogCleanup()
-			}
-			return nil
+			// Cobra invokes this PersistentPreRun with the leaf command, so
+			// SetContext hands the session-stamped context straight to the
+			// verb's RunE via cmd.Context().
+			cmd.SetContext(withHookSession(ctx))
 		},
 	}
 

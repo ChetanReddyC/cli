@@ -42,12 +42,6 @@ const sweepCondenseBudget = time.Second
 // number finalized. Each session is best-effort: a failure to mark one ended is
 // logged and skipped; a condense failure is logged but the session is still
 // counted (PostCommit will retry the condense later).
-//
-// Callers that keep logging after this returns must install their own
-// command-scoped logging (ensureCommandLogging) rather than rely on the sweep's:
-// the early return below leaves logging untouched, so on the common
-// nothing-to-do path there is none. `entire doctor` does exactly that — it goes
-// on to condense and discard sessions, whose handlers log.
 func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 	// Nothing to do is overwhelmingly the common case, and returning here keeps
 	// the sweep off the logging and store setup below entirely.
@@ -55,19 +49,13 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 		return 0
 	}
 
-	// Neither caller (`entire status`, `entire doctor`) initializes logging, so
-	// the phase-transition and condense lines below would land on the user's
-	// terminal via slog.Default() instead of the log file. A no-op when the
-	// caller already installed one for the whole command.
-	defer ensureCommandLogging(ctx)()
-
 	logCtx := logging.WithComponent(ctx, "session")
 	condenseDeadline := time.Now().Add(sweepCondenseBudget)
 
 	// This sweep writes checkpoints; a scanner-config failure must not silently
 	// use the default scanner set, so skip the condense work (an already-expired
 	// deadline) while still marking sessions ended below.
-	if err := strategy.EnsureRedactionConfigured(); err != nil {
+	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
 		logging.Warn(logging.WithComponent(ctx, "redaction"),
 			"skipping sweep condense: redaction scanner configuration failed",
 			slog.String("error", err.Error()))

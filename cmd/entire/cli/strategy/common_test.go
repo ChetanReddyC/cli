@@ -1718,11 +1718,11 @@ func TestEnsureRedactionConfigured_ScannerError(t *testing.T) {
 	resetRedactionConfiguredForTest()
 	t.Cleanup(resetRedactionConfiguredForTest)
 
-	err := EnsureRedactionConfigured()
+	err := EnsureRedactionConfigured(t.Context())
 	if err == nil || !errors.Is(err, settings.ErrScannerConfig) {
 		t.Fatalf("EnsureRedactionConfigured() = %v, want ErrScannerConfig", err)
 	}
-	if err := EnsureRedactionConfigured(); err == nil {
+	if err := EnsureRedactionConfigured(t.Context()); err == nil {
 		t.Fatal("second call returned nil; scanner error must be sticky across the Once")
 	}
 }
@@ -1743,7 +1743,7 @@ func TestEnsureRedactionConfigured_GoredactEnabled(t *testing.T) {
 		}
 	})
 
-	if err := EnsureRedactionConfigured(); err != nil {
+	if err := EnsureRedactionConfigured(t.Context()); err != nil {
 		t.Fatalf("EnsureRedactionConfigured() = %v, want nil", err)
 	}
 }
@@ -1764,7 +1764,7 @@ func TestEnsureRedactionConfigured_NarrowedScanners(t *testing.T) {
 		}
 	})
 
-	if err := EnsureRedactionConfigured(); err != nil {
+	if err := EnsureRedactionConfigured(t.Context()); err != nil {
 		t.Fatalf("EnsureRedactionConfigured() = %v, want nil (betterleaks-off + goredact-on is legal)", err)
 	}
 	// With betterleaks disabled, redacting this low-entropy PAT (invisible to
@@ -1783,7 +1783,7 @@ func TestEnsureRedactionConfigured_NarrowedScanners(t *testing.T) {
 	// Re-running the configure path (Once reset, marker kept) must not
 	// re-emit: an untouched marker mtime pins the early return.
 	resetRedactionConfiguredForTest()
-	if err := EnsureRedactionConfigured(); err != nil {
+	if err := EnsureRedactionConfigured(t.Context()); err != nil {
 		t.Fatalf("EnsureRedactionConfigured() after Once reset = %v, want nil", err)
 	}
 	info2, err := os.Stat(marker)
