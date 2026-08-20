@@ -1236,9 +1236,12 @@ func resolveTrailUpdateBody(ctx context.Context, client *api.Client, forge, owne
 		}
 		// fetchTrailDescription already trims; a non-empty result supersedes
 		// the list body, an empty one (older/partial server) leaves it intact.
+		// The etag is kept either way — it describes the document read, not
+		// the text, so it's valid even when the description is legitimately
+		// empty (avoids a redundant refetch below).
+		etag = et
 		if bt != "" {
 			body = bt
-			etag = et
 		}
 	}
 	return body, etag, nil
@@ -1465,14 +1468,23 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 			return err
 		}
 	}
-	if inputs.BodyChanged && bodyETag == "" && !inputs.Overwrite && found.Number > 0 {
-		// Non-interactive --body path: the interactive form already read the
-		// body (and its etag) above to seed the editor, but a --body caller
-		// supplied the replacement text directly and skipped that read. Do it
-		// here, best-effort, purely for the etag — a failure just leaves
-		// bodyETag empty and falls through to sendTrailBody's graceful
-		// Overwrite fallback rather than failing the whole command.
-		if _, etag, ferr := fetchTrailDescription(ctx, client, forge, owner, repoName, found.Number); ferr == nil {
+	if !noFlags && inputs.BodyChanged && bodyETag == "" && !inputs.Overwrite {
+		// Non-interactive --body path only (noFlags is the interactive
+		// branch, which already read the body and its etag above to seed the
+		// editor — gating on that branch rather than on bodyETag=="" matters:
+		// an interactive session can legitimately end with no etag too (e.g.
+		// the seed read failed and the user was already warned), and redoing
+		// the read here would silently pair an etag for content the user
+		// never saw with their edit). A --body caller supplied the
+		// replacement text directly and skipped that read, so do it here,
+		// best-effort, purely for the etag. A failure just leaves bodyETag
+		// empty and falls through to sendTrailBody's graceful Overwrite
+		// fallback rather than failing the whole command — but say so, since
+		// this is the unattended path most likely to run without anyone
+		// watching for a silently downgraded conflict check.
+		if _, etag, ferr := fetchTrailDescription(ctx, client, forge, owner, repoName, found.Number); ferr != nil {
+			fmt.Fprintf(errW, "Warning: could not verify trail body is unchanged (%v); writing without conflict detection\n", ferr)
+		} else {
 			bodyETag = etag
 		}
 	}
@@ -1657,12 +1669,9 @@ func sendTrailPatch(ctx context.Context, client *api.Client, path string, req ap
 func sendTrailBody(ctx context.Context, client *api.Client, path, body, ifMatch string, overwrite bool) error {
 	req := api.TrailBodyRequest{Markdown: body}
 	var headers http.Header
-	switch {
-	case overwrite:
-		req.Overwrite = true
-	case ifMatch != "":
+	if ifMatch != "" && !overwrite {
 		headers = http.Header{"If-Match": []string{ifMatch}}
-	default:
+	} else {
 		req.Overwrite = true
 	}
 

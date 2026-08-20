@@ -133,8 +133,8 @@ type TrailUpdateResponse struct {
 // The route also accepts contentJson (ProseMirror JSON, written as-is) in place
 // of markdown; the CLI only ever writes Markdown, so contentJson is not
 // modeled here. The route also accepts an If-Match header for optimistic
-// concurrency, populated from a prior read's or write's TrailBodyDocument.ETag
-// — see sendTrailBody for the dispatch between If-Match and Overwrite.
+// concurrency, populated from a prior read of TrailBodyDocument.ETag — see
+// sendTrailBody for the dispatch between If-Match and Overwrite.
 type TrailBodyRequest struct {
 	Markdown  string `json:"markdown"`
 	Overwrite bool   `json:"overwrite,omitempty"`
