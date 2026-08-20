@@ -329,8 +329,8 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 	if event.ToolUseID != "toolu_01X" {
 		t.Errorf("expected tool_use_id 'toolu_01X', got %q", event.ToolUseID)
 	}
-	if event.SubagentTranscript != "/tmp/parent/subagents/agent-a123.jsonl" {
-		t.Errorf("expected subagent_transcript '/tmp/parent/subagents/agent-a123.jsonl', got %q", event.SubagentTranscript)
+	if event.SubagentTranscriptPath != "/tmp/parent/subagents/agent-a123.jsonl" {
+		t.Errorf("expected subagent_transcript '/tmp/parent/subagents/agent-a123.jsonl', got %q", event.SubagentTranscriptPath)
 	}
 	if !event.Final {
 		t.Error("expected Final to be true for SubagentStop (true-completion) event")
@@ -338,7 +338,7 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 
 	// Defensive case: agent_transcript_path is SDK-documented for the Agent
 	// SDK but unverified for Claude Code's settings-file hook payloads, so a
-	// payload missing it must leave SubagentTranscript empty rather than
+	// payload missing it must leave SubagentTranscriptPath empty rather than
 	// error, falling back to ResolveAgentTranscriptPath downstream.
 	t.Run("no transcript path", func(t *testing.T) {
 		t.Parallel()
@@ -351,8 +351,8 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		require.NotNil(t, event, "expected event, got nil")
-		if event.SubagentTranscript != "" {
-			t.Errorf("expected empty subagent_transcript, got %q", event.SubagentTranscript)
+		if event.SubagentTranscriptPath != "" {
+			t.Errorf("expected empty subagent_transcript, got %q", event.SubagentTranscriptPath)
 		}
 		if !event.Final {
 			t.Error("expected Final to be true for SubagentStop event")

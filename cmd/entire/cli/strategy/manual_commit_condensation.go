@@ -213,19 +213,36 @@ func prepareTranscriptForStorage(
 // this helper only returns the pipeline's terminal artifacts: redacted bytes
 // and any externalized image assets. Callers append the assets to the
 // checkpoint's own Assets list (TaskPayload has no Assets field of its own).
+//
+// It also carries checkpoint.prepareSubagentTranscript's size guard, for the
+// same reason: agent-<agent-id>.jsonl is neither chunked nor capped, and
+// redaction runs at roughly 220ms/MB. The cap is measured against the SANITIZED
+// bytes, not the raw ones — sanitizing strips the bulk (Codex encrypted_content
+// runs to ~20% of a rollout's bytes), so measuring raw would drop a transcript
+// oversized only by payloads about to be discarded.
 func prepareTaskTranscriptForStorage(
 	ctx, logCtx context.Context,
 	ag agent.Agent,
 	state *SessionState,
+	path string,
 	raw []byte,
-) (redacted redact.RedactedBytes, assets []cpkg.TranscriptAsset, err error) {
+) (redacted redact.RedactedBytes, assets []cpkg.TranscriptAsset, tooLarge bool, err error) {
 	sanitized := agent.SanitizeTranscriptForStorage(ag, raw)
+	if len(sanitized) > agent.MaxChunkSize {
+		logging.Warn(logCtx, "subagent transcript exceeds the blob size cap; storing task without it",
+			slog.String("session_id", state.SessionID),
+			slog.String("path", path),
+			slog.Int("raw_bytes", len(raw)),
+			slog.Int("sanitized_bytes", len(sanitized)),
+			slog.Int("cap", agent.MaxChunkSize))
+		return redact.RedactedBytes{}, nil, true, nil
+	}
 	externalized, assets := externalizeSessionImages(ctx, logCtx, state, sanitized)
 	redacted, _, err = redactSessionTranscript(logCtx, externalized)
 	if err != nil {
-		return redact.RedactedBytes{}, nil, err
+		return redact.RedactedBytes{}, nil, false, err
 	}
-	return redacted, assets, nil
+	return redacted, assets, false, nil
 }
 
 // resolveTaskTranscriptPath falls back to the agent-layout convention when a
@@ -253,8 +270,9 @@ func resolveTaskTranscriptPath(state *SessionState, agentID string) string {
 }
 
 // taskTranscriptReasonUnresolvable, taskTranscriptReasonUnreadable,
-// taskTranscriptReasonEmpty, and taskTranscriptReasonRedactionFailed are the
-// stable TaskPayload.TranscriptUnavailableReason categories. They deliberately
+// taskTranscriptReasonEmpty, taskTranscriptReasonRedactionFailed, and
+// taskTranscriptReasonTooLarge are the stable
+// TaskPayload.TranscriptUnavailableReason categories. They deliberately
 // carry no path or underlying-error detail: task.json is pushed to
 // entire/checkpoints/v1, so a local filesystem path (which os.ReadFile's error
 // text embeds) must never end up in it. The detailed error goes only to
@@ -264,6 +282,7 @@ const (
 	taskTranscriptReasonUnreadable      = "transcript unreadable"
 	taskTranscriptReasonEmpty           = "transcript empty"
 	taskTranscriptReasonRedactionFailed = "transcript redaction failed"
+	taskTranscriptReasonTooLarge        = "transcript too large"
 )
 
 // materializeTaskRecords resolves and redacts each of state.TaskRecords'
@@ -356,7 +375,7 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 			continue
 		}
 
-		raw, readErr := readFirstTranscript(candidates)
+		raw, transcriptPath, readErr := readFirstTranscript(candidates)
 		if readErr != nil {
 			logging.Warn(logCtx, "failed to read subagent transcript; storing task without it",
 				slog.String("session_id", state.SessionID),
@@ -373,7 +392,12 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 			continue
 		}
 
-		redacted, taskAssets, prepErr := prepareTaskTranscriptForStorage(ctx, logCtx, ag, state, raw)
+		redacted, taskAssets, tooLarge, prepErr := prepareTaskTranscriptForStorage(ctx, logCtx, ag, state, transcriptPath, raw)
+		if tooLarge {
+			payload.TranscriptUnavailableReason = taskTranscriptReasonTooLarge
+			payloads = append(payloads, payload)
+			continue
+		}
 		if prepErr != nil {
 			logging.Warn(logCtx, "failed to redact subagent transcript; storing task without it",
 				slog.String("session_id", state.SessionID),
@@ -393,19 +417,20 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 	return payloads, assets
 }
 
-// readFirstTranscript tries each candidate path in order and returns the
-// bytes of the first one that reads successfully. Returns the last error when
-// every candidate fails (callers only reach here with at least one candidate).
-func readFirstTranscript(candidates []string) ([]byte, error) {
+// readFirstTranscript tries each candidate path in order and returns the bytes
+// of the first one that reads successfully, along with the path it came from
+// (for logging — never for storage). Returns the last error when every
+// candidate fails (callers only reach here with at least one candidate).
+func readFirstTranscript(candidates []string) ([]byte, string, error) {
 	var lastErr error
 	for _, path := range candidates {
 		data, err := os.ReadFile(path) //nolint:gosec // path is agent-declared or resolved from session state, not user input
 		if err == nil {
-			return data, nil
+			return data, path, nil
 		}
 		lastErr = err
 	}
-	return nil, lastErr
+	return nil, "", lastErr
 }
 
 // sidecarSessionImages captures images an agent stores OUTSIDE the transcript
