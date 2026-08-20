@@ -1069,7 +1069,8 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	// exists remotely but not locally. Bounded budget + the store's failure
 	// memo keep a dead network from stalling the post-commit hook.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
-		RefFetcher: remote.HookCheckpointRefFetcher(),
+		RefFetcher:  remote.HookCheckpointRefFetcher(),
+		ReadRemotes: CheckpointReadRemotes(ctx),
 	})
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
@@ -1607,6 +1608,15 @@ type contentCheckOpts struct {
 func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *git.Repository, state *SessionState, opts contentCheckOpts) (bool, error) {
 	logCtx := logging.WithComponent(ctx, "manual-commit")
 
+	// Task records are pending checkpoint content that registers on neither the shadow branch nor transcript growth.
+	if state.HasTaskContent() {
+		logging.Debug(logCtx, "sessionHasNewContent: session has task records",
+			slog.String("session_id", state.SessionID),
+			slog.Int("task_records", len(state.TaskRecords)),
+		)
+		return true, nil
+	}
+
 	// Use cached shadow tree if provided
 	var tree *object.Tree
 	if opts.shadowTree != nil {
@@ -2083,12 +2093,13 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		}
 		activeSessions++
 		// Skip sessions that have no condensable content: no transcript path,
-		// no tracked files, and no shadow branch data (StepCount == 0). These
+		// no tracked files, no SaveStep checkpoints, and no task records. These
 		// would produce a Skipped result in CondenseSession, leaving the
 		// Entire-Checkpoint trailer pointing to nothing on the metadata branch.
 		// NOTE: conservative approximation of the skip gate in CondenseSession
 		// (which checks extracted data, not raw state). Keep aligned.
-		if state.TranscriptPath == "" && len(state.FilesTouched) == 0 && state.StepCount == 0 {
+		if state.TranscriptPath == "" && len(state.FilesTouched) == 0 &&
+			state.StepCount == 0 && !state.HasTaskContent() {
 			emptyActiveSessions++
 			logging.Debug(logCtx, "prepare-commit-msg: fast path skipping empty session",
 				slog.String("session_id", state.SessionID),
@@ -2502,8 +2513,10 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 
 	// Get worktree status to find ALL changed files. This is a second full
 	// worktree walk in the turn-start hook — the pre-prompt capture in
-	// cli/state.go does its own. They are not shared.
-	status, err := gitrepo.Status(ctx, repo)
+	// cli/state.go does its own. They are not shared, but they share the
+	// budget wrapper's process-local breach latch: if the pre-prompt walk
+	// breached, this call fails fast instead of re-entering the walk.
+	status, err := gitrepo.StatusWithBudget(ctx, repo)
 	if err != nil {
 		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree status",
 			slog.String("error", err.Error()))
@@ -2908,6 +2921,15 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	redactedTranscript, redactErr := redact.JSONLBytes(fullTranscript)
 	redactSpan.End()
 	if redactErr != nil {
+		if errors.Is(redactErr, redact.ErrScannerDegraded) {
+			// Keep TurnCheckpointIDs: the flag is per-process, so the next
+			// hook process retries.
+			logging.Warn(logCtx, "finalize: transcript redaction degraded, skipping",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", redactErr.Error()),
+			)
+			return 1
+		}
 		logging.Warn(logCtx, "finalize: transcript redaction failed, dropping transcript",
 			slog.String("session_id", state.SessionID),
 			slog.String("error", redactErr.Error()),
@@ -2923,7 +2945,8 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// sessions). Bounded budget + the store's failure memo keep a dead
 	// network from stalling the stop hook N times.
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
-		RefFetcher: remote.HookCheckpointRefFetcher(),
+		RefFetcher:  remote.HookCheckpointRefFetcher(),
+		ReadRemotes: CheckpointReadRemotes(ctx),
 	})
 	if err != nil {
 		logging.Warn(logCtx, "finalize: failed to open checkpoint store",
@@ -3033,7 +3056,7 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 ) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	start := time.Now()
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: CheckpointReadRemotes(ctx)})
 	if err != nil {
 		logging.Warn(logCtx, "post-commit: carry-forward failed to open checkpoint store",
 			slog.String("session_id", state.SessionID),
