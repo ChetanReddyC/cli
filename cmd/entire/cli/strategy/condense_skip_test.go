@@ -447,130 +447,87 @@ func TestTryAgentCommitFastPath_SkipsEmptyButAcceptsContentSession(t *testing.T)
 	assert.Contains(t, string(content), "Entire-Checkpoint", "should add trailer from the content session")
 }
 
-// Regression test: background subagents commit mid-task while the parent
-// session is IDLE (between turns). The old ACTIVE-only gate silently dropped
-// linkage for these commits — six of seven commits in a real subagent-driven
-// PR shipped with no Entire-Checkpoint trailer. An idle session with a fresh
-// task record must still take the fast path.
-func TestTryAgentCommitFastPath_AcceptsIdleSessionWithTaskRecord(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	s := &ManualCommitStrategy{}
-
-	commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
-	require.NoError(t, os.WriteFile(commitMsgFile, []byte("test commit\n"), 0o644))
-
-	idleWithRecord := &SessionState{
-		SessionID:      "claude-session",
-		AgentType:      "Claude Code",
-		Phase:          session.PhaseIdle,
-		TranscriptPath: "/some/path/to/transcript.jsonl",
-		TaskRecords: []session.TaskRecord{
-			{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now()},
+// TestTryAgentCommitFastPath_IdleTaskRecordEligibility covers the idle+record
+// eligibility regressions in one table: an IDLE session links only with a
+// fresh task record (the incident fix — six of seven commits on a real
+// subagent-driven branch went unlinked under the old ACTIVE-only gate), while
+// no-record idle, ENDED-with-record, and stale-record sessions all decline.
+func TestTryAgentCommitFastPath_IdleTaskRecordEligibility(t *testing.T) {
+	freshRecord := []session.TaskRecord{
+		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now()},
+	}
+	staleRecord := []session.TaskRecord{
+		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now().Add(-25 * time.Hour)},
+	}
+	tests := []struct {
+		name        string
+		phase       session.Phase
+		taskRecords []session.TaskRecord
+		stepCount   int
+		wantLinked  bool
+	}{
+		{
+			// An idle session with a fresh task record must take the fast path.
+			name:        "AcceptsIdleSessionWithTaskRecord",
+			phase:       session.PhaseIdle,
+			taskRecords: freshRecord,
+			wantLinked:  true,
+		},
+		{
+			// An idle session with no records is an ordinary post-turn commit
+			// and must stay unlinked.
+			name:       "DeclinesIdleSessionWithoutTaskRecords",
+			phase:      session.PhaseIdle,
+			stepCount:  1,
+			wantLinked: false,
+		},
+		{
+			// An ENDED session's records belong to its own final condensation,
+			// not this fast path.
+			name:        "DeclinesEndedSessionWithTaskRecord",
+			phase:       session.PhaseEnded,
+			taskRecords: freshRecord,
+			wantLinked:  false,
+		},
+		{
+			// A record older than idleWithTaskContent's 24h freshness bound
+			// must not confer linkage forever.
+			name:        "DeclinesIdleSessionWithStaleTaskRecord",
+			phase:       session.PhaseIdle,
+			taskRecords: staleRecord,
+			wantLinked:  false,
 		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setupGitRepo(t)
+			t.Chdir(dir)
 
-	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{idleWithRecord}, "message")
-	assert.True(t, result, "fast path should fire for an idle session with a fresh task record")
+			s := &ManualCommitStrategy{}
+			commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
+			require.NoError(t, os.WriteFile(commitMsgFile, []byte("test commit\n"), 0o644))
 
-	content, err := os.ReadFile(commitMsgFile)
-	require.NoError(t, err)
-	assert.Contains(t, string(content), "Entire-Checkpoint", "should add trailer for idle session with a task record")
-}
+			state := &SessionState{
+				SessionID:      "claude-session",
+				AgentType:      "Claude Code",
+				Phase:          tt.phase,
+				TranscriptPath: "/some/path/to/transcript.jsonl",
+				StepCount:      tt.stepCount,
+				TaskRecords:    tt.taskRecords,
+			}
 
-// Regression test: an idle session with NO task records is an
-// ordinary post-turn commit, not a mid-task background-subagent commit. It
-// must stay unlinked — widening the eligibility check must not accidentally
-// make every idle session linkable.
-func TestTryAgentCommitFastPath_DeclinesIdleSessionWithoutTaskRecords(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
+			result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{state}, "message")
+			assert.Equal(t, tt.wantLinked, result, "fast path taken")
 
-	s := &ManualCommitStrategy{}
-
-	commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
-	require.NoError(t, os.WriteFile(commitMsgFile, []byte("test commit\n"), 0o644))
-
-	idleNoMarkers := &SessionState{
-		SessionID:      "claude-session",
-		AgentType:      "Claude Code",
-		Phase:          session.PhaseIdle,
-		TranscriptPath: "/some/path/to/transcript.jsonl",
-		StepCount:      1,
+			content, err := os.ReadFile(commitMsgFile)
+			require.NoError(t, err)
+			if tt.wantLinked {
+				assert.Contains(t, string(content), "Entire-Checkpoint")
+			} else {
+				assert.NotContains(t, string(content), "Entire-Checkpoint")
+			}
+		})
 	}
-
-	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{idleNoMarkers}, "message")
-	assert.False(t, result, "fast path should not fire for an idle session with no task records")
-
-	content, err := os.ReadFile(commitMsgFile)
-	require.NoError(t, err)
-	assert.NotContains(t, string(content), "Entire-Checkpoint", "ordinary post-turn commit must stay unlinked")
-}
-
-// Regression test: linkage is for live sessions only. An ENDED session's
-// task records belong to its own final condensation, not the
-// prepare-commit-msg fast path — an ended session must still decline even
-// with a record present.
-func TestTryAgentCommitFastPath_DeclinesEndedSessionWithTaskRecord(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	s := &ManualCommitStrategy{}
-
-	commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
-	require.NoError(t, os.WriteFile(commitMsgFile, []byte("test commit\n"), 0o644))
-
-	endedWithRecord := &SessionState{
-		SessionID:      "claude-session",
-		AgentType:      "Claude Code",
-		Phase:          session.PhaseEnded,
-		TranscriptPath: "/some/path/to/transcript.jsonl",
-		TaskRecords: []session.TaskRecord{
-			{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now()},
-		},
-	}
-
-	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{endedWithRecord}, "message")
-	assert.False(t, result, "fast path should not fire for an ended session, even with a task record")
-
-	content, err := os.ReadFile(commitMsgFile)
-	require.NoError(t, err)
-	assert.NotContains(t, string(content), "Entire-Checkpoint", "ended session records belong to its own final condensation")
-}
-
-// Regression test: stale records must not confer linkage forever. Records
-// persist until condensation materializes them — a subagent that dies without
-// a completion signal leaves its record behind while the parent session sits
-// idle indefinitely. Without a staleness bound, that stale record would keep
-// making every later no-TTY commit in the worktree linkable, forever. An idle
-// session whose only record is older than idleWithTaskContent's 24h freshness
-// threshold must decline, the same as an idle session with no record at all.
-func TestTryAgentCommitFastPath_DeclinesIdleSessionWithStaleTaskRecord(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	s := &ManualCommitStrategy{}
-
-	commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
-	require.NoError(t, os.WriteFile(commitMsgFile, []byte("test commit\n"), 0o644))
-
-	idleWithStaleRecord := &SessionState{
-		SessionID:      "claude-session",
-		AgentType:      "Claude Code",
-		Phase:          session.PhaseIdle,
-		TranscriptPath: "/some/path/to/transcript.jsonl",
-		TaskRecords: []session.TaskRecord{
-			{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now().Add(-25 * time.Hour)},
-		},
-	}
-
-	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{idleWithStaleRecord}, "message")
-	assert.False(t, result, "fast path should not fire for an idle session whose only task record is stale")
-
-	content, err := os.ReadFile(commitMsgFile)
-	require.NoError(t, err)
-	assert.NotContains(t, string(content), "Entire-Checkpoint", "a stale record must not confer linkage forever")
 }
 
 // getHeadHash returns the HEAD commit hash as a string.

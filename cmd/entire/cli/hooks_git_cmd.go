@@ -270,7 +270,6 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 			if g.skipUnsupportedCheckpointPolicy() {
 				return nil
 			}
-
 			hookErr := g.strategy.PostCommit(g.ctx)
 			g.logCompleted(hookErr)
 
