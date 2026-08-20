@@ -1,6 +1,12 @@
 package codex
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"strconv"
+
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+)
 
 // HooksFile represents the .codex/hooks.json structure.
 type HooksFile struct {
@@ -21,15 +27,118 @@ type HookEvents struct {
 
 // MatcherGroup groups hooks under an optional matcher pattern.
 type MatcherGroup struct {
-	Matcher *string     `json:"matcher"`
-	Hooks   []HookEntry `json:"hooks"`
+	Matcher       *string     `json:"matcher"`
+	Hooks         []HookEntry `json:"hooks"`
+	unknownFields map[string]json.RawMessage
 }
 
 // HookEntry represents a single hook command in the config.
 type HookEntry struct {
-	Type    string `json:"type"`
-	Command string `json:"command"`
-	Timeout int    `json:"timeout,omitempty"`
+	Type          string `json:"type"`
+	Command       string `json:"command"`
+	Timeout       int    `json:"timeout,omitempty"`
+	unknownFields map[string]json.RawMessage
+	hasType       bool
+	hasCommand    bool
+	hasTimeout    bool
+}
+
+// UnmarshalJSON retains fields from newer Codex schemas so hook updates do not
+// erase user configuration that this version of Entire does not understand.
+func (g *MatcherGroup) UnmarshalJSON(data []byte) error {
+	type matcherGroupJSON MatcherGroup
+	var decoded matcherGroupJSON
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return fmt.Errorf("decode matcher group: %w", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return fmt.Errorf("decode matcher group fields: %w", err)
+	}
+	delete(fields, "matcher")
+	delete(fields, "hooks")
+	*g = MatcherGroup(decoded)
+	g.unknownFields = fields
+	return nil
+}
+
+// MarshalJSON restores fields retained by UnmarshalJSON alongside the fields
+// Entire understands and may update.
+func (g MatcherGroup) MarshalJSON() ([]byte, error) {
+	fields := cloneJSONFields(g.unknownFields)
+	matcher, err := jsonutil.MarshalWithNoHTMLEscape(g.Matcher)
+	if err != nil {
+		return nil, fmt.Errorf("encode matcher: %w", err)
+	}
+	fields["matcher"] = matcher
+	hooks, err := jsonutil.MarshalWithNoHTMLEscape(g.Hooks)
+	if err != nil {
+		return nil, fmt.Errorf("encode matcher hooks: %w", err)
+	}
+	fields["hooks"] = hooks
+	output, err := jsonutil.MarshalWithNoHTMLEscape(fields)
+	if err != nil {
+		return nil, fmt.Errorf("encode matcher group: %w", err)
+	}
+	return output, nil
+}
+
+// UnmarshalJSON retains fields from hook variants and newer Codex schemas.
+func (e *HookEntry) UnmarshalJSON(data []byte) error {
+	type hookEntryJSON HookEntry
+	var decoded hookEntryJSON
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return fmt.Errorf("decode hook entry: %w", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return fmt.Errorf("decode hook entry fields: %w", err)
+	}
+	_, decoded.hasType = fields["type"]
+	_, decoded.hasCommand = fields["command"]
+	_, decoded.hasTimeout = fields["timeout"]
+	delete(fields, "type")
+	delete(fields, "command")
+	delete(fields, "timeout")
+	*e = HookEntry(decoded)
+	e.unknownFields = fields
+	return nil
+}
+
+// MarshalJSON preserves whether optional fields were absent on user-defined
+// hook variants while emitting all fields required by new Entire hooks.
+func (e HookEntry) MarshalJSON() ([]byte, error) {
+	fields := cloneJSONFields(e.unknownFields)
+	if e.hasType || e.Type != "" {
+		value, err := jsonutil.MarshalWithNoHTMLEscape(e.Type)
+		if err != nil {
+			return nil, fmt.Errorf("encode hook type: %w", err)
+		}
+		fields["type"] = value
+	}
+	if e.hasCommand || e.Command != "" {
+		value, err := jsonutil.MarshalWithNoHTMLEscape(e.Command)
+		if err != nil {
+			return nil, fmt.Errorf("encode hook command: %w", err)
+		}
+		fields["command"] = value
+	}
+	if e.hasTimeout || e.Timeout != 0 {
+		fields["timeout"] = json.RawMessage(strconv.Itoa(e.Timeout))
+	}
+	output, err := jsonutil.MarshalWithNoHTMLEscape(fields)
+	if err != nil {
+		return nil, fmt.Errorf("encode hook entry: %w", err)
+	}
+	return output, nil
+}
+
+func cloneJSONFields(fields map[string]json.RawMessage) map[string]json.RawMessage {
+	cloned := make(map[string]json.RawMessage, len(fields)+3)
+	for key, value := range fields {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // sessionInfoRaw is the JSON structure shared by the session-scoped hooks,

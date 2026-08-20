@@ -132,16 +132,21 @@ func TestInstallHooks_LinkedWorktreeMigratesLegacyConfig(t *testing.T) {
   "$schema": "destination-schema",
   "user_setting": {"keep": true},
   "hooks": {
-    "PreToolUse": [{"matcher": "^Bash$", "hooks": [{"type": "command", "command": "user-destination-hook"}]}]
+    "PreToolUse": [{"matcher": "^Bash$", "hooks": [{"type": "command", "command": "user-destination-hook"}]}],
+    "Stop": [{"matcher": null, "user_destination_group": true, "hooks": [
+      {"type": "command", "command": "user-destination-stop", "async": true, "status_message": "destination-message"},
+      {"type": "prompt", "prompt": "destination-prompt"}
+    ]}]
   }
 }`), 0o600))
 	require.NoError(t, os.WriteFile(legacyPath, []byte(`{
   "$schema": "legacy-schema",
   "legacy_setting": {"keep": true},
   "hooks": {
-    "Stop": [{"matcher": null, "hooks": [
+    "Stop": [{"matcher": null, "user_legacy_group": true, "hooks": [
       {"type": "command", "command": "entire hooks codex stop", "timeout": 30},
-      {"type": "command", "command": "user-legacy-hook"}
+      {"type": "command", "command": "user-legacy-hook", "async": true, "status_message": "legacy-message"},
+      {"type": "prompt", "prompt": "legacy-prompt"}
     ]}]
   }
 }`), 0o600))
@@ -155,6 +160,10 @@ func TestInstallHooks_LinkedWorktreeMigratesLegacyConfig(t *testing.T) {
 	require.Contains(t, authoritative, "destination-schema")
 	require.Contains(t, authoritative, "user_setting")
 	require.Contains(t, authoritative, "user-destination-hook")
+	require.Contains(t, authoritative, "user_destination_group")
+	require.Contains(t, authoritative, "destination-message")
+	require.Contains(t, authoritative, "destination-prompt")
+	require.NotContains(t, authoritative, `"command": ""`)
 	require.Contains(t, authoritative, "entire hooks codex stop")
 	require.NotContains(t, authoritative, "legacy-schema")
 
@@ -162,6 +171,10 @@ func TestInstallHooks_LinkedWorktreeMigratesLegacyConfig(t *testing.T) {
 	require.Contains(t, legacy, "legacy-schema")
 	require.Contains(t, legacy, "legacy_setting")
 	require.Contains(t, legacy, "user-legacy-hook")
+	require.Contains(t, legacy, "user_legacy_group")
+	require.Contains(t, legacy, "legacy-message")
+	require.Contains(t, legacy, "legacy-prompt")
+	require.NotContains(t, legacy, `"command": ""`)
 	require.NotContains(t, legacy, "entire hooks codex")
 
 	count, err = ag.InstallHooks(context.Background(), false)
