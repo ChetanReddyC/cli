@@ -62,8 +62,9 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 		Short:  handler.Description() + " hook handlers",
 		Hidden: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			agentHookLogCleanup = initHookLogging(cmd.Context())
-			return nil
+			var err error
+			agentHookLogCleanup, err = initHookLogging(cmd.Context())
+			return err
 		},
 		PersistentPostRunE: func(_ *cobra.Command, _ []string) error {
 			if agentHookLogCleanup != nil {
@@ -123,7 +124,10 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	}
 
 	if initLogging {
-		cleanup := initHookLogging(cmd.Context())
+		cleanup, initErr := initHookLogging(cmd.Context())
+		if initErr != nil {
+			return initErr
+		}
 		defer cleanup()
 	}
 

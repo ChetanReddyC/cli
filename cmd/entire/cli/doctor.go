@@ -62,8 +62,8 @@ For each stuck session, you can choose to:
 
 Use --force to condense all fixable sessions without prompting.  Sessions that can't
 be condensed will be discarded.`,
-		PreRun: func(_ *cobra.Command, _ []string) {
-			strategy.EnsureRedactionConfigured()
+		PreRunE: func(_ *cobra.Command, _ []string) error {
+			return strategy.EnsureRedactionConfigured()
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runSessionsFix(cmd, forceFlag)

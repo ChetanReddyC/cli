@@ -86,7 +86,10 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	t.Setenv(logging.LogLevelEnvVar, "DEBUG")
 
 	// Initialize logging (normally done by PersistentPreRunE)
-	cleanup := initHookLogging(context.Background())
+	cleanup, err := initHookLogging(context.Background())
+	if err != nil {
+		t.Fatalf("initHookLogging error: %v", err)
+	}
 	defer cleanup()
 
 	// Create a transcript file for the hook input
@@ -111,8 +114,7 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	cmd.SetErr(&bytes.Buffer{})
 
 	// Execute the command
-	err := cmd.Execute()
-	if err != nil {
+	if err := cmd.Execute(); err != nil {
 		t.Fatalf("command execution failed: %v", err)
 	}
 

@@ -123,14 +123,15 @@ func (g *gitHookContext) skipUnreadableCheckpointPolicy(err error) bool {
 	return true
 }
 
-// initHookLogging initializes logging for hooks by finding the most recent session.
-// Returns a cleanup function that should be deferred.
-// If Entire is not set up or disabled, returns a no-op to avoid creating files.
-func initHookLogging(ctx context.Context) func() {
+// initHookLogging initializes logging for hooks and configures redaction.
+// Returns a cleanup function to defer, and an error only for
+// scanner-configuration failures, which must fail the hook.
+// If Entire is not set up or disabled, returns a no-op.
+func initHookLogging(ctx context.Context) (func(), error) {
 	// Don't create any files if Entire is not set up or disabled.
 	// This is checked here as defense-in-depth (also checked in PersistentPreRunE).
 	if !settings.IsSetUpAndEnabled(ctx) {
-		return func() {}
+		return func() {}, nil
 	}
 
 	// Set up log level getter so logging can read from settings
@@ -138,16 +139,18 @@ func initHookLogging(ctx context.Context) func() {
 
 	// Read session ID for the slog attribute (empty string is fine - log file is fixed)
 	sessionID := strategy.FindMostRecentSession(ctx)
-	if err := logging.Init(ctx, sessionID); err != nil {
+	initErr := logging.Init(ctx, sessionID)
+	// Configure redaction before acting on initErr: the hook writes
+	// checkpoints even when logging failed to initialize.
+	if err := strategy.EnsureRedactionConfigured(); err != nil {
+		return func() {}, fmt.Errorf("configuring redaction: %w", err)
+	}
+	if initErr != nil {
 		// Init failed - logging will use stderr fallback
-		return func() {}
+		return func() {}, nil //nolint:nilerr // logging init failure is non-fatal by design
 	}
 
-	// Configure redaction once at startup: PII (opt-in), inline custom_redactions,
-	// and rule packs discovered under .entire/redactors/. No-op if nothing is configured.
-	strategy.EnsureRedactionConfigured()
-
-	return logging.Close
+	return logging.Close, nil
 }
 
 // hookLogCleanup stores the cleanup function for hook logging.
@@ -176,8 +179,9 @@ func newHooksGitCmd() *cobra.Command {
 			discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			external.DiscoverAndRegister(discoveryCtx)
-			hookLogCleanup = initHookLogging(ctx)
-			return nil
+			var err error
+			hookLogCleanup, err = initHookLogging(ctx)
+			return err
 		},
 		PersistentPostRunE: func(_ *cobra.Command, _ []string) error {
 			if hookLogCleanup != nil {

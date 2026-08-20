@@ -1289,6 +1289,62 @@ func TestRunStatus_ShowsEnabledAgents(t *testing.T) {
 	}
 }
 
+// TestRunStatus_ScannerSelectionLine covers the "Secret scanners · ..." line
+// across both effective-settings call sites (short and --detailed) and both
+// the non-default and default (line absent) cases.
+func TestRunStatus_ScannerSelectionLine(t *testing.T) {
+	tests := []struct {
+		name        string
+		settings    string
+		detailed    bool
+		want        string // substring checked for presence or absence per wantPresent
+		wantPresent bool
+	}{
+		{
+			name:        "goredact only, short",
+			settings:    testSettingsGoredactOnly,
+			want:        "Secret scanners · goredact",
+			wantPresent: true,
+		},
+		{
+			name:        "both enabled, short",
+			settings:    `{"enabled": true, "redaction": {"betterleaks": {"enabled": true}, "goredact": {"enabled": true}}}`,
+			want:        "Secret scanners · betterleaks, goredact",
+			wantPresent: true,
+		},
+		{
+			name:        "default, short",
+			settings:    testSettingsEnabled,
+			want:        "Secret scanners",
+			wantPresent: false,
+		},
+		{
+			name:        "goredact only, detailed",
+			settings:    testSettingsGoredactOnly,
+			detailed:    true,
+			want:        "Secret scanners · goredact",
+			wantPresent: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTestRepo(t)
+			writeSettings(t, tc.settings)
+
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, tc.detailed, false); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
+
+			output := stdout.String()
+			if got := strings.Contains(output, tc.want); got != tc.wantPresent {
+				t.Errorf("strings.Contains(output, %q) = %v, want %v; output: %s", tc.want, got, tc.wantPresent, output)
+			}
+		})
+	}
+}
+
 func TestRunStatus_EnabledNoAgentsHidesHooksLine(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
@@ -1749,6 +1805,42 @@ func TestRunStatusJSON_Enabled(t *testing.T) {
 	// footer, so the agent-help pointer must be present once entire is set up.
 	if result.AgentHelp != agentHelpCommand {
 		t.Errorf("Expected agent_help='entire agent-help', got %q", result.AgentHelp)
+	}
+}
+
+func TestRunStatusJSON_SecretScanners_Default(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if result.SecretScanners != nil {
+		t.Errorf("Expected secret_scanners omitted for default selection, got %v", result.SecretScanners)
+	}
+}
+
+func TestRunStatusJSON_SecretScanners_NonDefault(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsGoredactOnly)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if !slices.Equal(result.SecretScanners, []string{"goredact"}) {
+		t.Errorf("Expected secret_scanners=[goredact], got %v", result.SecretScanners)
 	}
 }
 
