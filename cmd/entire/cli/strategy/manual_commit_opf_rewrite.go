@@ -51,15 +51,17 @@ func (e *V1DivergedError) Error() string {
 		e.Local.String()[:7], e.Remote.String()[:7], e.MergeBase.String()[:7])
 }
 
-// BootstrapTooLargeError: first push to a remote with no v1 yet, but
-// more unpushed commits than the safety cap. OPF inference is ~30s per
-// commit, so unbounded bootstraps could take hours.
+// BootstrapTooLargeError: more un-OPF'd commits to rewrite than the
+// safety cap — a first push to a remote with no v1 yet, or a checkpoint
+// ref whose un-trailered ancestry runs deep because OPF was enabled
+// late. OPF inference is ~30s per commit, so unbounded bootstraps could
+// take hours.
 type BootstrapTooLargeError struct {
 	Count, Limit int
 }
 
 func (e *BootstrapTooLargeError) Error() string {
-	return fmt.Sprintf("OPF bootstrap would rewrite %d entire/checkpoints/v1 commits "+
+	return fmt.Sprintf("OPF bootstrap would rewrite %d checkpoint commits "+
 		"(limit %d). Set ENTIRE_OPF_BOOTSTRAP_LIMIT=<N> or =unlimited to override, "+
 		"or push without OPF (ENTIRE_OPF=no git push) to bring the remote into sync first",
 		e.Count, e.Limit)

@@ -845,25 +845,49 @@ func setupGitRefsOPFRepo(t *testing.T, cpIDs ...string) (bareDir string, repo *g
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
-	stores, err := checkpoint.Open(t.Context(), repo, checkpoint.OpenOptions{})
-	require.NoError(t, err)
 	for _, cpID := range cpIDs {
-		cid := id.MustCheckpointID(cpID)
-		require.NoError(t, stores.Persistent.Write(t.Context(), checkpoint.Session{
-			CheckpointID: cid,
-			SessionID:    "sess-" + cpID,
-			Strategy:     "manual-commit",
-			Transcript:   redact.AlreadyRedacted([]byte(`{"role":"user","content":"Hello, PERSONABC asked"}` + "\n")),
-			Prompts:      []string{"Look up PERSONABC"},
-			AuthorName:   "Test",
-			AuthorEmail:  "test@test.com",
-		}))
-		ref := mustRefName(t, cid)
-		_, refErr := repo.Reference(ref, true)
-		require.NoError(t, refErr, "git-refs write should have created %s", ref)
-		refs = append(refs, ref)
+		addGitRefsSession(t, repo, cpID, "sess-"+cpID)
+		refs = append(refs, mustRefName(t, id.MustCheckpointID(cpID)))
 	}
 	return bareDir, repo, refs
+}
+
+// addGitRefsSession writes one sentinel-bearing session to a checkpoint through
+// the git-refs backend, advancing (or creating) its ref and queuing it. Called
+// twice for the same checkpoint, it leaves the ref with two unpushed commits —
+// the shape a write followed by a backfill produces.
+func addGitRefsSession(t *testing.T, repo *git.Repository, cpID, sessionID string) {
+	t.Helper()
+	stores, err := checkpoint.Open(t.Context(), repo, checkpoint.OpenOptions{})
+	require.NoError(t, err)
+	cid := id.MustCheckpointID(cpID)
+	require.NoError(t, stores.Persistent.Write(t.Context(), checkpoint.Session{
+		CheckpointID: cid,
+		SessionID:    sessionID,
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"role":"user","content":"Hello, PERSONABC asked"}` + "\n")),
+		Prompts:      []string{"Look up PERSONABC"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}))
+	_, refErr := repo.Reference(mustRefName(t, cid), true)
+	require.NoError(t, refErr, "git-refs write should have created the checkpoint ref")
+}
+
+// walkRefAncestry returns every commit on a checkpoint ref, tip-first.
+func walkRefAncestry(t *testing.T, repo *git.Repository, tip plumbing.Hash) []*object.Commit {
+	t.Helper()
+	var out []*object.Commit
+	for h := tip; !h.IsZero(); {
+		c, err := repo.CommitObject(h)
+		require.NoError(t, err)
+		out = append(out, c)
+		if len(c.ParentHashes) == 0 {
+			break
+		}
+		h = c.ParentHashes[0]
+	}
+	return out
 }
 
 func refHashes(t *testing.T, repo *git.Repository, refs []plumbing.ReferenceName) []plumbing.Hash {
@@ -979,4 +1003,58 @@ func TestPrePushCheckpointRefs_OPFDisabledFlushesUnchanged(t *testing.T) {
 	assert.Equal(t, before, refHashes(t, repo, refs), "no rewrite may happen with OPF off")
 	assert.Equal(t, before[0].String(), remoteRefHash(t, bareDir, refs[0]), "the ref as written must reach the remote")
 	assert.Empty(t, queuedRefs(t, repo), "pushed refs leave the queue")
+}
+
+// Regression: pushing a checkpoint ref carries its whole unpushed ancestry, so
+// rewriting only the tip shipped un-OPF'd ancestor blobs. Every un-applied
+// commit on the ref must be rewritten.
+func TestRewriteQueuedCheckpointRefsWithOPF_RewritesEveryUnpushedAncestor(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	addGitRefsSession(t, repo, "a1b2c3d4e5f6", "sess-2")
+	require.Len(t, walkRefAncestry(t, repo, refHashes(t, repo, refs)[0]), 2, "fixture must have two unpushed commits")
+
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+
+	chain := walkRefAncestry(t, repo, refHashes(t, repo, refs)[0])
+	require.Len(t, chain, 2, "the chain length must survive the rewrite")
+	for _, c := range chain {
+		require.True(t, trailers.HasOPFApplied(c.Message), "ancestor %s must be OPF-applied", c.Hash.String()[:7])
+		require.NotContains(t, treeContents(t, repo, c.Hash), "PERSONABC")
+	}
+}
+
+// Steady state (OPF on all along): the tip's parent already carries the
+// trailer, so the walk stops there and the already-applied ancestor is neither
+// re-scanned nor rewritten.
+func TestRewriteQueuedCheckpointRefsWithOPF_StopsAtTrailedParent(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	applied := refHashes(t, repo, refs)[0]
+
+	addGitRefsSession(t, repo, "a1b2c3d4e5f6", "sess-2")
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+
+	require.Equal(t, 2, fake.batchCallCount(), "one scan per push, not a re-scan of applied history")
+	chain := walkRefAncestry(t, repo, refHashes(t, repo, refs)[0])
+	require.Equal(t, applied, chain[1].Hash, "the already-applied parent must be kept as-is")
+}
+
+// A deep un-trailered ancestry (OPF enabled late) fails closed with the same
+// bounded, remediated stop the v1 path gives a large first push.
+func TestRewriteQueuedCheckpointRefsWithOPF_AncestryOverBootstrapLimit(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	t.Setenv("ENTIRE_OPF_BOOTSTRAP_LIMIT", "1")
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	addGitRefsSession(t, repo, "a1b2c3d4e5f6", "sess-2")
+	before := refHashes(t, repo, refs)
+
+	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+	var tooLarge *BootstrapTooLargeError
+	require.ErrorAs(t, err, &tooLarge)
+	require.Equal(t, 2, tooLarge.Count)
+	require.Equal(t, 1, tooLarge.Limit)
+	require.Equal(t, before, refHashes(t, repo, refs), "an over-limit ancestry must not move any ref")
 }
