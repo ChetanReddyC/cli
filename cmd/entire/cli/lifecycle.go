@@ -1420,9 +1420,16 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 			slog.String("error", reloadErr.Error()))
 	} else if freshState != nil {
 		freshPhase = freshState.Phase
+	} else {
+		// Swept between capture and reload. The sweeper (finalizeExitedSessions
+		// or endSessionNow) condenses as part of ending the session, so the
+		// record we just completed is materialized by whoever removed the
+		// state — there is nothing left here to condense from. Logged so this
+		// is distinguishable from the read-error fallback above.
+		logging.Debug(logCtx, "session state swept during subagent-stop capture; leaving the condense to the sweeper",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID))
 	}
-	// freshState == nil (state swept between capture and reload) falls back
-	// to the pre-capture phase for the same fail-conservative reason.
 
 	if freshPhase == session.PhaseEnded {
 		// The session ended before or during this SubagentStop's capture.
