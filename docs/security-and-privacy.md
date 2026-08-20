@@ -230,11 +230,16 @@ Non-interactive contexts (CI, scripted pipes with no TTY) skip the prompt and ru
 
 **CI consideration**: if you've enabled OPF locally and your CI runs `git push` (e.g. an agent-driven workflow), the CI push will attempt to run OPF too. If the `opf` binary isn't installed in CI, the push will abort with `OPFRuntimeFailedError` rather than silently shipping under-redacted content — by design, since "I enabled OPF" should mean "no content leaves my machines without OPF." The remedies are (a) install `opf` in CI, (b) set `ENTIRE_OPF=no` for CI pushes, or (c) set `prompt_default: "never"` if you only want OPF on interactive pushes.
 
-OPF failures at push time are **fail-closed**: if OPF is not on PATH, fails to start, or times out during the pre-push rewrite, the per-process circuit breaker trips and the rewrite aborts the push with `OPF runtime failed; aborting push`. Nothing reaches the remote. The intent is that "the user enabled OPF" means "I do not want unredacted content leaving this machine" — falling back to 8-layer silently on the push path would violate that contract. Fix the install or set `ENTIRE_OPF=no` for a one-off push.
+OPF failures at push time are **fail-closed**: if OPF is not on PATH, fails to start, or times out during the pre-push rewrite, the per-process circuit breaker trips and no under-redacted content reaches the remote. The intent is that "the user enabled OPF" means "I do not want unredacted content leaving this machine" — falling back to 8-layer silently on the push path would violate that contract. Fix the install or set `ENTIRE_OPF=no` for a one-off push.
+
+How that is enforced depends on the checkpoint backend, because they have different escape hatches:
+
+- **git-branch**: the rewrite aborts the push with `OPF runtime failed; aborting push`. Your `git push` exits non-zero. The checkpoint branch travels with that push, so refusing the push is the only way to withhold it.
+- **git-refs**: checkpoint refs are pushed separately from your branch and stay queued when they are not flushed, so the failure withholds the checkpoint push and lets your own `git push` succeed. Nothing under-redacted ships either way. This is not silent: a warning names the failure and states that checkpoint refs stayed queued for the next push.
 
 (The circuit breaker is per-process, so a broken install costs one warning instead of one timeout per blob — but the push still aborts.)
 
-Cost note: each shell-out loads the OPF model (~1.5B parameters on CPU). The pre-push rewrite batches **every redactable leaf across every unpushed v1 commit** into a single inference pass, so a typical real-world push pays the model-load cost once (~6s) plus inference (~5s per 100KB of leaf content) — not multiplied by the number of commits or blobs. A 3-commit push with ~250KB of total prose content runs in ~12–15s, not the ~50–100s a per-blob flow would take. Per-commit latency is unaffected because OPF doesn't run at commit time.
+Cost note: each shell-out loads the OPF model (~1.5B parameters on CPU). The pre-push rewrite batches **every redactable leaf across every unpushed commit** — v1 commits on git-branch, every unpushed commit on every queued ref on git-refs — into a single inference pass, so a typical real-world push pays the model-load cost once (~6s) plus inference (~5s per 100KB of leaf content) — not multiplied by the number of commits or blobs. A 3-commit push with ~250KB of total prose content runs in ~12–15s, not the ~50–100s a per-blob flow would take. Per-commit latency is unaffected because OPF doesn't run at commit time.
 
 #### When OPF actually runs
 
