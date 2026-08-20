@@ -481,15 +481,18 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			m.codeLoading = true
 			m.codeResults = nil
 			m.codeSearchErr = ""
+			m.codeWarning = ""
 			cmds = append(cmds, performCodeSearch(opts, m.codeSearchGen))
 		} else {
 			// No code query (e.g. repo-only input) — clear stale code
 			// results and bump the generation so any in-flight search
-			// from a prior query is discarded when it completes.
+			// from a prior query is discarded when it completes. Nothing
+			// will arrive to overwrite the warning, so clear it here too.
 			m.codeSearchGen++
 			m.codeLoading = false
 			m.codeResults = nil
 			m.codeSearchErr = ""
+			m.codeWarning = ""
 		}
 
 		// Checkpoint search (only if repo filters are valid for the checkpoint API).
