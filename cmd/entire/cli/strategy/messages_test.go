@@ -45,6 +45,7 @@ func TestTruncateDescription(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := TruncateDescription(tt.input, tt.maxLen)
 			if got != tt.want {
 				t.Errorf("TruncateDescription(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
@@ -95,6 +96,7 @@ func TestFormatSubagentEndMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := FormatSubagentEndMessage(tt.agentType, tt.description, tt.toolUseID)
 			if got != tt.want {
 				t.Errorf("FormatSubagentEndMessage(%q, %q, %q) = %q, want %q",
@@ -139,6 +141,7 @@ func TestFormatIncrementalMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := FormatIncrementalMessage(tt.todoContent, tt.sequence, tt.toolUseID)
 			if got != tt.want {
 				t.Errorf("FormatIncrementalMessage(%q, %d, %q) = %q, want %q",
@@ -200,6 +203,7 @@ func TestExtractLastCompletedTodo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := ExtractLastCompletedTodo([]byte(tt.todosJSON))
 			if got != tt.want {
 				t.Errorf("ExtractLastCompletedTodo(%s) = %q, want %q", tt.todosJSON, got, tt.want)
@@ -250,6 +254,7 @@ func TestCountTodos(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := CountTodos([]byte(tt.todosJSON))
 			if got != tt.want {
 				t.Errorf("CountTodos(%s) = %d, want %d", tt.todosJSON, got, tt.want)
