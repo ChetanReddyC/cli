@@ -14,7 +14,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+
 	"github.com/go-git/go-git/v6"
+	"github.com/spf13/cobra"
 )
 
 // TestWithHookSession_StampsMostRecentSession pins the one thing the hook path
@@ -55,10 +57,13 @@ func TestWithHookSession_StampsMostRecentSession(t *testing.T) {
 	}
 }
 
-// TestWithHookSession_GateSkipsRepo covers the gate that newAgentHooksCmd relies
-// on entirely: a repo Entire never set up, and one where it is disabled, must
-// come back with the context untouched — nothing scanned, no redactors loaded.
-func TestWithHookSession_GateSkipsRepo(t *testing.T) {
+// TestHookPreRuns_GateSkipsRepo covers the gate each hook pre-run applies before
+// calling withHookSession, which scans session state and loads redactors: a repo
+// Entire never set up, and one where it is disabled, must come back with the
+// context untouched. The gate lives at the call sites — withHookSession itself
+// does not repeat it, because that costs an uncached settings.Load on the
+// per-commit and per-turn paths.
+func TestHookPreRuns_GateSkipsRepo(t *testing.T) {
 	tests := []struct {
 		name     string
 		settings string
@@ -84,9 +89,18 @@ func TestWithHookSession_GateSkipsRepo(t *testing.T) {
 				}
 			}
 
-			ctx := context.Background()
-			if got := withHookSession(ctx); got != ctx {
-				t.Error("withHookSession() returned a derived context; the gate must return the input unchanged")
+			// Drive the real pre-runs. A gated pre-run returns before
+			// SetContext, so the command's context is still the one we handed it.
+			for name, hookCmd := range map[string]*cobra.Command{
+				"git hooks":   newHooksGitCmd(),
+				"agent hooks": agentHooksCmd(t, testAgentName),
+			} {
+				base := context.Background()
+				hookCmd.SetContext(base)
+				hookCmd.PersistentPreRun(hookCmd, nil)
+				if hookCmd.Context() != base {
+					t.Errorf("%s pre-run derived a context in a repo it must skip", name)
+				}
 			}
 		})
 	}
@@ -283,4 +297,18 @@ func TestGitHookPolicySkipsWhenRepoCannotOpen(t *testing.T) {
 	if !g.skipUnsupportedCheckpointPolicy() {
 		t.Fatal("expected git hook to skip when repository cannot be opened")
 	}
+}
+
+// agentHooksCmd returns the hooks subcommand for one agent, whose pre-run is the
+// call site that used to rely on withHookSession's own gate.
+func agentHooksCmd(t *testing.T, agentName string) *cobra.Command {
+	t.Helper()
+
+	for _, sub := range newHooksCmd().Commands() {
+		if sub.Use == agentName {
+			return sub
+		}
+	}
+	t.Fatalf("no hooks subcommand for %q", agentName)
+	return nil
 }

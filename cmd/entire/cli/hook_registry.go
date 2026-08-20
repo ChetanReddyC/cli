@@ -58,6 +58,12 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 		Short:  handler.Description() + " hook handlers",
 		Hidden: true,
 		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			// withHookSession scans session state and loads redactors, so it must
+			// not run in a repo that never enabled Entire. Same fail-closed gate
+			// the git-hook tree applies before its own call.
+			if !settings.IsSetUpAndEnabled(cmd.Context()) {
+				return
+			}
 			// Cobra invokes this PersistentPreRun with the leaf command, so
 			// SetContext hands the session-stamped context straight to the
 			// hook verb's RunE via cmd.Context().

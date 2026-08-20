@@ -127,15 +127,11 @@ func (g *gitHookContext) skipUnreadableCheckpointPolicy(err error) bool {
 // scanning session state on every command, and configures redaction. Returns
 // the context to pass down with cmd.SetContext.
 //
-// The gate is load-bearing, not defensive: the git-hook tree checks it before
-// calling, but newAgentHooksCmd does not, so this is the only thing standing
-// between a never-enabled repo and having its session state scanned and its
-// redactors loaded.
+// Every caller must gate on settings.IsSetUpAndEnabled first — it scans session
+// state and loads redactors, neither of which may touch a repo that never
+// enabled Entire. The check is not repeated here: it costs an uncached
+// settings.Load, and this runs on the per-commit and per-turn paths.
 func withHookSession(ctx context.Context) context.Context {
-	if !settings.IsSetUpAndEnabled(ctx) {
-		return ctx
-	}
-
 	ctx = logging.WithSessionID(ctx, strategy.FindMostRecentSession(ctx))
 
 	// Hooks are the checkpoint-writing path, so this cannot be left to the root
