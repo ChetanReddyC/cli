@@ -87,6 +87,32 @@ func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) (
 				Agent:            state.AgentType,
 			})
 		}
+
+		// [Task] rows come from task records (#2058) — live and completed-unmaterialized
+		// entries are both pending until condensed; no shadow commit exists, so no ID.
+		for _, rec := range state.TaskRecords {
+			date := rec.CompletedAt
+			if date.IsZero() {
+				date = rec.StartedAt
+			}
+			shortToolUseID := rec.ToolUseID
+			if len(shortToolUseID) > id.ShortIDLength {
+				shortToolUseID = shortToolUseID[:id.ShortIDLength]
+			}
+			message := FormatSubagentEndMessage(rec.SubagentType, rec.TaskDescription, shortToolUseID)
+			if rec.CompletedAt.IsZero() {
+				message = FormatSubagentRunningMessage(rec.SubagentType, rec.TaskDescription, shortToolUseID)
+			}
+			allPoints = append(allPoints, RewindPoint{
+				Message:          message,
+				Date:             date,
+				IsTaskCheckpoint: true,
+				ToolUseID:        rec.ToolUseID,
+				SessionID:        state.SessionID,
+				SessionPrompt:    state.LastPrompt,
+				Agent:            state.AgentType,
+			})
+		}
 	}
 
 	// Sort by date, most recent first
@@ -640,8 +666,8 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 	}
 	defer repo.Close()
 
-	WarnIfMetadataDisconnected()
-	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{BlobFetcher: s.blobFetcher})
+	WarnIfMetadataDisconnected(ctx)
+	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{BlobFetcher: s.blobFetcher, ReadRemotes: CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}

@@ -51,6 +51,34 @@ func inGroup(c *cobra.Command, groupID string) *cobra.Command {
 	return c
 }
 
+// Run every ancestor's persistent hook, root first, not only the closest one
+// cobra picks by default. Without this, the `checkpoint`, `session`, and `agent`
+// pre-runs shadow the root's and it never builds a logger — silently, since the
+// only symptom is missing log lines.
+//
+// Set in init() rather than NewRootCmd: it is a cobra package global, so writing
+// it per construction races with cobra reading it during Execute (parallel tests
+// do both at once).
+//
+//nolint:gochecknoinits // Set a cobra package global once, before any goroutine can read it (see above).
+func init() {
+	cobra.EnableTraverseRunHooks = true
+}
+
+// isShellCompletion reports whether this is one of cobra's hidden completion
+// requests. The shell runs them on every TAB press, so they skip building a
+// logger: MkdirAll + OpenFile + the settings read that resolves the level (which
+// shells out to git) is real latency, and it left a 0-byte entire.log behind.
+func isShellCompletion(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		switch c.Name() {
+		case cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
+			return true
+		}
+	}
+	return false
+}
+
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "entire",
@@ -64,7 +92,22 @@ func NewRootCmd() *cobra.Command {
 		CompletionOptions: cobra.CompletionOptions{
 			HiddenDefaultCmd: true,
 		},
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			if isShellCompletion(cmd) {
+				return
+			}
+			if !settings.IsSetUpAny(cmd.Context()) {
+				return
+			}
+			ensureLogger(cmd)
+		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
+			// Deferred so it runs after the telemetry and version-check calls
+			// below, which log, and so the hidden-command early return still
+			// flushes. main.go closes again for the paths cobra skips this hook
+			// on; Close is idempotent and nil-safe.
+			defer func() { _ = logging.LoggerFromContext(cmd.Context()).Close() }()
+
 			// Skip for hidden commands (walk parent chain — Cobra doesn't propagate Hidden)
 			for c := cmd; c != nil; c = c.Parent() {
 				if c.Hidden {
@@ -212,22 +255,16 @@ func newSweepSessionsCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Detached child with discarded stdout/stderr: make sure a file
+			// logger is attached so a failing background sweep (e.g. a zombie
+			// that can't self-heal) is diagnosable in .entire/logs/entire.log
+			// rather than vanishing. Idempotent, and it resolves the worktree
+			// root itself — a child whose worktree was removed between spawn
+			// and exec gets no logger rather than a stray .entire/logs/ in an
+			// arbitrary directory. The root PersistentPostRun closes whichever
+			// logger ends up on the context.
+			ensureLogger(cmd)
 			ctx := cmd.Context()
-			// Detached child with discarded stdout/stderr: initialize file
-			// logging so a failing background sweep (e.g. a zombie that can't
-			// self-heal) is diagnosable in .entire/logs/entire.log rather than
-			// vanishing. Guard on WorktreeRoot first — matching resume/
-			// checkpoint resume/explain/clean — so a child whose worktree was
-			// removed or relocated
-			// between spawn and exec (or a manual invocation outside a repo)
-			// doesn't create a stray .entire/logs/ in an arbitrary directory;
-			// logging.Init falls back to cwd when WorktreeRoot fails.
-			if _, err := paths.WorktreeRoot(ctx); err == nil {
-				logging.SetLogLevelGetter(GetLogLevel)
-				if err := logging.Init(ctx, ""); err == nil {
-					defer logging.Close()
-				}
-			}
 			// Log the top-level error too: main.go prints RunE errors to
 			// stderr, which is io.Discard for a detached child — without this
 			// line a sweep that fails before its loop leaves no trace.
