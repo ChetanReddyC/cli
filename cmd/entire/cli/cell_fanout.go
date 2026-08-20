@@ -54,9 +54,10 @@ type cellGroup struct {
 // collapse across jurisdictions into one group routed by whichever repo came
 // first — they stay per-jurisdiction and route via the jurisdiction fallback.
 //
-// A RepoIndexEntry with Placements routes to exactly ONE placement, picked by
-// mode (routedRepoPlacement). Mirror placements are replicated copies of the
-// same content indexed under their own namespaces — searching them returns
+// A RepoIndexEntry with Placements routes to exactly ONE placement — its home
+// placement (routedRepoPlacement): the elected processing primary, else the
+// canonical convention. Mirror placements are replicated copies of the same
+// content indexed under their own namespaces — searching them returns
 // duplicate and stale rows, and diverges from the web (ENT-1672). When
 // Placements is empty, the top-level Cell/Jurisdiction/ID are used (backward
 // compat for index responses that predate placements).
@@ -64,7 +65,7 @@ type cellGroup struct {
 // skipped names repos with no routable placement — the picked placement is
 // explicitly not ready (processing/failed/suspended) or carries no ID.
 // Callers surface these so the narrowed scope is visible.
-func groupReposByCell(repos []coreapi.RepoIndexEntry, mode placementRouting) (cells []cellGroup, skipped []string) {
+func groupReposByCell(repos []coreapi.RepoIndexEntry) (cells []cellGroup, skipped []string) {
 	byCell := make(map[string]*cellGroup)
 
 	addToGroup := func(id, cell, jurisdiction, clusterSlug string) {
@@ -96,7 +97,7 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry, mode placementRouting) (ce
 
 	for _, r := range repos {
 		if len(r.Placements) > 0 {
-			p, ok := routedRepoPlacement(r, mode)
+			p, ok := routedRepoPlacement(r)
 			if !ok {
 				label := r.FullName
 				if label == "" {
@@ -128,44 +129,22 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry, mode placementRouting) (ce
 	return cells, skipped
 }
 
-// placementRouting selects which of an entry's placements a fan-out reads
-// from. The two modes mirror the entire.io BFF's split (search.ts /
-// code-search.ts, ENT-1672) — the web and the CLI must choose identically or
-// their results diverge the moment core elects a processing primary that
-// differs from the row-ID convention.
-type placementRouting int
-
-const (
-	// routeByElection prefers the placement named by core's explicit
-	// `primaries.processing` ULID — the cell that does the repo's heavy
-	// lifting (trails, runners, checkpoint ingest), where searchable content
-	// originates — falling back to the canonical convention for rows
-	// predating that field (the BFF's searchPlacement). Used by ALL semantic
-	// search: scoped requests pin the picked placement's ULID (query-serve
-	// resolves explicit pins from its all-accessible-placements byID set),
-	// and pin-less broad requests are narrowed by query-serve to the same
-	// election since ENT-1776 (entire-search#188), so the elected cell
-	// answers for the repo either way.
-	routeByElection placementRouting = iota
-	// routeCanonical ignores the election and picks by the canonical
-	// convention: the placement whose ID equals the entry's own ID, else the
-	// first (the BFF's canonicalPlacement). Used by code search only,
-	// matching the BFF's code-search.ts deliberately: the whole code-READ
-	// chain — hits, /symbols, /usages, the web's file viewer — resolves the
-	// canonical placement, so canonical keeps a hit and its follow-ups on
-	// the same copy. Flip only when that entire chain routes by the election
-	// (tracked on ENT-1776).
-	routeCanonical
-)
-
-// routedRepoPlacement picks the one placement of r that mode routes to.
-// Selection order under routeByElection:
+// routedRepoPlacement picks the entry's HOME placement — the one the fan-out
+// reads from (the BFF's searchPlacement in list-repos-index.ts). Selection
+// order:
 //
-//  1. the placement named by core's explicit `primaries.processing` ULID;
-//  2. fallback: the canonical convention below.
+//  1. the placement named by core's explicit `primaries.processing` ULID —
+//     the cell that does the repo's heavy lifting (trails, runners,
+//     checkpoint ingest), where searchable content originates;
+//  2. fallback for rows predating that field, or naming a ULID absent from
+//     the placement list: the canonical convention — the placement whose ID
+//     equals the entry's own ID, else the first.
 //
-// Under routeCanonical (and as the fallback above): the placement whose ID
-// equals the entry's own ID, else the first.
+// Every fan-out caller routes by this one rule. It is safe for pinned and
+// pin-less requests alike: pins resolve from the leaves'
+// all-accessible-placements byID sets, and both leaves narrow pin-less broad
+// scope by the same election since ENT-1776 (entire-search#188,
+// peregrine#214).
 //
 // Selection must never key on the Mirror flag: real /repos rows mark every
 // placement Mirror:true, primary included. (The other primary, data_primary,
@@ -174,14 +153,14 @@ const (
 //
 // ok is false when r has no placements at all (the caller routes those via
 // the top-level legacy fields, so this arm is defensive), or when the chosen
-// placement is not routable: it carries no ID, or
-// it is not ready. An elected-but-unready primary is NOT substituted with a
-// ready mirror — it may predate the clone, and the BFF's searchPlacement
-// returns the same pick as-is for its caller to skip; the two clients must
-// choose identically. Status is required over the wire, so the empty-status
-// arm is defensive; any unrecognized future status is treated as not ready,
-// which skips the repo WITH a report rather than searching an unknown state.
-func routedRepoPlacement(r coreapi.RepoIndexEntry, mode placementRouting) (coreapi.RepoPlacement, bool) {
+// placement is not routable: it carries no ID, or it is not ready. An
+// elected-but-unready primary is NOT substituted with a ready mirror — it may
+// predate the clone, and the BFF's searchPlacement returns the same pick
+// as-is for its caller to skip; the two clients must choose identically.
+// Status is required over the wire, so the empty-status arm is defensive; any
+// unrecognized future status is treated as not ready, which skips the repo
+// WITH a report rather than searching an unknown state.
+func routedRepoPlacement(r coreapi.RepoIndexEntry) (coreapi.RepoPlacement, bool) {
 	if len(r.Placements) == 0 {
 		return coreapi.RepoPlacement{}, false
 	}
@@ -199,10 +178,8 @@ func routedRepoPlacement(r coreapi.RepoIndexEntry, mode placementRouting) (corea
 		return false
 	}
 	picked := false
-	if mode == routeByElection {
-		if primaries, ok := r.Primaries.Get(); ok {
-			picked = pick(strings.TrimSpace(primaries.Processing))
-		}
+	if primaries, ok := r.Primaries.Get(); ok {
+		picked = pick(strings.TrimSpace(primaries.Processing))
 	}
 	if !picked {
 		pick(r.ID)

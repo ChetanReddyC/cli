@@ -62,8 +62,8 @@ type SearchResponse struct {
 	FailedJurisdictions []string `json:"failed_jurisdictions,omitempty"`
 
 	// SkippedRepos is set by the CLI's fan-out layer (not by peregrine) when
-	// explicitly requested repos had no routable canonical placement (missing
-	// or not ready) and were excluded from the search.
+	// explicitly requested repos had no routable home placement (missing or
+	// not ready) and were excluded from the search.
 	SkippedRepos []string `json:"skipped_repos,omitempty"`
 }
 

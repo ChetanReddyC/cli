@@ -108,10 +108,10 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 		if err != nil {
 			return nil, err
 		}
-		// Scoped requests pin the picked placement's ULID (repoIDs below), so
-		// the elected processing primary is safe to route by — the BFF's
-		// filtered path applies the same rule.
-		cells, skipped = groupReposByCell(entries, routeByElection)
+		// Scoped requests pin the picked placement's ULID (repoIDs below),
+		// which query-serve resolves from its all-accessible byID set — the
+		// BFF's filtered path applies the same home-placement rule.
+		cells, skipped = groupReposByCell(entries)
 	} else {
 		index, err := s.listFullIndex(ctx)
 		if err != nil {
@@ -129,7 +129,7 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 		// else the canonical convention) is its own cell since ENT-1776
 		// (entire-search#188), so broad routing follows the same election —
 		// like the BFF's unfiltered path (entire.io#3801).
-		cells, skipped = groupReposByCell(index.Repos, routeByElection)
+		cells, skipped = groupReposByCell(index.Repos)
 	}
 	if len(skipped) > 0 {
 		if scoped {

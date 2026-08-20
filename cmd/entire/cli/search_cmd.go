@@ -527,15 +527,17 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 	}
 
 	// Step 3: Group repos by cell and resolve baseURLs via shared helpers.
-	// Code search routes CANONICAL in both modes, deliberately ignoring the
-	// processing-primary election (matching the BFF's code-search.ts): the
-	// whole code-READ chain — hits, /symbols, /usages, the web's file viewer —
-	// resolves the canonical placement, so canonical keeps a hit and its
-	// follow-ups on the same copy, and keeps web and CLI identical. Flip only
-	// when that entire chain routes by the election (tracked on ENT-1776).
-	cells, skippedRepos := groupReposByCell(indexRepos, routeCanonical)
+	// Code search routes by the same home-placement rule as semantic search
+	// (elected processing primary, else the canonical convention): peregrine
+	// resolves pins from its all-ids set and narrows pin-less broad scope by
+	// the election since ENT-1776 (peregrine#214). The BFF's code-search.ts
+	// still routes canonical until its code-read chain (/symbols, /usages,
+	// file viewer) flips with it — identical behavior for now because every
+	// current election matches the convention; core electing divergent
+	// primaries is gated on that web flip (tracked on ENT-1776).
+	cells, skippedRepos := groupReposByCell(indexRepos)
 	if len(skippedRepos) > 0 {
-		logging.Debug(ctx, "code search: repos without a routable canonical placement", "repos", strings.Join(skippedRepos, ","))
+		logging.Debug(ctx, "code search: repos without a routable home placement", "repos", strings.Join(skippedRepos, ","))
 	}
 	// Only explicitly filtered searches report skips: unfiltered searches send
 	// no repo param, so a skipped repo only stops contributing to which cells
