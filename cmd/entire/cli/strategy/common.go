@@ -408,10 +408,25 @@ var initRedactionOnce sync.Once
 // redact package: PII detection (opt-in), inline custom_redactions, and rule
 // packs auto-discovered from .entire/redactors/.
 //
-// Must be called at each process entry point before checkpoint writes.
-func EnsureRedactionConfigured() {
+// Call before checkpoint writes with a context descended from the root
+// pre-run, so redact's diagnostics reach .entire/logs/: hook contexts swallow
+// stderr, so otherwise a user grepping for component=redaction finds nothing
+// and concludes their rules never ran. Without a context logger they fall back
+// to stderr and the load-time summary is skipped.
+//
+// sync.Once: the first caller's context wins, and every caller is an entry
+// point that just built one.
+func EnsureRedactionConfigured(ctx context.Context) {
 	initRedactionOnce.Do(func() {
-		ctx := context.Background()
+		// Session-stamped: redact calls this logger without a context, so it
+		// cannot pick the session up the way logging.Warn does.
+		logger := logging.SessionLoggerFromContext(ctx)
+
+		// A canceled ctx (Ctrl-C mid-hook) would fail the settings read, consume
+		// the Once, and leave custom rules unconfigured — fail-open — for the
+		// rest of the process. Keep the ctx values, not its cancellation.
+		ctx := context.WithoutCancel(ctx)
+
 		s, err := settings.Load(ctx)
 		if err != nil {
 			logCtx := logging.WithComponent(ctx, "redaction")
@@ -438,6 +453,7 @@ func EnsureRedactionConfigured() {
 				Enabled:        true,
 				Categories:     make(map[redact.PIICategory]bool),
 				CustomPatterns: pii.CustomPatterns,
+				Logger:         logger,
 			}
 			cfg.Categories[redact.PIIEmail] = pii.Email == nil || *pii.Email
 			cfg.Categories[redact.PIIPhone] = pii.Phone == nil || *pii.Phone
@@ -457,7 +473,7 @@ func EnsureRedactionConfigured() {
 			logging.Warn(logCtx, "failed to resolve redactors path", slog.String("error", perr.Error()))
 			packsDir = packsRelPath
 		}
-		packs, lerr := redact.LoadPacks(packsDir)
+		packs, lerr := redact.LoadPacks(packsDir, logger)
 		if lerr != nil {
 			warnUser(ctx, "redaction",
 				"failed to load redactor packs",
@@ -469,6 +485,7 @@ func EnsureRedactionConfigured() {
 			redact.ConfigureCustomRules(redact.CustomRulesConfig{
 				Inline: inline,
 				Packs:  packs,
+				Logger: logger,
 			})
 		}
 
@@ -492,7 +509,34 @@ func EnsureRedactionConfigured() {
 				Categories: opf.Categories,
 				Command:    opf.Command,
 				Timeout:    opf.TimeoutSeconds,
+				Logger:     logger,
 			})
+		}
+
+		// Load-time summary so "are my rules active?" is answerable from the
+		// log alone.
+		//
+		// Gated on an initialized logger: without one, logging.Info falls
+		// through to the process-default stderr logger, and an INFO line the
+		// user did not ask for would surface as terminal noise. WARN
+		// diagnostics are deliberately not gated — a broken rule is worth
+		// showing wherever it can be shown.
+		if logger != nil {
+			packRules := 0
+			for _, p := range packs {
+				packRules += len(p.Rules)
+			}
+			piiEnabled := s.Redaction != nil && s.Redaction.PII != nil && s.Redaction.PII.Enabled
+			logging.Info(logging.WithComponent(ctx, "redaction"), "redaction configured",
+				slog.Int("packs", len(packs)),
+				slog.Int("pack_rules", packRules),
+				slog.Int("inline_patterns", len(inline)),
+				// Configured counts above, compiled below: a gap between
+				// them means a rule failed to compile (warned separately).
+				slog.Int("active_rules", redact.ActiveCustomRules()),
+				slog.Bool("pii", piiEnabled),
+				slog.Bool("opf", redact.OPFEnabled()),
+			)
 		}
 	})
 }

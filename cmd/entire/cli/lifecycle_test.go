@@ -18,6 +18,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
@@ -815,6 +817,367 @@ func TestHandleLifecycleTurnEnd_EmptyRepository(t *testing.T) {
 	if err != nil {
 		t.Errorf("expected nil for empty repository (graceful no-op), got: %v", err)
 	}
+}
+
+// mockAnalyzerAgent adds TranscriptAnalyzer so turn-end can derive modified
+// files from the transcript when git status is unavailable.
+type mockAnalyzerAgent struct {
+	mockLifecycleAgent
+
+	modifiedFiles []string
+}
+
+var _ agent.TranscriptAnalyzer = (*mockAnalyzerAgent)(nil)
+
+func (m *mockAnalyzerAgent) GetTranscriptPosition(string) (int, error) { return 0, nil }
+
+func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(string, int) ([]string, int, error) {
+	return m.modifiedFiles, 0, nil
+}
+
+// TestTurnFlow_StatusBudgetBreachDegradesGracefully pins the zombie-hook
+// incident regression (stray `git init` in $HOME): when the worktree status
+// walk breaches its wall-clock budget, both turn hooks must still succeed —
+// the agent treats a non-zero hook exit as failure — and turn-end must
+// checkpoint the transcript-derived files while skipping new-file detection,
+// so pre-existing untracked files are not misattributed to the agent. Before
+// the budget existed the failure mode was worse (hook ground for hours), but
+// the degrade path itself is what this test locks in.
+func TestTurnFlow_StatusBudgetBreachDegradesGracefully(t *testing.T) {
+	// Not parallel: t.Chdir plus the process-global status budget latch.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "README.md", "# test\n")
+	testutil.GitAdd(t, tmpDir, "README.md")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	gitrepo.SetStatusBudgetBreachedForTesting(true)
+	t.Cleanup(func() { gitrepo.SetStatusBudgetBreachedForTesting(false) })
+
+	ctx := context.Background()
+	sessionID := "sess-budget-breach"
+
+	// Pre-existing untracked file that must not be claimed by the checkpoint.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "preexisting.txt"), []byte("x"), 0o600))
+
+	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
+
+	// Agents report absolute paths; resolve symlinks (macOS /var → /private/var)
+	// so the path normalizes against the repo root the handler resolves.
+	resolvedDir, err := filepath.EvalSymlinks(tmpDir)
+	require.NoError(t, err)
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "mock-analyzer",
+			agentType:      "Mock Analyzer Agent",
+			transcriptData: []byte(`{"type":"user","message":"test"}`),
+		},
+		modifiedFiles: []string{filepath.Join(resolvedDir, "agent.txt")},
+	}
+
+	// Turn start: the untracked scan is degraded, not fatal.
+	startEvent := &agent.Event{
+		Type:       agent.TurnStart,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Prompt:     "write agent.txt",
+		Timestamp:  time.Now(),
+	}
+	require.NoError(t, handleLifecycleTurnStart(ctx, ag, startEvent))
+
+	preState, err := LoadPrePromptState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, preState)
+	require.True(t, preState.UntrackedScanSkipped, "breached scan must be recorded so turn-end skips new-file detection")
+
+	// The agent writes its file during the turn.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "agent.txt"), []byte("agent"), 0o600))
+
+	endEvent := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, endEvent), "turn-end must exit 0 when status is unavailable")
+
+	// Capture proceeded from transcript-derived data: the agent's file is in
+	// the session state, the pre-existing untracked file is not.
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Contains(t, state.FilesTouched, "agent.txt")
+	require.NotContains(t, state.FilesTouched, "preexisting.txt")
+	require.NotNil(t, state.CaptureDegradedAt, "the breach must be persisted so `entire status` can surface it")
+}
+
+// mockPromptAgent adds PromptExtractor so turn-end's LastPrompt backfill runs.
+type mockPromptAgent struct {
+	mockAnalyzerAgent
+
+	prompts []string
+}
+
+var _ agent.PromptExtractor = (*mockPromptAgent)(nil)
+
+func (m *mockPromptAgent) ExtractPrompts(string, int) ([]string, error) { return m.prompts, nil }
+
+// TestHandleLifecycleTurnEnd_SaveBreachStillBackfillsLastPrompt pins the
+// degrade-path bookkeeping: when the first-checkpoint status read inside
+// SaveStep breaches its budget, the checkpoint is skipped and the hook exits
+// 0 — but the turn-end tail must still run, backfilling LastPrompt (SaveStep
+// initialized session state before failing, wiping any earlier value) and
+// persisting the capture-degraded marker.
+func TestHandleLifecycleTurnEnd_SaveBreachStillBackfillsLastPrompt(t *testing.T) {
+	// Not parallel: t.Chdir plus the package-global git-status budget override.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "README.md", "# test\n")
+	testutil.GitAdd(t, tmpDir, "README.md")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	t.Cleanup(checkpoint.SetGitStatusBudgetForTesting(time.Nanosecond))
+
+	ctx := context.Background()
+	sessionID := "sess-save-breach-backfill"
+
+	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
+
+	resolvedDir, err := filepath.EvalSymlinks(tmpDir)
+	require.NoError(t, err)
+	ag := &mockPromptAgent{
+		mockAnalyzerAgent: mockAnalyzerAgent{
+			mockLifecycleAgent: mockLifecycleAgent{
+				name:           "mock-prompt",
+				agentType:      "Mock Prompt Agent",
+				transcriptData: []byte(`{"type":"user","message":"test"}`),
+			},
+			modifiedFiles: []string{filepath.Join(resolvedDir, "agent.txt")},
+		},
+		prompts: []string{"write agent.txt"},
+	}
+
+	// Turn start without a prompt (exec-mode shape, e.g. Factory Droid):
+	// prompt.txt stays empty so turn-end must backfill from the transcript.
+	startEvent := &agent.Event{
+		Type:       agent.TurnStart,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+	require.NoError(t, handleLifecycleTurnStart(ctx, ag, startEvent))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "agent.txt"), []byte("agent"), 0o600))
+
+	endEvent := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, endEvent), "save breach must degrade, not fail the hook")
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, 0, state.StepCount, "the breached save must not have produced a checkpoint")
+	require.Equal(t, "write agent.txt", state.LastPrompt, "the backfill must run on the degrade path too")
+	require.NotNil(t, state.CaptureDegradedAt, "the save breach must be persisted so `entire status` can surface it")
+}
+
+// TestHandleLifecycleTurnEnd_ScanSkippedMarkerSkipsNewFileDetection pins the
+// cross-process degrade shape the same-process test above cannot reach: turn
+// start runs in one hook process whose status walk breaches (writing the
+// UntrackedScanSkipped marker), while turn end runs in a fresh process whose
+// walk SUCCEEDS. PreUntrackedFiles() converts the marker state's nil
+// UntrackedFiles into a non-nil empty baseline, so without the changes.New
+// guard in handleLifecycleTurnEnd every pre-existing untracked file in the
+// worktree would be classified New and claimed by the checkpoint. Deleting
+// that guard must fail this test.
+func TestHandleLifecycleTurnEnd_ScanSkippedMarkerSkipsNewFileDetection(t *testing.T) {
+	// Not parallel: t.Chdir plus the process-global status budget latch.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "README.md", "# test\n")
+	testutil.GitAdd(t, tmpDir, "README.md")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	ctx := context.Background()
+	sessionID := "sess-marker-cross-process"
+
+	// Pre-existing untracked file the checkpoint must not claim.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "preexisting.txt"), []byte("x"), 0o600))
+
+	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
+
+	resolvedDir, err := filepath.EvalSymlinks(tmpDir)
+	require.NoError(t, err)
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "mock-analyzer",
+			agentType:      "Mock Analyzer Agent",
+			transcriptData: []byte(`{"type":"user","message":"test"}`),
+		},
+		modifiedFiles: []string{filepath.Join(resolvedDir, "agent.txt")},
+	}
+
+	// Process A: turn start under a breached budget writes the marker.
+	gitrepo.SetStatusBudgetBreachedForTesting(true)
+	startEvent := &agent.Event{
+		Type:       agent.TurnStart,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Prompt:     "write agent.txt",
+		Timestamp:  time.Now(),
+	}
+	require.NoError(t, handleLifecycleTurnStart(ctx, ag, startEvent))
+	// Process B: turn end runs with a fresh latch and a healthy walk.
+	gitrepo.SetStatusBudgetBreachedForTesting(false)
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "agent.txt"), []byte("agent"), 0o600))
+
+	endEvent := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, endEvent))
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Contains(t, state.FilesTouched, "agent.txt")
+	require.NotContains(t, state.FilesTouched, "preexisting.txt",
+		"marker must disable new-file detection: with no baseline, pre-existing untracked files would be misattributed to the agent")
+	require.NotNil(t, state.CaptureDegradedAt,
+		"a marker-degraded turn must be persisted even when the end-hook walk succeeds")
+
+	// A following turn whose scans stay within budget clears the marker: the
+	// warning means "the LAST turn degraded", not "some turn once did".
+	require.NoError(t, handleLifecycleTurnStart(ctx, ag, startEvent))
+	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, endEvent))
+	state, err = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Nil(t, state.CaptureDegradedAt, "a healthy turn must clear the degradation marker")
+}
+
+// TestHandleLifecycleSubagentEnd_ScanSkippedMarkerSkipsNewFileDetection is the
+// subagent-path twin of the turn-end marker test: the pre-task scan breaches
+// in one process, subagent-end's walk succeeds in another, and without the
+// changes.New guard in handleLifecycleSubagentEnd the task checkpoint would
+// claim every pre-existing untracked file. Deleting that guard must fail this
+// test.
+func TestHandleLifecycleSubagentEnd_ScanSkippedMarkerSkipsNewFileDetection(t *testing.T) {
+	// Not parallel: t.Chdir plus the process-global status budget latch.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "README.md", "# test\n")
+	testutil.GitAdd(t, tmpDir, "README.md")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	ctx := context.Background()
+	sessionID := "sess-task-marker"
+	toolUseID := "toolu-cross-process-01"
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "preexisting.txt"), []byte("x"), 0o600))
+
+	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
+
+	resolvedDir, err := filepath.EvalSymlinks(tmpDir)
+	require.NoError(t, err)
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "mock-analyzer",
+			agentType:      "Mock Analyzer Agent",
+			transcriptData: []byte(`{"type":"user","message":"test"}`),
+		},
+		modifiedFiles: []string{filepath.Join(resolvedDir, "task.txt")},
+	}
+
+	// Process A: pre-task capture under a breached budget writes the marker.
+	gitrepo.SetStatusBudgetBreachedForTesting(true)
+	require.NoError(t, CapturePreTaskState(ctx, toolUseID))
+	gitrepo.SetStatusBudgetBreachedForTesting(false)
+
+	preState, err := LoadPreTaskState(ctx, toolUseID)
+	require.NoError(t, err)
+	require.NotNil(t, preState)
+	require.True(t, preState.UntrackedScanSkipped)
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "task.txt"), []byte("task"), 0o600))
+
+	endEvent := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		ToolUseID:  toolUseID,
+		Timestamp:  time.Now(),
+	}
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, endEvent))
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Contains(t, state.FilesTouched, "task.txt")
+	require.NotContains(t, state.FilesTouched, "preexisting.txt",
+		"marker must disable new-file detection on the subagent path")
+}
+
+// TestHandleClaudeCodePostTodo_ScanSkippedMarkerSkipsNewFileDetection is the
+// PostTodo twin of the turn-end/subagent-end marker tests: PostTodo detects
+// changes with a nil baseline (all untracked files classified New), so after
+// a pre-task scan breach (marker written in one process) a PostTodo whose own
+// walk succeeds would claim every pre-existing untracked file in the
+// incremental checkpoint. Deleting the PostTodo marker guard must fail this
+// test.
+func TestHandleClaudeCodePostTodo_ScanSkippedMarkerSkipsNewFileDetection(t *testing.T) {
+	// Not parallel: t.Chdir, the process-global status budget latch, and the
+	// currentHookAgentName hook-context global.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "README.md", "# test\n")
+	testutil.GitAdd(t, tmpDir, "README.md")
+	testutil.GitCommit(t, tmpDir, "init")
+	// PostTodo skips on the default branch; incremental checkpoints only run
+	// on feature branches.
+	testutil.GitCheckoutNewBranch(t, tmpDir, "feature/posttodo")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	currentHookAgentName = agent.AgentNameClaudeCode
+	t.Cleanup(func() { currentHookAgentName = "" })
+
+	ctx := context.Background()
+	toolUseID := "toolu-posttodo-01"
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "preexisting.txt"), []byte("x"), 0o600))
+
+	// Process A: pre-task capture under a breached budget writes the marker.
+	gitrepo.SetStatusBudgetBreachedForTesting(true)
+	require.NoError(t, CapturePreTaskState(ctx, toolUseID))
+	gitrepo.SetStatusBudgetBreachedForTesting(false)
+
+	// The subagent modifies a tracked file during the task, so the incremental
+	// checkpoint still has real content to save.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# test\nmodified\n"), 0o600))
+
+	input := `{"session_id":"sess-posttodo","transcript_path":"","tool_name":"TodoWrite",` +
+		`"tool_use_id":"toolu-todowrite-01","tool_input":{"todos":[{"content":"do work","status":"completed"}]}}`
+	require.NoError(t, handleClaudeCodePostTodoFromReader(ctx, strings.NewReader(input)))
+
+	state, err := strategy.LoadSessionState(ctx, "sess-posttodo")
+	require.NoError(t, err)
+	require.Contains(t, state.FilesTouched, "README.md")
+	require.NotContains(t, state.FilesTouched, "preexisting.txt",
+		"marker must disable new-file detection on the PostTodo path")
 }
 
 // --- handleLifecycleCompaction tests ---
@@ -2470,13 +2833,17 @@ func TestNewRefreshTrailEnablementCmd_APIFailureExitsZero(t *testing.T) {
 // trail in .entire/logs/entire.log instead of vanishing. The command runs in a
 // repo with no origin remote, so the scope resolves-and-fails locally (no
 // network) and that failure has to be logged to the repo's log file.
+//
+// Executed through the real root command, because the root PersistentPreRunE is
+// what opens the log file (and its PersistentPostRun is what flushes it) — the
+// same path the detached child takes through main.go. Constructing the
+// subcommand alone would exercise a wiring production never uses.
 func TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile(t *testing.T) {
 	setupStopTestRepo(t)
+	markRepoSetUpForLogging(t)
 	t.Setenv("ENTIRE_LOG_LEVEL", "debug")
 
-	cmd := newRefreshTrailEnablementCmd()
-	cmd.SetArgs([]string{})
-	require.NoError(t, cmd.ExecuteContext(context.Background()))
+	require.NoError(t, executeThroughRoot(t, "__refresh_trail_enablement"))
 
 	root, err := paths.WorktreeRoot(context.Background())
 	require.NoError(t, err)
@@ -2486,12 +2853,15 @@ func TestRefreshTrailEnablementCmd_LogsBackgroundFailureToFile(t *testing.T) {
 		"background refresh failure must be diagnosable in .entire/logs/entire.log")
 }
 
-// TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree guards the file-init
-// against running outside a resolvable worktree. logging.Init falls back to the
-// current directory when paths.WorktreeRoot fails, so the command must guard on
-// WorktreeRoot (as resume/rewind/reset/explain do) or a child whose worktree was
-// removed/relocated between spawn and exec would MkdirAll a stray .entire/logs/
-// wherever it happens to be running.
+// TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree guards log-file
+// creation against running outside a resolvable worktree. The root
+// PersistentPreRun — the single logger-construction site — must gate on
+// WorktreeRoot, or a child whose worktree was removed/relocated between spawn
+// and exec would MkdirAll a stray .entire/logs/ wherever it happens to be
+// running.
+//
+// Run through the real root: the gate lives there now, so constructing the
+// subcommand alone would pass without ever reaching the code under test.
 func TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree(t *testing.T) {
 	dir := t.TempDir() // a plain temp dir, not a git worktree
 	t.Chdir(dir)
@@ -2499,9 +2869,7 @@ func TestRefreshTrailEnablementCmd_NoStrayLogsOutsideWorktree(t *testing.T) {
 	session.ClearGitCommonDirCache()
 	t.Setenv("ENTIRE_LOG_LEVEL", "debug")
 
-	cmd := newRefreshTrailEnablementCmd()
-	cmd.SetArgs([]string{})
-	require.NoError(t, cmd.ExecuteContext(context.Background()))
+	require.NoError(t, executeThroughRoot(t, "__refresh_trail_enablement"))
 
 	_, statErr := os.Stat(filepath.Join(dir, ".entire", "logs"))
 	require.True(t, os.IsNotExist(statErr),
