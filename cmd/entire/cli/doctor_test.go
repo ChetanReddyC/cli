@@ -551,6 +551,38 @@ func TestRunSessionsFix_NonInteractive_HintsForceInsteadOfPrompting(t *testing.T
 	assert.ElementsMatch(t, []string{"2026-08-17-doctor-no-tty", "2026-08-17-doctor-no-tty-2"}, ids)
 }
 
+func TestRunSessionsFix_NonInteractive_TaskContentHintMatchesForceCondense(t *testing.T) {
+	// Cannot use t.Parallel() because t.Chdir modifies process-global state.
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	state := &strategy.SessionState{
+		SessionID:  "2026-08-20-doctor-task-content",
+		BaseCommit: testBaseCommit,
+		Phase:      session.PhaseEnded,
+		StartedAt:  time.Now().Add(-2 * time.Hour),
+		TaskRecords: []session.TaskRecord{{
+			ToolUseID:   "toolu_doctor_task_content",
+			StartedAt:   time.Now().Add(-time.Hour),
+			CompletedAt: time.Now(),
+		}},
+	}
+	require.NoError(t, strategy.SaveSessionState(context.Background(), state))
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	require.NoError(t, runSessionsFix(cmd, false))
+	assert.Empty(t, stderr.String())
+
+	output := stdout.String()
+	assert.Contains(t, output, "  Fix: condense to permanent storage.")
+	assert.NotContains(t, output, "  Fix: discard (no condensable checkpoint data).")
+}
+
 // Doctor's logging setup must cover the whole command, not just the
 // exited-session sweep. With no exited session to finalize — the common case,
 // and the one this fixture builds — the sweep returns before it touches logging,

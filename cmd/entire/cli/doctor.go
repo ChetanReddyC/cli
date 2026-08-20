@@ -215,7 +215,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		// Disclose what --force would do to this session, using the same
 		// predicate the force branch above applies.
 		if !canPrompt {
-			if ss.HasShadowBranch && ss.CheckpointCount > 0 {
+			if canCondenseStuckSession(ss) {
 				fmt.Fprintln(cmd.OutOrStdout(), "  Fix: condense to permanent storage.")
 			} else {
 				fmt.Fprintln(cmd.OutOrStdout(), "  Fix: discard (no condensable checkpoint data).")
