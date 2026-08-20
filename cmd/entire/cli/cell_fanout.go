@@ -208,7 +208,10 @@ func routedRepoPlacement(r coreapi.RepoIndexEntry) (coreapi.RepoPlacement, bool)
 
 // placementByID returns the placement with the given ID; ok is false when id
 // is empty or names no placement. Both sides of the comparison are trimmed so
-// the match cannot depend on which caller normalized its input.
+// the match cannot depend on which caller normalized its input. Shared with
+// cell_target.go's resolveProcessingPlacement: the two resolvers differ in
+// what they do with an unready placement, deliberately, but must never
+// disagree on whether an ID names one at all.
 func placementByID(placements []coreapi.RepoPlacement, id string) (coreapi.RepoPlacement, bool) {
 	id = strings.TrimSpace(id)
 	if id == "" {
