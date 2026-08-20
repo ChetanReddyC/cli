@@ -124,8 +124,9 @@ func detectGoredact(s string) []taggedRegion {
 	}
 	out := regions[:0]
 	for _, r := range regions {
-		// Out-of-bounds offsets are a library-contract violation; flag unknown coverage instead of panicking.
-		if r.start < 0 || r.end > len(s) {
+		// Out-of-bounds or inverted offsets are a library-contract violation;
+		// flag unknown coverage instead of panicking.
+		if r.start < 0 || r.end > len(s) || r.start > r.end {
 			scannerDegraded.Store(true)
 			continue
 		}

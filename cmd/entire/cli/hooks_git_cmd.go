@@ -143,6 +143,9 @@ func initHookLogging(ctx context.Context) (func(), error) {
 	// Configure redaction before acting on initErr: the hook writes
 	// checkpoints even when logging failed to initialize.
 	if err := strategy.EnsureRedactionConfigured(); err != nil {
+		if initErr == nil {
+			logging.Close() // flush the just-initialized logger before failing the hook
+		}
 		return func() {}, fmt.Errorf("configuring redaction: %w", err)
 	}
 	if initErr != nil {
