@@ -158,7 +158,9 @@ var connectionStringRules = []connectionStringRule{
 
 // String replaces secrets and PII in s using layered detection:
 //  1. Entropy-based: high-entropy alphanumeric sequences (threshold 4.5)
-//  2. Pattern-based: betterleaks regex rules (260+ known secret formats)
+//  2. Pattern-based: scanner engines selected via ConfigureScanners —
+//     betterleaks regex rules (260+ known secret formats) and/or the
+//     goredact engine; betterleaks-only when unconfigured
 //  3. Provider token prefixes: deterministic prefix rules for credential
 //     formats betterleaks misses in isolation (e.g. Supabase sb_secret_)
 //  4. Credentialed URIs: URLs containing userinfo passwords
@@ -205,24 +207,29 @@ func detectAllLayers(s string) []taggedRegion {
 		}
 	}
 
-	// 2. Pattern-based detection via betterleaks (secrets — always on).
-	if d := getDetector(); d != nil {
-		for _, f := range d.DetectString(s) {
-			if f.Secret == "" {
-				continue
-			}
-			searchFrom := 0
-			for {
-				idx := strings.Index(s[searchFrom:], f.Secret)
-				if idx < 0 {
-					break
+	// 2. Pattern-based detection via scanner engines (secrets — selected
+	// via ConfigureScanners; betterleaks-only when unconfigured).
+	if getScanners().betterleaks {
+		if d := getDetector(); d != nil {
+			for _, f := range d.DetectString(s) {
+				if f.Secret == "" {
+					continue
 				}
-				absIdx := searchFrom + idx
-				regions = append(regions, taggedRegion{region: region{absIdx, absIdx + len(f.Secret)}})
-				searchFrom = absIdx + len(f.Secret)
+				searchFrom := 0
+				for {
+					idx := strings.Index(s[searchFrom:], f.Secret)
+					if idx < 0 {
+						break
+					}
+					absIdx := searchFrom + idx
+					regions = append(regions, taggedRegion{region: region{absIdx, absIdx + len(f.Secret)}})
+					searchFrom = absIdx + len(f.Secret)
+				}
 			}
 		}
 	}
+	// goredact engine findings (only runs when enabled via ConfigureScanners).
+	regions = append(regions, detectGoredact(s)...)
 
 	// 3. Provider-specific deterministic token prefixes (secrets — always on).
 	// Catches low-entropy credential formats (e.g. Supabase sb_secret_) that
@@ -510,11 +517,16 @@ func Bytes(b []byte) []byte {
 
 // JSONLBytes redacts secrets in JSONL-formatted byte content and returns
 // the result as RedactedBytes, certifying the output has been through redaction.
+// Returns ErrScannerDegraded when the goredact scanner degraded while
+// betterleaks is disabled.
 func JSONLBytes(b []byte) (RedactedBytes, error) {
 	s := string(b)
 	redacted, err := JSONLContent(s)
 	if err != nil {
 		return RedactedBytes{}, err
+	}
+	if scannerDegradedSole() {
+		return RedactedBytes{}, ErrScannerDegraded
 	}
 	if redacted == s {
 		return RedactedBytes{data: b}, nil
@@ -525,11 +537,16 @@ func JSONLBytes(b []byte) (RedactedBytes, error) {
 // JSONLBytesWithPrivacyFilter augments JSONLBytes with the OpenAI Privacy
 // Filter. Use only at condensation/export boundaries; per-turn writes must
 // use JSONLBytes.
+// Returns ErrScannerDegraded when the goredact scanner degraded while
+// betterleaks is disabled.
 func JSONLBytesWithPrivacyFilter(ctx context.Context, b []byte) (RedactedBytes, error) {
 	s := string(b)
 	redacted, err := JSONLContentWithPrivacyFilter(ctx, s)
 	if err != nil {
 		return RedactedBytes{}, err
+	}
+	if scannerDegradedSole() {
+		return RedactedBytes{}, ErrScannerDegraded
 	}
 	if redacted == s {
 		return RedactedBytes{data: b}, nil
