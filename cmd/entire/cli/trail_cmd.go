@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -243,7 +244,7 @@ func runTrailShowWithClient(ctx context.Context, w, errW io.Writer, client *api.
 			bodyText = snapshot
 		}
 	case found.Number > 0:
-		if bt, derr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number); derr == nil {
+		if bt, _, derr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number); derr == nil {
 			// A successful fetch means we authoritatively consulted the
 			// description, but it only supersedes the seeded list body when
 			// it actually carries text: an older/partial server that omits
@@ -428,27 +429,28 @@ func trailWebURL(base, forge, owner, repo string, number int) string {
 }
 
 // fetchTrailDescription fetches a trail's rendered description text
-// (`trail.body_document.text_snapshot`), which the list endpoint omits, by
-// integer number. It returns only the description — the list result already
-// supplies the metadata — and decodes only the fields it needs, so it is
-// unaffected by the shape of sibling fields like `checkpoints`/`thread`.
-func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, error) {
+// (`trail.body_document.text_snapshot`) and its etag, which the list endpoint
+// omits, by integer number. It returns only the description and etag — the
+// list result already supplies the metadata — and decodes only the fields it
+// needs, so it is unaffected by the shape of sibling fields like
+// `checkpoints`/`thread`.
+func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, string, error) {
 	resp, err := client.Get(ctx, trailNumberPath(forge, owner, repo, number))
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch trail detail: %w", err)
+		return "", "", fmt.Errorf("failed to fetch trail detail: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return "", err
+		return "", "", err
 	}
 	detail, err := decodeTrailResource(resp)
 	if err != nil {
-		return "", fmt.Errorf("failed to decode trail detail: %w", err)
+		return "", "", fmt.Errorf("failed to decode trail detail: %w", err)
 	}
 	if detail.BodyDocument == nil {
-		return "", nil
+		return "", "", nil
 	}
-	return strings.TrimSpace(detail.BodyDocument.TextSnapshot), nil
+	return strings.TrimSpace(detail.BodyDocument.TextSnapshot), detail.BodyDocument.ETag, nil
 }
 
 // decodeTrailResource decodes entire-api's direct detail resource.
@@ -1215,32 +1217,40 @@ func newTrailCreateRequest(title, body, branch, base, statusStr, typeStr, priori
 }
 
 // resolveTrailUpdateBody returns the body text to seed the interactive update
-// form with. The list resource omits the description (it lives in
-// body_document, served only by the detail endpoint), so update must fetch the
-// detail body — otherwise the form prefills from the empty list body and a
-// user edit against that blank baseline can overwrite a description they never
-// saw. Best-effort: on a failed detail fetch it returns the list body plus the
-// error so the caller can warn (mirroring runTrailShow); an empty detail body
-// (older/partial server) falls back to the list body with no error.
-func resolveTrailUpdateBody(ctx context.Context, client *api.Client, forge, owner, repo string, found *api.TrailResource) (string, error) {
-	body := found.Body
+// form with, plus the etag of the description as read (empty when unavailable,
+// e.g. an older server or a fallback to the list body — see sendTrailBody for
+// how a missing etag is handled). The list resource omits the description (it
+// lives in body_document, served only by the detail endpoint), so update must
+// fetch the detail body — otherwise the form prefills from the empty list body
+// and a user edit against that blank baseline can overwrite a description they
+// never saw. Best-effort: on a failed detail fetch it returns the list body
+// (and no etag) plus the error so the caller can warn (mirroring
+// runTrailShow); an empty detail body (older/partial server) falls back to the
+// list body with no error.
+func resolveTrailUpdateBody(ctx context.Context, client *api.Client, forge, owner, repo string, found *api.TrailResource) (body, etag string, err error) {
+	body = found.Body
 	if found.Number > 0 {
-		bt, err := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number)
-		if err != nil {
-			return body, err
+		bt, et, ferr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number)
+		if ferr != nil {
+			return body, "", ferr
 		}
 		// fetchTrailDescription already trims; a non-empty result supersedes
 		// the list body, an empty one (older/partial server) leaves it intact.
+		// The etag is kept either way — it describes the document read, not
+		// the text, so it's valid even when the description is legitimately
+		// empty (avoids a redundant refetch below).
+		etag = et
 		if bt != "" {
 			body = bt
 		}
 	}
-	return body, nil
+	return body, etag, nil
 }
 
 func newTrailUpdateCmd() *cobra.Command {
 	var statusStr, title, body, branch, typeStr, priorityStr string
 	var assigneeAdd, assigneeRemove, reviewerAdd, reviewerRemove []string
+	var overwrite bool
 
 	cmd := &cobra.Command{
 		Use:   "update",
@@ -1257,6 +1267,7 @@ func newTrailUpdateCmd() *cobra.Command {
 				TitleChanged:    cmd.Flags().Changed("title"),
 				Body:            body,
 				BodyChanged:     cmd.Flags().Changed("body"),
+				Overwrite:       overwrite,
 				Branch:          branch,
 				Repo:            trailRepoFlag(cmd),
 				AssigneeAdd:     assigneeAdd,
@@ -1274,6 +1285,7 @@ func newTrailUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&statusStr, "status", "", "Update status")
 	cmd.Flags().StringVar(&title, "title", "", "Update title")
 	cmd.Flags().StringVar(&body, "body", "", "Replace the description (--body= clears it)")
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "Replace the description unconditionally, even if it changed since being read (only applies when --body is also given)")
 	cmd.Flags().StringVar(&branch, "branch", "", "Branch to update trail for (defaults to current)")
 	cmd.Flags().StringSliceVar(&assigneeAdd, "add-assignee", nil, "Add assignee(s) by login")
 	cmd.Flags().StringSliceVar(&assigneeRemove, "remove-assignee", nil, "Remove assignee(s) by login")
@@ -1292,6 +1304,7 @@ type trailUpdateInputs struct {
 	TitleChanged    bool
 	Body            string
 	BodyChanged     bool
+	Overwrite       bool
 	Branch          string
 	Repo            string
 	AssigneeAdd     []string
@@ -1340,6 +1353,7 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 	statusStr := inputs.Status
 	title := inputs.Title
 	body := inputs.Body
+	var bodyETag string
 	noFlags := !inputs.StatusChanged && !inputs.TitleChanged && !inputs.BodyChanged &&
 		inputs.AssigneeAdd == nil && inputs.AssigneeRemove == nil &&
 		inputs.ReviewerAdd == nil && inputs.ReviewerRemove == nil &&
@@ -1364,11 +1378,12 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 		// the form prefills with the current text and change detection below
 		// compares against the real server value. Warn on a fetch failure so
 		// a blank baseline doesn't silently overwrite an unseen description.
-		seedBody, bodyErr := resolveTrailUpdateBody(ctx, client, forge, owner, repoName, found)
+		seedBody, seedETag, bodyErr := resolveTrailUpdateBody(ctx, client, forge, owner, repoName, found)
 		if bodyErr != nil {
 			fmt.Fprintf(errW, "Warning: could not load current trail body: %v\n", bodyErr)
 		}
 		body = seedBody
+		bodyETag = seedETag
 		origStatus, origTitle, origBody := statusStr, title, body
 
 		form := NewAccessibleForm(
@@ -1453,8 +1468,28 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 			return err
 		}
 	}
+	if !noFlags && inputs.BodyChanged && bodyETag == "" && !inputs.Overwrite {
+		// Non-interactive --body path only (noFlags is the interactive
+		// branch, which already read the body and its etag above to seed the
+		// editor — gating on that branch rather than on bodyETag=="" matters:
+		// an interactive session can legitimately end with no etag too (e.g.
+		// the seed read failed and the user was already warned), and redoing
+		// the read here would silently pair an etag for content the user
+		// never saw with their edit). A --body caller supplied the
+		// replacement text directly and skipped that read, so do it here,
+		// best-effort, purely for the etag. A failure just leaves bodyETag
+		// empty and falls through to sendTrailBody's graceful Overwrite
+		// fallback rather than failing the whole command — but say so, since
+		// this is the unattended path most likely to run without anyone
+		// watching for a silently downgraded conflict check.
+		if _, etag, ferr := fetchTrailDescription(ctx, client, forge, owner, repoName, found.Number); ferr != nil {
+			fmt.Fprintf(errW, "Warning: could not verify trail body is unchanged (%v); writing without conflict detection\n", ferr)
+		} else {
+			bodyETag = etag
+		}
+	}
 	if inputs.BodyChanged {
-		if err := sendTrailBody(ctx, client, trailBodyPath(forge, owner, repoName, found.Number), body); err != nil {
+		if err := sendTrailBody(ctx, client, trailBodyPath(forge, owner, repoName, found.Number), body, bodyETag, inputs.Overwrite); err != nil {
 			if hasMeta {
 				return fmt.Errorf("trail metadata was updated, but the body update failed (the metadata change already applied; retry only the --body change): %w", err)
 			}
@@ -1616,31 +1651,48 @@ func sendTrailPatch(ctx context.Context, client *api.Client, path string, req ap
 // one that serves body writes (api.TrailUpdateRequest documents why the metadata
 // PATCH does not). path must already be that route — see trailBodyPath.
 //
-// Overwrite is set because that is what `trail update --body` already means: the
-// caller named the replacement text, and the interactive path shows them the
-// current description before they edit it (resolveTrailUpdateBody). Left false,
-// the route refuses with 409 document_not_empty against any trail whose
-// description is non-empty — i.e. everything except a first write — so the flag
-// is what makes editing an existing description work at all.
+// Three dispatch modes, in order:
 //
-// The cost is that a description changed elsewhere between that read and this
-// write is replaced rather than reported. The route's If-Match is not a fix for
-// that here: its ETag comes only from a body write's own response (including the
-// 409's), so the CLI can obtain one just by being refused and retrying — which
-// clobbers exactly as overwrite does, one round trip later. A true
-// compare-and-set would need the ETag of the document the user actually read,
-// and a trail read carries none (bodyDocument has no ETag, and its updatedAt is
-// formatted to a different precision than the header, so reconstructing one from
-// a read yields a value that never matches). Giving the user that choice is a
-// flag decision, not something to bury here.
-func sendTrailBody(ctx context.Context, client *api.Client, path, body string) error {
-	resp, err := client.Put(ctx, path, api.TrailBodyRequest{Markdown: body, Overwrite: true})
+//   - overwrite: sends Overwrite: true and no If-Match. This is the explicit
+//     --overwrite flag — the caller wants the replacement to win regardless of
+//     what's there.
+//   - ifMatch non-empty (and !overwrite): sends If-Match instead of Overwrite,
+//     so the write is rejected with 412 if the description changed since
+//     ifMatch was read (resolveTrailUpdateBody / the non-interactive etag
+//     fetch in runTrailUpdateWithClient).
+//   - neither: falls back to Overwrite: true. This is deliberate graceful
+//     degradation, not a shortcut to remove — it's what runs against a server
+//     that predates the etag field, a trail with no body document yet, or
+//     after a failed best-effort etag read. Refusing to write in that case
+//     would make `trail update --body` unusable against anything older or
+//     partial than the newest server.
+func sendTrailBody(ctx context.Context, client *api.Client, path, body, ifMatch string, overwrite bool) error {
+	req := api.TrailBodyRequest{Markdown: body}
+	var headers http.Header
+	if ifMatch != "" && !overwrite {
+		headers = http.Header{"If-Match": []string{ifMatch}}
+	} else {
+		req.Overwrite = true
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal trail body request: %w", err)
+	}
+	resp, err := client.Request(ctx, http.MethodPut, path, headers, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("failed to update trail body: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return err
+		switch {
+		case api.IsHTTPErrorStatus(err, http.StatusPreconditionFailed):
+			return fmt.Errorf("%w — trail body changed since it was read; run 'entire trail show' to see the current text and merge it in, then re-run — or pass --overwrite to discard it", err)
+		case api.IsHTTPErrorStatus(err, http.StatusConflict):
+			return fmt.Errorf("%w — trail body is not empty; pass --overwrite to replace it", err)
+		default:
+			return err
+		}
 	}
 	// Nothing reads the document back; decoding it only confirms the success
 	// really was this route's JSON response, and drains the body — the same
