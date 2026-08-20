@@ -412,13 +412,16 @@ func TestLoad_LocalIgnoresScannerToggles(t *testing.T) {
 	}
 }
 
-// TestScannerSettings_BothDisabledFailsLoad pins the fail-closed rule: if
-// both secret scanners end up disabled after settings are loaded, Load must
-// return an error wrapping ErrScannerConfig rather than silently proceeding
-// with zero active scanners. The "both enabled" case is a positive control:
-// it guards against a botched condition (e.g. one that checks only
-// BetterleaksEnabled()) that would reject this legal configuration.
+// TestScannerSettings_BothDisabledFailsLoad pins the fail-closed rule: Load
+// must reject a merged config with zero enabled scanners (wrapping
+// ErrScannerConfig) while accepting legal one-scanner and default selections.
 func TestScannerSettings_BothDisabledFailsLoad(t *testing.T) {
+	// Nil-receiver accessors must report the defaults (betterleaks on, goredact off).
+	var nilSettings *EntireSettings
+	if !nilSettings.BetterleaksEnabled() || nilSettings.GoredactEnabled() {
+		t.Error("nil-receiver scanner accessors should report defaults (betterleaks on, goredact off)")
+	}
+
 	cases := []struct {
 		name    string
 		json    string
@@ -427,6 +430,7 @@ func TestScannerSettings_BothDisabledFailsLoad(t *testing.T) {
 		{"explicit both false", `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{"enabled":false},"goredact":{"enabled":false}}}`, true},
 		{"betterleaks false, goredact omitted", `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{"enabled":false}}}`, true},
 		{"goredact only", `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{"enabled":false},"goredact":{"enabled":true}}}`, false},
+		{"empty scanner objects keep defaults", `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{},"goredact":{}}}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1545,62 +1549,6 @@ func TestGetCheckpointPushRemote(t *testing.T) {
 			s := &EntireSettings{StrategyOptions: tt.opts}
 			if got := s.GetCheckpointPushRemote(); got != tt.want {
 				t.Errorf("GetCheckpointPushRemote() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func boolPtr(b bool) *bool { return &b }
-
-func TestScannerSettings_Defaults(t *testing.T) {
-	t.Parallel()
-	s := &EntireSettings{}
-	if !s.BetterleaksEnabled() {
-		t.Error("BetterleaksEnabled() = false for zero settings, want true")
-	}
-	if s.GoredactEnabled() {
-		t.Error("GoredactEnabled() = true for zero settings, want false")
-	}
-
-	var nilS *EntireSettings
-	if !nilS.BetterleaksEnabled() {
-		t.Error("BetterleaksEnabled() = false for nil receiver, want true")
-	}
-	if nilS.GoredactEnabled() {
-		t.Error("GoredactEnabled() = true for nil receiver, want false")
-	}
-}
-
-func TestScannerSettings_Explicit(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name            string
-		redaction       *RedactionSettings
-		wantBetterleaks bool
-		wantGoredact    bool
-	}{
-		{"betterleaks off, goredact on", &RedactionSettings{
-			Betterleaks: &ScannerSettings{Enabled: boolPtr(false)},
-			Goredact:    &ScannerSettings{Enabled: boolPtr(true)},
-		}, false, true},
-		{"both on", &RedactionSettings{
-			Betterleaks: &ScannerSettings{Enabled: boolPtr(true)},
-			Goredact:    &ScannerSettings{Enabled: boolPtr(true)},
-		}, true, true},
-		{"empty scanner objects keep defaults", &RedactionSettings{
-			Betterleaks: &ScannerSettings{},
-			Goredact:    &ScannerSettings{},
-		}, true, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s := &EntireSettings{Redaction: tc.redaction}
-			if got := s.BetterleaksEnabled(); got != tc.wantBetterleaks {
-				t.Errorf("BetterleaksEnabled() = %v, want %v", got, tc.wantBetterleaks)
-			}
-			if got := s.GoredactEnabled(); got != tc.wantGoredact {
-				t.Errorf("GoredactEnabled() = %v, want %v", got, tc.wantGoredact)
 			}
 		})
 	}

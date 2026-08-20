@@ -8,6 +8,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 // sweepCondenseBudget caps how much wall clock one sweep may spend condensing,
@@ -62,6 +63,16 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 
 	logCtx := logging.WithComponent(ctx, "session")
 	condenseDeadline := time.Now().Add(sweepCondenseBudget)
+
+	// This sweep writes checkpoints; a scanner-config failure must not silently
+	// use the default scanner set, so skip the condense work (an already-expired
+	// deadline) while still marking sessions ended below.
+	if err := strategy.EnsureRedactionConfigured(); err != nil {
+		logging.Warn(logging.WithComponent(ctx, "redaction"),
+			"skipping sweep condense: redaction scanner configuration failed",
+			slog.String("error", err.Error()))
+		condenseDeadline = time.Now()
+	}
 
 	var store *session.StateStore // lazily created on first finalize
 	finalized := 0

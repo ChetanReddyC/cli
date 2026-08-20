@@ -1617,7 +1617,8 @@ func TestConfigureScanners_GoredactLayer(t *testing.T) {
 
 	// Baseline: both scanners off (legal at the package level; the settings
 	// layer forbids this combination in production). This LOW-entropy,
-	// shape-valid PAT (entropy ~3.6, below layer 1's 4.5 threshold) survives
+	// shape-valid PAT (entropy ≈3.22 full token, ≈2.99 over the suffix — below
+	// layer 1's 4.5 threshold) survives
 	// unchanged, proving no non-scanner layer catches it — every redaction
 	// asserted below is scanner-attributable — and pinning the betterleaks
 	// gate-off direction (betterleaks-only DOES redact this PAT).

@@ -553,9 +553,12 @@ func (s *treeWriter) writeFinalTaskCheckpoint(ctx context.Context, opts WriteOpt
 		if readErr == nil && !tooLarge {
 			agentContent = prepared
 			// Try JSONL-aware redaction first; fall back to plain string redaction
-			// if the content is not valid JSONL (avoids silently dropping the transcript).
+			// only on a JSONL parse error (avoids silently dropping the transcript).
 			redacted, jsonlErr := redact.JSONLBytes(agentContent)
 			if jsonlErr != nil {
+				if errors.Is(jsonlErr, redact.ErrScannerDegraded) {
+					return "", fmt.Errorf("redact subagent transcript %s: %w", opts.SubagentTranscriptPath, jsonlErr)
+				}
 				logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
 					slog.String("path", opts.SubagentTranscriptPath),
 					slog.String("error", jsonlErr.Error()),
@@ -2578,7 +2581,10 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, fileP
 		return hash, mode, nil
 	}
 
-	content = RedactBlobBytes(ctx, content, treePath, false)
+	content, err = RedactBlobBytes(ctx, content, treePath, false)
+	if err != nil {
+		return plumbing.ZeroHash, 0, err
+	}
 
 	hash, err := CreateBlobFromContent(repo, content)
 	if err != nil {
@@ -2594,6 +2600,11 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, fileP
 // usePrivacyFilter is true the full 9-layer pipeline (the eight regex
 // layers plus OPF) runs; otherwise just the eight regex layers.
 //
+// Returns an error wrapping redact.ErrScannerDegraded (content nil) when
+// the sole configured scanner degraded on a JSON-shaped blob — callers
+// must match it with errors.Is and fail the write rather than fall back
+// to under-scanned plain redaction.
+//
 // .json is handled alongside .jsonl because checkpoint metadata files
 // (metadata.json, per-session metadata.json) carry free-form fields
 // like Summary.Intent / Summary.Outcome / ReviewPrompt that can
@@ -2607,7 +2618,7 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, fileP
 // enabled-but-no-categories OPF config; the true path below silently
 // falls back to regex-only in that state, so it must not be wired
 // into any flow that stamps the Entire-OPF-Applied trailer.
-func RedactBlobBytes(ctx context.Context, content []byte, treePath string, usePrivacyFilter bool) []byte {
+func RedactBlobBytes(ctx context.Context, content []byte, treePath string, usePrivacyFilter bool) ([]byte, error) {
 	if strings.HasSuffix(treePath, ".jsonl") || strings.HasSuffix(treePath, ".json") {
 		var (
 			redacted redact.RedactedBytes
@@ -2619,14 +2630,17 @@ func RedactBlobBytes(ctx context.Context, content []byte, treePath string, usePr
 			redacted, err = redact.JSONLBytes(content)
 		}
 		if err == nil {
-			return redacted.Bytes()
+			return redacted.Bytes(), nil
+		}
+		if errors.Is(err, redact.ErrScannerDegraded) {
+			return nil, fmt.Errorf("redact %s: %w", treePath, err)
 		}
 		// JSONL parse failed — fall through to plain bytes.
 	}
 	if usePrivacyFilter {
-		return redact.BytesWithPrivacyFilter(ctx, content)
+		return redact.BytesWithPrivacyFilter(ctx, content), nil
 	}
-	return redact.Bytes(content)
+	return redact.Bytes(content), nil
 }
 
 // GetGitAuthorFromRepo retrieves the git user.name and user.email,

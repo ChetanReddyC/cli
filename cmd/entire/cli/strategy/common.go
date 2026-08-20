@@ -532,6 +532,7 @@ func EnsureRedactionConfigured() error {
 // betterleaks is off, so exactly one narrowed configuration is reachable
 // today. Best-effort: marker IO failures degrade to warning every run, never
 // to silence.
+// Revisit the fixed marker content when a third engine is added.
 func maybeWarnNarrowedScanners(ctx context.Context, s *settings.EntireSettings) {
 	if s.BetterleaksEnabled() {
 		return

@@ -1808,39 +1808,35 @@ func TestRunStatusJSON_Enabled(t *testing.T) {
 	}
 }
 
-func TestRunStatusJSON_SecretScanners_Default(t *testing.T) {
-	setupTestRepo(t)
-	writeSettings(t, testSettingsEnabled)
-
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
+// secret_scanners is omitted for the default selection and lists the enabled
+// engines for a non-default one.
+func TestRunStatusJSON_SecretScanners(t *testing.T) {
+	cases := []struct {
+		name     string
+		settings string
+		want     []string // nil: field omitted for the default selection
+	}{
+		{"default omitted", testSettingsEnabled, nil},
+		{"goredact only listed", testSettingsGoredactOnly, []string{"goredact"}},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTestRepo(t)
+			writeSettings(t, tc.settings)
 
-	var result statusJSON
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if result.SecretScanners != nil {
-		t.Errorf("Expected secret_scanners omitted for default selection, got %v", result.SecretScanners)
-	}
-}
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
 
-func TestRunStatusJSON_SecretScanners_NonDefault(t *testing.T) {
-	setupTestRepo(t)
-	writeSettings(t, testSettingsGoredactOnly)
-
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
-	}
-
-	var result statusJSON
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if !slices.Equal(result.SecretScanners, []string{"goredact"}) {
-		t.Errorf("Expected secret_scanners=[goredact], got %v", result.SecretScanners)
+			var result statusJSON
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if !slices.Equal(result.SecretScanners, tc.want) {
+				t.Errorf("secret_scanners = %v, want %v", result.SecretScanners, tc.want)
+			}
+		})
 	}
 }
 

@@ -124,6 +124,11 @@ func detectGoredact(s string) []taggedRegion {
 	}
 	out := regions[:0]
 	for _, r := range regions {
+		// Out-of-bounds offsets are a library-contract violation; flag unknown coverage instead of panicking.
+		if r.start < 0 || r.end > len(s) {
+			scannerDegraded.Store(true)
+			continue
+		}
 		// Defensive: goredact's validators already reject placeholder shapes;
 		// kept so the stack-wide policy holds even if a future rule set stops
 		// doing so.

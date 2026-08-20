@@ -159,7 +159,7 @@ var connectionStringRules = []connectionStringRule{
 // String replaces secrets and PII in s using layered detection:
 //  1. Entropy-based: high-entropy alphanumeric sequences (threshold 4.5)
 //  2. Pattern-based: scanner engines selected via ConfigureScanners —
-//     betterleaks regex rules (260+ known secret formats) and/or the
+//     betterleaks regex rules (several hundred known secret formats) and/or the
 //     goredact engine; betterleaks-only when unconfigured
 //  3. Provider token prefixes: deterministic prefix rules for credential
 //     formats betterleaks misses in isolation (e.g. Supabase sb_secret_)
@@ -174,8 +174,8 @@ func String(s string) string {
 	return applyRegions(s, detectAllLayers(s))
 }
 
-// detectAllLayers runs the eight always-on/opt-in regex-based redaction
-// layers and returns their tagged regions. The OpenAI Privacy Filter
+// detectAllLayers runs the always-on, opt-in, and scanner-configurable
+// detection layers and returns their tagged regions. The OpenAI Privacy Filter
 // (the final, network-backed layer) is NOT included — callers that want it
 // append detectOPF spans to the result before passing to applyRegions. See
 // StringWithPrivacyFilter for the augmented flow.
