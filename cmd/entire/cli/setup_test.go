@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/agent/vogon"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -142,6 +143,11 @@ func writeExternalAgentBinary(t *testing.T, dir, name string) {
 // simulate both installed and available (uninstalled) external plugins.
 func writeExternalAgentBinaryEx(t *testing.T, dir, name string, hooksInstalled bool) {
 	t.Helper()
+	// Whatever this mock is written for, discovering it registers it into the
+	// process-global registry, which outlives the TempDir holding the binary.
+	// Restore the registry so later tests walking agent.List() do not exec a
+	// path that no longer exists.
+	t.Cleanup(agent.SnapshotRegistryForTesting())
 
 	installed := strconv.FormatBool(hooksInstalled)
 
@@ -189,6 +195,7 @@ esac
 
 func writeExternalSummaryAgentBinary(t *testing.T, dir, name string) {
 	t.Helper()
+	t.Cleanup(agent.SnapshotRegistryForTesting())
 
 	script := `#!/bin/sh
 case "$1" in
@@ -1252,12 +1259,6 @@ func TestRunUninstall_Force_RemovesGitHooks(t *testing.T) {
 //
 // setupTestRepo scrubs $PATH down to git and sh, so a real entire-agent-* binary
 // on the developer's machine cannot leak in.
-//
-// The mock does stay in the process-global registry after the test, matching
-// what the other external-agent tests in this package already do — there is no
-// registry-restore helper to hang it on yet. The name is unique per test, and
-// its binary is gone once TempDir cleanup runs, so a later AreHooksInstalled on
-// the leaked entry fails and reports false rather than a stale "installed".
 func installExternalAgentPluginForUninstall(t *testing.T, agentName string, hooksInstalled bool) {
 	t.Helper()
 
@@ -1399,6 +1400,92 @@ func TestRunUninstall_ReportsUnremovedExternalAgentHooks(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "uninstalled successfully") {
 		t.Errorf("uninstall must not report success while agent hooks remain, stdout:\n%s", stdout.String())
+	}
+}
+
+// fakeBuiltinHookAgent is a built-in (non-external) hook-supporting agent whose
+// UninstallHooks is observable. It embeds vogon so the Agent surface stays
+// whatever the interface requires, and overrides only what these tests turn on.
+type fakeBuiltinHookAgent struct {
+	*vogon.Agent
+
+	name           types.AgentName
+	uninstallCalls *int
+	uninstallErr   error
+}
+
+func (f *fakeBuiltinHookAgent) Name() types.AgentName { return f.name }
+func (f *fakeBuiltinHookAgent) Type() types.AgentType { return types.AgentType(f.name) }
+
+// AreHooksInstalled reports false: these tests are about what happens to a
+// built-in the installed-hooks sweep did not pick up.
+func (f *fakeBuiltinHookAgent) AreHooksInstalled(context.Context) bool { return false }
+
+func (f *fakeBuiltinHookAgent) UninstallHooks(context.Context) error {
+	*f.uninstallCalls++
+	return f.uninstallErr
+}
+
+// registerFakeBuiltinHookAgent registers a built-in hook-supporting agent whose
+// hooks report as not installed, and returns its UninstallHooks call count.
+func registerFakeBuiltinHookAgent(t *testing.T, name types.AgentName, uninstallErr error) *int {
+	t.Helper()
+
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true}`)
+	t.Cleanup(agent.SnapshotRegistryForTesting())
+
+	calls := 0
+	agent.Register(name, func() agent.Agent {
+		return &fakeBuiltinHookAgent{
+			Agent:          &vogon.Agent{},
+			name:           name,
+			uninstallCalls: &calls,
+			uninstallErr:   uninstallErr,
+		}
+	})
+	return &calls
+}
+
+// TestRunUninstall_BuiltinHooksRemovedWhenNotDetected pins the asymmetry between
+// built-in and external agents. A built-in's UninstallHooks is in-process and
+// idempotent, and its hook config can be partial or stale in a way
+// AreHooksInstalled does not recognize as installed, so it is called regardless.
+// Only external plugins — where the call is a mutating subprocess against a
+// binary discovery found on $PATH — are skipped on a clean "no hooks".
+func TestRunUninstall_BuiltinHooksRemovedWhenNotDetected(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	calls := registerFakeBuiltinHookAgent(t, "fake-builtin-undetected", nil)
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
+	}
+
+	if *calls == 0 {
+		t.Errorf("a built-in agent absent from the installed set must still have UninstallHooks called, stdout:\n%s", stdout.String())
+	}
+}
+
+// TestRunUninstall_BuiltinHookFailureStillSucceeds pins that a built-in failure
+// keeps the pre-existing contract: a warning and a zero exit. The non-zero exit
+// is reserved for external plugins, which a re-run cannot reach once .entire/ —
+// and with it the setting gating discovery — is gone. A built-in is always
+// reachable: its leftover hooks keep the installed set non-empty.
+func TestRunUninstall_BuiltinHookFailureStillSucceeds(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	registerFakeBuiltinHookAgent(t, "fake-builtin-failing", errors.New("mock builtin uninstall failure"))
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("a built-in hook failure must not fail the uninstall, got error = %v\nstderr: %s", err, stderr.String())
+	}
+
+	if !strings.Contains(stderr.String(), "Warning: failed to remove agent hooks") {
+		t.Errorf("expected the failure to be warned about on stderr, got:\n%s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "uninstalled successfully") {
+		t.Errorf("expected the uninstall to still report success, got:\n%s", stdout.String())
 	}
 }
 

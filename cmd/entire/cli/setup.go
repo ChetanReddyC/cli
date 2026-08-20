@@ -2458,17 +2458,18 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	failedExternal, agentHooksErr := removeAgentHooks(ctx, w, agentsWithInstalledHooks)
 	if agentHooksErr != nil {
 		fmt.Fprintf(errW, "Warning: failed to remove agent hooks: %v\n", agentHooksErr)
-		// Step 4 below deletes .entire/, and with it the external_agents setting
-		// that gates discovery — so once this returns, a re-run cannot even see
-		// these plugins, let alone retry them. Name the command that still works,
-		// while the hooks are still reachable, rather than leaving the user with a
-		// warning they cannot act on.
+	}
+	// Step 4 below deletes .entire/, and with it the external_agents setting that
+	// gates discovery — so once this returns, a re-run cannot even see these
+	// plugins, let alone retry them. Name the command that still works, while the
+	// hooks are still reachable, rather than leaving the user with a warning they
+	// cannot act on. A built-in needs none of this: it is always reachable on a
+	// re-run, since its leftover hooks keep the installed set non-empty.
+	if len(failedExternal) > 0 {
 		for _, name := range failedExternal {
-			fmt.Fprintf(errW, "  %s hooks are still installed. Remove them with `entire-agent-%s uninstall-hooks`.\n", name, name)
+			fmt.Fprintf(errW, "  %s hooks are still installed. Remove them with `entire-agent-%s uninstall-hooks`.\n", agentDisplayName(name), name)
 		}
-		if len(failedExternal) > 0 {
-			fmt.Fprintln(errW, "  Re-running `entire disable --uninstall` will not reach these plugins once .entire/ is gone.")
-		}
+		fmt.Fprintln(errW, "  Re-running `entire disable --uninstall` will not reach these plugins once .entire/ is gone.")
 	}
 
 	// 2. Remove git hooks
@@ -2502,11 +2503,13 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		fmt.Fprintf(w, "  Removed %d shadow branches\n", branchesRemoved)
 	}
 
-	// Not "successfully": leftover agent hooks are the one failure above that the
-	// user must act on, and they are unreachable from a re-run now that .entire/
-	// is gone. Exit non-zero so a script wrapping this sees it too; the warnings
-	// are already on stderr, hence SilentError rather than the raw error.
-	if agentHooksErr != nil {
+	// Not "successfully": leftover external agent hooks are the one failure above
+	// that the user must act on, and they are unreachable from a re-run now that
+	// .entire/ is gone. Exit non-zero so a script wrapping this sees it too; the
+	// warnings are already on stderr, hence SilentError rather than the raw error.
+	// A built-in failure stays a warning with a zero exit, as it always was:
+	// re-running reaches it.
+	if len(failedExternal) > 0 {
 		fmt.Fprintln(w, "\nEntire CLI uninstalled, but some agent hooks could not be removed - see the warnings above.")
 		return NewSilentError(errors.New("some agent hooks could not be removed"))
 	}

@@ -157,11 +157,22 @@ func OutdatedHookAgentDisplayNames(ctx context.Context) []string {
 func agentDisplayNames(names []types.AgentName) []string {
 	displayNames := make([]string, 0, len(names))
 	for _, name := range names {
-		if ag, err := agent.Get(name); err == nil {
-			displayNames = append(displayNames, string(ag.Type()))
+		if display := agentDisplayName(name); display != "" {
+			displayNames = append(displayNames, display)
 		}
 	}
 	return displayNames
+}
+
+// agentDisplayName returns one agent's user-facing name, or "" if it is not
+// registered. Prose names an agent this way; only a command line the user is
+// meant to run keeps the registry name, which is what the binary is called.
+func agentDisplayName(name types.AgentName) string {
+	ag, err := agent.Get(name)
+	if err != nil {
+		return ""
+	}
+	return string(ag.Type())
 }
 
 // JoinAgentNames joins agent names into a comma-separated string.
