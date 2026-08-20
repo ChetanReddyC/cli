@@ -97,6 +97,7 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 
 	slugs, allRepos := cfg.ScopeSlugs()
 	var cells []cellGroup
+	var skipped []string
 	var warnings []string
 	scoped := !allRepos
 	if scoped {
@@ -107,7 +108,9 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 		if err != nil {
 			return nil, err
 		}
-		cells = groupReposByCell(entries)
+		// Scoped requests pin the picked placement's ULID (repoIDs below),
+		// which query-serve resolves from its all-accessible byID set.
+		cells, skipped = groupReposByCell(entries)
 	} else {
 		index, err := s.listFullIndex(ctx)
 		if err != nil {
@@ -120,7 +123,14 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 			logging.Debug(ctx, "semantic search: repo index truncated; cross-repo results may be incomplete")
 			warnings = append(warnings, "repo index truncated; cross-repo results may be incomplete")
 		}
-		cells = groupReposByCell(index.Repos)
+		// Broad requests send no repo pins; query-serve narrows pin-less
+		// scope by the same election routedRepoPlacement picks by (ENT-1776),
+		// so one grouping serves both request shapes.
+		cells, skipped = groupReposByCell(index.Repos)
+	}
+	skipped = reportableSkippedRepos(ctx, scoped, len(cells), skipped)
+	if len(skipped) > 0 {
+		warnings = append(warnings, fmt.Sprintf("skipped %d repo(s) with no searchable placement (missing or not ready): %s", len(skipped), strings.Join(skipped, ", ")))
 	}
 
 	if len(cells) == 0 {
@@ -514,10 +524,13 @@ func sortTier0Rows(tier0 []tier0Row) {
 	})
 }
 
-// dedupSemanticResults removes cross-cell duplicates by type+id (a repo
-// mirrored across cells returns the same logical result from each), keeping
-// the first (higher-ranked) copy. Results without an id are always kept. The
-// per-type dupe tally feeds the total/count corrections.
+// dedupSemanticResults removes cross-cell duplicates by type+id, keeping the
+// first (higher-ranked) copy. The fan-out routes each repo to one home cell
+// (ENT-1672/ENT-1776), so per-repo rows no longer repeat — this guards the cases
+// that still can: a crosslinked session attached to repos in different cells,
+// and unfiltered queries where overlapping cell scopes return the same row.
+// Results without an id are always kept. The per-type dupe tally feeds the
+// total/count corrections.
 func dedupSemanticResults(merged []search.Result) ([]search.Result, map[string]int) {
 	seen := make(map[string]bool, len(merged))
 	dupesByType := make(map[string]int)

@@ -689,7 +689,16 @@ therefore has exactly three routing shapes, mirroring the entire.io BFF:
   `ClusterSlug`↔`Cluster.Slug`, NOT the cell name, which the catalog does not
   expose), `resolveCellBaseURLs`, and `fanOutCells` (parallel per-cell calls,
   per-cell timeout, partial failures isolated per slot). Merge semantics stay
-  with the command.
+  with the command. Each repo routes to exactly ONE placement — its home,
+  picked by `routedRepoPlacement` (the elected `primaries.processing`, else
+  the canonical row-ID convention). Mirrors are never searched: they are
+  replicated copies indexed under their own namespaces, so an extra leg
+  returns duplicate and stale rows, and diverges from the web
+  (ENT-1672/ENT-1776). Unlike the repo-scoped resolver above, this one fails
+  SOFT — a home placement that is not ready is skipped and reported
+  (`reportableSkippedRepos`: pinned requests always warn, broad ones only
+  when the skips left no cell to query), never substituted with a ready
+  mirror.
 
 Token rule: identity tokens are **per-jurisdiction, not per-cell**. Multi-cell
 callers must build one `auth.CellClientFactory`
