@@ -99,10 +99,10 @@ func v4Ckpt(id string, tier int, meta search.Meta) search.Result {
 	}
 }
 
-func v4Commit(sha string, tier int, meta search.Meta) search.Result {
-	if tier >= 0 {
-		meta.Tier = iptr(tier)
-	}
+// v4Commit builds a tier-1 commit result (every merge test uses tier 1 for
+// commits; tier variation is exercised via checkpoints).
+func v4Commit(sha string, meta search.Meta) search.Result {
+	meta.Tier = iptr(1)
 	return search.Result{
 		Type:   search.TypeCommit,
 		Meta:   meta,
@@ -338,8 +338,8 @@ func TestMergeSemanticV4Responses_PerTypeWindowAndLowerBounds(t *testing.T) {
 			v4RepoRow(t, "repo-1", 0.9),
 			v4Ckpt("ck-a", 1, search.Meta{Score: 0.9}),
 			v4Ckpt("ck-b", 1, search.Meta{Score: 0.8}),
-			v4Commit("sha-a", 1, search.Meta{Score: 0.7}),
-			v4Commit("sha-b", 1, search.Meta{Score: 0.6}),
+			v4Commit("sha-a", search.Meta{Score: 0.7}),
+			v4Commit("sha-b", search.Meta{Score: 0.6}),
 		}, Total: 5, Counts: &search.TypeCounts{Repos: 1, Checkpoints: 999, Commits: 999}}),
 	})
 	if err != nil {
@@ -455,7 +455,7 @@ func TestMergeSemanticV4Responses_DedupAdjustsTotalsAndCounts(t *testing.T) {
 	cellA := &search.Response{
 		Results: []search.Result{
 			v4Session("sess-dup", "backend", 0.9),
-			v4Commit("sha1", 1, search.Meta{Score: 0.6}),
+			v4Commit("sha1", search.Meta{Score: 0.6}),
 		},
 		Total:  2,
 		Counts: &search.TypeCounts{Sessions: 1, Commits: 1},
@@ -528,7 +528,7 @@ func TestMergeSemanticV4Responses_SameIDDifferentTypeNotDeduped(t *testing.T) {
 	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
 		v4CellOK(&search.Response{Results: []search.Result{
 			v4Ckpt("x", 1, search.Meta{Score: 0.9}),
-			v4Commit("x", 1, search.Meta{Score: 0.8}),
+			v4Commit("x", search.Meta{Score: 0.8}),
 		}, Total: 2}),
 	})
 	if err != nil {
@@ -684,7 +684,7 @@ func TestMergeSemanticV4Responses_NilCountsBodiesTolerated(t *testing.T) {
 			v4Ckpt("a", 1, search.Meta{Score: 0.9}),
 		}, Total: 1}), // no Counts
 		v4CellOK(&search.Response{Results: []search.Result{
-			v4Commit("sha", 1, search.Meta{Score: 0.5}),
+			v4Commit("sha", search.Meta{Score: 0.5}),
 		}, Total: 1, Counts: &search.TypeCounts{Commits: 1}}),
 	})
 	if err != nil {

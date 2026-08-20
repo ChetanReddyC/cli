@@ -305,6 +305,11 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles, codeOpts)
 			model.semanticSearch = searcher
 			model.warning = strings.Join(resp.Warnings, "; ")
+			// The initial response's counts metadata must reach the model the
+			// same way a re-search's does, or the tab counts and their
+			// lower-bound "+" are missing on the first view (ENT-1777).
+			model.counts = resp.Counts
+			model.countsLowerBound = resp.CountsLowerBound
 			p := tea.NewProgram(model)
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("TUI error: %w", err)

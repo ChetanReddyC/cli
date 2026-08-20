@@ -147,7 +147,7 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 			// contract as the BFF's zero-routable-cells answer.
 			resp.Truncated = true
 			resp.CountsLowerBound = map[string]bool{
-				"repos": true, "checkpoints": true, "commits": true, "prs": true, "sessions": true,
+				facetRepos: true, facetCheckpoints: true, facetCommits: true, facetPRs: true, facetSessions: true,
 			}
 		}
 		if indexTruncated || scopeNarrowed {
@@ -539,21 +539,31 @@ func dedupSemanticResults(merged []search.Result) []search.Result {
 	return deduped
 }
 
+// Facet names for the wire maps (truncated_types / counts_lower_bound) — the
+// BFF's RESULT_TYPE_TO_FACET values.
+const (
+	facetRepos       = "repos"
+	facetCheckpoints = "checkpoints"
+	facetCommits     = "commits"
+	facetPRs         = "prs"
+	facetSessions    = "sessions"
+)
+
 // semanticFacetOf maps a wire result type to its counts/truncation facet name
 // (the BFF's RESULT_TYPE_TO_FACET). Unknown types have no facet: they are kept
 // in results, exempt from the per-type cap, and counted only in the total.
 func semanticFacetOf(typ string) (string, bool) {
 	switch typ {
 	case search.TypeRepo:
-		return "repos", true
+		return facetRepos, true
 	case search.TypeCheckpoint:
-		return "checkpoints", true
+		return facetCheckpoints, true
 	case search.TypeCommit:
-		return "commits", true
+		return facetCommits, true
 	case search.TypePR:
-		return "prs", true
+		return facetPRs, true
 	case search.TypeSession:
-		return "sessions", true
+		return facetSessions, true
 	}
 	return "", false
 }
