@@ -125,7 +125,11 @@ func detectGoredact(s string) []taggedRegion {
 	out := regions[:0]
 	for _, r := range regions {
 		// Out-of-bounds or inverted offsets are a library-contract violation;
-		// flag unknown coverage instead of panicking.
+		// flag unknown coverage instead of panicking. Deliberately keeps the
+		// remaining regions (each is independently bounds-checked, so using
+		// them only adds redaction): under a sole scanner the sentinel fails
+		// the write regardless, and under both engines betterleaks carries
+		// coverage — dropping valid regions here would only redact less.
 		if r.start < 0 || r.end > len(s) || r.start > r.end {
 			scannerDegraded.Store(true)
 			continue
