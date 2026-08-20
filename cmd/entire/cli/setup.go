@@ -908,12 +908,12 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				selectedAgent = ag
 			}
 
-			if logging.LoggerFromContext(ctx) == nil {
-				if l, err := newLogger(ctx); err == nil {
-					ctx = logging.WithLogger(ctx, l)
-					cmd.SetContext(ctx)
-				}
-			}
+			// enable runs before the repo is set up, which is exactly when the
+			// root pre-run's IsSetUpAny gate declines to build a logger. Placed
+			// after every check that can still reject this invocation, so a
+			// rejected enable leaves an untouched repo untouched.
+			ensureLogger(cmd)
+			ctx = cmd.Context()
 
 			if selectedAgent != nil {
 				// --agent is a targeted operation: set up this specific agent without

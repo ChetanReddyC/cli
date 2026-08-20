@@ -26,14 +26,8 @@ func TestWithHookSession_StampsMostRecentSession(t *testing.T) {
 	t.Chdir(tmpDir)
 	testutil.InitRepo(t, tmpDir)
 
+	enableEntire(t, tmpDir)
 	entireDir := filepath.Join(tmpDir, paths.EntireDir)
-	if err := os.MkdirAll(entireDir, 0o750); err != nil {
-		t.Fatalf("failed to create .entire directory: %v", err)
-	}
-	settingsFile := filepath.Join(entireDir, "settings.json")
-	if err := os.WriteFile(settingsFile, []byte(`{"enabled":true,"strategy":"manual-commit"}`), 0o600); err != nil {
-		t.Fatalf("failed to create settings file: %v", err)
-	}
 
 	sessionID := "test-session-12345"
 	writeTestSessionState(t, tmpDir, sessionID)

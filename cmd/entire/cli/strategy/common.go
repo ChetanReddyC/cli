@@ -408,35 +408,23 @@ var initRedactionOnce sync.Once
 // redact package: PII detection (opt-in), inline custom_redactions, and rule
 // packs auto-discovered from .entire/redactors/.
 //
-// Must be called before checkpoint writes with a context descended from the
-// root PersistentPreRunE, which is where logging is initialized: that context
-// carries the logger, so the redact package's diagnostics land in
-// .entire/logs/ — hook contexts swallow stderr, so without this users grepping
-// for component=redaction find nothing and conclude their rules never ran.
+// Call before checkpoint writes with a context descended from the root
+// pre-run, so redact's diagnostics reach .entire/logs/: hook contexts swallow
+// stderr, so otherwise a user grepping for component=redaction finds nothing
+// and concludes their rules never ran. Without a context logger they fall back
+// to stderr and the load-time summary is skipped.
 //
-// The injected logger is stamped with the context's session ID so redact's
-// context-free calls stay filterable by session.
-//
-// Without a context logger, diagnostics fall back to the process-default
-// stderr logger and the load-time summary is skipped. That happens when the
-// root hook declined to initialize logging — outside a repository, or in a
-// repo that never enabled Entire — and for callers outside the cobra tree.
-//
-// sync.Once: the first caller's context wins. Every caller is a process
-// entry point that just built its context, so later calls are no-ops by
-// design, not a lost injection.
+// sync.Once: the first caller's context wins, and every caller is an entry
+// point that just built one.
 func EnsureRedactionConfigured(ctx context.Context) {
 	initRedactionOnce.Do(func() {
 		// Session-stamped: redact calls this logger without a context, so it
-		// cannot pick the session up the way logging.Warn does — and its
-		// diagnostics are exactly the lines a user greps by session.
+		// cannot pick the session up the way logging.Warn does.
 		logger := logging.SessionLoggerFromContext(ctx)
 
-		// Redaction config is a process-wide one-shot: if the caller's ctx
-		// is already canceled (Ctrl-C mid-hook), a failed settings read here
-		// would consume the Once and leave the user's custom rules
-		// unconfigured — fail-open — for the rest of the process. Keep the
-		// ctx values (logger, worktree root) but not its cancellation.
+		// A canceled ctx (Ctrl-C mid-hook) would fail the settings read, consume
+		// the Once, and leave custom rules unconfigured — fail-open — for the
+		// rest of the process. Keep the ctx values, not its cancellation.
 		ctx := context.WithoutCancel(ctx)
 
 		s, err := settings.Load(ctx)
@@ -526,8 +514,7 @@ func EnsureRedactionConfigured(ctx context.Context) {
 		}
 
 		// Load-time summary so "are my rules active?" is answerable from the
-		// log alone — the happy path used to log nothing, which is why a user
-		// whose rules were fine still had no way to confirm it.
+		// log alone.
 		//
 		// Gated on an initialized logger: without one, logging.Info falls
 		// through to the process-default stderr logger, and an INFO line the

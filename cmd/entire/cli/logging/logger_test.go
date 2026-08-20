@@ -47,6 +47,9 @@ func readLog(t *testing.T, l *Logger, path string) string {
 		t.Fatalf("Close() error = %v", err)
 	}
 	content, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "" // nothing was ever written, so the file was never created
+	}
 	if err != nil {
 		t.Fatalf("failed to read log file: %v", err)
 	}
@@ -85,7 +88,9 @@ func TestParseLevel(t *testing.T) {
 	}
 }
 
-func TestNew_CreatesDirectoryAndFile(t *testing.T) {
+// The file appears on the first line written, not at New: a command that logs
+// nothing must not pay for opening it or leave an empty entire.log behind.
+func TestNew_CreatesFileOnFirstWrite(t *testing.T) {
 	t.Parallel()
 
 	dir := filepath.Join(t.TempDir(), "nested", LogsDir)
@@ -94,38 +99,49 @@ func TestNew_CreatesDirectoryAndFile(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 	defer func() { _ = l.Close() }()
+	path := filepath.Join(dir, logFileName)
 
-	if _, err := os.Stat(filepath.Join(dir, logFileName)); err != nil {
-		t.Errorf("New() did not create the log file: %v", err)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("New() created the log file before anything was logged (stat err = %v)", err)
+	}
+
+	Info(WithLogger(context.Background(), l), "first line")
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("first write did not create the log file: %v", err)
 	}
 }
 
-// TestNew_ReportsFailureAsError pins the contract that replaced the old
-// (nil, nil) status channel: the caller learns the sink could not be opened and
-// decides what to do, rather than silently receiving a stderr logger it would
-// then inject and splash over the user's output.
-func TestNew_ReportsFailureAsError(t *testing.T) {
+func TestNew_RejectsEmptyDir(t *testing.T) {
 	t.Parallel()
 
-	t.Run("empty Dir", func(t *testing.T) {
-		t.Parallel()
+	if _, err := New(Config{}); err == nil {
+		t.Error("New() with no Dir = nil error, want an error")
+	}
+}
 
-		if _, err := New(Config{}); err == nil {
-			t.Error("New() with no Dir = nil error, want an error")
-		}
-	})
+// An unusable directory must not fail the caller — losing a log line is never
+// worth an error a command has to handle — but Close reports it, so it is not
+// lost entirely.
+func TestLogger_UnusableDirDropsLinesAndCloseReports(t *testing.T) {
+	t.Parallel()
 
-	t.Run("Dir path occupied by a file", func(t *testing.T) {
-		t.Parallel()
+	occupied := filepath.Join(t.TempDir(), "logs")
+	if err := os.WriteFile(occupied, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("failed to write blocking file: %v", err)
+	}
+	l, err := New(Config{Dir: occupied})
+	if err != nil {
+		t.Fatalf("New() error = %v; an unusable dir must surface at Close, not here", err)
+	}
 
-		occupied := filepath.Join(t.TempDir(), "logs")
-		if err := os.WriteFile(occupied, []byte("not a directory"), 0o600); err != nil {
-			t.Fatalf("failed to write blocking file: %v", err)
-		}
-		if _, err := New(Config{Dir: occupied}); err == nil {
-			t.Error("New() over a regular file = nil error, want an error")
-		}
-	})
+	Warn(WithLogger(context.Background(), l), "dropped")
+
+	if err := l.Close(); err == nil {
+		t.Error("Close() = nil error after the log file could not be opened")
+	}
 }
 
 func TestLogger_WritesJSON(t *testing.T) {

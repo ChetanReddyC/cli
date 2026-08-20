@@ -15,6 +15,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
+	"github.com/spf13/cobra"
+
 	// Import agents to register them
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/codex"
@@ -76,24 +78,16 @@ func GetStrategy(_ context.Context) *strategy.ManualCommitStrategy {
 	return s
 }
 
-// GetLogLevel returns the configured log level from settings.
-// Returns empty string if not configured (caller should use default).
-// Note: ENTIRE_LOG_LEVEL env var takes precedence; check it first.
-func GetLogLevel(ctx context.Context) string {
-	s, err := settings.Load(ctx)
-	if err != nil {
-		return ""
-	}
-	return s.LogLevel
-}
-
 // resolveLogLevel resolves the level for a new logger: the environment first,
-// then repo settings. An unrecognized name warns on stderr rather than logging,
-// because there is no logger yet to warn through.
+// then repo settings. An unreadable settings file leaves the default. An
+// unrecognized name warns on stderr rather than logging, because there is no
+// logger yet to warn through.
 func resolveLogLevel(ctx context.Context) slog.Level {
 	name := os.Getenv(logging.LogLevelEnvVar)
 	if name == "" {
-		name = GetLogLevel(ctx)
+		if s, err := settings.Load(ctx); err == nil {
+			name = s.LogLevel
+		}
 	}
 	level, ok := logging.ParseLevel(name)
 	if !ok {
@@ -108,6 +102,23 @@ func resolveLogLevel(ctx context.Context) slog.Level {
 // writing into this repo is allowed: the root PersistentPreRun gates on
 // IsSetUpAny, and enable calls this only after every check that can still reject
 // the invocation, so a rejected enable leaves an untouched repo untouched.
+// ensureLogger attaches a logger to cmd's context unless one is already there,
+// and is the only place that installs one. Two loggers on the same file means
+// two 8KB buffers, and whichever lands in the context second orphans the first —
+// nothing flushes it. Best-effort: a command must not die because a log file
+// could not be opened.
+func ensureLogger(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	if logging.LoggerFromContext(ctx) != nil {
+		return
+	}
+	l, err := newLogger(ctx)
+	if err != nil {
+		return
+	}
+	cmd.SetContext(logging.WithLogger(ctx, l))
+}
+
 func newLogger(ctx context.Context) (*logging.Logger, error) {
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {

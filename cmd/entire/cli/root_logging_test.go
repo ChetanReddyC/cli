@@ -11,18 +11,13 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/spf13/cobra"
 )
 
-// probeMarker is what the probe command writes through the logger it was
-// handed, so the assertion can prove the line reached the log file rather than
-// just that a logger existed.
+// probeMarker proves a line reached the log file, not just that a logger existed.
 const probeMarker = "root prerun injected this logger"
 
-// markRepoSetUpForLogging writes the settings file that makes
-// settings.IsSetUpAny true for the repo at cwd — the gate the root PersistentPreRun uses
-// to keep a never-enabled repo free of an .entire/ directory.
+// markRepoSetUpForLogging satisfies the root pre-run's IsSetUpAny gate.
 func markRepoSetUpForLogging(t *testing.T) {
 	t.Helper()
 
@@ -34,9 +29,8 @@ func markRepoSetUpForLogging(t *testing.T) {
 	}
 }
 
-// executeThroughRoot runs args through a real root command, which is the only
-// way to exercise the root PersistentPreRunE that initializes logging and the
-// PersistentPostRun that flushes it. Output is discarded.
+// executeThroughRoot runs args through a real root command — the only way to
+// exercise the pre-run that builds the logger and the post-run that flushes it.
 func executeThroughRoot(t *testing.T, args ...string) error {
 	t.Helper()
 
@@ -47,29 +41,24 @@ func executeThroughRoot(t *testing.T, args ...string) error {
 	return root.ExecuteContext(context.Background())
 }
 
-// setUpRepoForRootLogging makes cwd a git repo that Entire has been set up in,
-// which is what the root PersistentPreRun gates on.
+// setUpRepoForRootLogging makes cwd a set-up git repo. setupStopTestRepo also
+// clears the worktree-root and git-common-dir caches, without which a path
+// cached by an earlier test resolves these t.Chdir tests against the wrong repo.
 func setUpRepoForRootLogging(t *testing.T) string {
 	t.Helper()
 
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "f.txt", "init")
-	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "init")
-	t.Chdir(dir)
+	setupStopTestRepo(t)
+	dir := mustGetwd(t)
 	markRepoSetUpForLogging(t)
 	return dir
 }
 
-// runProbeUnder attaches a probe command under the command path in parents,
-// executes it through the real root, and reports the logger its RunE observed
-// in the context — writing probeMarker through it while the log file is still
-// open, since the root PersistentPostRun flushes and closes on the way out.
+// runProbeUnder attaches a probe under the given command path, runs it through
+// the real root, and reports the logger its RunE saw — writing probeMarker while
+// the file is still open, since the post-run closes on the way out.
 //
-// The probe is Hidden so that hook's parent-chain Hidden walk short-circuits
-// before the telemetry and version-check calls, which would otherwise reach the
-// network mid-test.
+// Hidden so the post-run's Hidden walk short-circuits before its telemetry and
+// version-check calls, which would otherwise hit the network mid-test.
 func runProbeUnder(t *testing.T, parents ...string) *logging.Logger {
 	t.Helper()
 
@@ -107,10 +96,9 @@ func runProbeUnder(t *testing.T, parents ...string) *logging.Logger {
 	return observed
 }
 
-// TestRootPreRun_InjectsLoggerIntoCommandContext pins the contract every command
-// now depends on instead of building a logger itself: after the root
-// PersistentPreRunE, the executing command's context carries the initialized
-// logger, and lines written through it land in .entire/logs/entire.log.
+// Every command depends on this instead of building a logger itself: after the
+// root pre-run, the executing command's context carries one, and lines written
+// through it land in .entire/logs/entire.log.
 func TestRootPreRun_InjectsLoggerIntoCommandContext(t *testing.T) {
 	dir := setUpRepoForRootLogging(t)
 
@@ -127,13 +115,9 @@ func TestRootPreRun_InjectsLoggerIntoCommandContext(t *testing.T) {
 	}
 }
 
-// TestRootPreRun_ReachesLeafUnderGroupWithOwnPreRun pins the dependency on
-// cobra.EnableTraverseRunHooks. `checkpoint` — like `hooks`, `session`, and
-// `agent` — defines its own PersistentPreRunE, and under cobra's default
-// only-the-closest-hook behaviour that shadows the root hook entirely. The
-// failure would be silent: no error, just every command under those groups
-// logging to stderr again, which is exactly what routing redaction diagnostics
-// into .entire/logs/ set out to stop.
+// Pins the dependency on cobra.EnableTraverseRunHooks: these groups define
+// their own pre-run, which under cobra's default shadows the root's entirely.
+// The failure is silent — every command under them logs to stderr again.
 func TestRootPreRun_ReachesLeafUnderGroupWithOwnPreRun(t *testing.T) {
 	setUpRepoForRootLogging(t)
 
@@ -146,17 +130,12 @@ func TestRootPreRun_ReachesLeafUnderGroupWithOwnPreRun(t *testing.T) {
 	}
 }
 
-// TestInitRootLogging_SkipsRepoThatNeverEnabledEntire pins the gate that keeps
-// `enable` owning its own logger: building one CREATES .entire/logs/, so a repo
-// that never set Entire up must come out of an unrelated command untouched
-// rather than seeded with an untracked directory no gitignore entry covers yet.
+// Building a logger CREATES .entire/logs/, so a repo that never set Entire up
+// must come out of an unrelated command untouched — not seeded with an
+// untracked directory no gitignore entry covers yet.
 func TestInitRootLogging_SkipsRepoThatNeverEnabledEntire(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "f.txt", "init")
-	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "init")
-	t.Chdir(dir)
+	setupStopTestRepo(t) // deliberately not marked set up
+	dir := mustGetwd(t)
 
 	if runProbeUnder(t) != nil {
 		t.Error("LoggerFromContext() must be nil in a repo that never enabled Entire")
@@ -166,16 +145,11 @@ func TestInitRootLogging_SkipsRepoThatNeverEnabledEntire(t *testing.T) {
 	}
 }
 
-// TestExecutedCommandCarriesLoggerOnFailure pins the flush main.go depends on.
-// Cobra returns out of Command.execute as soon as RunE errors, and as soon as
-// required-flag validation fails — both before its PersistentPostRun loop, so
-// root's flush never runs on either. With no package global left, the command
-// ExecuteContextC hands back is the only route to the logger, and a failing
-// hook's diagnostics are exactly the lines worth not losing in the 8KB buffer.
-//
-// Errors raised before any pre-run (unknown flag or subcommand, bad args) return
-// a command carrying no logger, which is harmless: none was built, so there is
-// nothing buffered to lose.
+// Pins the flush main.go depends on: cobra returns out of execute() as soon as
+// RunE errors or required-flag validation fails, both before its post-run loop,
+// so root's flush never runs and the command ExecuteContextC hands back is the
+// only route to the buffered lines. (Errors raised before any pre-run carry no
+// logger, so there is nothing to lose.)
 func TestExecutedCommandCarriesLoggerOnFailure(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -214,7 +188,7 @@ func TestExecutedCommandCarriesLoggerOnFailure(t *testing.T) {
 				RunE:   tt.runE,
 			}
 			if tt.requireFlag {
-				// Log from the pre-run instead: RunE is never reached here.
+				// RunE is never reached on this path.
 				probe.PersistentPreRun = func(cmd *cobra.Command, _ []string) {
 					logging.Warn(cmd.Context(), probeMarker)
 				}
@@ -237,15 +211,9 @@ func TestExecutedCommandCarriesLoggerOnFailure(t *testing.T) {
 			}
 
 			logFile := filepath.Join(dir, paths.EntireDir, "logs", "entire.log")
-			buffered, readErr := os.ReadFile(logFile)
-			if readErr != nil {
-				t.Fatalf("read entire.log: %v", readErr)
-			}
-			if bytes.Contains(buffered, []byte(probeMarker)) {
-				t.Skip("line reached the file without a flush; this test can no longer prove main.go's close is what flushes it")
-			}
 
-			// Exactly what main.go does after ExecuteContextC.
+			// Exactly what main.go does after ExecuteContextC. Nothing else can
+			// have flushed: cobra skips its PostRun loop on both these paths.
 			if closeErr := logging.LoggerFromContext(executed.Context()).Close(); closeErr != nil {
 				t.Fatalf("Close() error = %v", closeErr)
 			}
@@ -258,5 +226,23 @@ func TestExecutedCommandCarriesLoggerOnFailure(t *testing.T) {
 				t.Errorf("line logged before the failure was lost: %s", flushed)
 			}
 		})
+	}
+}
+
+// TestShellCompletion_BuildsNoLogger pins that cobra's hidden completion
+// requests skip logger construction. The shell runs them on every TAB press, so
+// they must not pay MkdirAll + OpenFile plus the settings read that resolves the
+// level (which shells out to git) — and they used to leave a 0-byte entire.log
+// behind in any repo where nothing had logged yet.
+func TestShellCompletion_BuildsNoLogger(t *testing.T) {
+	dir := setUpRepoForRootLogging(t)
+
+	// Set up, so only the completion gate can prevent the logger.
+	if err := executeThroughRoot(t, cobra.ShellCompRequestCmd, ""); err != nil {
+		t.Fatalf("execute %s: %v", cobra.ShellCompRequestCmd, err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, paths.EntireDir, "logs")); !os.IsNotExist(err) {
+		t.Errorf(".entire/logs must not be created by shell completion (stat err = %v)", err)
 	}
 }

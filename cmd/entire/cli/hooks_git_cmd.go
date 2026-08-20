@@ -22,7 +22,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// gitHooksDisabled is set by PersistentPreRunE when Entire is not set up or disabled.
+// gitHooksDisabled is set by PersistentPreRun when Entire is not set up or disabled.
 // When true, all git hook commands return early without doing any work.
 var gitHooksDisabled bool
 
@@ -123,20 +123,14 @@ func (g *gitHookContext) skipUnreadableCheckpointPolicy(err error) bool {
 	return true
 }
 
-// withHookSession adds the hook-only logging context the root entry point
-// cannot supply, and configures redaction for the checkpoint writes that follow.
-// Returns the context to pass down (cmd.SetContext) so hook handlers inherit it.
+// withHookSession adds the session the root pre-run cannot know without
+// scanning session state on every command, and configures redaction. Returns
+// the context to pass down with cmd.SetContext.
 //
-// The root PersistentPreRunE already opened the log sink and put the logger in
-// the context, and closes it again in its PersistentPostRun (main.go closes once
-// more for the error path cobra skips post-runs on). So there is nothing here to
-// initialize or to clean up — only the session, which root would have to scan
-// session state on every command to know.
-//
-// The gate is load-bearing on the agent-hook path, not merely defensive: the
-// git-hook tree checks it before calling, but newAgentHooksCmd does not, so this
-// is the only thing standing between a never-enabled repo and having its session
-// state scanned and its redactors loaded.
+// The gate is load-bearing, not defensive: the git-hook tree checks it before
+// calling, but newAgentHooksCmd does not, so this is the only thing standing
+// between a never-enabled repo and having its session state scanned and its
+// redactors loaded.
 func withHookSession(ctx context.Context) context.Context {
 	if !settings.IsSetUpAndEnabled(ctx) {
 		return ctx
@@ -144,12 +138,8 @@ func withHookSession(ctx context.Context) context.Context {
 
 	ctx = logging.WithSessionID(ctx, strategy.FindMostRecentSession(ctx))
 
-	// Configure redaction once at startup: PII (opt-in), inline custom_redactions,
-	// and rule packs discovered under .entire/redactors/. No-op if nothing is
-	// configured. Hooks are the checkpoint-writing path, so this cannot be left
-	// to the root prerun: without it only always-on secret scanning would run.
-	// Receives the logger-carrying ctx so redaction diagnostics and the load-time
-	// summary route into .entire/logs/.
+	// Hooks are the checkpoint-writing path, so this cannot be left to the root
+	// pre-run: without it only always-on secret scanning would run.
 	strategy.EnsureRedactionConfigured(ctx)
 
 	return ctx

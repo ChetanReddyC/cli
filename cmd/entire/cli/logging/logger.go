@@ -1,37 +1,8 @@
 // Package logging provides structured logging for the Entire CLI using slog.
 //
-// A Logger owns one log file. Construct it once at the entry point, put it in
-// the context, and close it there — nothing in this package is process-global,
-// so two loggers can coexist and a command cannot be affected by what another
-// one configured.
-//
-// Usage:
-//
-//	// At the cobra entry point: build the logger and inject it, so downstream
-//	// code receives it from the context.
-//	l, err := logging.New(logging.Config{Dir: dir, Level: level})
-//	if err != nil {
-//	    // handle error
-//	}
-//	ctx = logging.WithLogger(ctx, l)
-//
-//	// At the exit point, from the context rather than package state.
-//	defer func() {
-//	    if l := logging.LoggerFromContext(ctx); l != nil {
-//	        _ = l.Close()
-//	    }
-//	}()
-//
-//	// Add context values
-//	ctx = logging.WithSessionID(ctx, sessionID)
-//	ctx = logging.WithComponent(ctx, "hooks")
-//	ctx = logging.WithAgent(ctx, agentName)
-//
-//	// Log with context - session/component/agent extracted automatically
-//	logging.Info(ctx, "hook invoked",
-//	    slog.String("hook", hookName),
-//	    slog.String("branch", branch),
-//	)
+// A Logger owns one log file. The entry point builds one, puts it in the
+// context with WithLogger, and closes it from there; nothing here is
+// process-global.
 package logging
 
 import (
@@ -52,74 +23,79 @@ const LogLevelEnvVar = "ENTIRE_LOG_LEVEL"
 // LogsDir is the directory where log files are stored (relative to repo root).
 const LogsDir = ".entire/logs"
 
-// logFileName is the single file every Logger appends to inside Config.Dir.
 const logFileName = "entire.log"
 
-// writeBufferSize batches writes so a hook doing many small log calls pays one
-// syscall per 8KB rather than one per line.
 const writeBufferSize = 8192
 
-// Config describes a Logger to build.
 type Config struct {
-	// Dir is the directory to create the log file in, created if absent.
-	// Required: an empty Dir is an error rather than a silent default, because
-	// the caller is the only thing that knows whether writing here is allowed
-	// (never outside a repository, never in a repo that has not enabled Entire).
+	// Dir is created if absent. Required rather than defaulted: only the caller
+	// knows whether writing here is allowed.
 	Dir string
 
-	// Level is the minimum level to emit. The zero value is slog.LevelInfo.
-	// Resolve it from the environment and settings with ParseLevel.
+	// Level is the minimum level to emit; the zero value is slog.LevelInfo.
 	Level slog.Level
 }
 
-// Logger owns a log file, the buffered writer in front of it, and the slog
-// handler that writes through them.
+// Logger is safe for concurrent use: slog handlers may be called from several
+// goroutines and bufio.Writer is not goroutine-safe, so mu serializes every
+// write and Close. Writes after Close are dropped — losing a log line must
+// never surface as an error in the caller.
 //
-// Safe for concurrent use: slog handlers may be called from several goroutines
-// and bufio.Writer is not goroutine-safe, so every write and Close is
-// serialized. Writes after Close are dropped rather than failing — losing a log
-// line must never surface as an error in the caller.
+// The file is created on first write, not by New, so a command that logs
+// nothing (shell completion, version, help) neither pays for opening it nor
+// leaves an empty entire.log behind.
 type Logger struct {
 	slog *slog.Logger
 
-	// mu serializes writes to buf and guards the buf/file handles against a
-	// concurrent Close. Exclusive rather than an RWMutex: concurrent writers are
-	// exactly the problem, so admitting them together would defeat it.
-	mu   sync.Mutex
-	buf  *bufio.Writer
-	file *os.File
+	mu      sync.Mutex
+	dir     string
+	buf     *bufio.Writer
+	file    *os.File
+	closed  bool
+	openErr error
 }
 
-// New opens cfg.Dir/entire.log for appending and returns a Logger writing JSON
-// to it.
+// New returns a Logger that writes JSON to cfg.Dir/entire.log, creating both on
+// the first line actually written. It never falls back to stderr: an injected
+// logger that wrote to the terminal would splash operational lines over the
+// user's output.
 //
-// Errors are real errors: the caller decides whether a missing log file is
-// fatal (it generally is not) and what to do instead. Nothing falls back to
-// stderr here, because a logger that writes to the terminal would splash
-// operational lines over the user's output once injected.
+// A directory that cannot be created or opened is reported by Close, not here —
+// by then lines have already been dropped, which is the same outcome as any
+// other write failure and must never surface as an error in the caller.
 func New(cfg Config) (*Logger, error) {
 	if cfg.Dir == "" {
 		return nil, errors.New("logging: Config.Dir is required")
 	}
-	if err := os.MkdirAll(cfg.Dir, 0o750); err != nil {
-		return nil, fmt.Errorf("create log directory: %w", err)
-	}
-	path := filepath.Join(cfg.Dir, logFileName)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // fixed filename under a caller-vetted directory
-	if err != nil {
-		return nil, fmt.Errorf("open log file: %w", err)
-	}
 
-	l := &Logger{
-		buf:  bufio.NewWriterSize(f, writeBufferSize),
-		file: f,
-	}
+	l := &Logger{dir: cfg.Dir}
 	l.slog = slog.New(slog.NewJSONHandler(logWriter{l}, &slog.HandlerOptions{Level: cfg.Level}))
 	return l, nil
 }
 
+// open creates the log file. Caller holds mu. A failure is remembered so the
+// next line does not retry the syscalls.
+func (l *Logger) open() error {
+	if l.openErr != nil {
+		return l.openErr
+	}
+	if err := os.MkdirAll(l.dir, 0o750); err != nil {
+		l.openErr = fmt.Errorf("create log directory: %w", err)
+		return l.openErr
+	}
+	path := filepath.Join(l.dir, logFileName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // fixed filename under a caller-vetted directory
+	if err != nil {
+		l.openErr = fmt.Errorf("open log file: %w", err)
+		return l.openErr
+	}
+	l.file = f
+	l.buf = bufio.NewWriterSize(f, writeBufferSize)
+	return nil
+}
+
 // Slog returns the underlying *slog.Logger, for packages that take one by
-// injection (redact) and should not depend on this wrapper type.
+// injection and should not depend on this type. Nil-safe.
 func (l *Logger) Slog() *slog.Logger {
 	if l == nil {
 		return nil
@@ -127,8 +103,9 @@ func (l *Logger) Slog() *slog.Logger {
 	return l.slog
 }
 
-// Close flushes the buffer and closes the log file. Idempotent, and safe to
-// call concurrently with logging: later writes are dropped.
+// Close flushes the buffer and closes the log file, and reports a failure to
+// open it if one happened. Idempotent, and safe to call concurrently with
+// logging: later writes are dropped rather than reopening the file.
 func (l *Logger) Close() error {
 	if l == nil {
 		return nil
@@ -137,7 +114,8 @@ func (l *Logger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	var flushErr error
+	l.closed = true
+	flushErr := l.openErr
 	if l.buf != nil {
 		if err := l.buf.Flush(); err != nil {
 			flushErr = fmt.Errorf("flush log buffer: %w", err)
@@ -153,16 +131,20 @@ func (l *Logger) Close() error {
 	return flushErr
 }
 
-// logWriter adapts a Logger to io.Writer for its slog handler without putting
-// Write on Logger's own public surface.
+// logWriter keeps Write off Logger's public surface.
 type logWriter struct{ l *Logger }
 
 func (w logWriter) Write(p []byte) (int, error) {
 	w.l.mu.Lock()
 	defer w.l.mu.Unlock()
 
-	if w.l.buf == nil {
+	if w.l.closed {
 		return len(p), nil
+	}
+	if w.l.buf == nil {
+		if err := w.l.open(); err != nil {
+			return len(p), nil // dropped, reported by Close
+		}
 	}
 	n, err := w.l.buf.Write(p)
 	if err != nil {
@@ -171,10 +153,9 @@ func (w logWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// ParseLevel maps a log level name to a slog.Level. ok is false for a non-empty
-// name that is not recognized, so the caller can warn about a typo rather than
-// silently logging at the default level. An empty name is the default, INFO,
-// and reports ok.
+// ParseLevel maps a log level name to a slog.Level. ok is false for an
+// unrecognized non-empty name, so the caller can warn about a typo. An empty
+// name is INFO and reports ok.
 func ParseLevel(s string) (level slog.Level, ok bool) {
 	switch strings.ToUpper(strings.TrimSpace(s)) {
 	case "":
@@ -212,26 +193,31 @@ func Error(ctx context.Context, msg string, attrs ...any) {
 	log(ctx, slog.LevelError, msg, attrs...)
 }
 
-// log is the internal logging function that extracts context values and logs.
-//
-// The logger comes from the context, which is the same logger downstream
-// packages receive by injection — one resolution path, so a caller cannot log
-// somewhere other than where redact does. slog.Default() is the fallback for a
-// context built before the entry point ran or derived from context.Background();
-// that one is the runtime's own global, not state this package owns.
+// log resolves the logger from the context, falling back to slog.Default() for
+// a context built before the entry point ran.
 //
 // Context attributes lose to caller-supplied ones: slog does not dedupe attrs,
-// so emitting session_id from the context on top of a call site that passes its
-// own would put the key in the line twice. Over a hundred call sites pass one
-// by hand, so the collision is the common case, not the corner.
+// and over a hundred call sites pass session_id by hand, so emitting both would
+// put the key in the line twice.
 func log(ctx context.Context, level slog.Level, msg string, attrs ...any) {
 	l := LoggerFromContext(ctx).Slog()
 	if l == nil {
 		l = slog.Default()
 	}
 
+	// Before building anything: slog checks the level inside Log, by which point
+	// the context walk and both attr slices are already paid for. Most calls
+	// here are Debug, suppressed at the default level.
+	if !l.Enabled(nil, level) { //nolint:staticcheck // nil context is intentional, as below
+		return
+	}
+
 	contextAttrs := attrsFromContext(ctx)
-	dropSessionID := hasSessionIDAttr(attrs)
+	// Only scan the caller's attrs when there is a session to collide with;
+	// attrsFromContext emits it first.
+	dropSessionID := len(contextAttrs) > 0 &&
+		contextAttrs[0].Key == sessionIDAttrKey &&
+		hasSessionIDAttr(attrs)
 
 	allAttrs := make([]any, 0, len(contextAttrs)+len(attrs))
 	for _, a := range contextAttrs {
@@ -242,17 +228,14 @@ func log(ctx context.Context, level slog.Level, msg string, attrs ...any) {
 	}
 	allAttrs = append(allAttrs, attrs...)
 
-	// Pass nil context to slog as we've already extracted context values as attributes.
-	// slog handlers are expected to handle nil context gracefully.
+	// Context values are already extracted as attributes.
 	l.Log(nil, level, msg, allAttrs...) //nolint:staticcheck // nil context is intentional - we extract values as attributes
 }
 
-// hasSessionIDAttr reports whether attrs already carry a session_id.
-//
-// attrs follows slog's calling convention: slog.Attr values and loose
-// key/value pairs may be mixed, where a string element is a key and the
-// element after it its value. A session_id nested inside a slog.Group is a
-// different JSON path and so does not collide.
+// hasSessionIDAttr reports whether attrs already carry a session_id. attrs
+// follows slog's convention: Attr values and loose key/value pairs may be
+// mixed, so a string element is a key and the next its value. A session_id
+// inside a slog.Group is a different JSON path and does not collide.
 func hasSessionIDAttr(attrs []any) bool {
 	for i := 0; i < len(attrs); i++ {
 		switch a := attrs[i].(type) {
@@ -270,15 +253,14 @@ func hasSessionIDAttr(attrs []any) bool {
 	return false
 }
 
-// attrsFromContext extracts logging attributes from a context.
+// attrsFromContext extracts logging attributes from a context. Session comes
+// first; log() relies on that ordering.
 func attrsFromContext(ctx context.Context) []slog.Attr {
 	if ctx == nil {
 		return nil
 	}
 
-	var attrs []slog.Attr
-
-	// Session first, matching the order log lines have always had.
+	attrs := make([]slog.Attr, 0, 3) // sized for the three below
 	if s := sessionIDFromContext(ctx); s != "" {
 		attrs = append(attrs, slog.String(sessionIDAttrKey, s))
 	}

@@ -92,8 +92,8 @@ func getHookType(hookName string) string {
 // parsing, and lifecycle dispatch.
 // Used by both the registered subcommand path and the RunE fallback for external agents.
 // When stampSession is true, it attaches the hook session context itself (used by
-// the RunE fallback since it doesn't go through PersistentPreRunE). Built-in agent
-// subcommands pass false since their parent command's PersistentPreRunE already
+// the RunE fallback since it doesn't go through PersistentPreRun). Built-in agent
+// subcommands pass false since their parent command's PersistentPreRun already
 // did it.
 func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, stampSession bool) error {
 	// Skip silently if not in a git repository - hooks shouldn't prevent the agent from working
@@ -111,7 +111,7 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	// or unreadable settings file made every hook invocation pay the full
 	// dispatch cost instead of exiting fast (#524).
 	// settings.IsSetUpAndEnabled is the same fail-closed gate the git hooks
-	// use (see PersistentPreRunE in hooks_git_cmd.go).
+	// use (see PersistentPreRun in hooks_git_cmd.go).
 	if !settings.IsSetUpAndEnabled(cmd.Context()) {
 		return nil
 	}

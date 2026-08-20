@@ -467,7 +467,7 @@ func newRefreshTrailEnablementCmd() *cobra.Command {
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Detached child with discarded stdout/stderr: the root
-			// PersistentPreRunE has already routed logging into
+			// PersistentPreRun has already routed logging into
 			// .entire/logs/entire.log, so a failing background refresh (e.g.
 			// an unreachable host) is diagnosable there rather than vanishing.
 			ctx := cmd.Context()
