@@ -530,23 +530,8 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		}
 	}
 
-	// Skip gate: if there is no transcript AND no files touched, there is nothing
-	// meaningful to condense. Return early to avoid writing metadata-only stubs.
-	//
-	// This check MUST run before filterFilesTouched. That function's fallback
-	// assigns all committed files to sessions with empty FilesTouched (designed
-	// for mid-turn commits where SaveStep hasn't run yet). Without this ordering,
-	// genuinely empty sessions (no transcript, no shadow branch, no tracked files)
-	// would acquire committed files from the fallback and bypass this gate.
-	if len(sessionData.Transcript) == 0 && len(sessionData.FilesTouched) == 0 {
-		logging.Info(logCtx, "session skipped: no transcript or files to condense",
-			slog.String("session_id", state.SessionID),
-			slog.String("agent_type", string(state.AgentType)),
-			slog.String("checkpoint_id", checkpointID.String()),
-			slog.Bool("has_shadow_branch", hasShadowBranch),
-			slog.String("transcript_path", state.TranscriptPath),
-		)
-		return newSkippedResult(checkpointID, state.SessionID), nil
+	if skipped := skipIfNothingToCondense(logCtx, sessionData, state, checkpointID, hasShadowBranch); skipped != nil {
+		return skipped, nil
 	}
 
 	filterFilesTouched(sessionData, committedFiles, state)
@@ -699,12 +684,39 @@ func redactOrDrop(logCtx context.Context, transcript []byte, sessionID string, c
 	return redactedTranscript, redactDuration
 }
 
+// skipIfNothingToCondense returns a Skipped result when there is no
+// transcript, no files touched, AND no task records — nothing meaningful to
+// condense, so return early instead of writing a metadata-only stub. A
+// records-only session (read-only background subagent, empty parent
+// transcript) must still write: its task payloads are the checkpoint's content.
+//
+// This check MUST run before filterFilesTouched. That function's fallback
+// assigns all committed files to sessions with empty FilesTouched (designed
+// for mid-turn commits where SaveStep hasn't run yet). Without this ordering,
+// genuinely empty sessions (no transcript, no shadow branch, no tracked files)
+// would acquire committed files from the fallback and bypass this gate.
+func skipIfNothingToCondense(logCtx context.Context, sessionData *ExtractedSessionData, state *SessionState, checkpointID id.CheckpointID, hasShadowBranch bool) *CondenseResult {
+	if len(sessionData.Transcript) > 0 || len(sessionData.FilesTouched) > 0 || state.HasTaskContent() {
+		return nil
+	}
+	logging.Info(logCtx, "session skipped: no transcript or files to condense",
+		slog.String("session_id", state.SessionID),
+		slog.String("agent_type", string(state.AgentType)),
+		slog.String("checkpoint_id", checkpointID.String()),
+		slog.Bool("has_shadow_branch", hasShadowBranch),
+		slog.String("transcript_path", state.TranscriptPath),
+	)
+	return newSkippedResult(checkpointID, state.SessionID)
+}
+
 // skipIfPostRedactionEmpty returns a Skipped result when redaction emptied the
 // transcript AND the filtered FilesTouched is also empty. Without this, a
 // session that passed the pre-redaction gate but got its transcript dropped by
-// a malformed-JSONL redaction error would write a metadata-only stub.
+// a malformed-JSONL redaction error would write a metadata-only stub. A
+// session with task payloads to materialize must still write even when its
+// parent transcript redacts to empty.
 func skipIfPostRedactionEmpty(logCtx context.Context, redactedTranscript redact.RedactedBytes, sessionData *ExtractedSessionData, state *SessionState, checkpointID id.CheckpointID) *CondenseResult {
-	if redactedTranscript.Len() > 0 || len(sessionData.FilesTouched) > 0 {
+	if redactedTranscript.Len() > 0 || len(sessionData.FilesTouched) > 0 || state.HasTaskContent() {
 		return nil
 	}
 	logging.Info(logCtx, "session skipped: nothing to persist after redaction",
@@ -790,10 +802,10 @@ func filterFilesTouched(sessionData *ExtractedSessionData, committedFiles map[st
 // recorded a checkpoint (StepCount > 0). False means the session was likely
 // registered but never did anything; treating such a session as the author of
 // the committed files would attribute another session's work to it.
-// TranscriptOnlyTaskSteps deliberately does NOT count here: those steps by
-// definition touched no files, so letting them qualify the session for the
-// committed-files fallback would be the exact mis-attribution this guard
-// prevents.
+// Task records deliberately do NOT count here: a record-bearing session may
+// have touched no files at all (read-only subagent), so letting records
+// qualify the session for the committed-files fallback would be the exact
+// mis-attribution this guard prevents.
 func sessionHasEvidenceOfWork(sessionData *ExtractedSessionData, state *SessionState) bool {
 	if len(sessionData.Transcript) > 0 {
 		return true
@@ -1494,7 +1506,10 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		_, refErr := repo.Reference(refName, true)
 		hasShadowBranch := refErr == nil
 
-		if !hasShadowBranch {
+		// A record-bearing session must materialize its task records rather
+		// than be cleared: they hold condensable content that never lives on
+		// the shadow branch, and clearing would destroy it.
+		if !hasShadowBranch && !state.HasTaskContent() {
 			logging.Info(logCtx, "no shadow branch for session, clearing state only",
 				slog.String("session_id", sessionID),
 				slog.String("shadow_branch", shadowBranchName),
@@ -1591,7 +1606,10 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			return ErrMutationSkip
 		}
 
-		if state.StepCount <= 0 && state.TranscriptOnlyTaskSteps <= 0 {
+		// A session whose only content is a task record — even a still-LIVE one
+		// left behind by a failed capture — must not be marked FullyCondensed
+		// without materializing; HasTaskContent counts both shapes.
+		if state.StepCount <= 0 && !state.HasTaskContent() {
 			state.FullyCondensed = true
 			return nil
 		}
@@ -1601,10 +1619,10 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		_, refErr := repo.Reference(refName, true)
 		hasShadowBranch := refErr == nil
 
-		// Transcript-only task records never write a shadow branch, so their
-		// sessions must condense from the live transcript (CondenseSession's
-		// documented no-shadow-branch path) rather than take this shortcut.
-		if !hasShadowBranch && state.TranscriptOnlyTaskSteps <= 0 {
+		// Task records never write a shadow branch, so their sessions must
+		// condense from the live transcript (CondenseSession's documented
+		// no-shadow-branch path) rather than take this shortcut.
+		if !hasShadowBranch && !state.HasTaskContent() {
 			logging.Info(logCtx, "eager condense: no shadow branch",
 				slog.String("session_id", sessionID),
 				slog.String("shadow_branch", shadowBranchName),
@@ -1691,9 +1709,9 @@ func (s *ManualCommitStrategy) cleanupShadowBranchIfUnused(ctx context.Context, 
 			continue
 		}
 		otherShadow := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		if otherShadow == shadowBranchName && (state.StepCount > 0 || state.TranscriptOnlyTaskSteps > 0) {
-			// Another session still needs this shadow branch (transcript-only
-			// task steps live on it too, not just SaveStep checkpoints)
+		// Only SaveStep checkpoints live on the shadow branch; task records do
+		// not, so they no longer pin the branch alive.
+		if otherShadow == shadowBranchName && state.StepCount > 0 {
 			return nil
 		}
 	}

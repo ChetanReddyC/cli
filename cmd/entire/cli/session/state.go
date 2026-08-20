@@ -205,17 +205,6 @@ type State struct {
 	// JSON tag kept as "checkpoint_count" for backward compatibility with existing state files.
 	StepCount int `json:"checkpoint_count"`
 
-	// TranscriptOnlyTaskSteps counts non-incremental task steps saved with
-	// empty file lists — background read-only subagents captured via the
-	// SubagentStop Final path's no-changes bypass — which would otherwise be
-	// invisible to every condensation trigger (they register with neither
-	// FilesTouched nor StepCount). Deliberately separate from StepCount, whose
-	// ==0/==1 values carry first-checkpoint-baseline and transcript-anchor
-	// semantics in SaveStep: folding these steps into StepCount would make a
-	// background capture that lands before the session's first SaveStep
-	// silently kill the baseline capture and the transcript anchor.
-	TranscriptOnlyTaskSteps int `json:"transcript_only_task_steps,omitempty"`
-
 	// CheckpointTranscriptStart is the transcript line offset where the current
 	// checkpoint cycle began. Set to 0 at session start, updated to current
 	// transcript length after each condensation. Used to scope the transcript
@@ -397,12 +386,11 @@ type State struct {
 // capture, SubagentStop, or the SessionEnd sweep. Unlike the prior
 // remove-on-claim model, a completed record is NOT deleted: it must persist
 // so a later condensation can materialize its transcript. Consumed by the
-// turn-end incremental snapshot (captureInFlightTaskIncremental) and the
 // Final captures — the SubagentStop handler (handleSubagentStopFinal) and the
 // SessionEnd sweep (completeLiveTaskRecords). A Final capture completes the
 // record LAST, after successful extraction (strategy.CompleteTaskRecord's
 // exactly-once mutation), so a failed capture leaves the record live for the
-// SessionEnd sweep to retry. Turn-end snapshots leave the record live.
+// SessionEnd sweep to retry.
 type TaskRecord struct {
 	// ToolUseID is the Task tool invocation's tool_use_id — the same ID used
 	// to key TaskMetadataDir. Dedup key for AddTaskRecord.
@@ -445,40 +433,6 @@ type TaskRecord struct {
 	// CompletedAt is when this record was completed (CompleteTaskRecord).
 	// Zero means the record is still in flight. See the type doc comment.
 	CompletedAt time.Time `json:"completed_at,omitempty"`
-
-	// LastCapturedTranscriptBytes is the subagent transcript file's size, in
-	// bytes, as of the last turn-end scan that fully accounted for the
-	// transcript — whether or not that scan wrote a checkpoint (the
-	// zero-files skip records it too; see persistCapturedTranscriptSize in
-	// the cli package). Lets a later turn-end skip re-scanning and
-	// re-committing a transcript that hasn't grown since then — without this,
-	// every turn-end after a task's last real progress re-extracts the whole
-	// transcript (and, for a read-only subagent, rescans it forever). Zero
-	// (the default) always triggers the first capture: a resolved subagent
-	// transcript is never a zero-byte file in practice.
-	//
-	// Deferred removal: this field's machinery (captureInFlightTaskIncremental,
-	// persistCapturedTranscriptSize) is scheduled for deletion once the
-	// materializer + producer switch land (see the durable-records plan,
-	// Task 4) and is kept here only so this rename stays independently
-	// buildable.
-	LastCapturedTranscriptBytes int64 `json:"last_captured_transcript_bytes,omitempty"`
-
-	// LastSnapshotAttempt is when captureInFlightTasks last SELECTED this
-	// record for a turn-end incremental snapshot attempt (stamped regardless
-	// of per-task outcome — skipped, deduped, or saved). The turn-end path
-	// selects at most maxInFlightTasksPerCapture records ordered by
-	// least-recently-attempted (zero value sorts first), so this is what
-	// rotates the selection: without it, a stable oldest-StartedAt prefix
-	// would always pick the same N records, and any task beyond the cap would
-	// never get an incremental snapshot for the life of the session, even
-	// though the comment on the cap promises it's "picked up next turn-end."
-	// The SessionEnd final path is uncapped and never reads or writes this
-	// field.
-	//
-	// Deferred removal: see LastCapturedTranscriptBytes above — same Task 4
-	// scheduling.
-	LastSnapshotAttempt time.Time `json:"last_snapshot_attempt,omitempty"`
 }
 
 // AddTaskRecord records a subagent launch, replacing any existing entry with
@@ -549,15 +503,20 @@ func (s *State) CompleteTaskRecord(toolUseID string, completedAt time.Time) bool
 	return false
 }
 
+// HasTaskContent reports whether this session carries pending subagent task
+// content: any task record — live (transcript-so-far still needs capturing)
+// or completed-unmaterialized (awaiting condensation) — counts. Condensation
+// triggers and session-empty guards key on this, not on shadow-branch
+// existence: task records never touch the shadow branch.
+func (s *State) HasTaskContent() bool {
+	return len(s.TaskRecords) > 0
+}
+
 // LiveTaskRecords returns the records not yet completed (CompletedAt zero) —
-// i.e. still in flight. Trigger paths and in-flight diagnostics (currently
-// just the turn-end/SessionEnd backstop's "any in-flight work?" check and its
-// task selection) must use this rather than the raw TaskRecords slice: since
-// CompleteTaskRecord no longer removes a record, TaskRecords mixes live
-// records with already-completed ones awaiting materialization. The
-// session-empty fast-path guard is a separate consumer still keyed on
-// TranscriptOnlyTaskSteps today; it gets rewired onto task records in Task 4
-// once TranscriptOnlyTaskSteps itself is retired.
+// i.e. still in flight. In-flight consumers (the SessionEnd sweep's "any
+// in-flight work?" check) must use this rather than the raw TaskRecords
+// slice: since CompleteTaskRecord no longer removes a record, TaskRecords
+// mixes live records with already-completed ones awaiting materialization.
 func (s *State) LiveTaskRecords() []TaskRecord {
 	var live []TaskRecord
 	for _, r := range s.TaskRecords {

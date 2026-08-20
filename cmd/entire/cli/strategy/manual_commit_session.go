@@ -110,10 +110,12 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		// with LastCheckpointID (needed for checkpoint ID reuse on subsequent commits).
 		// Clean up everything else: stale pre-state-machine sessions (empty phase),
 		// IDLE/ENDED sessions that were never condensed, etc.
+		// A record-bearing session has condensable task content that never
+		// touches the shadow branch, so it is not orphaned by branch absence.
 		shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		refName := plumbing.NewBranchReferenceName(shadowBranch)
 		if _, err := repo.Reference(refName, true); err != nil {
-			if !state.Phase.IsActive() && state.LastCheckpointID.IsEmpty() {
+			if !state.Phase.IsActive() && state.LastCheckpointID.IsEmpty() && !state.HasTaskContent() {
 				//nolint:errcheck,gosec // G104: Cleanup is best-effort, shouldn't fail the list operation
 				store.Clear(ctx, state.SessionID)
 				continue
@@ -129,7 +131,7 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 // expensive in PostCommit and actionable via 'entire doctor'.
 func isWarnableStaleEndedSession(repo *git.Repository, state *SessionState) bool {
 	if state.Phase != session.PhaseEnded || state.FullyCondensed ||
-		(state.StepCount <= 0 && state.TranscriptOnlyTaskSteps <= 0) {
+		(state.StepCount <= 0 && !state.HasTaskContent()) {
 		return false
 	}
 
@@ -138,6 +140,11 @@ func isWarnableStaleEndedSession(repo *git.Repository, state *SessionState) bool
 	// branches during condensation, so a branch that existed at list-load time
 	// may be gone by the time we reach the warning check. Without this re-check
 	// we would warn about sessions that this commit just cleaned up.
+	// Record-bearing sessions stay warnable regardless: task records hold
+	// condensable content that never lives on the shadow branch.
+	if state.HasTaskContent() {
+		return true
+	}
 	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	refName := plumbing.NewBranchReferenceName(shadowBranch)
 	_, err := repo.Reference(refName, true)
@@ -526,7 +533,7 @@ func (s *ManualCommitStrategy) CountOtherActiveSessionsWithCheckpoints(ctx conte
 		// Sessions from different base commits are independent and shouldn't be counted
 		if state.SessionID != currentSessionID &&
 			state.WorktreePath == currentWorktree &&
-			(state.StepCount > 0 || state.TranscriptOnlyTaskSteps > 0) &&
+			(state.StepCount > 0 || state.HasTaskContent()) &&
 			state.BaseCommit == currentHead {
 			count++
 		}

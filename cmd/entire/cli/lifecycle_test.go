@@ -102,10 +102,9 @@ func newMockAgent() *mockLifecycleAgent {
 }
 
 // mockAnalyzerAgent extends mockLifecycleAgent with a fake TranscriptAnalyzer
-// implementation. The in-flight-task incremental snapshot path
-// (captureInFlightTaskIncremental) reads modified files from the subagent's
-// own transcript via this interface, not from git status, so tests exercising
-// that path need an agent that implements it.
+// implementation. The background Final capture path reads modified files from
+// the subagent's own transcript via this interface, not from git status, so
+// tests exercising that path need an agent that implements it.
 type mockAnalyzerAgent struct {
 	*mockLifecycleAgent
 
@@ -2717,16 +2716,6 @@ func finalSubagentEvent(sessionID, toolUseID, subagentID string) *agent.Event {
 	}
 }
 
-// turnEndEvent builds a TurnEnd event referencing the main transcript.
-func turnEndEvent(sessionID, sessionRef string) *agent.Event {
-	return &agent.Event{
-		Type:       agent.TurnEnd,
-		SessionID:  sessionID,
-		SessionRef: sessionRef,
-		Timestamp:  time.Now(),
-	}
-}
-
 // writeSubagentTranscripts writes a one-line main transcript plus a sibling
 // subagent transcript for agentID (the legacy layout ResolveAgentTranscriptPath
 // falls back to) in a fresh temp dir, outside the repo so their presence never
@@ -2917,8 +2906,8 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_CapturesUsingLaunchRecordedLabe
 	require.NotNil(t, rec)
 	assert.Equal(t, "reviewer", rec.SubagentType, "the completed record must keep the launch-recorded subagent type")
 	assert.Equal(t, "Review the PR", rec.TaskDescription, "the completed record must keep the launch-recorded description")
-	assert.Equal(t, 1, state.TranscriptOnlyTaskSteps,
-		"a no-changes Final completion must register as a transcript-only step so condensation triggers see it")
+	assert.True(t, state.HasTaskContent(),
+		"a no-changes Final completion must leave the record in place so condensation triggers see it")
 	assert.Zero(t, state.StepCount,
 		"a transcript-only completion must NOT consume StepCount — its ==0/==1 values carry SaveStep's first-checkpoint-baseline and transcript-anchor semantics")
 }
@@ -2960,7 +2949,7 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect(t
 //
 // Uses a read-only capture (no file changes) — the headline motivating case,
 // a background reviewer that edits nothing. Such a completion touches neither
-// FilesTouched nor StepCount, so TranscriptOnlyTaskSteps is what keeps
+// FilesTouched nor StepCount, so the task record itself is what keeps
 // CondenseAndMarkFullyCondensed off its no-steps and no-shadow-branch
 // shortcuts. The session state carries a real transcript path and a
 // registered agent type so CondenseSession has actual content to condense —
@@ -3097,7 +3086,6 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_ClaimPreventsDoubleCapture(t *t
 	require.NotNil(t, rec)
 	require.False(t, rec.CompletedAt.IsZero(), "first Final event must complete the record")
 	firstCompletedAt := rec.CompletedAt
-	require.Equal(t, 1, state.TranscriptOnlyTaskSteps)
 
 	// A second Final event for the same ToolUseID: the record is already
 	// completed, so this must be a no-op rather than a second completion.
@@ -3109,7 +3097,7 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_ClaimPreventsDoubleCapture(t *t
 	rec = state.FindTaskRecord(toolUseID)
 	require.NotNil(t, rec)
 	assert.Equal(t, firstCompletedAt, rec.CompletedAt, "a duplicate Final event must not re-complete the record")
-	assert.Equal(t, 1, state.TranscriptOnlyTaskSteps, "a duplicate Final event must not register a second transcript-only step")
+	assert.Len(t, state.TaskRecords, 1, "a duplicate Final event must not register a second record")
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_Background_ExcludesForeignWorktreeChanges
@@ -3193,7 +3181,7 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_Background_ExcludesForeignWorkt
 // worktree state — checkpoint/ephemeral.go's collectChangedFiles baseline)
 // and its ==1 value anchors TranscriptIdentifierAtStart. A transcript-only
 // background Final landing BEFORE the session's first SaveStep must therefore
-// register on the dedicated TranscriptOnlyTaskSteps counter, not StepCount —
+// register only on the task record, not StepCount —
 // otherwise the subsequent first SaveStep sees StepCount==1, skips the
 // baseline capture (silently dropping the user's pre-existing dirt from every
 // checkpoint), and never sets the transcript anchor.
@@ -3221,7 +3209,7 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_TranscriptOnlyBeforeFirstSaveSt
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Zero(t, state.StepCount, "transcript-only task step must not consume StepCount")
-	require.Equal(t, 1, state.TranscriptOnlyTaskSteps, "transcript-only task step must register on its dedicated counter")
+	require.True(t, state.HasTaskContent(), "the completed record must register as pending task content")
 
 	// Now the session's FIRST SaveStep. It must still get first-checkpoint
 	// semantics: baseline capture of user-dirt.txt and the transcript anchor.
@@ -3304,8 +3292,6 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_UnresolvableTranscript_SkipsPar
 		"an unresolvable subagent transcript must not trigger a parent-transcript scan that attributes the whole session's files to one background task")
 	assert.Empty(t, rec.DeclaredTranscriptPath, "an unresolvable transcript completes the record with declared-path-empty")
 	assert.NotContains(t, state.FilesTouched, "parent-work.txt")
-	assert.Equal(t, 1, state.TranscriptOnlyTaskSteps,
-		"the completion must still register a (file-less) transcript-only step so condensation triggers see it")
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_AnalyzerError_FailsInsteadOfEmptyStep
@@ -3348,211 +3334,6 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_AnalyzerError_FailsInsteadOfEmp
 	require.NotNil(t, state)
 	assert.Len(t, state.LiveTaskRecords(), 1,
 		"the record must stay LIVE — the error returns before completion, so the SessionEnd sweep retries it")
-	assert.Zero(t, state.TranscriptOnlyTaskSteps, "nothing completed, so nothing may register with condensation triggers")
-}
-
-// TestHandleLifecycleTurnEnd_InFlightTask_IncrementalSnapshot is the
-// regression Task 3 fixes: before this backstop, a background subagent's
-// code changes were completely invisible between launch and its eventual
-// SubagentStop — which, for a subagent running minutes, meant long stretches
-// with zero checkpoint presence for work already on disk. Turn-end must
-// snapshot the in-flight task's code changes as an incremental checkpoint
-// (code-only — no transcript, per checkpoint/ephemeral.go's incremental write
-// path) at `<taskMetadataDir>/checkpoints/NNN-<toolUseID>.json`, and the
-// marker must stay: this is a snapshot, not the completion signal.
-func TestHandleLifecycleTurnEnd_InFlightTask_IncrementalSnapshot(t *testing.T) {
-	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
-	repoDir, headHash := setupSubagentEndTestRepo(t)
-	ctx := context.Background()
-	sessionID := "turnend-inflight-session"
-	toolUseID := "toolu_turnend1"
-	agentID := "agent-turnend1"
-
-	mainTranscriptPath, _ := writeSubagentTranscripts(t, agentID)
-
-	saveInFlightSession(ctx, t, sessionID, headHash,
-		session.TaskRecord{ToolUseID: toolUseID, AgentID: agentID, StartedAt: time.Now(), SubagentType: "dev", TaskDescription: "Implement widget"})
-
-	// The subagent's own code change: an untracked file the analyzer reports
-	// as modified. This also makes the parent turn's own git-status scan see a
-	// change, so handleLifecycleTurnEnd takes the main SaveStep path (not the
-	// "no files modified" early return) — proving the backstop runs alongside
-	// ordinary turn-end processing, not only in its absence.
-	testutil.WriteFile(t, repoDir, "widget.txt", "written by background subagent")
-
-	ag := &mockAnalyzerAgent{
-		mockLifecycleAgent: newMockAgent(),
-		analyzerFiles:      []string{"widget.txt"},
-	}
-
-	err := handleLifecycleTurnEnd(ctx, ag, turnEndEvent(sessionID, mainTranscriptPath))
-	require.NoError(t, err)
-
-	// Marker stays: turn-end is a backstop snapshot, not the final capture.
-	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
-	require.NoError(t, loadErr)
-	require.NotNil(t, state)
-	require.Len(t, state.TaskRecords, 1, "turn-end snapshot must not clear the in-flight marker")
-
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
-	cpPath := ".entire/metadata/" + sessionID + "/tasks/" + toolUseID + "/checkpoints/001-" + toolUseID + ".json"
-	content, found := readShadowBranchFile(t, repoDir, shadowBranch, cpPath)
-	require.True(t, found, "expected incremental checkpoint file at %s", cpPath)
-	assert.Contains(t, content, toolUseID)
-}
-
-// TestHandleLifecycleTurnEnd_InFlightTask_SkipPaths table-tests the turn-end
-// backstop's skip paths — no incremental checkpoint is written and the marker
-// stays. Each row is a named regression:
-//   - MissingTranscriptSkipsSilently: a marker whose subagent transcript file
-//     doesn't exist yet (the subagent barely started) must be skipped without
-//     error — the backstop is best-effort; the next turn-end or the eventual
-//     SubagentStop will catch it.
-//   - ZeroFilesRecordsTranscriptSize: the zero-modified-files skip path in
-//     captureInFlightTaskIncremental used to return without persisting
-//     LastCapturedTranscriptBytes, so a read-only subagent's unchanged
-//     transcript was rescanned by the analyzer every turn-end forever.
-//   - AnalyzerErrorDoesNotPersistSize: a failed ExtractModifiedFilesFromOffset
-//     used to fall through into the zero-files branch and persist the size —
-//     permanently skipping retries at that transcript size via the growth
-//     dedup. An analyzer error must skip BOTH the save and the size persist.
-func TestHandleLifecycleTurnEnd_InFlightTask_SkipPaths(t *testing.T) {
-	// NOT parallel: subtests use t.Chdir via setupSubagentEndTestRepo.
-	tests := []struct {
-		name              string
-		transcriptExists  bool
-		analyzerErr       error
-		writeRepoChange   bool
-		wantSizePersisted bool
-	}{
-		{name: "MissingTranscriptSkipsSilently", transcriptExists: false, writeRepoChange: true},
-		{name: "ZeroFilesRecordsTranscriptSize", transcriptExists: true, wantSizePersisted: true},
-		{name: "AnalyzerErrorDoesNotPersistSize", transcriptExists: true, analyzerErr: errors.New("transcript parse failed")},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			repoDir, headHash := setupSubagentEndTestRepo(t)
-			ctx := context.Background()
-			sessionID := "turnend-skip-session"
-			toolUseID := "toolu_skip1"
-			agentID := "agent-skip1"
-
-			mainTranscriptPath, subagentTranscriptPath := writeSubagentTranscripts(t, agentID)
-			if !tt.transcriptExists {
-				require.NoError(t, os.Remove(subagentTranscriptPath))
-			}
-
-			saveInFlightSession(ctx, t, sessionID, headHash,
-				session.TaskRecord{ToolUseID: toolUseID, AgentID: agentID, StartedAt: time.Now(), SubagentType: "dev"})
-
-			if tt.writeRepoChange {
-				testutil.WriteFile(t, repoDir, "unrelated.txt", "main session's own change")
-			}
-
-			ag := &mockAnalyzerAgent{
-				mockLifecycleAgent: newMockAgent(),
-				analyzerErr:        tt.analyzerErr,
-			}
-			require.NoError(t, handleLifecycleTurnEnd(ctx, ag, turnEndEvent(sessionID, mainTranscriptPath)))
-
-			shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
-			cpPath := ".entire/metadata/" + sessionID + "/tasks/" + toolUseID + "/checkpoints/001-" + toolUseID + ".json"
-			_, found := readShadowBranchFile(t, repoDir, shadowBranch, cpPath)
-			assert.False(t, found, "a skip path must not write an incremental checkpoint")
-
-			state, loadErr := strategy.LoadSessionState(ctx, sessionID)
-			require.NoError(t, loadErr)
-			require.NotNil(t, state)
-			marker := state.FindTaskRecord(toolUseID)
-			require.NotNil(t, marker, "a skip path must not clear the in-flight marker")
-
-			if tt.wantSizePersisted {
-				info, statErr := os.Stat(subagentTranscriptPath)
-				require.NoError(t, statErr)
-				assert.Equal(t, info.Size(), marker.LastCapturedTranscriptBytes,
-					"the zero-files skip must still record the transcript size, or an unchanged read-only transcript is rescanned every turn-end forever")
-			} else {
-				assert.Zero(t, marker.LastCapturedTranscriptBytes,
-					"this skip path must not persist the transcript size — the growth dedup would wrongly treat it as already captured and never retry")
-			}
-		})
-	}
-}
-
-// TestHandleLifecycleTurnEnd_InFlightTask_DedupsUnchangedTranscript is the
-// regression for the growth-dedup fix-up: before it, every turn-end after a
-// task's last real progress re-scanned the whole subagent transcript and
-// wrote a content-identical incremental checkpoint — a per-turn cost that
-// grows with the transcript, plus pure noise in the checkpoint history. A
-// turn-end whose subagent transcript is byte-for-byte unchanged since the
-// last capture must skip entirely (no analyzer scan, no shadow-branch write);
-// once the transcript grows again, the next turn-end must capture it.
-func TestHandleLifecycleTurnEnd_InFlightTask_DedupsUnchangedTranscript(t *testing.T) {
-	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
-	repoDir, headHash := setupSubagentEndTestRepo(t)
-	ctx := context.Background()
-	sessionID := "turnend-dedup-session"
-	toolUseID := "toolu_dedup1"
-	agentID := "agent-dedup1"
-
-	mainTranscriptPath, subagentTranscriptPath := writeSubagentTranscripts(t, agentID)
-
-	saveInFlightSession(ctx, t, sessionID, headHash,
-		session.TaskRecord{ToolUseID: toolUseID, AgentID: agentID, StartedAt: time.Now(), SubagentType: "dev", TaskDescription: "Implement widget"})
-
-	testutil.WriteFile(t, repoDir, "widget.txt", "written by background subagent")
-
-	ag := &mockAnalyzerAgent{
-		mockLifecycleAgent: newMockAgent(),
-		analyzerFiles:      []string{"widget.txt"},
-	}
-
-	newEvent := func() *agent.Event { return turnEndEvent(sessionID, mainTranscriptPath) }
-
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
-	cpPath := ".entire/metadata/" + sessionID + "/tasks/" + toolUseID + "/checkpoints/001-" + toolUseID + ".json"
-
-	// First turn-end: the marker has never recorded a captured size (0) and
-	// the transcript is non-empty, so this must capture.
-	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, newEvent()))
-	firstContent, found := readShadowBranchFile(t, repoDir, shadowBranch, cpPath)
-	require.True(t, found, "expected an incremental checkpoint after the first turn-end")
-
-	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
-	require.NoError(t, loadErr)
-	marker := state.FindTaskRecord(toolUseID)
-	require.NotNil(t, marker)
-	firstSize := marker.LastCapturedTranscriptBytes
-	require.NotZero(t, firstSize, "the marker must record the captured transcript's size")
-
-	// Second turn-end: the subagent transcript is byte-for-byte unchanged, so
-	// this must be a no-op — the checkpoint blob must not be rewritten and the
-	// marker's recorded size must not move.
-	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, newEvent()))
-	secondContent, found := readShadowBranchFile(t, repoDir, shadowBranch, cpPath)
-	require.True(t, found)
-	assert.Equal(t, firstContent, secondContent, "an unchanged transcript must not produce a second incremental capture")
-
-	state, loadErr = strategy.LoadSessionState(ctx, sessionID)
-	require.NoError(t, loadErr)
-	marker = state.FindTaskRecord(toolUseID)
-	require.NotNil(t, marker)
-	assert.Equal(t, firstSize, marker.LastCapturedTranscriptBytes, "an unchanged transcript must not update the recorded size")
-
-	// Grow the subagent transcript: the next turn-end must capture again.
-	require.NoError(t, os.WriteFile(subagentTranscriptPath,
-		[]byte(`{"type":"assistant"}`+"\n"+`{"type":"assistant","more":"progress"}`+"\n"), 0o600))
-	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, newEvent()))
-	thirdContent, found := readShadowBranchFile(t, repoDir, shadowBranch, cpPath)
-	require.True(t, found)
-	assert.NotEqual(t, secondContent, thirdContent, "a grown transcript must produce a new incremental capture")
-
-	state, loadErr = strategy.LoadSessionState(ctx, sessionID)
-	require.NoError(t, loadErr)
-	marker = state.FindTaskRecord(toolUseID)
-	require.NotNil(t, marker)
-	assert.Greater(t, marker.LastCapturedTranscriptBytes, firstSize, "the marker must record the grown transcript's new size")
 }
 
 // TestHandleLifecycleSessionEnd_InFlightTask_FinalCapture pins invariant 4: a
@@ -3645,20 +3426,16 @@ func TestHandleLifecycleSessionEnd_InFlightTask_FinalCapture(t *testing.T) {
 		"the stored subagent transcript must carry the subagent's actual content")
 }
 
-// TestCaptureInFlightTasks_FinalPathIsUncapped is the regression for the
-// uncapped-final-path fix-up: unlike the turn-end incremental path, which
-// clips to maxInFlightTasksPerCapture and defers the remainder to a later
-// turn-end (or SessionEnd), a Final (SessionEnd) capture has no later chance
-// to defer to — it's the last opportunity to keep each task's transcript
-// before the marker's information is gone for good. It must claim and
-// capture every in-flight marker, not just the first maxInFlightTasksPerCapture.
-func TestCaptureInFlightTasks_FinalPathIsUncapped(t *testing.T) {
+// TestCompleteLiveTaskRecords_CompletesEveryRecord pins that the SessionEnd
+// sweep is uncapped: it is every record's last completion chance, so it must
+// claim and capture every live marker, however many are in flight.
+func TestCompleteLiveTaskRecords_CompletesEveryRecord(t *testing.T) {
 	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
 	_, headHash := setupSubagentEndTestRepo(t)
 	ctx := context.Background()
 	sessionID := "uncapped-final-session"
 
-	const taskCount = maxInFlightTasksPerCapture + 1
+	const taskCount = 9
 	saveInFlightSession(ctx, t, sessionID, headHash, makeNInFlightTasks(taskCount)...)
 
 	ag := newMockAgent()
@@ -3667,69 +3444,6 @@ func TestCaptureInFlightTasks_FinalPathIsUncapped(t *testing.T) {
 	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
 	require.NoError(t, loadErr)
 	require.NotNil(t, state)
-	require.Len(t, state.TaskRecords, taskCount, "records must persist after completion — the future materializer reads them at condensation")
-	live := state.LiveTaskRecords()
-	assert.Empty(t, live,
-		"a Final capture must complete every record (got %d still live), not just the first %d",
-		len(live), maxInFlightTasksPerCapture)
-}
-
-// TestCaptureInFlightTasks_TurnEndRotatesSnapshotSelection is the regression
-// for a verified external-review finding: the turn-end incremental path used
-// to select a stable oldest-StartedAt prefix of at most
-// maxInFlightTasksPerCapture markers, and markers persist until their Final
-// capture. With more than the cap in flight, any marker beyond the first N
-// never received an incremental snapshot for the life of the session — a
-// stable prefix never rotates — contradicting the cap comment's promise that
-// a clipped task is merely delayed to "next turn-end." With
-// maxInFlightTasksPerCapture+1 markers, two consecutive non-final captures
-// must together stamp LastSnapshotAttempt on every marker at least once: the
-// 9th marker must not be starved forever.
-func TestCaptureInFlightTasks_TurnEndRotatesSnapshotSelection(t *testing.T) {
-	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
-	_, headHash := setupSubagentEndTestRepo(t)
-	ctx := context.Background()
-	sessionID := "rotate-turnend-session"
-
-	const taskCount = maxInFlightTasksPerCapture + 1
-	saveInFlightSession(ctx, t, sessionID, headHash, makeNInFlightTasks(taskCount)...)
-
-	ag := newMockAgent()
-
-	// First turn-end: no marker has ever been attempted (all-zero
-	// LastSnapshotAttempt, tied), so selection falls back to StartedAt order —
-	// exactly the pre-fix stable prefix — and stamps only the capped batch.
-	captureInFlightTasks(ctx, ag, sessionID, "")
-
-	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
-	require.NoError(t, loadErr)
-	require.NotNil(t, state)
-	require.Len(t, state.TaskRecords, taskCount, "a non-final capture must never remove markers")
-
-	stampedAfterFirst := 0
-	for _, task := range state.TaskRecords {
-		if !task.LastSnapshotAttempt.IsZero() {
-			stampedAfterFirst++
-		}
-	}
-	assert.Equal(t, maxInFlightTasksPerCapture, stampedAfterFirst,
-		"the first turn-end must stamp exactly the capped batch, leaving the marker(s) beyond the cap unattempted")
-
-	// Second turn-end: the never-attempted marker(s) (zero LastSnapshotAttempt)
-	// must sort before everything the first call just stamped, so this
-	// selection reaches them — the rotation this fix adds. Under the old
-	// stable-oldest-StartedAt-prefix selection, this second call would pick
-	// the exact same 8 markers again and the 9th would still be unattempted.
-	captureInFlightTasks(ctx, ag, sessionID, "")
-
-	state, loadErr = strategy.LoadSessionState(ctx, sessionID)
-	require.NoError(t, loadErr)
-	require.NotNil(t, state)
-	require.Len(t, state.TaskRecords, taskCount)
-
-	for _, task := range state.TaskRecords {
-		assert.False(t, task.LastSnapshotAttempt.IsZero(),
-			"tool_use_id %s has a zero LastSnapshotAttempt after two turn-ends spanning %d markers — the stable-prefix selection this fixes starves markers beyond the cap forever",
-			task.ToolUseID, taskCount)
-	}
+	require.Len(t, state.TaskRecords, taskCount, "records must persist after completion — the materializer reads them at condensation")
+	assert.Empty(t, state.LiveTaskRecords(), "the SessionEnd sweep must complete every record")
 }

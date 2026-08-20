@@ -860,6 +860,45 @@ func TestCondenseSession_PoisonedTaskRecord_SkippedNotWedged(t *testing.T) {
 	require.False(t, remaining["toolu_valid"], "the completed valid record was materialized and must also be removed")
 }
 
+// TestCondenseAndMarkFullyCondensed_RecordsOnlySessionMaterializes is the
+// trigger half of invariant 7: a records-only session (read-only background
+// subagent; no SaveStep, no shadow branch, no files, no parent transcript)
+// must condense into a real checkpoint carrying tasks/<id>/, not be
+// short-circuited to FullyCondensed by the empty-session/no-shadow-branch
+// shortcuts or CondenseSession's own skip gates.
+func TestCondenseAndMarkFullyCondensed_RecordsOnlySessionMaterializes(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	agentTranscriptPath := filepath.Join(t.TempDir(), "agent-transcript.jsonl")
+	require.NoError(t, os.WriteFile(agentTranscriptPath, []byte(`{"role":"assistant","content":"reviewed the diff; verdict: LGTM"}`+"\n"), 0o644))
+
+	sessionID := "2026-08-20-records-only"
+	now := time.Now()
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.saveSessionState(context.Background(), &SessionState{
+		SessionID: sessionID, StartedAt: now, Phase: session.PhaseEnded,
+		TaskRecords: []session.TaskRecord{{
+			ToolUseID: "toolu_recordsonly", AgentID: "agent-ro", SubagentType: "reviewer",
+			DeclaredTranscriptPath: agentTranscriptPath, StartedAt: now, CompletedAt: now,
+		}},
+	}))
+
+	require.NoError(t, s.CondenseAndMarkFullyCondensed(context.Background(), sessionID))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.True(t, state.FullyCondensed)
+	require.False(t, state.LastCheckpointID.IsEmpty(), "a records-only session must write a real checkpoint, not skip")
+	require.Empty(t, state.TaskRecords, "the materialized record must be removed from state")
+
+	jsonl, ok := checkpointTaskFile(t, repo, state.LastCheckpointID, "tasks/toolu_recordsonly/agent-agent-ro.jsonl")
+	require.True(t, ok, "records-only condensation must materialize the record under tasks/<id>/")
+	require.Contains(t, jsonl, "LGTM")
+}
+
 // TestResetCheckpointWindow_RemovesCompletedTaskRecordsKeepsInFlight is a
 // focused unit test on resetCheckpointWindow's task-record removal, isolated
 // from the full condensation write path.

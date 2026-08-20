@@ -507,14 +507,14 @@ func TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop(t *testing.T)
 	}
 }
 
-// TestSubagentCheckpoints_TurnEndBackstop_ThenSubagentStop covers the
-// turn-end incremental backstop between a background launch stub and the
-// eventual subagent-stop: before this PR, a background subagent's in-flight
-// work had zero checkpoint presence until (if ever) SubagentStop arrived.
-// Now turn-end (Stop) snapshots the subagent's code changes incrementally —
-// leaving the in-flight marker in place, since the task is still running —
-// and subagent-stop remains the authoritative final capture that clears it.
-func TestSubagentCheckpoints_TurnEndBackstop_ThenSubagentStop(t *testing.T) {
+// TestSubagentCheckpoints_TurnEnd_ThenSubagentStop covers turn-end (Stop)
+// landing between a background launch stub and the eventual subagent-stop:
+// the retired incremental backstop must NOT resurface (no shadow-tree task
+// write), the in-flight marker must survive the turn untouched, and
+// subagent-stop remains the authoritative capture that completes the record —
+// in-flight coverage now comes from condensation materializing the record's
+// transcript-so-far, not from turn-end snapshots.
+func TestSubagentCheckpoints_TurnEnd_ThenSubagentStop(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 	session := env.NewSession()
@@ -553,12 +553,12 @@ func TestSubagentCheckpoints_TurnEndBackstop_ThenSubagentStop(t *testing.T) {
 		t.Fatalf("SimulateStop (turn-end) failed: %v", err)
 	}
 
-	// Incremental checkpoint exists from the turn-end backstop.
+	// No incremental task checkpoint: the turn-end backstop is retired.
 	shadowBranch := env.GetShadowBranchName()
 	incrementalPath := paths.EntireMetadataDir + "/" + session.ID + "/tasks/" + taskToolUseID +
 		"/checkpoints/001-" + taskToolUseID + ".json"
-	if !env.FileExistsInBranch(shadowBranch, incrementalPath) {
-		t.Fatalf("expected incremental checkpoint from turn-end backstop at %s", incrementalPath)
+	if env.FileExistsInBranch(shadowBranch, incrementalPath) {
+		t.Fatalf("turn-end must not write shadow-tree task checkpoints anymore, found %s", incrementalPath)
 	}
 
 	// The marker survives: the task is still running, and subagent-stop

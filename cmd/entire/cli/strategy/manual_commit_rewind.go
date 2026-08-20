@@ -87,6 +87,30 @@ func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) (
 				Agent:            state.AgentType,
 			})
 		}
+
+		// Pending subagent work lives on task records (#2058), not shadow-tree
+		// task checkpoints, so [Task] rows come from the records: both live and
+		// completed-unmaterialized entries are pending until condensed. These
+		// rows have no shadow commit, hence no ID.
+		for _, rec := range state.TaskRecords {
+			date := rec.CompletedAt
+			if date.IsZero() {
+				date = rec.StartedAt
+			}
+			shortToolUseID := rec.ToolUseID
+			if len(shortToolUseID) > id.ShortIDLength {
+				shortToolUseID = shortToolUseID[:id.ShortIDLength]
+			}
+			allPoints = append(allPoints, RewindPoint{
+				Message:          FormatSubagentEndMessage(rec.SubagentType, rec.TaskDescription, shortToolUseID),
+				Date:             date,
+				IsTaskCheckpoint: true,
+				ToolUseID:        rec.ToolUseID,
+				SessionID:        state.SessionID,
+				SessionPrompt:    state.LastPrompt,
+				Agent:            state.AgentType,
+			})
+		}
 	}
 
 	// Sort by date, most recent first

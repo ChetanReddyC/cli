@@ -189,7 +189,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		displayStuckSession(cmd, ss)
 
 		if force {
-			if ss.HasShadowBranch && ss.CheckpointCount > 0 {
+			if canCondenseStuckSession(ss) {
 				if err := strat.CondenseSessionByID(ctx, ss.State.SessionID); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to condense session %s: %v\n", ss.State.SessionID, err)
 				} else {
@@ -255,7 +255,7 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 			Reason:            reason,
 			ShadowBranch:      shadowBranch,
 			HasShadowBranch:   hasShadowBranch,
-			CheckpointCount:   state.StepCount + state.TranscriptOnlyTaskSteps,
+			CheckpointCount:   state.StepCount + len(state.TaskRecords),
 			FilesTouchedCount: len(state.FilesTouched),
 		}
 	}
@@ -285,10 +285,14 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 		}
 
 	case state.Phase == session.PhaseEnded:
-		// Ended sessions are stuck if they have uncondensed data — SaveStep
-		// checkpoints or transcript-only task steps, both live on the shadow
-		// branch.
-		if (state.StepCount <= 0 && state.TranscriptOnlyTaskSteps <= 0) || !hasShadowBranch {
+		// Ended sessions are stuck if they have uncondensed data: SaveStep
+		// checkpoints (which need the shadow branch to still exist) or task
+		// records (which never touch the shadow branch, so branch absence
+		// must not hide them).
+		if state.HasTaskContent() {
+			return stuck("ended with uncondensed checkpoint data")
+		}
+		if state.StepCount <= 0 || !hasShadowBranch {
 			return nil
 		}
 		return stuck("ended with uncondensed checkpoint data")
@@ -322,12 +326,20 @@ func displayStuckSession(cmd *cobra.Command, ss stuckSession) {
 	fmt.Fprintf(w, "  Checkpoints: %d, Files touched: %d\n", ss.CheckpointCount, ss.FilesTouchedCount)
 }
 
+// canCondenseStuckSession reports whether a stuck session has content the
+// condense path can save: shadow-branch checkpoints, or task records — which
+// never live on the shadow branch, so a record-bearing dead-owner session
+// must be condensed (materialized), never discarded.
+func canCondenseStuckSession(ss stuckSession) bool {
+	return (ss.HasShadowBranch && ss.CheckpointCount > 0) || ss.State.HasTaskContent()
+}
+
 // promptSessionAction asks the user what to do with a stuck session.
 func promptSessionAction(ss stuckSession) (string, error) {
 	var action string
 
 	options := make([]huh.Option[string], 0, 3)
-	if ss.HasShadowBranch && ss.CheckpointCount > 0 {
+	if canCondenseStuckSession(ss) {
 		options = append(options, huh.NewOption("Condense (save to permanent storage)", "condense"))
 	}
 	options = append(options,
@@ -688,8 +700,10 @@ func canDeleteShadowBranch(ctx context.Context, shadowBranch, excludeSessionID s
 		if state.SessionID == excludeSessionID {
 			continue
 		}
+		// Task records never live on the shadow branch, so only SaveStep
+		// checkpoints pin it alive.
 		otherShadow := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		if otherShadow == shadowBranch && (state.StepCount > 0 || state.TranscriptOnlyTaskSteps > 0) {
+		if otherShadow == shadowBranch && state.StepCount > 0 {
 			return false, nil
 		}
 	}

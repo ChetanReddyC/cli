@@ -200,9 +200,9 @@ func (s *ManualCommitStrategy) ensureSessionInitialized(ctx context.Context, rep
 
 // SaveTaskStep saves a task step checkpoint to the shadow branch.
 // Uses checkpoint.EphemeralStore.Write with a checkpoint.TaskStep request.
-// Remains for incremental checkpoints only (post-todo and the turn-end
-// background backstop); final subagent captures write task records instead
-// (CompleteTaskRecord / UpsertCompletedTaskRecord).
+// Remains for post-todo incremental checkpoints only (its sole production
+// caller is handleClaudeCodePostTodo); final subagent captures write task
+// records instead (CompleteTaskRecord / UpsertCompletedTaskRecord).
 func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepContext) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -237,14 +237,7 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 
 		var messageSubject string
 		if step.IsIncremental {
-			messageSubject = FormatIncrementalSubject(
-				step.IncrementalType,
-				step.SubagentType,
-				step.TaskDescription,
-				step.TodoContent,
-				step.IncrementalSequence,
-				shortToolUseID,
-			)
+			messageSubject = FormatIncrementalMessage(step.TodoContent, step.IncrementalSequence, shortToolUseID)
 		} else {
 			messageSubject = FormatSubagentEndMessage(step.SubagentType, step.TaskDescription, shortToolUseID)
 		}
@@ -369,9 +362,9 @@ func launchStubTaskRecord(rec session.TaskRecord) session.TaskRecord {
 // applyTaskRecordCompletion attaches a completed task's results to its record
 // and to the session: files merge into FilesTouched (invariant: carry-forward
 // and PostCommit gating must see task files exactly as the shadow task write
-// used to provide), and a zero-file completion bumps TranscriptOnlyTaskSteps
-// so the condensation triggers still fire for a read-only subagent (Task 4
-// rewires those triggers onto the records themselves).
+// used to provide). The record itself is what condensation triggers key on
+// (State.HasTaskContent), so a zero-file read-only completion needs no
+// separate counter.
 // Callers must pre-merge rec.Files with any existing record's files — this
 // overwrites live.Files rather than merging.
 func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) error {
@@ -392,9 +385,6 @@ func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) erro
 		live.AgentID = rec.AgentID
 	}
 	state.FilesTouched = mergeFilesTouched(state.FilesTouched, rec.Files)
-	if len(rec.Files) == 0 {
-		state.TranscriptOnlyTaskSteps++
-	}
 	return nil
 }
 
@@ -505,7 +495,6 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 // stored — see removeCompletedTaskRecords.
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
-	state.TranscriptOnlyTaskSteps = 0
 	state.CheckpointTokenUsage = nil
 	state.RebaselineSubagentTokens()
 	removeCompletedTaskRecords(state)

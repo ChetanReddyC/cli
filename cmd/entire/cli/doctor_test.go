@@ -175,6 +175,24 @@ func TestClassifySession_EndedNoShadowBranch_Healthy(t *testing.T) {
 	assert.Nil(t, result, "ended session without shadow branch should be healthy")
 }
 
+// An ENDED record-bearing session has condensable task content that never
+// lives on the shadow branch, so branch absence must not classify it healthy.
+func TestClassifySession_EndedRecordsOnlyNoShadowBranch_Stuck(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	state := &strategy.SessionState{
+		SessionID: "test-ended-records-only", BaseCommit: testBaseCommit, Phase: session.PhaseEnded,
+		TaskRecords: []session.TaskRecord{{ToolUseID: "toolu_1", StartedAt: time.Now(), CompletedAt: time.Now()}},
+	}
+
+	result := classifySession(state, repo, time.Now())
+	require.NotNil(t, result, "ended record-bearing session must be reported even without a shadow branch")
+	assert.Equal(t, "ended with uncondensed checkpoint data", result.Reason)
+	assert.Equal(t, 1, result.CheckpointCount)
+}
+
 func TestClassifySession_EndedZeroStepCount_Healthy(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	repo, err := git.PlainOpen(dir)
