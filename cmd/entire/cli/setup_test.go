@@ -1293,6 +1293,11 @@ func TestRunUninstall_RemovesExternalAgentHooks(t *testing.T) {
 	if !strings.Contains(string(data), "uninstall-hooks") {
 		t.Errorf("uninstall must invoke the external plugin's uninstall-hooks, exec log:\n%s\nstdout:\n%s", data, stdout.String())
 	}
+	// Every are-hooks-installed is a subprocess. One uninstall needs one answer:
+	// the confirmation summary's detection is reused for the removal decision.
+	if got := strings.Count(string(data), "are-hooks-installed"); got != 1 {
+		t.Errorf("plugin queried for installed hooks %d times, want 1, exec log:\n%s", got, data)
+	}
 }
 
 // TestRunUninstall_SummaryNamesExternalAgent pins the other half: the

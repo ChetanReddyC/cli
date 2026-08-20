@@ -2455,7 +2455,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	fmt.Fprintln(w, "\nUninstalling Entire CLI...")
 
 	// 1. Remove agent hooks (lowest risk)
-	if err := removeAgentHooks(ctx, w); err != nil {
+	if err := removeAgentHooks(ctx, w, agentsWithInstalledHooks); err != nil {
 		fmt.Fprintf(errW, "Warning: failed to remove agent hooks: %v\n", err)
 	}
 
@@ -2526,8 +2526,17 @@ func checkEntireDirExists(ctx context.Context) bool {
 	return err == nil
 }
 
-// removeAgentHooks removes hooks from all agents that support hooks.
-func removeAgentHooks(ctx context.Context, w io.Writer) error {
+// removeAgentHooks removes hooks from all agents that support hooks. installed
+// is the set the caller already detected, reused rather than re-detected: for an
+// external agent AreHooksInstalled is a subprocess, and it is also what the
+// confirmation summary was built from, so reusing it uninstalls exactly what the
+// user was shown.
+func removeAgentHooks(ctx context.Context, w io.Writer, installed []types.AgentName) error {
+	wasInstalled := make(map[types.AgentName]bool, len(installed))
+	for _, name := range installed {
+		wasInstalled[name] = true
+	}
+
 	var errs []error
 	for _, name := range agent.List() {
 		ag, err := agent.Get(name)
@@ -2538,19 +2547,18 @@ func removeAgentHooks(ctx context.Context, w io.Writer) error {
 		if !ok {
 			continue
 		}
-		wasInstalled := hs.AreHooksInstalled(ctx)
 		// Built-in agents get the call unconditionally: it is an in-process,
 		// idempotent cleanup, and it still removes hooks a stale AreHooksInstalled
 		// fails to recognize. For an external agent it is a subprocess running the
 		// plugin's mutating uninstall-hooks, and discovery registered every
 		// entire-agent-* binary on $PATH, not just the one the user enabled — so a
 		// plugin reporting no hooks is left alone.
-		if !wasInstalled && external.IsExternal(ag) {
+		if !wasInstalled[name] && external.IsExternal(ag) {
 			continue
 		}
 		if err := hs.UninstallHooks(ctx); err != nil {
 			errs = append(errs, err)
-		} else if wasInstalled {
+		} else if wasInstalled[name] {
 			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
 		}
 	}
