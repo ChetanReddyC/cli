@@ -934,7 +934,7 @@ func TestRenderSearchStatic(t *testing.T) {
 	var buf bytes.Buffer
 	styles := statusStyles{colorEnabled: false, width: 120}
 	results := testMultiTypeResults()
-	renderSearchStatic(&buf, results, "auth", len(results), styles)
+	renderSearchStatic(&buf, results, "auth", len(results), false, styles)
 	output := buf.String()
 
 	if !strings.Contains(output, `Found 4 results matching "auth"`) {

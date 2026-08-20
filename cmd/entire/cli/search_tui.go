@@ -35,11 +35,14 @@ const (
 
 // searchResultsMsg is sent when a search API call completes.
 type searchResultsMsg struct {
-	results  []search.Result
-	total    int
-	counts   *search.TypeCounts
-	warnings []string
-	err      error
+	results []search.Result
+	total   int
+	counts  *search.TypeCounts
+	// countsLowerBound marks facets whose lists were capped upstream, so
+	// their counts are "at least N" (rendered as "N+", matching the web).
+	countsLowerBound map[string]bool
+	warnings         []string
+	err              error
 }
 
 // searchMoreResultsMsg is sent when a fetch-more-results call completes.
@@ -127,24 +130,25 @@ const (
 
 // searchModel is the bubbletea model for interactive search results.
 type searchModel struct {
-	results      []search.Result
-	cursor       int
-	page         int // 0-based display page index
-	total        int
-	width        int
-	height       int
-	mode         searchMode
-	loading      bool
-	fetchingMore bool // true while fetching next API page
-	searchErr    string
-	input        textinput.Model
-	searchCfg    search.Config
-	apiPage      int // 1-based last-fetched API page
-	styles       searchStyles
-	detailVP     viewport.Model     // full-screen detail view
-	browseVP     viewport.Model     // scrollable browse view
-	filterType   typeFilter         // active type tab filter
-	counts       *search.TypeCounts // per-type counts from API
+	results          []search.Result
+	cursor           int
+	page             int // 0-based display page index
+	total            int
+	width            int
+	height           int
+	mode             searchMode
+	loading          bool
+	fetchingMore     bool // true while fetching next API page
+	searchErr        string
+	input            textinput.Model
+	searchCfg        search.Config
+	apiPage          int // 1-based last-fetched API page
+	styles           searchStyles
+	detailVP         viewport.Model     // full-screen detail view
+	browseVP         viewport.Model     // scrollable browse view
+	filterType       typeFilter         // active type tab filter
+	counts           *search.TypeCounts // per-type counts from API
+	countsLowerBound map[string]bool    // facets whose counts are lower bounds
 
 	// semanticSearch performs checkpoint searches (initial, re-search, and
 	// pagination). The command layer injects its session searcher so every
@@ -354,6 +358,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		m.results = msg.results
 		m.total = msg.total
 		m.counts = msg.counts
+		m.countsLowerBound = msg.countsLowerBound
 		m.warning = strings.Join(msg.warnings, "; ")
 		m.apiPage = 1
 		m.cursor = 0
@@ -678,7 +683,7 @@ func (m searchModel) performSearch(cfg search.Config) tea.Cmd {
 		if err != nil {
 			return searchResultsMsg{err: err}
 		}
-		return searchResultsMsg{results: resp.Results, total: resp.Total, counts: resp.Counts, warnings: resp.Warnings}
+		return searchResultsMsg{results: resp.Results, total: resp.Total, counts: resp.Counts, countsLowerBound: resp.CountsLowerBound, warnings: resp.Warnings}
 	}
 }
 
@@ -813,8 +818,14 @@ func (m searchModel) viewSearchMode() string {
 func (m searchModel) viewTypeTabs() string {
 	cmCount, ssCount := m.computeTypeCounts()
 
-	renderTab := func(label string, filter typeFilter, count int, keyHint string) string {
-		text := fmt.Sprintf("[%s] %s %d", keyHint, label, count)
+	renderTab := func(label string, filter typeFilter, count int, lowerBound bool, keyHint string) string {
+		suffix := ""
+		if lowerBound {
+			// The count is a lower bound — that facet's list was capped
+			// upstream. Same "+" the web renders (ENT-1777).
+			suffix = "+"
+		}
+		text := fmt.Sprintf("[%s] %s %d%s", keyHint, label, count, suffix)
 		if m.filterType == filter {
 			return m.styles.render(m.styles.tabActive, text)
 		}
@@ -826,10 +837,12 @@ func (m searchModel) viewTypeTabs() string {
 	// matches the web, which dropped its Checkpoints tab. Raw checkpoints stay
 	// reachable by ID via `entire checkpoint explain <id>` (folded session rows
 	// route there).
+	// Sessions ORs the checkpoints flag like the web: session rows fold in
+	// checkpoint hits, so a capped checkpoints list bounds sessions too.
 	tabs := []string{
-		renderTab("Commits", typeFilterCommits, cmCount, "1"),
-		renderTab("Sessions", typeFilterSessions, ssCount, "2"),
-		renderTab("Code", typeFilterCode, len(m.codeResults), "3"),
+		renderTab("Commits", typeFilterCommits, cmCount, m.countsLowerBound["commits"], "1"),
+		renderTab("Sessions", typeFilterSessions, ssCount, m.countsLowerBound["sessions"] || m.countsLowerBound["checkpoints"], "2"),
+		renderTab("Code", typeFilterCode, len(m.codeResults), false, "3"),
 	}
 
 	return strings.Join(tabs, "  ")
@@ -1810,8 +1823,14 @@ func snippetMarkdownStyles(dark bool) ansi.StyleConfig {
 // ─── Static Fallback ─────────────────────────────────────────────────────────
 
 // renderSearchStatic writes a non-interactive table for accessible mode.
-func renderSearchStatic(w io.Writer, results []search.Result, query string, total int, styles statusStyles) {
-	fmt.Fprintf(w, "Found %d results matching %q\n\n", total, query)
+func renderSearchStatic(w io.Writer, results []search.Result, query string, total int, lowerBound bool, styles statusStyles) {
+	// "+" marks a lower bound — some type's list was capped, so more matches
+	// exist than are counted (the web renders the same suffix; ENT-1777).
+	suffix := ""
+	if lowerBound {
+		suffix = "+"
+	}
+	fmt.Fprintf(w, "Found %d%s results matching %q\n\n", total, suffix, query)
 
 	cols := computeColumns(styles.width)
 
