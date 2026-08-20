@@ -2455,8 +2455,20 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	fmt.Fprintln(w, "\nUninstalling Entire CLI...")
 
 	// 1. Remove agent hooks (lowest risk)
-	if err := removeAgentHooks(ctx, w, agentsWithInstalledHooks); err != nil {
-		fmt.Fprintf(errW, "Warning: failed to remove agent hooks: %v\n", err)
+	failedExternal, agentHooksErr := removeAgentHooks(ctx, w, agentsWithInstalledHooks)
+	if agentHooksErr != nil {
+		fmt.Fprintf(errW, "Warning: failed to remove agent hooks: %v\n", agentHooksErr)
+		// Step 4 below deletes .entire/, and with it the external_agents setting
+		// that gates discovery — so once this returns, a re-run cannot even see
+		// these plugins, let alone retry them. Name the command that still works,
+		// while the hooks are still reachable, rather than leaving the user with a
+		// warning they cannot act on.
+		for _, name := range failedExternal {
+			fmt.Fprintf(errW, "  %s hooks are still installed. Remove them with `entire-agent-%s uninstall-hooks`.\n", name, name)
+		}
+		if len(failedExternal) > 0 {
+			fmt.Fprintln(errW, "  Re-running `entire disable --uninstall` will not reach these plugins once .entire/ is gone.")
+		}
 	}
 
 	// 2. Remove git hooks
@@ -2488,6 +2500,15 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		fmt.Fprintf(errW, "Warning: failed to remove shadow branches: %v\n", err)
 	} else if branchesRemoved > 0 {
 		fmt.Fprintf(w, "  Removed %d shadow branches\n", branchesRemoved)
+	}
+
+	// Not "successfully": leftover agent hooks are the one failure above that the
+	// user must act on, and they are unreachable from a re-run now that .entire/
+	// is gone. Exit non-zero so a script wrapping this sees it too; the warnings
+	// are already on stderr, hence SilentError rather than the raw error.
+	if agentHooksErr != nil {
+		fmt.Fprintln(w, "\nEntire CLI uninstalled, but some agent hooks could not be removed - see the warnings above.")
+		return NewSilentError(errors.New("some agent hooks could not be removed"))
 	}
 
 	fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")
@@ -2531,13 +2552,19 @@ func checkEntireDirExists(ctx context.Context) bool {
 // external agent AreHooksInstalled is a subprocess, and it is also what the
 // confirmation summary was built from, so reusing it uninstalls exactly what the
 // user was shown.
-func removeAgentHooks(ctx context.Context, w io.Writer, installed []types.AgentName) error {
+//
+// The names of any external agents whose removal failed are returned alongside
+// the error: the caller is about to delete the settings that make those plugins
+// discoverable at all, so it needs to name them while they can still be acted
+// on. Errors carry the agent's display name for the same reason.
+func removeAgentHooks(ctx context.Context, w io.Writer, installed []types.AgentName) ([]types.AgentName, error) {
 	wasInstalled := make(map[types.AgentName]bool, len(installed))
 	for _, name := range installed {
 		wasInstalled[name] = true
 	}
 
 	var errs []error
+	var failedExternal []types.AgentName
 	for _, name := range agent.List() {
 		ag, err := agent.Get(name)
 		if err != nil {
@@ -2554,15 +2581,24 @@ func removeAgentHooks(ctx context.Context, w io.Writer, installed []types.AgentN
 		// entire-agent-* binary on $PATH, not just the one the user enabled — so a
 		// plugin reporting no hooks is left alone.
 		if !wasInstalled[name] && external.IsExternal(ag) {
+			// AreHooksInstalled collapses a crashed, timed-out, or malformed probe
+			// into "not installed", so this skip can also mean "the plugin could not
+			// tell us". Nothing user-facing to say — the summary already showed the
+			// plugin as having no hooks — but leave a trace for `doctor bundle`.
+			logging.Debug(ctx, "skipping external agent hook removal: plugin reports no hooks installed",
+				"agent", string(name))
 			continue
 		}
 		if err := hs.UninstallHooks(ctx); err != nil {
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("%s: %w", ag.Type(), err))
+			if external.IsExternal(ag) {
+				failedExternal = append(failedExternal, name)
+			}
 		} else if wasInstalled[name] {
 			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
 		}
 	}
-	return errors.Join(errs...)
+	return failedExternal, errors.Join(errs...)
 }
 
 // removeAllSessionStates removes all session state files and the directory.
