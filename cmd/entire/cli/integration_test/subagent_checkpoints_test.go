@@ -383,9 +383,24 @@ func verifyShadowCheckpointStorage(t *testing.T, env *TestEnv, sessionID, taskTo
 	}
 }
 
-// hasInFlightTask reports whether state has an in-flight marker for toolUseID.
-func hasInFlightTask(state *strategy.SessionState, toolUseID string) bool {
-	for _, task := range state.InFlightTasks {
+// hasTaskRecord reports whether state has a record — live or completed — for
+// toolUseID.
+func hasTaskRecord(state *strategy.SessionState, toolUseID string) bool {
+	for _, task := range state.TaskRecords {
+		if task.ToolUseID == toolUseID {
+			return true
+		}
+	}
+	return false
+}
+
+// hasLiveTaskRecord reports whether state has a still-in-flight (uncompleted)
+// record for toolUseID. Unlike the prior claim-and-remove model, a completed
+// record now persists (for the future condensation materializer) rather than
+// being deleted — so "the marker was cleared" is "no longer live", not "no
+// longer present". See session.TaskRecord and State.CompleteTaskRecord.
+func hasLiveTaskRecord(state *strategy.SessionState, toolUseID string) bool {
+	for _, task := range state.LiveTaskRecords() {
 		if task.ToolUseID == toolUseID {
 			return true
 		}
@@ -446,7 +461,7 @@ func TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop(t *testing.T)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}
-	if state == nil || !hasInFlightTask(state, taskToolUseID) {
+	if state == nil || !hasLiveTaskRecord(state, taskToolUseID) {
 		t.Fatalf("expected in-flight marker for %s after background launch stub, state=%+v", taskToolUseID, state)
 	}
 
@@ -479,8 +494,8 @@ func TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop(t *testing.T)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}
-	if state != nil && hasInFlightTask(state, taskToolUseID) {
-		t.Errorf("in-flight marker for %s should be cleared after subagent-stop", taskToolUseID)
+	if state != nil && hasLiveTaskRecord(state, taskToolUseID) {
+		t.Errorf("in-flight marker for %s should be cleared (completed) after subagent-stop", taskToolUseID)
 	}
 
 	// Task checkpoint now exists.
@@ -571,7 +586,7 @@ func TestSubagentCheckpoints_TurnEndBackstop_ThenSubagentStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}
-	if state == nil || !hasInFlightTask(state, taskToolUseID) {
+	if state == nil || !hasLiveTaskRecord(state, taskToolUseID) {
 		t.Fatalf("expected in-flight marker for %s to survive turn-end, state=%+v", taskToolUseID, state)
 	}
 
@@ -602,8 +617,8 @@ func TestSubagentCheckpoints_TurnEndBackstop_ThenSubagentStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}
-	if state != nil && hasInFlightTask(state, taskToolUseID) {
-		t.Errorf("in-flight marker for %s should be cleared after subagent-stop", taskToolUseID)
+	if state != nil && hasLiveTaskRecord(state, taskToolUseID) {
+		t.Errorf("in-flight marker for %s should be cleared (completed) after subagent-stop", taskToolUseID)
 	}
 }
 
@@ -654,7 +669,7 @@ func TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}
-	if state != nil && hasInFlightTask(state, taskToolUseID) {
+	if state != nil && hasTaskRecord(state, taskToolUseID) {
 		t.Fatalf("foreground task should never record an in-flight marker, state=%+v", state)
 	}
 
@@ -692,7 +707,7 @@ func TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}
-	if state != nil && hasInFlightTask(state, taskToolUseID) {
+	if state != nil && hasTaskRecord(state, taskToolUseID) {
 		t.Errorf("in-flight marker for %s should not exist after a foreground double-fire", taskToolUseID)
 	}
 }

@@ -379,25 +379,33 @@ type State struct {
 	// timeout. Only meaningful on Owner.Host.
 	Owner *proclive.Identity `json:"owner,omitempty"`
 
-	// InFlightTasks tracks background subagents dispatched by this session
-	// whose completion signal (SubagentStop) has not arrived yet. See
-	// InFlightTask.
-	InFlightTasks []InFlightTask `json:"in_flight_tasks,omitempty"`
+	// TaskRecords tracks subagents dispatched by this session — the durable
+	// pointer ledger for subagent work. See TaskRecord.
+	TaskRecords []TaskRecord `json:"task_records,omitempty"`
 }
 
-// InFlightTask records a background subagent dispatched by this session whose
-// completion signal (SubagentStop) has not arrived yet. Entire's launch-time
-// post-task hook fires at the background launch STUB, so between launch and
-// SubagentStop this is the only record that the session has live background
-// work. Consumed by the turn-end incremental snapshot
-// (captureInFlightTaskIncremental) and the Final captures — the SubagentStop
-// handler (handleSubagentStopFinal) and the SessionEnd sweep
-// (captureInFlightTaskFinal). A Final capture claims (removes) the marker
-// up-front via claimInFlightTask before capturing, so it is cleared
-// regardless of capture outcome. Turn-end snapshots leave it in place.
-type InFlightTask struct {
+// TaskRecord is the durable pointer ledger entry for a subagent dispatched by
+// this session: a small session-state record (correlation ID, agent type,
+// description, declared transcript path, files touched, tokens) rather than a
+// shadow-tree write. Condensation is what materializes a record's transcript
+// (sanitize → externalize → redact) into the parent session's checkpoint —
+// see docs/superpowers/plans/2026-08-19-subagent-durable-records.md.
+//
+// CompletedAt zero means the record is still in flight (background launch
+// observed, no completion signal yet); non-zero means the record was
+// completed — via CompleteTaskRecord — by a foreground/background post-task
+// capture, SubagentStop, or the SessionEnd sweep. Unlike the prior
+// remove-on-claim model, a completed record is NOT deleted: it must persist
+// so a later condensation can materialize its transcript. Consumed by the
+// turn-end incremental snapshot (captureInFlightTaskIncremental) and the
+// Final captures — the SubagentStop handler (handleSubagentStopFinal) and the
+// SessionEnd sweep (captureInFlightTaskFinal). A Final capture claims the
+// record up-front via claimTaskRecord (marking it completed, exactly once)
+// before capturing, so completion is recorded regardless of capture outcome.
+// Turn-end snapshots leave the record live (uncompleted).
+type TaskRecord struct {
 	// ToolUseID is the Task tool invocation's tool_use_id — the same ID used
-	// to key TaskMetadataDir. Dedup key for AddInFlightTask.
+	// to key TaskMetadataDir. Dedup key for AddTaskRecord.
 	ToolUseID string `json:"tool_use_id"`
 
 	// AgentID is the subagent identifier (tool_response.agentId at launch
@@ -411,10 +419,32 @@ type InFlightTask struct {
 	// SubagentStop payloads carry no tool_input — a Final-path capture has no
 	// way to derive them from the event itself (ParseSubagentTypeAndDescription
 	// yields empty strings on a nil ToolInput). The Final handler reads these
-	// from the marker to label the task step, falling back to the event's own
-	// fields only when the marker is absent.
+	// from the record to label the task step, falling back to the event's own
+	// fields only when the record is absent.
 	SubagentType    string `json:"subagent_type,omitempty"`
 	TaskDescription string `json:"task_description,omitempty"`
+
+	// DeclaredTranscriptPath is the subagent transcript path an agent's stop
+	// hook declared (e.g. Claude Code's agent_transcript_path, or the
+	// equivalent Codex/Cursor field) — the path #2058 says must not be lost
+	// between mid-turn capture and condensation-time materialization. Empty
+	// when no declared path was available; the materializer falls back to
+	// ResolveAgentTranscriptPath in that case.
+	DeclaredTranscriptPath string `json:"declared_transcript_path,omitempty"`
+
+	// Files is the set of files touched by this subagent, merged into the
+	// session's FilesTouched at completion time. Populated when the record
+	// is completed; empty for a still in-flight record and for a completed
+	// read-only subagent.
+	Files []string `json:"files,omitempty"`
+
+	// TokenUsage is this subagent's token usage, when the completing hook
+	// payload provided one. nil when unavailable.
+	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+
+	// CompletedAt is when this record was completed (CompleteTaskRecord).
+	// Zero means the record is still in flight. See the type doc comment.
+	CompletedAt time.Time `json:"completed_at,omitempty"`
 
 	// LastCapturedTranscriptBytes is the subagent transcript file's size, in
 	// bytes, as of the last turn-end scan that fully accounted for the
@@ -426,59 +456,115 @@ type InFlightTask struct {
 	// transcript (and, for a read-only subagent, rescans it forever). Zero
 	// (the default) always triggers the first capture: a resolved subagent
 	// transcript is never a zero-byte file in practice.
+	//
+	// Deferred removal: this field's machinery (captureInFlightTaskIncremental,
+	// persistCapturedTranscriptSize) is scheduled for deletion once the
+	// materializer + producer switch land (see the durable-records plan,
+	// Task 4) and is kept here only so this rename stays independently
+	// buildable.
 	LastCapturedTranscriptBytes int64 `json:"last_captured_transcript_bytes,omitempty"`
 
 	// LastSnapshotAttempt is when captureInFlightTasks last SELECTED this
-	// marker for a turn-end incremental snapshot attempt (stamped regardless
+	// record for a turn-end incremental snapshot attempt (stamped regardless
 	// of per-task outcome — skipped, deduped, or saved). The turn-end path
-	// selects at most maxInFlightTasksPerCapture markers ordered by
+	// selects at most maxInFlightTasksPerCapture records ordered by
 	// least-recently-attempted (zero value sorts first), so this is what
 	// rotates the selection: without it, a stable oldest-StartedAt prefix
-	// would always pick the same N markers, and any task beyond the cap would
+	// would always pick the same N records, and any task beyond the cap would
 	// never get an incremental snapshot for the life of the session, even
 	// though the comment on the cap promises it's "picked up next turn-end."
 	// The SessionEnd final path is uncapped and never reads or writes this
 	// field.
+	//
+	// Deferred removal: see LastCapturedTranscriptBytes above — same Task 4
+	// scheduling.
 	LastSnapshotAttempt time.Time `json:"last_snapshot_attempt,omitempty"`
 }
 
-// AddInFlightTask records a background subagent launch, replacing any
-// existing entry with the same ToolUseID. Dedup by ToolUseID: a retried or
-// duplicate launch event must not create two markers for the same task,
-// which would make RemoveInFlightTask leave a stale entry behind after the
-// first is cleared.
-func (s *State) AddInFlightTask(task InFlightTask) {
-	for i, existing := range s.InFlightTasks {
+// AddTaskRecord records a subagent launch, replacing any existing entry with
+// the same ToolUseID. Dedup by ToolUseID: a retried or duplicate launch event
+// must not create two records for the same task, which would make
+// RemoveTaskRecord leave a stale entry behind after the first is cleared.
+func (s *State) AddTaskRecord(task TaskRecord) {
+	for i, existing := range s.TaskRecords {
 		if existing.ToolUseID == task.ToolUseID {
-			s.InFlightTasks[i] = task
+			s.TaskRecords[i] = task
 			return
 		}
 	}
-	s.InFlightTasks = append(s.InFlightTasks, task)
+	s.TaskRecords = append(s.TaskRecords, task)
 }
 
-// RemoveInFlightTask clears the in-flight marker for toolUseID, if present.
-// No-op when no marker matches.
-func (s *State) RemoveInFlightTask(toolUseID string) {
-	for i, existing := range s.InFlightTasks {
+// RemoveTaskRecord clears the record for toolUseID, if present. No-op when no
+// record matches. Retained for tests and any caller that genuinely wants to
+// discard a record outright — ordinary completion should use
+// CompleteTaskRecord instead, which keeps the record for the materializer.
+func (s *State) RemoveTaskRecord(toolUseID string) {
+	for i, existing := range s.TaskRecords {
 		if existing.ToolUseID == toolUseID {
-			s.InFlightTasks = append(s.InFlightTasks[:i], s.InFlightTasks[i+1:]...)
+			s.TaskRecords = append(s.TaskRecords[:i], s.TaskRecords[i+1:]...)
 			return
 		}
 	}
 }
 
-// FindInFlightTask returns a pointer to the in-flight marker for toolUseID, or
-// nil if none exists. The pointer aliases the slice element, so callers must
-// not retain it across a mutation that could reallocate InFlightTasks (e.g.
-// AddInFlightTask, RemoveInFlightTask).
-func (s *State) FindInFlightTask(toolUseID string) *InFlightTask {
-	for i := range s.InFlightTasks {
-		if s.InFlightTasks[i].ToolUseID == toolUseID {
-			return &s.InFlightTasks[i]
+// FindTaskRecord returns a pointer to the record for toolUseID, or nil if
+// none exists. The pointer aliases the slice element, so callers must not
+// retain it across a mutation that could reallocate TaskRecords (e.g.
+// AddTaskRecord, RemoveTaskRecord).
+func (s *State) FindTaskRecord(toolUseID string) *TaskRecord {
+	for i := range s.TaskRecords {
+		if s.TaskRecords[i].ToolUseID == toolUseID {
+			return &s.TaskRecords[i]
 		}
 	}
 	return nil
+}
+
+// CompleteTaskRecord marks the record for toolUseID as completed: sets
+// CompletedAt and, when non-empty/non-nil, the completion fields
+// (declaredTranscriptPath, files, tokenUsage). Returns false — a no-op — when
+// no record exists for toolUseID or it was already completed (CompletedAt
+// already non-zero), giving every caller an exactly-once completion guard
+// equivalent to the old claim-and-remove semantics: whichever caller observes
+// true proceeds with the capture, a racing duplicate sees false and skips.
+func (s *State) CompleteTaskRecord(toolUseID string, completedAt time.Time, declaredTranscriptPath string, files []string, tokenUsage *agent.TokenUsage) bool {
+	for i := range s.TaskRecords {
+		if s.TaskRecords[i].ToolUseID != toolUseID {
+			continue
+		}
+		if !s.TaskRecords[i].CompletedAt.IsZero() {
+			return false
+		}
+		s.TaskRecords[i].CompletedAt = completedAt
+		if declaredTranscriptPath != "" {
+			s.TaskRecords[i].DeclaredTranscriptPath = declaredTranscriptPath
+		}
+		if files != nil {
+			s.TaskRecords[i].Files = files
+		}
+		if tokenUsage != nil {
+			s.TaskRecords[i].TokenUsage = tokenUsage
+		}
+		return true
+	}
+	return false
+}
+
+// LiveTaskRecords returns the records not yet completed (CompletedAt zero) —
+// i.e. still in flight. Trigger paths and in-flight diagnostics (the
+// fast-path empty-session guard, the turn-end/SessionEnd backstop's "any
+// in-flight work?" check) must use this rather than the raw TaskRecords
+// slice: since CompleteTaskRecord no longer removes a record, TaskRecords
+// mixes live records with already-completed ones awaiting materialization.
+func (s *State) LiveTaskRecords() []TaskRecord {
+	var live []TaskRecord
+	for _, r := range s.TaskRecords {
+		if r.CompletedAt.IsZero() {
+			live = append(live, r)
+		}
+	}
+	return live
 }
 
 // PromptAttribution captures line-level attribution data at the start of each prompt.
