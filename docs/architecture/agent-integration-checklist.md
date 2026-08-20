@@ -79,9 +79,9 @@ Map agent-native hooks to these `EventType` constants (see `agent/event.go`):
       claude-code subagent-stop`) fires at true completion, per-agent, including
       after the parent's own turn already ended (`Final: true`). Without the
       second hook, everything a background subagent does is invisible — see the
-      "Task Steps (Subagent Checkpoints)" section of [Sessions and
+      "Task Records (Subagent Work)" section of [Sessions and
       Checkpoints](sessions-and-checkpoints.md) for the full launch-stub →
-      turn-end backstop → final-capture design this drives.
+      task-record completion → condensation-materializer design this drives.
 
 ### Hook Installation
 
