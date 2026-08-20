@@ -2408,11 +2408,15 @@ func TestRunTrailEnablementRefresh_NotOnboardedSavesDisabledCache(t *testing.T) 
 // candidate-row counterpart to TestRunTrailEnablementRefresh_NotOnboardedSavesDisabledCache
 // above, and exercises the real resolution chain (rather than mocking
 // trailRefreshAPIClient directly) so it also proves resolveProcessingPlacement
-// itself classifies a discoverable-but-unonboarded repo as errRepoNotOnboarded:
-// a repos-index row with Candidate set but no placements/primaries is the more
-// common real trigger for "not onboarded" than the zero-rows case (a random
-// repo a developer works in, vs. one the caller can't see or that doesn't
-// exist).
+// itself classifies a Candidate row as errRepoNotOnboarded.
+//
+// It does NOT claim the Candidate row is the common real-world trigger — it
+// isn't. Verified against prod 2026-08-19: today's control plane only matches
+// onboarded repos in a Filter lookup, so a public non-onboarded repo comes back
+// as ZERO rows, and this branch is currently unreachable in production. The
+// coverage stays because the OpenAPI text on ListReposParams.Filter promises
+// the opposite, so the branch is one server change away from live. See the
+// comment on the Candidate branch in cell_target.go.
 func TestRunTrailEnablementRefresh_CandidateRowSavesDisabledCache(t *testing.T) {
 	setupStopTestRepo(t)
 	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")

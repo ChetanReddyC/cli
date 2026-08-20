@@ -392,6 +392,16 @@ var (
 	protectedDirsCache []string
 )
 
+// warnUser logs a warning and, on a real terminal, repeats a one-line version
+// on stderr. Hooks log to .entire/logs/entire.log, where most users never
+// look, so anything the user must act on needs the breadcrumb too.
+func warnUser(ctx context.Context, component, msg, breadcrumb string, attrs ...any) {
+	logging.Warn(logging.WithComponent(ctx, component), msg, attrs...)
+	if interactive.IsTerminalWriter(os.Stderr) {
+		fmt.Fprintf(os.Stderr, "[entire] %s\n", breadcrumb)
+	}
+}
+
 var initRedactionOnce sync.Once
 
 // EnsureRedactionConfigured loads redaction settings and configures the
@@ -436,6 +446,18 @@ func EnsureRedactionConfigured(ctx context.Context) {
 			return
 		}
 
+		// A tracked .entire/settings.local.json was ignored. Report it: the
+		// user's local overrides silently stopped applying, and the fix is
+		// not guessable from the symptom.
+		if reason := s.LocalLayerRejection(); reason != "" {
+			warnUser(ctx, "settings",
+				"ignoring .entire/settings.local.json",
+				"ignoring .entire/settings.local.json ("+reason+"); fix with: git rm --cached .entire/settings.local.json",
+				slog.String("reason", reason),
+				slog.String("remediation", "run: git rm --cached .entire/settings.local.json"),
+			)
+		}
+
 		// PII detection (opt-in).
 		if s.Redaction != nil && s.Redaction.PII != nil && s.Redaction.PII.Enabled {
 			pii := s.Redaction.PII
@@ -465,14 +487,11 @@ func EnsureRedactionConfigured(ctx context.Context) {
 		}
 		packs, lerr := redact.LoadPacks(packsDir, logger)
 		if lerr != nil {
-			logCtx := logging.WithComponent(ctx, "redaction")
-			logging.Warn(logCtx, "failed to load redactor packs", slog.String("error", lerr.Error()))
-			// Hooks log to .entire/logs/entire.log, where most users never
-			// look. Surface a one-line breadcrumb on stderr when we have a
-			// real terminal so the user can find the detail.
-			if interactive.IsTerminalWriter(os.Stderr) {
-				fmt.Fprintf(os.Stderr, "[entire] redactor packs failed to load (%v); see .entire/logs/entire.log or run `entire doctor`.\n", lerr)
-			}
+			warnUser(ctx, "redaction",
+				"failed to load redactor packs",
+				fmt.Sprintf("redactor packs failed to load (%v); see .entire/logs/entire.log or run `entire doctor`.", lerr),
+				slog.String("error", lerr.Error()),
+			)
 		}
 		if len(inline) > 0 || len(packs) > 0 {
 			redact.ConfigureCustomRules(redact.CustomRulesConfig{
@@ -485,6 +504,18 @@ func EnsureRedactionConfigured(ctx context.Context) {
 		// OpenAI Privacy Filter (opt-in 9th layer).
 		if s.Redaction != nil && s.Redaction.OpenAIPrivacyFilter != nil {
 			opf := s.Redaction.OpenAIPrivacyFilter
+			// The loader records rather than logs (see
+			// settings.enforceOPFCommandTrust); surface it here or a user
+			// whose configured binary is ignored gets no signal.
+			if cmd, reason, rejected := opf.CommandRejection(); rejected {
+				warnUser(ctx, "redaction",
+					"ignoring openai_privacy_filter.command; falling back to \"opf\" on $PATH",
+					fmt.Sprintf("ignoring openai_privacy_filter.command (%s); using \"opf\" from $PATH.", reason),
+					slog.String("reason", reason),
+					slog.String("ignored_command", cmd),
+					slog.String("remediation", "set redaction.openai_privacy_filter.command in .entire/settings.local.json, and keep that file out of version control"),
+				)
+			}
 			redact.ConfigurePrivacyFilter(redact.OPFConfig{
 				Enabled:    opf.Enabled,
 				Categories: opf.Categories,
