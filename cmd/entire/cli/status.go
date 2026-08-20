@@ -572,6 +572,11 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 			if warning := divergenceWarnings[st.SessionID]; warning != "" {
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
+			if st.CaptureDegradedAt != nil {
+				warning := fmt.Sprintf("capture degraded %s: status scan over budget; new-file detection skipped (see 'entire doctor logs')",
+					timeAgo(*st.CaptureDegradedAt))
+				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
+			}
 			fmt.Fprintln(w)
 		}
 	}
@@ -768,6 +773,9 @@ type sessionBriefJSON struct {
 	Agent  string `json:"agent"`
 	Model  string `json:"model,omitempty"`
 	Status string `json:"status"`
+	// CaptureDegraded reports that a session for this agent last turned with a
+	// status scan over budget, so new-file detection was skipped.
+	CaptureDegraded bool `json:"capture_degraded,omitempty"`
 }
 
 func runStatusJSON(ctx context.Context, w io.Writer) error {
@@ -857,12 +865,16 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 							existing.brief.Status = sessionStatusLabel(st)
 							existing.isActive = true
 						}
+						// Degradation is sticky across the dedupe: any degraded
+						// session for this agent must not be hidden by a healthy one.
+						existing.brief.CaptureDegraded = existing.brief.CaptureDegraded || st.CaptureDegradedAt != nil
 					} else {
 						byAgent[agent] = &agentEntry{
 							brief: sessionBriefJSON{
-								Agent:  agent,
-								Model:  st.ModelName,
-								Status: sessionStatusLabel(st),
+								Agent:           agent,
+								Model:           st.ModelName,
+								Status:          sessionStatusLabel(st),
+								CaptureDegraded: st.CaptureDegradedAt != nil,
 							},
 							isActive: active,
 						}
