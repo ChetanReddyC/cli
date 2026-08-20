@@ -1691,12 +1691,23 @@ func TestConfigureScanners_GoredactLayer(t *testing.T) {
 		t.Errorf("goredact-only String(db kv) = %q, want layer-7 redaction", got)
 	}
 
+	// Gate-off pin: a betterleaks-1.8.0-exclusive detection (the
+	// generic-password rule; goredact rejects the low-entropy value and no
+	// other layer matches) must NOT fire under goredact-only.
+	if got := String("password=not-a-secret-setting"); got != "password=not-a-secret-setting" {
+		t.Errorf("goredact-only String() = %q, want unchanged (betterleaks gated off)", got)
+	}
+
 	// Both engines: goredact remains active alongside betterleaks.
 	if err := ConfigureScanners(ScannersConfig{Betterleaks: true, Goredact: true}); err != nil {
 		t.Fatalf("ConfigureScanners(both): %v", err)
 	}
 	if got := String(in); strings.Contains(got, "ghp_a1b2c1d2e1f2g1h2a1b2c1d2e1f2g1h2a1b2") {
 		t.Errorf("both-scanners String() left the PAT unredacted: %q", got)
+	}
+	// ...and betterleaks remains active too (same 1.8.0-exclusive detection).
+	if got := String("password=not-a-secret-setting"); got != "password=REDACTED" {
+		t.Errorf("both-scanners String() = %q, want betterleaks generic-password detection", got)
 	}
 }
 
