@@ -3,6 +3,8 @@ package strategy
 import "testing"
 
 func TestTruncateDescription(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		input  string
@@ -52,6 +54,8 @@ func TestTruncateDescription(t *testing.T) {
 }
 
 func TestFormatSubagentEndMessage(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		agentType   string
@@ -101,6 +105,8 @@ func TestFormatSubagentEndMessage(t *testing.T) {
 }
 
 func TestFormatIncrementalMessage(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		todoContent string
@@ -143,6 +149,8 @@ func TestFormatIncrementalMessage(t *testing.T) {
 }
 
 func TestExtractLastCompletedTodo(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		todosJSON string
@@ -201,6 +209,8 @@ func TestExtractLastCompletedTodo(t *testing.T) {
 }
 
 func TestCountTodos(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		todosJSON string
