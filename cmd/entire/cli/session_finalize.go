@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
@@ -63,12 +64,19 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 	logCtx := logging.WithComponent(ctx, "session")
 	condenseDeadline := time.Now().Add(sweepCondenseBudget)
 
-	var store *session.StateStore // lazily created on first finalize
+	// Created up front: the record-completion pre-check and the post-finalize
+	// refresh below both need fresh loads.
+	store, storeErr := session.NewStateStore(ctx)
+	if storeErr != nil {
+		store = nil
+	}
 	finalized := 0
 	for _, st := range states {
 		if !st.OwnerExited() {
 			continue // cheap pre-filter on the (possibly stale) list snapshot
 		}
+
+		sweepCompleteLiveTaskRecords(ctx, store, st)
 
 		// Finalize via the same path a clean SessionStop hook would take, but
 		// re-validate OwnerExited on the freshly-loaded state under the lock:
@@ -93,11 +101,6 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 		// fail-open and budget-capped, so StepCount/FullyCondensed must not be
 		// assumed). Fall back to a minimal ended-marking if the reload fails —
 		// enough for the caller's "active" filter to drop it.
-		if store == nil {
-			if s, serr := session.NewStateStore(ctx); serr == nil {
-				store = s
-			}
-		}
 		refreshed := false
 		if store != nil {
 			if reloaded, lerr := store.Load(ctx, st.SessionID); lerr == nil && reloaded != nil {
@@ -113,4 +116,27 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 		finalized++
 	}
 	return finalized
+}
+
+// sweepCompleteLiveTaskRecords completes a dead-owner session's live task
+// records ahead of the sweep's endSessionNow, exactly as a clean SessionEnd
+// does: the owner is gone, so no SubagentStop can ever arrive, and an
+// un-completed record would otherwise keep the session carrying pending task
+// content forever. Re-checks OwnerExited on a fresh load so a session revived
+// since the caller's snapshot is left alone; best-effort throughout.
+func sweepCompleteLiveTaskRecords(ctx context.Context, store *session.StateStore, st *session.State) {
+	fresh := st
+	if store != nil {
+		if reloaded, err := store.Load(ctx, st.SessionID); err == nil && reloaded != nil {
+			fresh = reloaded
+		}
+	}
+	if !fresh.OwnerExited() || len(fresh.LiveTaskRecords()) == 0 {
+		return
+	}
+	ag, err := agent.GetByAgentType(fresh.AgentType)
+	if err != nil || ag == nil {
+		return
+	}
+	completeLiveTaskRecords(ctx, ag, fresh.SessionID, fresh.TranscriptPath)
 }

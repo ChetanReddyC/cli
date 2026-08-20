@@ -2460,29 +2460,20 @@ func TestWarnStaleEndedSessions_RateLimit(t *testing.T) {
 	assert.Contains(t, buf.String(), "entire doctor")
 }
 
-// TestPostCommit_IdleSessionWithLiveMarker_CondensesCommitSnapshot verifies
-// that an idle session with a live in-flight marker — eligible for the
-// fast-path trailer via tryAgentCommitFastPath, and backed by the CLI-layer
-// commit-snapshot capture (captureInFlightTaskCommitSnapshot,
-// cmd/entire/cli/lifecycle.go) that runs before PostCommit — actually
-// condenses. This test reproduces the capture's realistic effect on session
-// state directly via SaveTaskStep — a non-incremental task step whose
-// ModifiedFiles ends up empty because the subagent's own file write already
-// landed in this very commit (filterToUncommittedFiles strips it once HEAD
-// includes it) — and then runs PostCommit, asserting condensation happens
-// end to end despite that empty ModifiedFiles list.
-//
-// This is the scenario the incident's fix depends on: a background subagent
-// commits its own work mid-task, so ModifiedFiles is empty and the session
-// never picks up a FilesTouched/committed-file overlap the "content
+// TestPostCommit_IdleSessionWithTaskRecord_CondensesMaterializedContent
+// verifies that an idle session with a fresh task record — eligible for the
+// fast-path trailer via tryAgentCommitFastPath — actually condenses, and that
+// the condensation materializes the record's transcript-so-far into the
+// permanent checkpoint's tasks/ subtree. This is the scenario the incident's
+// fix depends on: a background subagent commits its own work mid-task, so the
+// session never picks up a FilesTouched/committed-file overlap the "content
 // detection" path normally requires for a non-active session. Idle +
 // EventGitCommit routes unconditionally to ActionCondense (session/phase.go),
-// hasNew is true because the commit-snapshot capture grew the shadow
-// branch's stored transcript, and idleWithLiveMarker's overlap-check bypass
-// (shouldCondenseWithOverlapCheck) is what lets condensation proceed without
-// the overlap an empty ModifiedFiles list could never supply. Without a live
-// marker, that overlap requirement still applies unchanged.
-func TestPostCommit_IdleSessionWithLiveMarker_CondensesCommitSnapshot(t *testing.T) {
+// hasNew is true because the session carries a task record, and
+// idleWithTaskContent's overlap-check bypass (shouldCondenseWithOverlapCheck)
+// is what lets condensation proceed without overlap evidence. Without a fresh
+// record, that overlap requirement still applies unchanged.
+func TestPostCommit_IdleSessionWithTaskRecord_CondensesMaterializedContent(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
@@ -2490,9 +2481,9 @@ func TestPostCommit_IdleSessionWithLiveMarker_CondensesCommitSnapshot(t *testing
 	require.NoError(t, err)
 
 	s := &ManualCommitStrategy{}
-	sessionID := "test-postcommit-idle-marker"
-	toolUseID := "toolu_idlemarker1"
-	agentID := "agent-idlemarker1"
+	sessionID := "test-postcommit-idle-record"
+	toolUseID := "toolu_idlerecord1"
+	agentID := "agent-idlerecord1"
 
 	worktreePath, err := paths.WorktreeRoot(context.Background())
 	require.NoError(t, err)
@@ -2505,6 +2496,8 @@ func TestPostCommit_IdleSessionWithLiveMarker_CondensesCommitSnapshot(t *testing
 	transcriptDir := t.TempDir()
 	mainTranscriptPath := filepath.Join(transcriptDir, "main.jsonl")
 	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"work in background"}}`+"\n"), 0o644))
+	subagentTranscriptPath := filepath.Join(transcriptDir, "agent-"+agentID+".jsonl")
+	require.NoError(t, os.WriteFile(subagentTranscriptPath, []byte(`{"role":"assistant","content":"background widget progress"}`+"\n"), 0o644))
 
 	now := time.Now()
 	state := &SessionState{
@@ -2516,31 +2509,11 @@ func TestPostCommit_IdleSessionWithLiveMarker_CondensesCommitSnapshot(t *testing
 		Phase:          session.PhaseIdle,
 		AgentType:      agent.AgentTypeClaudeCode,
 		TranscriptPath: mainTranscriptPath,
-		InFlightTasks: []session.InFlightTask{
-			{ToolUseID: toolUseID, AgentID: agentID, StartedAt: now, SubagentType: "dev", TaskDescription: "background widget work"},
+		TaskRecords: []session.TaskRecord{
+			{ToolUseID: toolUseID, AgentID: agentID, StartedAt: now, SubagentType: "dev", TaskDescription: "background widget work", DeclaredTranscriptPath: subagentTranscriptPath},
 		},
 	}
 	require.NoError(t, s.saveSessionState(context.Background(), state))
-
-	// Reproduce captureInFlightTaskCommitSnapshot's realistic effect: a
-	// non-incremental task step with a stored transcript but zero
-	// ModifiedFiles (the subagent's file write is the very thing this commit
-	// lands, so post-commit filtering strips it before SaveTaskStep is called).
-	require.NoError(t, s.SaveTaskStep(context.Background(), TaskStepContext{
-		SessionID:              sessionID,
-		ToolUseID:              toolUseID,
-		AgentID:                agentID,
-		TranscriptPath:         mainTranscriptPath,
-		SubagentTranscriptPath: mainTranscriptPath,
-		AuthorName:             "Test",
-		AuthorEmail:            "test@test.com",
-		IsIncremental:          false,
-		SubagentType:           "dev",
-		TaskDescription:        "background widget work",
-		AgentType:              agent.AgentTypeClaudeCode,
-	}))
-
-	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 
 	// The subagent's own commit: the file it wrote, landing in HEAD alongside
 	// the Entire-Checkpoint trailer tryAgentCommitFastPath would have added.
@@ -2549,29 +2522,28 @@ func TestPostCommit_IdleSessionWithLiveMarker_CondensesCommitSnapshot(t *testing
 
 	require.NoError(t, s.PostCommit(context.Background()))
 
-	// Condensation should have consumed the commit-snapshot's shadow-branch
-	// content into a permanent checkpoint.
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensing the idle+marker session's commit-snapshot capture")
+	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensing the idle+record session")
 
-	refName := plumbing.NewBranchReferenceName(shadowBranch)
-	_, err = repo.Reference(refName, true)
-	assert.Error(t, err, "shadow branch should be deleted once its commit-snapshot content is condensed")
+	// The content guarantee: the trailer's checkpoint must actually carry the
+	// record's transcript-so-far, materialized by the condensation itself.
+	jsonlContent, ok := checkpointTaskFile(t, repo, id.MustCheckpointID("a1a1a1a1a1a1"), "tasks/"+toolUseID+"/agent-"+agentID+".jsonl")
+	require.True(t, ok, "the condensed checkpoint must materialize the task record's transcript under tasks/")
+	assert.Contains(t, jsonlContent, "background widget progress")
 }
 
-// TestPostCommit_EndedSessionWithLingeringMarker_UnrelatedCommitNotCondensed
-// is the regression for a scoping bug in the idle+marker overlap-check
-// bypass: finalizeExitedSessions (cmd/entire/cli/session_finalize.go) ends a
-// crashed/exited agent's session via endSessionNow, which never runs a final
-// in-flight-task capture — so a PhaseEnded session can carry a stale
-// InFlightTasks marker indefinitely, alongside FilesTouched left over from its
-// real earlier work. An earlier version of the marker bypass keyed only on
-// "has a marker" (not on phase), so it also fired for this ENDED session and
-// trusted its marker enough to skip the overlap check — condensing a later,
-// completely unrelated human commit into it. idleWithLiveMarker must be
-// scoped to state.Phase == PhaseIdle so an ENDED session with a lingering
-// marker still needs real file-overlap evidence like any other stale session.
-func TestPostCommit_EndedSessionWithLingeringMarker_UnrelatedCommitNotCondensed(t *testing.T) {
+// TestPostCommit_EndedSessionWithLingeringRecord_UnrelatedCommitNotCondensed
+// is the regression for a scoping bug in the idle+record overlap-check
+// bypass: a PhaseEnded session can carry a stale task record indefinitely
+// (e.g. a crashed agent whose session was swept), alongside FilesTouched left
+// over from its real earlier work. An earlier version of the bypass keyed
+// only on "has a record" (not on phase), so it also fired for this ENDED
+// session and trusted its record enough to skip the overlap check —
+// condensing a later, completely unrelated human commit into it.
+// idleWithTaskContent must be scoped to state.Phase == PhaseIdle so an ENDED
+// session with a lingering record still needs real file-overlap evidence like
+// any other stale session.
+func TestPostCommit_EndedSessionWithLingeringRecord_UnrelatedCommitNotCondensed(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
@@ -2579,7 +2551,7 @@ func TestPostCommit_EndedSessionWithLingeringMarker_UnrelatedCommitNotCondensed(
 	require.NoError(t, err)
 
 	s := &ManualCommitStrategy{}
-	sessionID := "test-postcommit-ended-lingering-marker"
+	sessionID := "test-postcommit-ended-lingering-record"
 
 	// Real earlier work: test.txt modified, shadow branch has content.
 	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
@@ -2590,10 +2562,9 @@ func TestPostCommit_EndedSessionWithLingeringMarker_UnrelatedCommitNotCondensed(
 	state.Phase = session.PhaseEnded
 	state.EndedAt = &now
 	state.FilesTouched = []string{"test.txt"}
-	// A marker finalizeExitedSessions left behind: the crashed agent's
-	// background task was never finalized by a real SubagentStop/SessionEnd
-	// capture, so the marker is still here even though the session is ENDED.
-	state.InFlightTasks = []session.InFlightTask{
+	// A record left behind by a crashed agent: never completed by a real
+	// SubagentStop/SessionEnd capture, still here though the session is ENDED.
+	state.TaskRecords = []session.TaskRecord{
 		{ToolUseID: "toolu_crashed1", AgentID: "agent-crashed1", StartedAt: now},
 	}
 	require.NoError(t, s.saveSessionState(context.Background(), state))
@@ -2632,6 +2603,6 @@ func TestPostCommit_EndedSessionWithLingeringMarker_UnrelatedCommitNotCondensed(
 	require.NoError(t, err)
 	assert.Equal(t, originalBaseCommit, state.BaseCommit,
 		"BaseCommit must not move for an ended session on an unrelated commit")
-	assert.Len(t, state.InFlightTasks, 1,
-		"the lingering marker must remain untouched by an unrelated commit")
+	assert.Len(t, state.TaskRecords, 1,
+		"the lingering record must remain untouched by an unrelated commit")
 }

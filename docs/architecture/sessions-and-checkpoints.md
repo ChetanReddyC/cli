@@ -182,7 +182,7 @@ Contains full worktree snapshot plus metadata overlay. **Multiple concurrent ses
 .entire/metadata/<session-id-1>/
 ├── full.jsonl           # Session 1 transcript
 ├── prompt.txt           # Checkpoint-scoped user prompts
-└── tasks/<tool-use-id>/ # Task checkpoints
+└── tasks/<tool-use-id>/ # Post-todo incremental task checkpoints only
 .entire/metadata/<session-id-2>/
 ├── full.jsonl           # Session 2 transcript (concurrent)
 ├── ...
@@ -236,109 +236,114 @@ makes the comparison false forever and the session silently stops condensing.
 - Deleted after condensation to `entire/checkpoints/v1`
 - Reset if orphaned (no session state file exists)
 
-### Task Steps (Subagent Checkpoints)
+### Task Records (Subagent Work)
 
-A **task step** captures one subagent invocation (Claude Code's Task tool) as
-metadata under `.entire/metadata/<session-id>/tasks/<tool-use-id>/` on the
-shadow branch — see `SaveTaskStep` / `TaskStepContext` in
-`strategy/manual_commit_git.go` and `strategy.go`.
+A subagent invocation (Claude Code's Task tool) is captured through a durable
+**task record** — `session.TaskRecord` (json `task_records`) on session state
+(`session/state.go`): `ToolUseID`, `AgentID`, `StartedAt`, `SubagentType`,
+`TaskDescription`, `DeclaredTranscriptPath`, `Files`, `TokenUsage`,
+`CompletedAt` (zero = still in flight). Mid-turn the record is a **pointer,
+not a payload**: the subagent's transcript stays wherever the agent wrote it,
+and the record remembers how to find it — the transcript path the agent's
+stop hook declared (Claude Code's `agent_transcript_path`), with the
+agent-layout convention as fallback. Nothing is written to the shadow branch
+for task work; the payload is materialized at condensation (below).
 
-**Foreground tasks** are unchanged: launch-time pre-task snapshots state,
-completion-time post-task (Claude Code's PostToolUse) extracts the subagent's
-modified files and transcript and saves the task step immediately. Skipped
-entirely if nothing changed.
+**Producers.**
 
-**Background tasks** (`run_in_background: true`) need more than one hook,
-because Claude Code's PostToolUse for a backgrounded Task fires at the launch
-acknowledgment, seconds after dispatch and long before the subagent has done
-any work — the true completion signal arrives later, out of band, as
-`SubagentStop`. Three points capture a background task, in order:
+- **Background launch** (`run_in_background: true` in the Task tool's input):
+  Claude Code's PostToolUse for a backgrounded Task fires at the launch
+  acknowledgment, seconds after dispatch, so the launch only records an
+  in-flight record and captures nothing. `SubagentType`/`TaskDescription` are
+  captured here because `SubagentStop`'s payload carries none of them.
+- **Foreground completion** (post-task, non-final): PostToolUse fires at true
+  completion, so the record is created-and-completed in one step, files and
+  transcript path attached.
+- **SubagentStop (final, authoritative)**: the real completion signal for
+  background tasks. `handleSubagentStopFinal` completes the live record —
+  bypassing any "no changes, skip" instinct: a read-only subagent (reviewer,
+  search agent) still produced a transcript worth materializing. File
+  attribution is analyzer-only (the subagent's own transcript, never a
+  whole-worktree scan that would sweep in the parent's concurrent work); the
+  accepted trade is that shell side-effect files the transcript never names,
+  and deletions, are under-captured. A record already completed (foreground
+  dedup, duplicate/racing Final event) is skipped.
+- **SessionEnd sweep** (`completeLiveTaskRecords`): a session closing with
+  tasks still in flight completes every remaining live record, strictly
+  **before** `endSessionNow` marks `PhaseEnded` and eagerly condenses, so the
+  condense materializes them.
+- **Factory Droid Workers** upsert (`UpsertCompletedTaskRecord`): a worker
+  spans multiple turns, so repeat completions merge files into the same record
+  instead of claiming exactly-once.
 
-1. **Launch stub (post-task, non-final).** Detected via `run_in_background` in
-   the Task tool's input. Instead of saving a (premature) task step, this
-   records an **in-flight marker** — `session.InFlightTask{ToolUseID, AgentID,
-   StartedAt, SubagentType, TaskDescription}` — on session state
-   (`session/state.go`). No task checkpoint is written yet; the marker is the
-   only record that background work is live. `SubagentType`/`TaskDescription`
-   are captured here because `SubagentStop`'s payload carries none of them —
-   the marker is where the eventual final capture's labels come from.
-2. **Turn-end backstop (Stop, non-final).** For every marker still in flight,
-   `captureInFlightTasks` snapshots the subagent's **code changes only** —
-   never the transcript, a property of the incremental write path itself
-   (`checkpoint/ephemeral.go`), not a choice made here — as an incremental
-   task step (`IsIncremental: true`, `IncrementalType:
-   IncrementalTypeBackgroundProgress`, sequence from the same
-   `GetNextCheckpointSequence` counter post-todo incrementals use). The marker
-   stays; the task is still running. To avoid rescanning an unchanged
-   transcript every turn, the marker records the subagent transcript size at
-   last capture and skips the scan (and the save) when it hasn't grown. Capped
-   at 8 tasks per invocation, selected least-recently-attempted first
-   (never-attempted markers sort ahead of everything, matching
-   `selectInFlightTasksForSnapshot`), so the selection rotates from turn-end
-   to turn-end instead of starving whatever launched beyond the cap — the
-   remainder is picked up on a later turn or, at worst, by the SessionEnd
-   final capture below, so nothing is lost, only delayed.
-3. **SubagentStop (final, authoritative).** The real completion signal.
-   `handleSubagentStopFinal` **claims** the in-flight marker (atomic
-   find-and-remove keyed by `ToolUseID`) before capturing:
-   - **No marker claimed** — the task was already captured at launch time
-     (foreground) or by a racing/duplicate Final event — skip the capture
-     entirely. This is what makes a foreground task safe against Claude Code
-     also sending it a `SubagentStop`: nothing to claim, nothing to redo.
-   - **Marker claimed** — save the full, non-incremental task step (transcript
-     included) and bypass the normal "no changes, skip" gate: a read-only
-     subagent (a reviewer, a search agent) still produced a transcript worth
-     keeping, and this is the only chance to capture it. File attribution is
-     analyzer-only (the subagent's own transcript; never the whole-worktree
-     scan, which would sweep in whatever the parent or another agent changed
-     between launch and completion). The accepted trade: shell side-effect
-     files the transcript never names are under-captured, and deletions by
-     the subagent are also uncapturable in analyzer-only mode.
-   - **Late-arrival guard.** A `SubagentStop` can arrive after the parent
-     session already ended (or was swept). Session state missing entirely →
-     skip the capture outright — the subagent's own transcript is still on
-     disk in its own directory, but re-creating session state here would
-     resurrect a zombie shadow branch nothing then condenses. Session state
-     present but `PhaseEnded` → capture, then immediately call
-     `CondenseAndMarkFullyCondensed` (the same eager condense `SessionEnd`
-     uses) so the newly-written task step doesn't linger as post-condensation
-     zombie data.
+**Exactly-once completion.** Completion goes through
+`strategy.CompleteTaskRecord`: one `MutateSessionState` closure marks
+`CompletedAt` exactly once (a racing duplicate sees false and skips), attaches
+the extraction results (files, token usage, declared transcript path) to the
+claimed record, and merges files into the session's `FilesTouched`. Completion
+happens **last**, after successful extraction, so a failed capture leaves the
+record live for the SessionEnd sweep to retry. Late-arrival guard: a
+`SubagentStop` whose parent session state is missing entirely skips outright —
+re-creating state would resurrect a zombie session; state present but
+`PhaseEnded` → complete the record, then eagerly condense
+(`CondenseAndMarkFullyCondensed`) so it doesn't linger as post-condensation
+data. Hard-killed agents get the same terminal state from the exited-owner
+sweep (`finalizeExitedSessions`, run inside `entire status`/`doctor`), which
+completes live records before ending the session — the transcript-so-far
+still reaches a permanent checkpoint.
 
-**SessionEnd finals.** If a session ends while tasks are still in flight (no
-`SubagentStop` ever arrived, or it's still pending), `SessionEnd` runs the same
-final capture as `SubagentStop` — non-incremental, transcript included,
-marker-claimed — for every remaining marker, and runs it **uncapped** (unlike
-the turn-end backstop's cap of 8): this is the last chance before the session
-closes, so clipping here would lose a transcript permanently rather than defer
-it. Crucially, this sweep runs **before** `endSessionNow` marks the session
-`PhaseEnded` and triggers its own eager condense — so the finals' task steps
-are captured in time for that condense to include them, rather than minting
-shadow data after condensation that nothing then cleans up.
+**Materialization (condensation).** `materializeTaskRecords`
+(`manual_commit_condensation.go`) resolves each record's transcript — declared
+path first, agent-layout fallback — runs the same sanitize → externalize →
+redact pipeline the session transcript gets
+(`prepareTaskTranscriptForStorage`), and writes
+`tasks/<tool-use-id>/{agent-<agent-id>.jsonl, task.json}` inside the parent
+session's checkpoint, on both persistent backends via the shared
+`applySessionWrite`. An unresolvable, unreadable, or empty transcript still
+gets a `task.json` carrying a stable, path-free
+`transcript_unavailable_reason` — the record is never silently dropped.
+Records with an empty/unsafe `ToolUseID` or `AgentID` are skipped with a
+warning, never allowed to wedge condensation.
+
+**Self-contained checkpoints.** Live records are materialized too: each
+condensation stores the transcript-so-far, so a mid-task commit carries a
+partial transcript and a later checkpoint carries the full one — the same
+self-containment rule the compact transcript follows. Live records survive
+condensation for retry; completed records are removed only after a successful
+write (`removeCompletedTaskRecords`, run from `resetCheckpointWindow`).
+
+**Trigger currency.** "Does this session have task content?" is
+`State.HasTaskContent()` (`len(TaskRecords) > 0`) everywhere — condensation
+triggers, empty-session guards, doctor classification, shadow-branch
+deletability. Records never touch the shadow branch: a records-only session
+(no shadow branch, no steps, empty parent transcript) still condenses, and
+shadow-branch existence no longer implies task content (shadow pinning keys on
+`StepCount` only). `checkpoint list --pending` renders `[Task]` rows from
+records, with `Running`/`Completed` verbs.
+
+**Shadow-branch task checkpoints** still exist in exactly one form: post-todo
+incrementals. `SaveTaskStep` (`strategy/manual_commit_git.go`) is formally
+incremental-only — it errors on non-incremental use — and its sole production
+caller is the Claude Code post-todo hook, writing under
+`.entire/metadata/<session-id>/tasks/<tool-use-id>/` when a TodoWrite fires
+inside a subagent.
 
 **Commit linkage while idle.** A background subagent's `git commit` normally
 lands between the parent session's turns, while the session is IDLE — the
 fast-path trailer decision (`tryAgentCommitFastPath`,
 `strategy/manual_commit_hooks.go`) used to trust only ACTIVE sessions, so
 these commits shipped with no `Entire-Checkpoint` trailer at all. An IDLE
-session with a live in-flight marker (`idleWithLiveMarker`) is now linkable
-too, bounded by the marker's age (`activeSessionInteractionThreshold`, 24h) so
-a subagent that dies without a final capture doesn't leave the session
-trusted forever. The trailer alone would dangle, though — the subagent's work
-isn't in the parent's shadow baseline yet — so post-commit gates a
-*commit-snapshot* capture (`captureInFlightTaskCommitSnapshot`,
-`lifecycle.go`) on the trailer's presence (`headHasCheckpointTrailer`,
-`hooks_git_cmd.go`) and runs it before `strategy.PostCommit`'s condensation in
-the same hook invocation: a non-incremental `SaveTaskStep` (transcript
-included, growth-deduped against the marker's `LastCapturedTranscriptBytes`,
-no `CleanupPreTaskState`, no marker claim — the task is still running) so the
-minted checkpoint is contentful in the same hook invocation, on the happy
-path. The gate only guarantees no capture attempt without a trailer, not no
-trailer without content: a capture failure (the subagent transcript not yet
-on disk, a stat/analyzer/`SaveTaskStep` error) is best-effort and leaves the
-trailer standing with condensation skipped for now, degrading to the existing
-backstops — the next turn-end incremental, the eventual SubagentStop Final, or
-the next commit — to fill it in later. Ordinary idle commits with no
-in-flight markers are unaffected — they stay exactly as before.
+session with a fresh task record (`idleWithTaskContent`: in-flight or
+completed-unmaterialized, each record bounded by its `StartedAt` age against
+`activeSessionInteractionThreshold`, 24h) is now linkable too, so a subagent
+that dies without a completion signal doesn't leave the session trusted
+forever. The same predicate feeds `shouldCondenseWithOverlapCheck`'s
+overlap-check bypass, so the trigger and the condensation trust share one
+rule. The trailer's content guarantee is the materializer itself: the
+commit's condensation stores each record's transcript-so-far under the
+checkpoint's `tasks/` subtree, so no separate commit-time capture is needed.
+Ordinary idle commits with no task records are unaffected — they stay exactly
+as before.
 
 ### Committed Checkpoints
 
@@ -446,7 +451,10 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 │   ├── metadata.json
 │   ├── full.jsonl
 │   └── ...
-└── 2/                   # Third session...
+├── 2/                   # Third session...
+└── tasks/<tool-use-id>/ # Subagent task records, materialized at condensation
+    ├── agent-<agent-id>.jsonl # Subagent transcript, sanitized + redacted (omitted when unavailable)
+    └── task.json        # Record metadata (files, tokens, timings, unavailable reason)
 ```
 
 **Compact transcript (`transcript.jsonl`):** generated best-effort from
@@ -754,7 +762,7 @@ Strategies determine checkpoint timing and type:
 | Event | Checkpoint Type |
 |-------|----------------|
 | On Save | Temporary |
-| On Task Complete | Temporary |
+| On Task Complete | Task record on session state → materialized at condensation |
 | On User Commit | Condense → Committed |
 
 ## Rewind

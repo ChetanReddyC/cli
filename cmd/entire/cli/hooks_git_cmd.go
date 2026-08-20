@@ -7,17 +7,14 @@ import (
 	"os"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
-	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/perf"
@@ -274,124 +271,11 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 				return nil
 			}
 
-			if headHasCheckpointTrailer(g.ctx) {
-				captureCommitSnapshotsForInFlightTasks(g.ctx)
-			}
-
 			hookErr := g.strategy.PostCommit(g.ctx)
 			g.logCompleted(hookErr)
 
 			return nil
 		},
-	}
-}
-
-// headHasCheckpointTrailer reports whether HEAD's commit message carries an
-// Entire-Checkpoint trailer, using the same trailers.ParseCheckpoint helper
-// strategy.PostCommit itself reads it with (manual_commit_hooks.go's PostCommit,
-// ~line 947). Gates captureCommitSnapshotsForInFlightTasks: condensation only
-// ever happens for a trailer-bearing commit — PostCommit bails immediately
-// otherwise — so running the commit-snapshot capture ahead of a no-trailer
-// commit would pay a full analyzer transcript scan plus a full
-// sanitize→externalize→redact transcript write for content nothing will ever
-// condense. Ordinary human commits between turns already have their session
-// state kept fresh by the turn-end backstop (captureInFlightTasks), so
-// skipping here loses nothing. Fails closed (false) on any read error: if we
-// can't tell whether the trailer is present, PostCommit itself will bail on
-// the same commit for the same reason, so there is nothing for the capture to
-// usefully back either.
-func headHasCheckpointTrailer(ctx context.Context) bool {
-	repo, err := gitrepo.OpenCurrent(ctx)
-	if err != nil {
-		return false
-	}
-	defer repo.Close()
-
-	head, err := repo.Head()
-	if err != nil {
-		return false
-	}
-
-	commit, err := repo.CommitObject(head.Hash())
-	if err != nil {
-		return false
-	}
-
-	_, found := trailers.ParseCheckpoint(commit.Message)
-	return found
-}
-
-// captureCommitSnapshotsForInFlightTasks runs the commit-snapshot capture
-// (captureInFlightTasksForCommit, cmd/entire/cli/lifecycle.go) for every
-// current-worktree session with any in-flight background task, before
-// strategy.PostCommit condenses this commit. This is what makes the
-// Entire-Checkpoint trailer tryAgentCommitFastPath adds for an idle session
-// with a live marker (see manual_commit_hooks.go) point at a checkpoint that
-// actually contains the subagent's work — without it, the trailer names a
-// checkpoint with nothing behind it.
-//
-// Deliberately broader than idleWithLiveMarker's trigger-side eligibility:
-// this loop has no phase check and no age bound on the marker, and it reads
-// from the unpruned strategy.ListSessionStates rather than the pruned
-// findSessionsForWorktree the trigger uses. This is safe, not an oversight:
-// an ACTIVE session with an in-flight marker must stay eligible too (a
-// foreground turn that also has a background subagent running), so a
-// phase filter here would wrongly skip it. An aged/stale marker costs at
-// most one wasted stat-and-compare — captureInFlightTaskCommitSnapshot's own
-// growth dedup against LastCapturedTranscriptBytes turns a no-op into a
-// no-op — never a wasted full capture. And this loop only ever backs a
-// checkpoint that condensation actually promotes: headHasCheckpointTrailer
-// already gates the call on a trailer having landed, so scanning extra
-// markers here can't manufacture linkage that tryAgentCommitFastPath's own,
-// narrower trust decision didn't already grant.
-//
-// Lives in the CLI layer (not strategy) because the capture needs
-// agent.AsTranscriptAnalyzer and agent.GetByAgentType — the strategy package
-// must not import agent analyzers. Best-effort throughout: every failure path
-// here logs and returns, never blocking strategy.PostCommit from running.
-func captureCommitSnapshotsForInFlightTasks(ctx context.Context) {
-	logCtx := logging.WithComponent(ctx, "hooks")
-
-	worktreePath, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		logging.Debug(logCtx, "post-commit: failed to resolve worktree root for commit-snapshot capture",
-			slog.String("error", err.Error()))
-		return
-	}
-
-	states, err := strategy.ListSessionStates(ctx)
-	if err != nil {
-		logging.Warn(logCtx, "post-commit: failed to list session states for commit-snapshot capture",
-			slog.String("error", err.Error()))
-		return
-	}
-
-	for _, state := range states {
-		// Exact worktree match only: a marker belongs to the worktree that
-		// launched its background task, and capturing it from a sibling
-		// worktree's post-commit hook would resolve the wrong repo-relative
-		// paths and git status.
-		if state.WorktreePath != worktreePath || len(state.InFlightTasks) == 0 {
-			continue
-		}
-
-		ag, agErr := agent.GetByAgentType(state.AgentType)
-		if agErr != nil {
-			logging.Debug(logCtx, "post-commit: could not resolve agent for commit-snapshot capture",
-				slog.String("session_id", state.SessionID),
-				slog.String("agent_type", string(state.AgentType)),
-				slog.String("error", agErr.Error()))
-			continue
-		}
-		if _, ok := agent.AsTranscriptAnalyzer(ag); !ok {
-			logging.Debug(logCtx, "post-commit: agent does not support transcript analysis, skipping commit-snapshot capture",
-				slog.String("session_id", state.SessionID),
-				slog.String("agent_type", string(state.AgentType)),
-			)
-			continue
-		}
-
-		captureInFlightTasksForCommit(ctx, ag, state.SessionID, state.TranscriptPath)
 	}
 }
 

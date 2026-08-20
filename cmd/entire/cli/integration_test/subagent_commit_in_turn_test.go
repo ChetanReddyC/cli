@@ -3,7 +3,7 @@
 package integration
 
 import (
-	"os"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -105,9 +105,13 @@ func TestSubagentCheckpoints_UncommittedWork_StillCheckpoints(t *testing.T) {
 		t.Fatalf("SimulatePostTask failed: %v", err)
 	}
 
-	wantPath := ".entire/metadata/" + session.ID + "/tasks/" + taskToolUseID + "/checkpoint.json"
-	if !env.FileExistsInBranch(env.GetShadowBranchName(), wantPath) {
-		t.Errorf("task checkpoint missing for uncommitted subagent work (%s)", wantPath)
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	rec := state.FindTaskRecord(taskToolUseID)
+	if rec == nil || rec.CompletedAt.IsZero() || !containsFile(rec.Files, editedFile) {
+		t.Errorf("expected a completed task record carrying uncommitted subagent work, got %+v", rec)
 	}
 }
 
@@ -133,93 +137,43 @@ func shadowBranches(env *TestEnv) []string {
 // run for it), and the commit shipped with no Entire-Checkpoint trailer at all —
 // six of seven commits on a real subagent-driven branch went unlinked this way.
 //
-// A first, already-completed background task seeds a shadow branch before the
-// task under test ever launches — mirroring the real incident, where the
-// unlinked commits land well into an already-active session, not on its very
-// first turn. This is load-bearing, not incidental: findSessionsForWorktree's
-// listAllSessionStates prunes any IDLE session with neither a shadow branch nor
-// a LastCheckpointID as an orphaned pre-state-machine record (manual_commit_session.go).
-// A session whose only activity so far is one open in-flight marker — the exact
-// shape this PR's idle+marker eligibility targets — has neither, and gets swept
-// before prepare-commit-msg ever sees it. That sweep is unrelated to this PR
-// (it predates PR #2032) and out of scope for a test; the seed task sidesteps
-// it the way a real multi-turn session would, staying read-only so it never
-// touches FilesTouched or the session's condensed-transcript baseline. This
-// gap — an idle session whose only activity is one open in-flight marker,
-// with no shadow branch or LastCheckpointID yet, gets swept before
-// prepare-commit-msg ever sees it, so a first-turn background commit still
-// goes unlinked — is tracked in this PR's body under "Known gaps /
-// follow-ups", discovered via this test's need for the seed workaround.
-//
 // This drives the REAL prepare-commit-msg and post-commit git hooks end to end
-// (GitCommitWithShadowHooksAsAgent), so it is the arbiter of whether the trailer
-// tryAgentCommitFastPath adds (idle+marker eligibility, manual_commit_hooks.go)
-// is actually backed by content: post-commit's headHasCheckpointTrailer gate
-// only runs the commit-snapshot capture (captureInFlightTasksForCommit,
-// lifecycle.go) when the trailer landed, and it runs before
-// strategy.PostCommit's condensation in the same hook invocation. The
-// marker's LastCapturedTranscriptBytes assertion below is the direct proof
-// that capture ran; the checkpoint-content assertion after it proves the
-// trailer resolves to something real rather than dangling — reachable here
-// only because idleWithLiveMarker (Task 1) bypasses shouldCondenseWithOverlapCheck's
-// overlap requirement for this IDLE, marker-bearing session (its FilesTouched
-// carries no evidence tying it to editedFile).
+// (GitCommitWithShadowHooksAsAgent), so it is the arbiter of whether the
+// trailer tryAgentCommitFastPath adds (idleWithTaskContent eligibility,
+// manual_commit_hooks.go) is actually backed by content: the commit's own
+// condensation materializes the live task record's transcript-so-far into the
+// permanent checkpoint's tasks/ subtree (#2058's durable-record model), so the
+// checkpoint-content assertion below proves the trailer resolves to something
+// real rather than dangling — reachable here only because idleWithTaskContent
+// bypasses shouldCondenseWithOverlapCheck's overlap requirement for this IDLE,
+// record-bearing session (its FilesTouched carries no evidence tying it to
+// editedFile). No seed task is needed: findSessionsForWorktree's orphan sweep
+// spares record-bearing sessions (manual_commit_session.go), so even a
+// first-turn background commit links.
 func TestSubagentCheckpoints_CommitWhileIdleWithLiveMarker_LinksAndCondensesContent(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 	sess := env.NewSession()
-	sess.CreateTranscript("delegate two background tasks", nil)
+	sess.CreateTranscript("delegate a background task", nil)
 
 	const (
-		seedToolUseID = "toolu_01IdleMarkerSeed"
-		seedAgentID   = "e5555666677778888"
 		taskToolUseID = "toolu_01IdleMarkerCommit"
 		subagentID    = "d4444555566667777"
 		editedFile    = "docs/idlemarker.md"
 	)
 
-	// Real Claude Code always sends a transcript_path on UserPromptSubmit;
-	// it is what populates the persisted SessionState.TranscriptPath that
-	// captureInFlightTaskCommitSnapshot later reads at post-commit time (no
-	// hook payload is available there to supply it directly, unlike
-	// SubagentStop's agent_transcript_path).
+	// Real Claude Code always sends a transcript_path on UserPromptSubmit; it
+	// is what populates the persisted SessionState.TranscriptPath condensation
+	// later stores as the parent transcript.
 	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	// Seed task: a read-only background subagent that finishes within this
-	// same turn. Its SubagentStop Final capture (bypassNoChangesSkip) writes a
-	// zero-file task step, which creates the shadow branch and bumps StepCount
-	// without ever touching FilesTouched.
-	if err := env.SimulatePreTask(sess.ID, sess.TranscriptPath, seedToolUseID); err != nil {
-		t.Fatalf("SimulatePreTask (seed) failed: %v", err)
-	}
-	if err := env.SimulatePostTask(PostTaskInput{
-		SessionID:       sess.ID,
-		TranscriptPath:  sess.TranscriptPath,
-		ToolUseID:       seedToolUseID,
-		AgentID:         seedAgentID,
-		RunInBackground: true,
-	}); err != nil {
-		t.Fatalf("SimulatePostTask (seed background stub) failed: %v", err)
-	}
-	seedTranscriptPath := sess.CreateSubagentTranscript(seedAgentID, nil)
-	if err := env.SimulateSubagentStop(SubagentStopInput{
-		SessionID:           sess.ID,
-		TranscriptPath:      sess.TranscriptPath,
-		AgentID:             seedAgentID,
-		AgentTranscriptPath: seedTranscriptPath,
-		ToolUseID:           seedToolUseID,
-	}); err != nil {
-		t.Fatalf("SimulateSubagentStop (seed) failed: %v", err)
-	}
-
-	// The task under test launches in the same (still-ACTIVE) turn.
 	if err := env.SimulatePreTask(sess.ID, sess.TranscriptPath, taskToolUseID); err != nil {
 		t.Fatalf("SimulatePreTask failed: %v", err)
 	}
 
-	// Background launch: marker recorded while the parent is still ACTIVE
+	// Background launch: record created while the parent is still ACTIVE
 	// (mid-turn).
 	if err := env.SimulatePostTask(PostTaskInput{
 		SessionID:       sess.ID,
@@ -232,11 +186,9 @@ func TestSubagentCheckpoints_CommitWhileIdleWithLiveMarker_LinksAndCondensesCont
 	}
 
 	// Turn ends: the parent goes IDLE while the background subagent keeps
-	// running. The subagent's transcript doesn't exist yet, so this turn-end's
-	// incremental backstop (captureInFlightTaskIncremental) has nothing to
-	// snapshot — the marker survives untouched, and the parent session
-	// carries no FilesTouched yet. This is the shape idleWithLiveMarker exists
-	// for: an IDLE session whose background task is still genuinely live.
+	// running. The record survives, still live. This is the shape
+	// idleWithTaskContent exists for: an IDLE session whose background task is
+	// still genuinely in flight.
 	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
@@ -244,11 +196,8 @@ func TestSubagentCheckpoints_CommitWhileIdleWithLiveMarker_LinksAndCondensesCont
 	if state.Phase != session.PhaseIdle {
 		t.Fatalf("expected session to be IDLE after turn-end, got %+v", state)
 	}
-	if hasInFlightTask(state, seedToolUseID) {
-		t.Fatalf("seed task's marker should have been claimed by its own subagent-stop, state=%+v", state)
-	}
-	if !hasInFlightTask(state, taskToolUseID) {
-		t.Fatalf("expected in-flight marker to survive turn-end, state=%+v", state)
+	if !hasLiveTaskRecord(state, taskToolUseID) {
+		t.Fatalf("expected live task record to survive turn-end, state=%+v", state)
 	}
 
 	// The subagent does its actual work while the parent sits idle between
@@ -268,53 +217,44 @@ func TestSubagentCheckpoints_CommitWhileIdleWithLiveMarker_LinksAndCondensesCont
 	headHash := env.GetHeadHash()
 	checkpointID := env.GetCheckpointIDFromCommitMessage(headHash)
 	if checkpointID == "" {
-		t.Fatalf("commit made while idle with a live marker should carry an Entire-Checkpoint trailer")
+		t.Fatalf("commit made while idle with a live task record should carry an Entire-Checkpoint trailer")
 	}
 
-	// Direct proof that captureInFlightTaskCommitSnapshot ran inside this
-	// post-commit invocation, before condensation: it is the only code path
-	// that advances a marker's LastCapturedTranscriptBytes outside of the
-	// turn-end backstop (which had nothing to capture yet — the subagent
-	// transcript didn't exist at Stop time), and it only runs at all because
-	// headHasCheckpointTrailer saw the trailer this same prepare-commit-msg
-	// just added. This is the ordering unit tests can't observe end to end.
-	state = requireSessionState(t, env, sess.ID)
-	marker := state.FindInFlightTask(taskToolUseID)
-	if marker == nil {
-		t.Fatalf("expected marker %s to still exist after the commit", taskToolUseID)
+	// THE content guarantee: the commit's condensation materialized the live
+	// record's transcript-so-far into the permanent checkpoint's tasks/
+	// subtree, so the trailer points at the subagent's real work.
+	storedTranscript, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
+		CheckpointTaskFilePath(checkpointID, taskToolUseID, "agent-"+subagentID+".jsonl"))
+	if !ok {
+		t.Fatalf("subagent transcript not materialized under the checkpoint's tasks/ subtree")
 	}
-	subagentTranscriptInfo, statErr := os.Stat(subagentTranscriptPath)
-	if statErr != nil {
-		t.Fatalf("failed to stat subagent transcript: %v", statErr)
-	}
-	if marker.LastCapturedTranscriptBytes != subagentTranscriptInfo.Size() {
-		t.Errorf("commit-snapshot capture did not run: marker.LastCapturedTranscriptBytes = %d, want %d (subagent transcript size)",
-			marker.LastCapturedTranscriptBytes, subagentTranscriptInfo.Size())
+	if !strings.Contains(storedTranscript, editedFile) {
+		t.Errorf("materialized subagent transcript does not reference %q: %q", editedFile, storedTranscript)
 	}
 
-	// The condensed permanent checkpoint is contentful, not a dangling
-	// trailer: it resolves at all (rather than PostCommit skipping this IDLE
-	// session for lack of overlap evidence) only because idleWithLiveMarker
-	// bypasses the overlap check, and it carries editedFile in FilesTouched
-	// via CondenseSession's committed-files fallback (filterFilesTouched in
-	// manual_commit_condensation.go).
+	// The condensed permanent checkpoint resolves at all (rather than
+	// PostCommit skipping this IDLE session for lack of overlap evidence) only
+	// because idleWithTaskContent bypasses the overlap check, and it carries
+	// editedFile in FilesTouched via CondenseSession's committed-files
+	// fallback (filterFilesTouched in manual_commit_condensation.go).
 	env.ValidateCheckpoint(CheckpointValidation{
 		CheckpointID:              checkpointID,
 		SessionID:                 sess.ID,
 		FilesTouched:              []string{editedFile},
-		ExpectedTranscriptContent: []string{"delegate two background tasks"},
+		ExpectedTranscriptContent: []string{"delegate a background task"},
 	})
 
-	// The marker survives condensation: the task is still running, and
-	// SubagentStop (not this commit) remains the authoritative Final capture
-	// that claims it. This is the invariant the unit tests leave unpinned.
+	// The live record survives condensation: the task is still running, and
+	// SubagentStop (not this commit) remains the authoritative completion
+	// signal; the next condensation re-materializes it.
 	state = requireSessionState(t, env, sess.ID)
-	if !hasInFlightTask(state, taskToolUseID) {
-		t.Fatalf("expected in-flight marker for %s to survive condensation, state=%+v", taskToolUseID, state)
+	if !hasLiveTaskRecord(state, taskToolUseID) {
+		t.Fatalf("expected live task record for %s to survive condensation, state=%+v", taskToolUseID, state)
 	}
 
-	// The subagent now finishes: the real completion signal runs the Final
-	// capture and claims the marker.
+	// The subagent now finishes: the real completion signal completes the
+	// record exactly-once, leaving it present (for the next materialization)
+	// but no longer live.
 	if err := env.SimulateSubagentStop(SubagentStopInput{
 		SessionID:           sess.ID,
 		TranscriptPath:      sess.TranscriptPath,
@@ -325,41 +265,26 @@ func TestSubagentCheckpoints_CommitWhileIdleWithLiveMarker_LinksAndCondensesCont
 		t.Fatalf("SimulateSubagentStop failed: %v", err)
 	}
 
-	state, err := env.GetSessionState(sess.ID)
-	if err != nil {
-		t.Fatalf("GetSessionState failed: %v", err)
+	state = requireSessionState(t, env, sess.ID)
+	if hasLiveTaskRecord(state, taskToolUseID) {
+		t.Errorf("task record for %s should be completed after subagent-stop", taskToolUseID)
 	}
-	if state != nil && hasInFlightTask(state, taskToolUseID) {
-		t.Errorf("in-flight marker for %s should be cleared after subagent-stop", taskToolUseID)
+	if !hasTaskRecord(state, taskToolUseID) {
+		t.Errorf("completed record for %s must persist until the next condensation materializes it", taskToolUseID)
 	}
 	// The already-committed file is not re-added as a tracked file: the
 	// analyzer's ModifiedFiles included it, but filterToUncommittedFiles
 	// strips anything already in HEAD before it ever reaches FilesTouched.
-	if state != nil {
-		for _, f := range state.FilesTouched {
-			if f == editedFile {
-				t.Errorf("committed file %s should not be re-added to FilesTouched by the Final capture", editedFile)
-			}
+	for _, f := range state.FilesTouched {
+		if f == editedFile {
+			t.Errorf("committed file %s should not be re-added to FilesTouched by the completion capture", editedFile)
 		}
-	}
-
-	// The Final capture re-stores the subagent's transcript unconditionally
-	// (no growth dedup on the Final path, by design) into the new task
-	// checkpoint on the (freshly re-created) shadow branch for the new HEAD.
-	shadowBranch := env.GetShadowBranchName()
-	finalCheckpointPath := paths.EntireMetadataDir + "/" + sess.ID + "/tasks/" + taskToolUseID + "/" + paths.CheckpointFileName
-	if !env.FileExistsInBranch(shadowBranch, finalCheckpointPath) {
-		t.Fatalf("final task checkpoint missing after subagent-stop: %s", finalCheckpointPath)
-	}
-	transcriptWantPath := paths.EntireMetadataDir + "/" + sess.ID + "/tasks/" + taskToolUseID + "/" + paths.AgentTranscriptFileName(subagentID)
-	if !env.FileExistsInBranch(shadowBranch, transcriptWantPath) {
-		t.Fatalf("subagent transcript not re-stored by the Final capture at %s", transcriptWantPath)
 	}
 }
 
 // TestSubagentCheckpoints_IdleCommitNoMarkers_NoTrailer is the companion guard:
-// an ordinary commit made while a session is IDLE with no in-flight background
-// task must stay exactly as before this PR — unlinked. idleWithLiveMarker's
+// an ordinary commit made while a session is IDLE with no task records must
+// stay exactly as before this PR — unlinked. idleWithTaskContent's
 // eligibility widening must not become "any IDLE session with a transcript
 // links every later commit," which would turn routine human commits made
 // between agent turns into false session linkage.
@@ -383,8 +308,8 @@ func TestSubagentCheckpoints_IdleCommitNoMarkers_NoTrailer(t *testing.T) {
 	if state == nil || state.Phase != session.PhaseIdle {
 		t.Fatalf("expected session to be IDLE after turn-end, got %+v", state)
 	}
-	if len(state.InFlightTasks) != 0 {
-		t.Fatalf("expected no in-flight markers, got %+v", state.InFlightTasks)
+	if len(state.TaskRecords) != 0 {
+		t.Fatalf("expected no task records, got %+v", state.TaskRecords)
 	}
 
 	// An unrelated file is committed while the session sits idle, no TTY
@@ -395,6 +320,6 @@ func TestSubagentCheckpoints_IdleCommitNoMarkers_NoTrailer(t *testing.T) {
 
 	headHash := env.GetHeadHash()
 	if checkpointID := env.GetCheckpointIDFromCommitMessage(headHash); checkpointID != "" {
-		t.Errorf("ordinary idle commit with no in-flight markers should not carry an Entire-Checkpoint trailer, got %s", checkpointID)
+		t.Errorf("ordinary idle commit with no task records should not carry an Entire-Checkpoint trailer, got %s", checkpointID)
 	}
 }

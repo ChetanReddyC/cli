@@ -335,31 +335,29 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 	if !event.Final {
 		t.Error("expected Final to be true for SubagentStop (true-completion) event")
 	}
-}
 
-// TestParseHookEvent_SubagentStop_NoTranscriptPath covers the defensive case:
-// agent_transcript_path is SDK-documented for the Agent SDK but unverified for
-// Claude Code's settings-file hook payloads, so a payload missing it must
-// leave SubagentTranscript empty rather than error, falling back to
-// ResolveAgentTranscriptPath downstream.
-func TestParseHookEvent_SubagentStop_NoTranscriptPath(t *testing.T) {
-	t.Parallel()
+	// Defensive case: agent_transcript_path is SDK-documented for the Agent
+	// SDK but unverified for Claude Code's settings-file hook payloads, so a
+	// payload missing it must leave SubagentTranscript empty rather than
+	// error, falling back to ResolveAgentTranscriptPath downstream.
+	t.Run("no transcript path", func(t *testing.T) {
+		t.Parallel()
 
-	ag := &ClaudeCodeAgent{}
-	input := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","hook_event_name":"SubagentStop","agent_id":"a123","tool_use_id":"toolu_01X","cwd":"/repo"}`
+		input := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","hook_event_name":"SubagentStop","agent_id":"a123","tool_use_id":"toolu_01X","cwd":"/repo"}`
 
-	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
+		event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	require.NotNil(t, event, "expected event, got nil")
-	if event.SubagentTranscript != "" {
-		t.Errorf("expected empty subagent_transcript, got %q", event.SubagentTranscript)
-	}
-	if !event.Final {
-		t.Error("expected Final to be true for SubagentStop event")
-	}
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		require.NotNil(t, event, "expected event, got nil")
+		if event.SubagentTranscript != "" {
+			t.Errorf("expected empty subagent_transcript, got %q", event.SubagentTranscript)
+		}
+		if !event.Final {
+			t.Error("expected Final to be true for SubagentStop event")
+		}
+	})
 }
 
 func TestParseHookEvent_PostTodo_ReturnsNil(t *testing.T) {

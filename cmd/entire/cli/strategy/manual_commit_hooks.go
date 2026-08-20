@@ -696,7 +696,7 @@ func (h *postCommitActionHandler) parentCommitHash() string {
 
 func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 	logCtx := logging.WithComponent(h.ctx, "checkpoint")
-	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, idleWithLiveMarker(state, time.Now()))
+	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, idleWithTaskContent(state, time.Now()))
 
 	logging.Debug(logCtx, "post-commit: HandleCondense decision",
 		slog.String("session_id", state.SessionID),
@@ -724,7 +724,7 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 
 func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.State) error {
 	logCtx := logging.WithComponent(h.ctx, "checkpoint")
-	shouldCondense := len(state.FilesTouched) > 0 && h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, idleWithLiveMarker(state, time.Now()))
+	shouldCondense := len(state.FilesTouched) > 0 && h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, idleWithTaskContent(state, time.Now()))
 
 	logging.Debug(logCtx, "post-commit: HandleCondenseIfFilesTouched decision",
 		slog.String("session_id", state.SessionID),
@@ -753,47 +753,39 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 
 // shouldCondenseWithOverlapCheck returns true if the session should be condensed
 // into this commit. Active sessions with recent interaction, and IDLE (not
-// ENDED) sessions with a live in-flight background task, condense unless they
+// ENDED) sessions with a fresh task record, condense unless they
 // have no tracked files and another session claims the committed files
-// (read-only gate). Stale ACTIVE sessions and any session with no live marker
-// (including IDLE sessions whose markers were already claimed, and ENDED
-// sessions — see idleWithLiveMarker's doc for why ENDED is excluded even
-// though it can carry a lingering marker) require file overlap evidence
-// between tracked files and committed files.
-func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time, hasLiveMarker bool) bool {
+// (read-only gate). Stale ACTIVE sessions and any session with no fresh record
+// (including ENDED sessions — see idleWithTaskContent's doc for why ENDED is
+// excluded even though it can carry lingering records) require file overlap
+// evidence between tracked files and committed files.
+func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time, hasTaskContent bool) bool {
 	if !h.hasNew {
 		return false
 	}
 	// Two shapes skip the overlap check: an ACTIVE session with recent
-	// interaction, and an IDLE session with a live in-flight background task.
+	// interaction, and an IDLE session with a fresh task record.
 	// In both cases PrepareCommitMsg's tryAgentCommitFastPath already
 	// validated this commit is session-related before adding the trailer
 	// (manual_commit_hooks.go), so the overlap check below — which exists to
 	// manufacture heuristic evidence when no such upstream signal exists —
 	// would be redundant at best.
 	//
-	// For the marker shape specifically, the overlap check isn't just
-	// redundant, it's unsatisfiable: the commit-snapshot capture that backs
-	// this trailer's checkpoint (captureInFlightTaskCommitSnapshot,
-	// cmd/entire/cli/lifecycle.go) runs post-commit, so
-	// filterToUncommittedFiles strips any file the subagent's own commit just
-	// landed before ModifiedFiles ever reaches FilesTouched — the realistic
-	// case is a self-committing background subagent, whose ModifiedFiles is
-	// then routinely empty. Requiring FilesTouched-overlap on top of hasNew
-	// would silently drop exactly the linkage this shape exists to fix.
+	// For the task-record shape specifically, the overlap check isn't just
+	// redundant, it's unsatisfiable: task records never touch the shadow
+	// branch (this commit's condensation materializes their transcript-so-far
+	// directly into the checkpoint's tasks/ subtree), and a self-committing
+	// background subagent's files land in HEAD rather than FilesTouched.
+	// Requiring FilesTouched-overlap on top of hasNew would silently drop
+	// exactly the linkage this shape exists to fix.
 	//
-	// idleWithLiveMarker is deliberately phase-scoped to IDLE and must never
-	// widen to "any session with a marker": finalizeExitedSessions
-	// (session_finalize.go) ends a crashed/exited session via endSessionNow
-	// WITHOUT running a final capture, so a PhaseEnded session can carry a
-	// stale InFlightTasks marker indefinitely. Such a session commonly also
-	// has non-empty FilesTouched from its earlier real work, which is exactly
-	// what the overlap check below is for — trusting its marker the same way
-	// would condense the next, entirely unrelated human commit into that
-	// stale session. Bypassing the overlap check is only sound while
-	// SubagentStop (or the eventual SessionEnd final capture) is still the
-	// live authoritative completion signal for the marker, which is true for
-	// IDLE but not for a session that has already ended.
+	// idleWithTaskContent is deliberately phase-scoped to IDLE and must never
+	// widen to "any session with a record": a PhaseEnded session can carry
+	// task records until its final condensation materializes them. Such a
+	// session commonly also has non-empty FilesTouched from its earlier real
+	// work, which is exactly what the overlap check below is for — trusting
+	// its records the same way would condense the next, entirely unrelated
+	// human commit into that stale session.
 	//
 	// Exception: when another session's tracked files overlap with the
 	// committed files, skip this session if it has no tracked files itself.
@@ -805,12 +797,12 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	// We check LastInteractionTime to avoid condensing stale ACTIVE sessions
 	// (agent killed without Stop hook) into every subsequent commit. A stale
 	// session has no recent interaction and falls through to the overlap
-	// check unless it has a live (IDLE) marker.
-	if (isActive && isRecentInteraction(lastInteraction)) || hasLiveMarker {
+	// check unless it has fresh (IDLE) task records.
+	if (isActive && isRecentInteraction(lastInteraction)) || hasTaskContent {
 		if h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 {
 			logging.Debug(h.ctx, "post-commit: skipping read-only session (no tracked files, other sessions claim committed files)",
 				slog.Bool("is_active", isActive),
-				slog.Bool("idle_with_live_marker", hasLiveMarker),
+				slog.Bool("idle_with_task_content", hasTaskContent),
 				slog.Int("sessions_with_committed_files", h.sessionsWithCommittedFiles),
 			)
 			return false
@@ -893,23 +885,22 @@ func isRecentInteraction(lastInteraction *time.Time) bool {
 	return lastInteraction != nil && time.Since(*lastInteraction) < activeSessionInteractionThreshold
 }
 
-// idleWithLiveMarker reports whether state is an IDLE session with a
-// recently-started background task — the second shape trusted to link and
-// condense commits without overlap evidence. Bounded by the marker's age:
-// markers are cleared only by final captures (SubagentStop/SessionEnd), so a
-// subagent that dies without either leaves its marker behind; an unbounded
-// trust would link every later no-TTY commit into the session forever. 24h
-// matches activeSessionInteractionThreshold's generosity; the sweep-finalize
-// follow-up (see PR body) is the eventual hygiene for orphaned markers.
+// idleWithTaskContent reports whether state is an IDLE session with a
+// recently-started task record — in flight OR completed-unmaterialized (the
+// HasTaskContent shapes) — the second shape trusted to link and condense
+// commits without overlap evidence. Bounded per record's StartedAt: records
+// persist until condensation materializes them, so a stale (>24h) record must
+// not make every later no-TTY commit a trailer candidate forever. 24h matches
+// activeSessionInteractionThreshold's generosity.
 //
 // Shared by tryAgentCommitFastPath's eligibility check and
 // shouldCondenseWithOverlapCheck's overlap-check bypass so the trigger and
 // the condensation trust can never drift apart into two different rules.
-func idleWithLiveMarker(state *SessionState, now time.Time) bool {
+func idleWithTaskContent(state *SessionState, now time.Time) bool {
 	if state.Phase != session.PhaseIdle {
 		return false
 	}
-	for _, task := range state.InFlightTasks {
+	for _, task := range state.TaskRecords {
 		if now.Sub(task.StartedAt) < activeSessionInteractionThreshold {
 			return true
 		}
@@ -1665,6 +1656,15 @@ type contentCheckOpts struct {
 func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *git.Repository, state *SessionState, opts contentCheckOpts) (bool, error) {
 	logCtx := logging.WithComponent(ctx, "manual-commit")
 
+	// Task records are pending checkpoint content that registers on neither the shadow branch nor transcript growth.
+	if state.HasTaskContent() {
+		logging.Debug(logCtx, "sessionHasNewContent: session has task records",
+			slog.String("session_id", state.SessionID),
+			slog.Int("task_records", len(state.TaskRecords)),
+		)
+		return true, nil
+	}
+
 	// Use cached shadow tree if provided
 	var tree *object.Tree
 	if opts.shadowTree != nil {
@@ -2123,15 +2123,15 @@ func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, se
 //     since the shadow branch doesn't exist yet).
 //
 // A session is eligible when it is ACTIVE (the classic mid-turn agent
-// commit), or when it is IDLE with a live in-flight background task (a
+// commit), or when it is IDLE with a fresh task record (a
 // background subagent committing between the parent session's turns — see
 // the eligibility check below for why this shape needs its own trigger).
-// Widening eligibility to the idle+marker shape also widens the no-TTY
+// Widening eligibility to the idle+record shape also widens the no-TTY
 // auto-link window to span the whole lifetime of the background task, not
 // just the parent's own turns — including a human commit made from a
 // raw-mode TUI git client (lazygit, gitui, tig; see
 // interactive.CanPromptInteractively's rawmode_unix.go) while a subagent is
-// still running. That's an accepted trade-off, not an oversight: the marker
+// still running. That's an accepted trade-off, not an oversight: the record
 // is genuine evidence that agent work is live in this worktree, and a rare
 // mislinked human commit is cheaper than the incident this fixes — a
 // background subagent's commits silently carrying no session linkage at all.
@@ -2152,31 +2152,30 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 	now := time.Now()
 	for _, state := range sessions {
 		// Two shapes are linkable here: a classic ACTIVE agent commit (the
-		// agent is mid-turn), and an IDLE session with a live (not stale —
-		// see idleWithLiveMarker) in-flight background task (a background
-		// subagent committing between the parent's turns — the ACTIVE-only
-		// gate used to silently drop linkage for these, since the parent
-		// session goes idle while the subagent keeps running). The
-		// commit-snapshot capture (see lifecycle.go's
-		// captureInFlightTaskCommitSnapshot) is what makes the checkpoint
-		// this trailer points at actually contentful for the idle+marker
-		// shape; this check is only the trigger. Shares idleWithLiveMarker
-		// with shouldCondenseWithOverlapCheck's overlap-check bypass so the
+		// agent is mid-turn), and an IDLE session with a fresh (not stale —
+		// see idleWithTaskContent) task record (a background subagent
+		// committing between the parent's turns — the ACTIVE-only gate used
+		// to silently drop linkage for these, since the parent session goes
+		// idle while the subagent keeps running). This commit's condensation
+		// materializing each record's transcript-so-far into the checkpoint's
+		// tasks/ subtree is what makes the checkpoint this trailer points at
+		// actually contentful for the idle+record shape; this check is only
+		// the trigger. Shares idleWithTaskContent with
+		// shouldCondenseWithOverlapCheck's overlap-check bypass so the
 		// trigger and the condensation trust never drift into two rules.
-		eligible := state.Phase.IsActive() || idleWithLiveMarker(state, now)
+		eligible := state.Phase.IsActive() || idleWithTaskContent(state, now)
 		if !eligible {
 			continue
 		}
 		eligibleSessions++
 		// Skip sessions that have no condensable content: no transcript path,
-		// no tracked files, and no shadow branch data (neither SaveStep
-		// checkpoints nor transcript-only task steps). These
+		// no tracked files, no SaveStep checkpoints, and no task records. These
 		// would produce a Skipped result in CondenseSession, leaving the
 		// Entire-Checkpoint trailer pointing to nothing on the metadata branch.
 		// NOTE: conservative approximation of the skip gate in CondenseSession
 		// (which checks extracted data, not raw state). Keep aligned.
 		if state.TranscriptPath == "" && len(state.FilesTouched) == 0 &&
-			state.StepCount == 0 && state.TranscriptOnlyTaskSteps == 0 {
+			state.StepCount == 0 && !state.HasTaskContent() {
 			emptyEligibleSessions++
 			logging.Debug(logCtx, "prepare-commit-msg: fast path skipping empty session",
 				slog.String("session_id", state.SessionID),
@@ -2188,20 +2187,19 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		return true
 	}
 	// Log why fast path didn't fire — collect session phases for diagnostics.
-	// in_flight_tasks is summed across all sessions (not just eligible ones) so
-	// "idle, no markers at all" (in_flight_tasks == 0) reads differently in the
-	// logs from "idle, markers present but something ate them before this loop
-	// saw them" (in_flight_tasks > 0 with eligible_sessions still 0) — the
-	// latter would otherwise be indistinguishable from ordinary no-marker idle
-	// commits and point straight at a bug in marker bookkeeping upstream of
-	// this fast path.
+	// task_records is summed across all sessions (not just eligible ones) so
+	// "idle, no records at all" (task_records == 0) reads differently in the
+	// logs from "idle, records present but all stale or ineligible"
+	// (task_records > 0 with eligible_sessions still 0) — the latter would
+	// otherwise be indistinguishable from ordinary no-record idle commits and
+	// point straight at a bug in record bookkeeping upstream of this fast path.
 	phases := make([]string, 0, len(sessions))
-	totalInFlightTasks := 0
+	totalTaskRecords := 0
 	for _, state := range sessions {
 		phases = append(phases, string(state.Phase))
-		totalInFlightTasks += len(state.InFlightTasks)
+		totalTaskRecords += len(state.TaskRecords)
 	}
-	message := "prepare-commit-msg: fast path found no ACTIVE or idle-with-in-flight-task sessions"
+	message := "prepare-commit-msg: fast path found no ACTIVE or idle-with-task-record sessions"
 	if eligibleSessions > 0 && emptyEligibleSessions == eligibleSessions {
 		message = "prepare-commit-msg: fast path skipped all eligible sessions as empty"
 	}
@@ -2210,7 +2208,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		slog.Int("sessions", len(sessions)),
 		slog.Int("eligible_sessions", eligibleSessions),
 		slog.Int("empty_eligible_sessions", emptyEligibleSessions),
-		slog.Int("in_flight_tasks", totalInFlightTasks),
+		slog.Int("task_records", totalTaskRecords),
 		slog.Any("session_phases", phases),
 	)
 	return false
@@ -2220,7 +2218,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 // The caller (tryAgentCommitFastPath) has already gated on skipContentDetection
 // (no TTY, or commit_linking="always") before ever reaching this function, so
 // by the time we're here the eligible session — ACTIVE, or IDLE with a live
-// in-flight background task — is trusted unconditionally: generate a
+// fresh task record — is trusted unconditionally: generate a
 // checkpoint ID and add the trailer directly, bypassing content detection and
 // interactive prompts.
 func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error { //nolint:unparam // kept for signature stability

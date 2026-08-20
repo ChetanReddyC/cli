@@ -14,7 +14,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/go-git/go-git/v6"
 )
 
@@ -263,47 +262,6 @@ func TestHooksGitCmd_ExposesPostRewriteSubcommand(t *testing.T) {
 	}
 	if found.Use != "post-rewrite <rewrite-type>" {
 		t.Fatalf("post-rewrite Use = %q, want %q", found.Use, "post-rewrite <rewrite-type>")
-	}
-}
-
-// TestHeadHasCheckpointTrailer_TrueWhenTrailerPresent pins the trailer gate
-// that guards captureCommitSnapshotsForInFlightTasks: a HEAD commit carrying
-// an Entire-Checkpoint trailer must be reported as such, using the same
-// trailers.ParseCheckpoint helper strategy.PostCommit reads it with.
-func TestHeadHasCheckpointTrailer_TrueWhenTrailerPresent(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	testutil.WriteFile(t, repoDir, "f.txt", "content")
-	testutil.GitAdd(t, repoDir, "f.txt")
-	testutil.GitCommit(t, repoDir, trailers.AppendCheckpointTrailer("agent commit", "a1b2c3d4e5f6"))
-
-	t.Chdir(repoDir)
-	paths.ClearWorktreeRootCache()
-
-	if !headHasCheckpointTrailer(context.Background()) {
-		t.Error("expected true for a HEAD commit carrying an Entire-Checkpoint trailer")
-	}
-}
-
-// TestHeadHasCheckpointTrailer_FalseWhenNoTrailer is the regression this gate
-// exists for: an ordinary human commit with no trailer must report false, so
-// captureCommitSnapshotsForInFlightTasks is skipped for it — condensation
-// never happens for a trailer-less commit (PostCommit bails immediately), so
-// running the commit-snapshot capture ahead of one would pay a full analyzer
-// scan plus a full transcript sanitize/redact/store for content nothing will
-// ever condense.
-func TestHeadHasCheckpointTrailer_FalseWhenNoTrailer(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	testutil.WriteFile(t, repoDir, "f.txt", "content")
-	testutil.GitAdd(t, repoDir, "f.txt")
-	testutil.GitCommit(t, repoDir, "ordinary human commit, no trailer")
-
-	t.Chdir(repoDir)
-	paths.ClearWorktreeRootCache()
-
-	if headHasCheckpointTrailer(context.Background()) {
-		t.Error("expected false for a HEAD commit with no Entire-Checkpoint trailer")
 	}
 }
 
