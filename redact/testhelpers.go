@@ -1,7 +1,5 @@
 package redact
 
-import "testing"
-
 // Cross-package test helpers. Lives in a regular .go file (not
 // export_test.go) so tests in cmd/entire/cli/strategy can call it.
 // The "ForTest" suffix is the production-code-must-not-call signal.
@@ -22,13 +20,22 @@ func SetScannerDegradedForTest(v bool) {
 	scannerDegraded.Store(v)
 }
 
+// testingTB is the subset of testing.TB these helpers need, declared
+// locally so package redact does not pull testing (and flag, runtime/pprof,
+// runtime/trace) into every binary that imports it. *testing.T satisfies it.
+type testingTB interface {
+	Helper()
+	Cleanup(f func())
+	Fatalf(format string, args ...any)
+}
+
 // WithScannerDegradedSole configures a goredact-only scanner set and flips
 // the degradation flag so JSONLBytes/JSONLBytesWithPrivacyFilter return
 // ErrScannerDegraded, registering a cleanup that restores the betterleaks
 // default. Named With (not Set) per Go convention because it registers
 // cleanup. Callers must NOT use t.Parallel — the scanner state is
 // process-global. Test-only.
-func WithScannerDegradedSole(t testing.TB) {
+func WithScannerDegradedSole(t testingTB) {
 	t.Helper()
 	t.Cleanup(func() {
 		// ConfigureScanners resets the degradation flag itself; no explicit

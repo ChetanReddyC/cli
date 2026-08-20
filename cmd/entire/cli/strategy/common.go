@@ -460,10 +460,15 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 			Betterleaks: s.BetterleaksEnabled(),
 			Goredact:    s.GoredactEnabled(),
 		}); err != nil {
+			// Keep configuring the rest: the sticky error still fails the
+			// callers that fail closed, and the one caller that only logs must
+			// not also lose the user's PII and custom rules for the whole
+			// process. No narrowed-coverage notice — the selection that would
+			// have narrowed coverage never took effect.
 			errRedactionScanner = fmt.Errorf("%w: %w", settings.ErrScannerConfig, err)
-			return
+		} else {
+			maybeWarnNarrowedScanners(ctx, s)
 		}
-		maybeWarnNarrowedScanners(ctx, s)
 
 		// A tracked .entire/settings.local.json was ignored. Report it: the
 		// user's local overrides silently stopped applying, and the fix is
