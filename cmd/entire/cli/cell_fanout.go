@@ -167,7 +167,7 @@ func routedRepoPlacement(r coreapi.RepoIndexEntry) (coreapi.RepoPlacement, bool)
 	}
 	var processingID string
 	if primaries, ok := r.Primaries.Get(); ok {
-		processingID = strings.TrimSpace(primaries.Processing)
+		processingID = primaries.Processing
 	}
 	p, ok := placementByID(r.Placements, processingID)
 	if !ok {
@@ -186,13 +186,15 @@ func routedRepoPlacement(r coreapi.RepoIndexEntry) (coreapi.RepoPlacement, bool)
 }
 
 // placementByID returns the placement with the given ID; ok is false when id
-// is empty or names no placement.
+// is empty or names no placement. Both sides of the comparison are trimmed so
+// the match cannot depend on which caller normalized its input.
 func placementByID(placements []coreapi.RepoPlacement, id string) (coreapi.RepoPlacement, bool) {
+	id = strings.TrimSpace(id)
 	if id == "" {
 		return coreapi.RepoPlacement{}, false
 	}
 	for _, p := range placements {
-		if p.ID == id {
+		if strings.TrimSpace(p.ID) == id {
 			return p, true
 		}
 	}

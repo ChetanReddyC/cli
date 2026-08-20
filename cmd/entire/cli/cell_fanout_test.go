@@ -236,6 +236,21 @@ func TestRoutedRepoPlacement_NoPlacements(t *testing.T) {
 	}
 }
 
+// TestPlacementByID pins the normalization contract: both sides of the match
+// are trimmed, and an empty or blank id never matches anything.
+func TestPlacementByID(t *testing.T) {
+	t.Parallel()
+	placements := []coreapi.RepoPlacement{{ID: " 01X "}}
+	if p, ok := placementByID(placements, "01X"); !ok || p.ID != " 01X " {
+		t.Fatalf("trimmed match = %+v, %v; want the placement, true", p, ok)
+	}
+	for _, id := range []string{"", "   ", "01MISSING"} {
+		if _, ok := placementByID(placements, id); ok {
+			t.Fatalf("id %q matched, want no match", id)
+		}
+	}
+}
+
 // TestReportableSkippedRepos pins the surfacing gate: pinned requests report
 // every skip; broad requests stay silent while any cell is queried, but
 // report when the skips left nothing to query (a bare "no results" would be
