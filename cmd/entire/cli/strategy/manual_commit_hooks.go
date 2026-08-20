@@ -1608,10 +1608,7 @@ type contentCheckOpts struct {
 func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *git.Repository, state *SessionState, opts contentCheckOpts) (bool, error) {
 	logCtx := logging.WithComponent(ctx, "manual-commit")
 
-	// Task records are pending checkpoint content in their own right — live
-	// ones need their transcript-so-far captured, completed ones await
-	// materialization — and none of them registers on the shadow branch or
-	// transcript-growth signals below, so they must count as new content here.
+	// Task records are pending checkpoint content that registers on neither the shadow branch nor transcript growth.
 	if state.HasTaskContent() {
 		logging.Debug(logCtx, "sessionHasNewContent: session has task records",
 			slog.String("session_id", state.SessionID),

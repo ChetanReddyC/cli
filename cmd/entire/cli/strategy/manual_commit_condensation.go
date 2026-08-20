@@ -1506,9 +1506,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		_, refErr := repo.Reference(refName, true)
 		hasShadowBranch := refErr == nil
 
-		// A record-bearing session must materialize its task records rather
-		// than be cleared: they hold condensable content that never lives on
-		// the shadow branch, and clearing would destroy it.
+		// Record-bearing sessions must materialize their records, not be cleared.
 		if !hasShadowBranch && !state.HasTaskContent() {
 			logging.Info(logCtx, "no shadow branch for session, clearing state only",
 				slog.String("session_id", sessionID),
@@ -1606,9 +1604,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			return ErrMutationSkip
 		}
 
-		// A session whose only content is a task record — even a still-LIVE one
-		// left behind by a failed capture — must not be marked FullyCondensed
-		// without materializing; HasTaskContent counts both shapes.
+		// HasTaskContent counts live records too — even those must materialize, never be shortcut away.
 		if state.StepCount <= 0 && !state.HasTaskContent() {
 			state.FullyCondensed = true
 			return nil
@@ -1619,9 +1615,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		_, refErr := repo.Reference(refName, true)
 		hasShadowBranch := refErr == nil
 
-		// Task records never write a shadow branch, so their sessions must
-		// condense from the live transcript (CondenseSession's documented
-		// no-shadow-branch path) rather than take this shortcut.
+		// Task records never write a shadow branch; their sessions condense via the no-shadow-branch path.
 		if !hasShadowBranch && !state.HasTaskContent() {
 			logging.Info(logCtx, "eager condense: no shadow branch",
 				slog.String("session_id", sessionID),

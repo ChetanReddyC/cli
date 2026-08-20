@@ -193,6 +193,20 @@ func TestClassifySession_EndedRecordsOnlyNoShadowBranch_Stuck(t *testing.T) {
 	assert.Equal(t, 1, result.CheckpointCount)
 }
 
+// FullyCondensed + leftover live record (pre-fix state or failed sweep capture) is healthy: everything worth keeping is materialized.
+func TestClassifySession_EndedFullyCondensedLeftoverRecord_Healthy(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	state := &strategy.SessionState{
+		SessionID: "test-ended-condensed-leftover", BaseCommit: testBaseCommit, Phase: session.PhaseEnded,
+		FullyCondensed: true, TaskRecords: []session.TaskRecord{{ToolUseID: "toolu_left", StartedAt: time.Now()}},
+	}
+	assert.Nil(t, classifySession(state, repo, time.Now()),
+		"a FullyCondensed ended session must not be re-flagged for a leftover live record")
+}
+
 func TestClassifySession_EndedZeroStepCount_Healthy(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	repo, err := git.PlainOpen(dir)

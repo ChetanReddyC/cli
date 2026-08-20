@@ -498,8 +498,8 @@ func TestShadowStrategy_GetRewindPoints_TaskRecordRows(t *testing.T) {
 	assert.True(t, points[0].IsTaskCheckpoint && points[1].IsTaskCheckpoint)
 	assert.Equal(t, "task-row-session", points[0].SessionID)
 	messages := points[0].Message + " | " + points[1].Message
-	assert.Contains(t, messages, "Review the diff")
-	assert.Contains(t, messages, "Implement widget")
+	assert.Contains(t, messages, "Completed 'reviewer' agent: Review the diff", "completed record renders the Completed verb")
+	assert.Contains(t, messages, "Running 'dev' agent: Implement widget", "live record renders the Running verb")
 }
 
 // When the most-recent session of a multi-session condensed checkpoint has no

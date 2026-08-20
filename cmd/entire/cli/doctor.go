@@ -285,10 +285,12 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 		}
 
 	case state.Phase == session.PhaseEnded:
-		// Ended sessions are stuck if they have uncondensed data: SaveStep
-		// checkpoints (which need the shadow branch to still exist) or task
-		// records (which never touch the shadow branch, so branch absence
-		// must not hide them).
+		// FullyCondensed = everything worth keeping is materialized; a leftover
+		// live record can never complete (owner gone) and must not re-flag forever.
+		if state.FullyCondensed {
+			return nil
+		}
+		// Task records never live on the shadow branch, so branch absence must not hide them.
 		if state.HasTaskContent() {
 			return stuck("ended with uncondensed checkpoint data")
 		}

@@ -110,8 +110,7 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		// with LastCheckpointID (needed for checkpoint ID reuse on subsequent commits).
 		// Clean up everything else: stale pre-state-machine sessions (empty phase),
 		// IDLE/ENDED sessions that were never condensed, etc.
-		// A record-bearing session has condensable task content that never
-		// touches the shadow branch, so it is not orphaned by branch absence.
+		// Record-bearing sessions hold condensable content off the shadow branch — never orphaned.
 		shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		refName := plumbing.NewBranchReferenceName(shadowBranch)
 		if _, err := repo.Reference(refName, true); err != nil {
@@ -140,8 +139,7 @@ func isWarnableStaleEndedSession(repo *git.Repository, state *SessionState) bool
 	// branches during condensation, so a branch that existed at list-load time
 	// may be gone by the time we reach the warning check. Without this re-check
 	// we would warn about sessions that this commit just cleaned up.
-	// Record-bearing sessions stay warnable regardless: task records hold
-	// condensable content that never lives on the shadow branch.
+	// Record-bearing sessions stay warnable: their content never lives on the shadow branch.
 	if state.HasTaskContent() {
 		return true
 	}

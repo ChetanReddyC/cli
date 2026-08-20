@@ -36,6 +36,12 @@ func FormatSubagentEndMessage(agentType, description, toolUseID string) string {
 	return formatSubagentMessage("Completed", agentType, description, toolUseID)
 }
 
+// FormatSubagentRunningMessage is FormatSubagentEndMessage's in-flight
+// counterpart, for pending-list rows whose task record is still live.
+func FormatSubagentRunningMessage(agentType, description, toolUseID string) string {
+	return formatSubagentMessage("Running", agentType, description, toolUseID)
+}
+
 // formatSubagentMessage is a shared helper for start/end messages.
 func formatSubagentMessage(verb, agentType, description, toolUseID string) string {
 	// Both empty - fall back to simple format

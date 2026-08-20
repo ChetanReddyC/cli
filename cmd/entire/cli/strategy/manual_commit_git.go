@@ -198,12 +198,16 @@ func (s *ManualCommitStrategy) ensureSessionInitialized(ctx context.Context, rep
 	return nil
 }
 
-// SaveTaskStep saves a task step checkpoint to the shadow branch.
-// Uses checkpoint.EphemeralStore.Write with a checkpoint.TaskStep request.
-// Remains for post-todo incremental checkpoints only (its sole production
-// caller is handleClaudeCodePostTodo); final subagent captures write task
-// records instead (CompleteTaskRecord / UpsertCompletedTaskRecord).
+// SaveTaskStep saves an incremental task step checkpoint to the shadow branch
+// (checkpoint.EphemeralStore.Write with a checkpoint.TaskStep request). It
+// exists for post-todo incrementals only — its sole production caller is
+// handleClaudeCodePostTodo — so non-incremental steps are rejected: final
+// subagent captures write task records instead (CompleteTaskRecord /
+// UpsertCompletedTaskRecord).
 func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepContext) error {
+	if !step.IsIncremental {
+		return errors.New("SaveTaskStep only writes incremental task checkpoints; final captures write task records")
+	}
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
@@ -235,12 +239,7 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 			shortToolUseID = shortToolUseID[:id.ShortIDLength]
 		}
 
-		var messageSubject string
-		if step.IsIncremental {
-			messageSubject = FormatIncrementalMessage(step.TodoContent, step.IncrementalSequence, shortToolUseID)
-		} else {
-			messageSubject = FormatSubagentEndMessage(step.SubagentType, step.TaskDescription, shortToolUseID)
-		}
+		messageSubject := FormatIncrementalMessage(step.TodoContent, step.IncrementalSequence, shortToolUseID)
 		commitMsg := trailers.FormatShadowTaskCommit(
 			messageSubject,
 			taskMetadataDir,
@@ -292,13 +291,8 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 			slog.Int("deleted_files", len(step.DeletedFiles)),
 			slog.String("shadow_branch", shadowBranchName),
 			slog.Bool("branch_created", !branchExisted),
-		}
-		if step.IsIncremental {
-			attrs = append(attrs,
-				slog.Bool("is_incremental", true),
-				slog.String("incremental_type", step.IncrementalType),
-				slog.Int("incremental_sequence", step.IncrementalSequence),
-			)
+			slog.String("incremental_type", step.IncrementalType),
+			slog.Int("incremental_sequence", step.IncrementalSequence),
 		}
 		logging.Info(logCtx, "task checkpoint saved", attrs...)
 
