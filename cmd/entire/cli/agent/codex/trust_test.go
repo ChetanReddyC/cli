@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -95,11 +96,11 @@ trusted_hash = "sha256:ddd"
 	require.Equal(t, []string{"session_end"}, inspectHookTrust(hooksPath).Gaps)
 }
 
-// TestMissingEntireHooks_FlagsAbsentSessionEnd covers the other half of the
+// TestInspectHookConfig_FlagsAbsentSessionEnd covers the other half of the
 // upgrade path: a repo enabled before SessionEnd existed has no such hook in
 // hooks.json at all, which `entire doctor` must report as drift. That install
 // also predates the subagent hooks, so all three are reported.
-func TestMissingEntireHooks_FlagsAbsentSessionEnd(t *testing.T) {
+func TestInspectHookConfig_FlagsAbsentSessionEnd(t *testing.T) {
 	hooksJSON := `{
   "hooks": {
     "SessionStart": [{"matcher": null, "hooks": [{"type":"command","command":"entire hooks codex session-start","timeout":30}]}],
@@ -110,7 +111,7 @@ func TestMissingEntireHooks_FlagsAbsentSessionEnd(t *testing.T) {
 }`
 	hooksPath := writeTrustFixture(t, hooksJSON)
 
-	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, missingEntireHooks(hooksPath))
+	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, inspectHookConfigAt(context.Background(), hooksPath).Missing)
 }
 
 // TestHookTrustGaps_NoGapsWhenAllTrusted returns nil when every declared
@@ -165,24 +166,24 @@ func TestHookTrustGaps_NilWhenConfigUnreadable(t *testing.T) {
 	require.Empty(t, inspectHookTrust(filepath.Join(tmp, "repo", ".codex", "hooks.json")).Gaps)
 }
 
-// TestMissingEntireHooks_FlagsStaleFile — user enabled Codex on an older
+// TestInspectHookConfig_FlagsStaleFile — user enabled Codex on an older
 // release that predates PostToolUse, SessionEnd and the subagent hooks. Their
 // hooks.json has the three oldest events; detection must surface every event
 // added since so doctor can prompt `entire enable`.
-func TestMissingEntireHooks_FlagsStaleFile(t *testing.T) {
+func TestInspectHookConfig_FlagsStaleFile(t *testing.T) {
 	hooksJSON := `{"hooks":{
 		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-start","timeout":30}]}],
 		"UserPromptSubmit":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex user-prompt-submit","timeout":30}]}],
 		"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}]
 	}}`
 	hooksPath := writeTrustFixture(t, hooksJSON)
-	require.Equal(t, []string{"session_end", "post_tool_use", "subagent_start", "subagent_stop"}, missingEntireHooks(hooksPath))
+	require.Equal(t, []string{"session_end", "post_tool_use", "subagent_start", "subagent_stop"}, inspectHookConfigAt(context.Background(), hooksPath).Missing)
 }
 
-// TestMissingEntireHooks_NilWhenAllPresent returns nil when every
+// TestInspectHookConfig_NoMissingWhenAllPresent returns nil when every
 // canonical event has an Entire-managed hook command, even if the file
 // also contains unrelated user-defined entries.
-func TestMissingEntireHooks_NilWhenAllPresent(t *testing.T) {
+func TestInspectHookConfig_NoMissingWhenAllPresent(t *testing.T) {
 	hooksJSON := `{"hooks":{
 		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-start","timeout":30}]}],
 		"SessionEnd":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-end","timeout":3}]}],
@@ -194,21 +195,21 @@ func TestMissingEntireHooks_NilWhenAllPresent(t *testing.T) {
 		"SubagentStop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-stop","timeout":30}]}]
 	}}`
 	hooksPath := writeTrustFixture(t, hooksJSON)
-	require.Empty(t, missingEntireHooks(hooksPath))
+	require.Empty(t, inspectHookConfigAt(context.Background(), hooksPath).Missing)
 }
 
-// TestMissingEntireHooks_NilWhenFileMissing — Codex isn't enabled for
+// TestInspectHookConfig_NoMissingWhenFileMissing — Codex isn't enabled for
 // this repo. Stay silent so doctor doesn't tell users to refresh hooks
 // they never installed.
-func TestMissingEntireHooks_NilWhenFileMissing(t *testing.T) {
-	require.Nil(t, missingEntireHooks(filepath.Join(t.TempDir(), "hooks.json")))
+func TestInspectHookConfig_NoMissingWhenFileMissing(t *testing.T) {
+	require.Nil(t, inspectHookConfigAt(context.Background(), filepath.Join(t.TempDir(), "hooks.json")).Missing)
 }
 
-// TestMissingEntireHooks_IgnoresNonEntireCommands — a hooks.json that
+// TestInspectHookConfig_IgnoresNonEntireCommands — a hooks.json that
 // declares the right events but with non-Entire commands (e.g. user's
 // own scripts) should still flag those events as missing the
 // CLI-managed install.
-func TestMissingEntireHooks_IgnoresNonEntireCommands(t *testing.T) {
+func TestInspectHookConfig_IgnoresNonEntireCommands(t *testing.T) {
 	hooksJSON := `{"hooks":{
 		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"my-other-tool","timeout":30}]}],
 		"SessionEnd":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex session-end","timeout":3}]}],
@@ -219,12 +220,12 @@ func TestMissingEntireHooks_IgnoresNonEntireCommands(t *testing.T) {
 		"SubagentStop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex subagent-stop","timeout":30}]}]
 	}}`
 	hooksPath := writeTrustFixture(t, hooksJSON)
-	require.Equal(t, []string{"session_start"}, missingEntireHooks(hooksPath))
+	require.Equal(t, []string{"session_start"}, inspectHookConfigAt(context.Background(), hooksPath).Missing)
 }
 
-func TestMissingEntireHooks_UserOnlyFileIsNotEntireDrift(t *testing.T) {
+func TestInspectHookConfig_UserOnlyFileIsNotEntireDrift(t *testing.T) {
 	hooksPath := writeTrustFixture(t, `{"hooks":{"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"my-user-hook"}]}]}}`)
-	require.Nil(t, missingEntireHooks(hooksPath))
+	require.Nil(t, inspectHookConfigAt(context.Background(), hooksPath).Missing)
 }
 
 // TestHookTrustGaps_HandlesNonzeroHandlerIndex — the state-key prefix

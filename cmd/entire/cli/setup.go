@@ -605,25 +605,10 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		}
 		return nil
 	}
-	var successfullyAddedAgents []agent.Agent
-	for _, ag := range addedAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
-		} else {
-			successfullyAddedAgents = append(successfullyAddedAgents, ag)
-			writeSharedHooksNote(ctx, w, ag)
-		}
-	}
-
-	var successfullyReinstalledAgents []agent.Agent
-	for _, ag := range reinstalledAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
-		} else {
-			successfullyReinstalledAgents = append(successfullyReinstalledAgents, ag)
-			writeSharedHooksNote(ctx, w, ag)
-		}
-	}
+	successfullyAddedAgents, setupErrs := setupAgentHookSet(ctx, w, addedAgents, opts.ForceHooks)
+	errs = append(errs, setupErrs...)
+	successfullyReinstalledAgents, setupErrs := setupAgentHookSet(ctx, w, reinstalledAgents, opts.ForceHooks)
+	errs = append(errs, setupErrs...)
 
 	var uninstalledAgents []agent.Agent
 	for _, ag := range removedAgents {
@@ -1259,9 +1244,11 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Setup agent hooks for all selected agents
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
+		result, err := setupAgentHooks(ctx, ag, opts.ForceHooks)
+		if err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
 		}
+		writeHookSetupSkipped(w, ag, result)
 		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
 			return err
 		}
@@ -1669,20 +1656,64 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 	return errors.Join(errs...)
 }
 
+type hookSetupResult struct {
+	installed int
+	skipped   error
+}
+
 // setupAgentHooks sets up hooks for a given agent.
-// Returns the number of hooks installed (0 if already installed).
-func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int, error) {
+func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (hookSetupResult, error) {
 	hookAgent, ok := agent.AsHookSupport(ag)
 	if !ok {
-		return 0, fmt.Errorf("agent %s does not support hooks", ag.Name())
+		return hookSetupResult{}, fmt.Errorf("agent %s does not support hooks", ag.Name())
 	}
 
 	count, err := hookAgent.InstallHooks(ctx, forceHooks)
 	if err != nil {
-		return 0, fmt.Errorf("failed to install %s hooks: %w", ag.Name(), err)
+		var skipped agent.HookInstallationSkipError
+		if errors.As(err, &skipped) {
+			return hookSetupResult{skipped: err}, nil
+		}
+		return hookSetupResult{}, fmt.Errorf("failed to install %s hooks: %w", ag.Name(), err)
 	}
 
-	return count, nil
+	return hookSetupResult{installed: count}, nil
+}
+
+func setupSelectedAgentHooks(ctx context.Context, w io.Writer, ag agent.Agent, forceHooks bool) (bool, error) {
+	result, err := setupAgentHooks(ctx, ag, forceHooks)
+	if err != nil {
+		return false, err
+	}
+	if writeHookSetupSkipped(w, ag, result) {
+		return false, nil
+	}
+	writeSharedHooksNote(ctx, w, ag)
+	return true, nil
+}
+
+func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) ([]agent.Agent, []error) {
+	var successful []agent.Agent
+	var errs []error
+	for _, ag := range agents {
+		installed, err := setupSelectedAgentHooks(ctx, w, ag, forceHooks)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
+			continue
+		}
+		if installed {
+			successful = append(successful, ag)
+		}
+	}
+	return successful, errs
+}
+
+func writeHookSetupSkipped(w io.Writer, ag agent.Agent, result hookSetupResult) bool {
+	if result.skipped == nil {
+		return false
+	}
+	fmt.Fprintf(w, "  Skipped %s hooks: %v.\n", ag.Type(), result.skipped)
+	return true
 }
 
 func hooksPresentOrOutdated(ctx context.Context, hookAgent agent.HookSupport, ag agent.Agent) bool {
@@ -1695,23 +1726,33 @@ func hooksPresentOrOutdated(ctx context.Context, hookAgent agent.HookSupport, ag
 
 func sharedHooksRemovalSuffix(ctx context.Context, ag agent.Agent) string {
 	shared, ok := ag.(agent.RepositorySharedHooks)
-	if !ok || !shared.HooksSharedAcrossWorktrees(ctx) {
+	if !ok {
 		return ""
 	}
-	return " from the repository-wide configuration; this affects all linked worktrees"
+	path, sharedAcrossWorktrees := shared.RepositorySharedHooksPath(ctx)
+	if !sharedAcrossWorktrees {
+		return ""
+	}
+	return fmt.Sprintf(" from the repository-wide configuration at %s; this affects all linked worktrees", path)
 }
 
 func writeSharedHooksNote(ctx context.Context, w io.Writer, ag agent.Agent) {
 	shared, ok := ag.(agent.RepositorySharedHooks)
-	if ok && shared.HooksSharedAcrossWorktrees(ctx) {
-		fmt.Fprintf(w, "  %s hooks are stored once for the repository and apply to all linked worktrees.\n", ag.Type())
+	if !ok {
+		return
+	}
+	if path, sharedAcrossWorktrees := shared.RepositorySharedHooksPath(ctx); sharedAcrossWorktrees {
+		fmt.Fprintf(w, "  %s hooks are stored at %s and apply to all linked worktrees.\n", ag.Type(), path)
 	}
 }
 
 func writeSharedHooksRemovalNote(ctx context.Context, w io.Writer, ag agent.Agent) {
 	shared, ok := ag.(agent.RepositorySharedHooks)
-	if ok && shared.HooksSharedAcrossWorktrees(ctx) {
-		fmt.Fprintf(w, "  %s hooks were removed from the repository-wide configuration; this affects all linked worktrees.\n", ag.Type())
+	if !ok {
+		return
+	}
+	if path, sharedAcrossWorktrees := shared.RepositorySharedHooksPath(ctx); sharedAcrossWorktrees {
+		fmt.Fprintf(w, "  %s hooks were removed from the repository-wide configuration at %s; this affects all linked worktrees.\n", ag.Type(), path)
 	}
 }
 
@@ -1921,10 +1962,11 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	fmt.Fprintf(w, "  Agent: %s\n", ag.Type())
 
 	// Install agent hooks (agent hooks don't depend on settings)
-	installedHooks, err := setupAgentHooks(ctx, ag, opts.ForceHooks)
+	hookSetup, err := setupAgentHooks(ctx, ag, opts.ForceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
 	}
+	hooksSkipped := writeHookSetupSkipped(w, ag, hookSetup)
 	if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
 		return err
 	}
@@ -2016,20 +2058,22 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	}
 	strategy.CheckAndWarnHookManagers(ctx, w, hookAbsoluteGitHookPath)
 
-	if installedHooks == 0 {
-		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
-		if ag.IsPreview() {
-			msg += " (Preview)"
+	if !hooksSkipped {
+		if hookSetup.installed == 0 {
+			msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
+			if ag.IsPreview() {
+				msg += " (Preview)"
+			}
+			fmt.Fprintf(w, "  %s\n", msg)
+		} else {
+			msg := fmt.Sprintf("Installed %d hooks for %s", hookSetup.installed, ag.Description())
+			if ag.IsPreview() {
+				msg += " (Preview)"
+			}
+			fmt.Fprintf(w, "  %s\n", msg)
 		}
-		fmt.Fprintf(w, "  %s\n", msg)
-	} else {
-		msg := fmt.Sprintf("Installed %d hooks for %s", installedHooks, ag.Description())
-		if ag.IsPreview() {
-			msg += " (Preview)"
-		}
-		fmt.Fprintf(w, "  %s\n", msg)
+		writeSharedHooksNote(ctx, w, ag)
 	}
-	writeSharedHooksNote(ctx, w, ag)
 
 	fmt.Fprintln(w, "  ✓ Configured project")
 	fmt.Fprintf(w, "    %s\n", configDisplay)

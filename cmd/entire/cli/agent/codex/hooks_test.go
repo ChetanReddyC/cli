@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	agenttestutil "github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 	"os"
 	"os/exec"
@@ -13,6 +14,8 @@ import (
 	"runtime"
 	"testing"
 )
+
+const testWindowsOS = "windows"
 
 // setupTestEnv creates a temp dir, sets CWD and CODEX_HOME for test isolation.
 // Cannot be parallel (uses t.Chdir and t.Setenv which are process-global).
@@ -93,7 +96,7 @@ func TestInstallHooks_LinkedWorktreeUsesAuthoritativeRoot(t *testing.T) {
 }
 
 func TestInstallHooks_LinkedWorktreeDoesNotCleanAliasedAuthoritativeFile(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == testWindowsOS {
 		t.Skip("directory symlinks require privileges on Windows")
 	}
 	repoRoot, linkedRoot := setupLinkedWorktreeEnv(t)
@@ -115,11 +118,13 @@ func TestInstallHooks_LinkedWorktreeDoesNotCleanAliasedAuthoritativeFile(t *test
 	require.Equal(t, agentpkg.HooksCurrent, ag.CheckHookConfig(context.Background()))
 }
 
-func TestHooksSharedAcrossWorktrees_PrimaryCheckoutWithLinkedWorktree(t *testing.T) {
+func TestRepositorySharedHooksPath_PrimaryCheckoutWithLinkedWorktree(t *testing.T) {
 	repoRoot, _ := setupLinkedWorktreeEnv(t)
 	t.Chdir(repoRoot)
 
-	require.True(t, (&CodexAgent{}).HooksSharedAcrossWorktrees(context.Background()))
+	path, shared := (&CodexAgent{}).RepositorySharedHooksPath(context.Background())
+	require.True(t, shared)
+	require.Equal(t, canonicalHooksPath(t, repoRoot), path)
 }
 
 func TestInstallHooks_LinkedWorktreeMigratesLegacyConfig(t *testing.T) {
@@ -272,7 +277,8 @@ func TestInstallHooks_LinkedSubmoduleRefusesGitInternalPath(t *testing.T) {
 
 	ag := &CodexAgent{}
 	_, err = ag.InstallHooks(context.Background(), false)
-	require.ErrorIs(t, err, ErrLinkedSubmoduleHooksUnsupported)
+	var unsupported *UnsupportedHookLocationError
+	require.ErrorAs(t, err, &unsupported)
 	require.NoDirExists(t, filepath.Join(unsafeRoot, ".codex"))
 
 	localPath := filepath.Join(linkedSubmoduleRoot, ".codex", HooksFileName)
@@ -286,7 +292,7 @@ func TestInstallHooks_LinkedSubmoduleRefusesGitInternalPath(t *testing.T) {
 
 func TestInstallHooks_WindowsWrapperProbeSuccessKeepsWrappedCommands(t *testing.T) {
 	tempDir := setupTestEnv(t)
-	withCodexHookEnvironment(t, "windows", true)
+	withCodexHookEnvironment(t, testWindowsOS, true)
 
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), false)
@@ -304,7 +310,7 @@ func TestInstallHooks_WindowsWrapperProbeSuccessKeepsWrappedCommands(t *testing.
 
 func TestInstallHooks_WindowsWrapperProbeFailureUsesWindowsCommands(t *testing.T) {
 	tempDir := setupTestEnv(t)
-	withCodexHookEnvironment(t, "windows", false)
+	withCodexHookEnvironment(t, testWindowsOS, false)
 
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), false)
@@ -326,7 +332,7 @@ func TestInstallHooks_WindowsWrapperProbeFailureUsesWindowsCommands(t *testing.T
 func TestInstallHooks_WindowsWrapperProbeFailureMigratesToWindowsCommands(t *testing.T) {
 	tempDir := setupTestEnv(t)
 	wrapperWorks := true
-	withCodexHookEnvironmentFunc(t, "windows", func(context.Context, string) bool {
+	withCodexHookEnvironmentFunc(t, testWindowsOS, func(context.Context, string) bool {
 		return wrapperWorks
 	})
 
@@ -371,10 +377,10 @@ func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	ctx := context.Background()
 	ag := &CodexAgent{}
 
-	testutil.AssertLegacyHookReplaced(t,
+	agenttestutil.AssertLegacyHookReplaced(t,
 		filepath.Join(tempDir, ".codex", HooksFileName),
 		agentpkg.WrapProductionSilentHookCommandForOS("entire hooks codex stop", agentpkg.UseWindowsProductionHooks(ctx)),
-		testutil.LegacyLocalDevCommand("hooks codex stop"),
+		agenttestutil.LegacyLocalDevCommand("hooks codex stop"),
 		func() {
 			if _, err := ag.InstallHooks(ctx, false); err != nil {
 				t.Fatalf("InstallHooks() error = %v", err)
@@ -555,21 +561,21 @@ func TestAreHooksInstalled_PartialHooksAreOutdated(t *testing.T) {
 	require.Equal(t, agentpkg.HooksOutdated, ag.CheckHookConfig(context.Background()))
 }
 
-func TestCheckHookConfig_MalformedAuthorityIsOutdated(t *testing.T) {
+func TestCheckHookConfig_MalformedAuthorityIsNotEntireDrift(t *testing.T) {
 	tempDir := setupTestEnv(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, ".codex"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(tempDir, ".codex", HooksFileName), []byte(`{"hooks":`), 0o600))
 
 	ag := &CodexAgent{}
 	require.False(t, ag.AreHooksInstalled(context.Background()))
-	require.Equal(t, agentpkg.HooksOutdated, ag.CheckHookConfig(context.Background()))
+	require.Equal(t, agentpkg.HooksAbsent, ag.CheckHookConfig(context.Background()))
 }
 
 // TestAreHooksInstalled_PreSessionEndInstall — a user who enabled Codex before
 // SessionEnd and the subagent hooks joined the install set still counts as
 // installed, so Codex keeps
 // appearing in `entire status` and the agent pickers instead of vanishing until
-// they re-run enable. The gap is drift, and MissingEntireHooks reports it.
+// they re-run enable. Hook-config inspection still reports the drift.
 func TestAreHooksInstalled_PreSessionEndInstall(t *testing.T) {
 	tempDir := setupTestEnv(t)
 
@@ -586,7 +592,7 @@ func TestAreHooksInstalled_PreSessionEndInstall(t *testing.T) {
 
 	ag := &CodexAgent{}
 	require.True(t, ag.AreHooksInstalled(context.Background()))
-	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, MissingEntireHooks(context.Background()))
+	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, InspectHookConfig(context.Background()).Missing)
 }
 
 func TestInstallHooks_PreservesExistingHooksJSON(t *testing.T) {
@@ -671,6 +677,23 @@ func TestUninstallHooks_ErrorsOnMalformedManagedHook(t *testing.T) {
 	data, readErr := os.ReadFile(hooksPath)
 	require.NoError(t, readErr)
 	require.JSONEq(t, existingConfig, string(data))
+}
+
+func TestUninstallHooksFiles_ReportsUnreadableFile(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == testWindowsOS {
+		t.Skip("Windows file permissions do not provide a stable unreadable-file fixture")
+	}
+
+	dir := t.TempDir()
+	hooksPath := filepath.Join(dir, HooksFileName)
+	require.NoError(t, os.WriteFile(hooksPath, []byte(`{"hooks":{}}`), 0o600))
+	require.NoError(t, os.Chmod(hooksPath, 0))
+	t.Cleanup(func() { require.NoError(t, os.Chmod(hooksPath, 0o600)) })
+
+	err := uninstallHooksFiles(t.Context(), filepath.Join(dir, "hooks.lock"), hooksPath)
+	require.Error(t, err)
+	require.ErrorContains(t, err, hooksPath)
 }
 
 func TestInstallHooks_DoesNotModifyUserConfig(t *testing.T) {
@@ -776,9 +799,9 @@ func TestInstallHooks_DropsLegacyHookAlongsideCurrent(t *testing.T) {
 
 	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
 	current := agentpkg.WrapProductionSilentHookCommandForOS("entire hooks codex stop", agentpkg.UseWindowsProductionHooks(ctx))
-	legacy := testutil.LegacyLocalDevCommand("hooks codex stop")
+	legacy := agenttestutil.LegacyLocalDevCommand("hooks codex stop")
 
-	testutil.AssertStaleHookDroppedAlongsideCurrent(t, hooksPath, current, legacy,
+	agenttestutil.AssertStaleHookDroppedAlongsideCurrent(t, hooksPath, current, legacy,
 		func() {
 			// Install, then append the legacy hook into the same Stop group.
 			if _, err := ag.InstallHooks(ctx, false); err != nil {
@@ -815,7 +838,7 @@ func TestInstallHooks_DropsLegacyHookAlongsideCurrent(t *testing.T) {
 // InstallHooks writes. A stale committed config is how the pi extension ended up
 // invoking a launcher script that had been deleted.
 func TestCommittedDogfoodHooksIsCurrent(t *testing.T) {
-	testutil.AssertCommittedDogfoodConfigStable(t, ".codex/hooks.json", func(t *testing.T, dir string) (int, error) {
+	agenttestutil.AssertCommittedDogfoodConfigStable(t, ".codex/hooks.json", func(t *testing.T, dir string) (int, error) {
 		t.Helper()
 		t.Chdir(dir)
 		return (&CodexAgent{}).InstallHooks(context.Background(), false)

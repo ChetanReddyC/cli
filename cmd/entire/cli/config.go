@@ -154,11 +154,10 @@ func InstalledAgentDisplayNames(ctx context.Context) []string {
 	return agentDisplayNames(GetAgentsWithHooksInstalled(ctx))
 }
 
-// OutdatedHookAgents returns installed agents whose Entire hook config has
-// drifted from what the CLI would write today, for `entire status` and
-// `entire doctor` to surface. Agents that don't implement agent.HookFreshness
-// are skipped: absence of a drift check reads as "nothing to report", never as
-// a warning.
+// OutdatedHookAgents returns agents whose Entire hook config has drifted from
+// what the CLI would write today, for `entire status` and `entire doctor` to
+// surface. Agents that don't implement agent.HookFreshness are skipped: absence
+// of a drift check reads as "nothing to report", never as a warning.
 //
 // Every freshness implementation is asked directly so it can report a stale
 // artifact that no longer qualifies as an active installation. For generated-

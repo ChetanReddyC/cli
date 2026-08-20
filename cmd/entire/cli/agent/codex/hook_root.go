@@ -11,11 +11,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// ErrLinkedSubmoduleHooksUnsupported prevents hook installation in Git's
-// internal submodule storage. Codex currently derives that unsafe location for
-// linked submodules, so there is no project hook root Entire can safely manage.
-var ErrLinkedSubmoduleHooksUnsupported = errors.New("codex hooks are not supported from a linked submodule")
-
 // HookLocation describes the hooks file Codex actually discovers for the
 // current checkout and any obsolete worktree-local file Entire may migrate.
 type HookLocation struct {
@@ -25,6 +20,21 @@ type HookLocation struct {
 	RepositoryWide  bool
 }
 
+// UnsupportedHookLocationError carries the safe paths Entire may still use
+// when Codex derives its shared hook root from unsupported Git metadata.
+type UnsupportedHookLocationError struct {
+	Location HookLocation
+	HookRoot string
+}
+
+func (e *UnsupportedHookLocationError) Error() string {
+	return fmt.Sprintf("codex hooks are not supported for derived hook root %q", e.HookRoot)
+}
+
+// HookInstallationSkipped marks this permanent safety refusal as non-fatal to
+// setup for other selected agents.
+func (e *UnsupportedHookLocationError) HookInstallationSkipped() {}
+
 // ProjectLayerExists reports whether Codex will construct a project config
 // layer for this checkout. Linked worktrees need a local .codex directory even
 // though hooks.json itself is loaded from the authoritative root.
@@ -33,6 +43,17 @@ func (l HookLocation) ProjectLayerExists() bool {
 	if l.LegacyHooksPath != "" {
 		projectDir = filepath.Dir(l.LegacyHooksPath)
 	}
+	return projectLayerExists(projectDir)
+}
+
+// WorktreeProjectLayerExists reports whether the current checkout has the
+// local .codex directory Codex needs to construct its project config layer.
+func WorktreeProjectLayerExists(ctx context.Context) bool {
+	path, err := worktreeLocalHooksPath(ctx)
+	return err == nil && projectLayerExists(filepath.Dir(path))
+}
+
+func projectLayerExists(projectDir string) bool {
 	info, err := os.Stat(projectDir)
 	return err == nil && info.IsDir()
 }
@@ -79,6 +100,12 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 		HooksPath: filepath.Join(worktreeRoot, ".codex", HooksFileName),
 	}
 	location.LockPath = location.HooksPath + ".lock"
+	if isUserHookRoot(worktreeRoot) {
+		return HookLocation{}, &UnsupportedHookLocationError{
+			Location: location,
+			HookRoot: worktreeRoot,
+		}
+	}
 	dotGitPath := filepath.Join(worktreeRoot, ".git")
 	info, err := os.Stat(dotGitPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -128,13 +155,44 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 	if err != nil {
 		return HookLocation{}, fmt.Errorf("resolve Codex hook root: %w", err)
 	}
-	if isInsideGitMetadata(authoritativeRoot) {
-		return location, fmt.Errorf("%w: refusing unsafe hook root %q", ErrLinkedSubmoduleHooksUnsupported, authoritativeRoot)
+	if !supportsSharedHookRoot(commonDir) || isInsideGitMetadata(authoritativeRoot) || isUserHookRoot(authoritativeRoot) {
+		return HookLocation{}, &UnsupportedHookLocationError{
+			Location: location,
+			HookRoot: authoritativeRoot,
+		}
 	}
 
 	location.HooksPath = filepath.Join(authoritativeRoot, ".codex", HooksFileName)
 	location.RepositoryWide = true
 	return omitAliasedLegacyHooks(location)
+}
+
+func supportsSharedHookRoot(commonDir string) bool {
+	base := filepath.Base(commonDir)
+	return base == ".git" || base == ".bare"
+}
+
+func isUserHookRoot(hookRoot string) bool {
+	home, err := os.UserHomeDir()
+	if err == nil {
+		canonicalHome, canonicalErr := canonicalPath(home)
+		if canonicalErr == nil && hookRoot == canonicalHome {
+			return true
+		}
+	}
+	codexHome := os.Getenv("CODEX_HOME")
+	if codexHome == "" {
+		if home == "" {
+			return false
+		}
+		codexHome = filepath.Join(home, ".codex")
+	}
+	canonicalCodexHome, err := canonicalPath(codexHome)
+	if err != nil {
+		return false
+	}
+	canonicalProjectDir, err := canonicalPath(filepath.Join(hookRoot, ".codex"))
+	return err == nil && canonicalProjectDir == canonicalCodexHome
 }
 
 func omitAliasedLegacyHooks(location HookLocation) (HookLocation, error) {

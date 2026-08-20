@@ -11,9 +11,10 @@ import (
 )
 
 // HookTrustGaps returns the snake_case event labels declared in Codex's
-// authoritative hooks.json that don't have a matching
-// `[hooks.state."<hooks.json>:<event>:0:0"]` entry in the user's Codex
-// config.toml — i.e. events the local user hasn't approved yet.
+// authoritative hooks.json that don't have a matching approval entry in the
+// user's Codex config.toml. Matching parses the full
+// `<hooks.json>:<event>:<group>:<handler>` key, accepts any valid indexes, and
+// compares canonicalized hook paths.
 //
 // This is the structural form of the trust check: we don't recompute
 // Codex's hook hash, we only look at key presence. That misses the
@@ -24,6 +25,8 @@ import (
 //
 // Returns nil when:
 //   - .codex/hooks.json doesn't exist (entire isn't installed in this repo)
+//   - The authoritative hook location can't be resolved
+//   - The checkout has no local .codex project layer
 //   - The user's config.toml can't be read
 //   - Every declared event already has a state entry
 func HookTrustGaps(ctx context.Context) []string {
@@ -116,21 +119,6 @@ func declaredCodexEvents(hooksJSONPath string) ([]string, bool) {
 	add("subagent_start", file.Hooks.SubagentStart)
 	add("subagent_stop", file.Hooks.SubagentStop)
 	return events, true
-}
-
-// MissingEntireHooks returns the snake_case event labels the CLI's canonical
-// install ships today that aren't backed by an Entire-managed hook command in
-// Codex's authoritative hooks.json. Surfaces drift when the user enabled Codex
-// on an older release and the install set has since grown.
-//
-// Returns nil when the authoritative file is absent, user-only, or invalid.
-// Callers that need to distinguish those states should use InspectHookConfig.
-func MissingEntireHooks(ctx context.Context) []string {
-	return InspectHookConfig(ctx).Missing
-}
-
-func missingEntireHooks(hooksJSONPath string) []string {
-	return inspectHookConfigAt(context.Background(), hooksJSONPath).Missing
 }
 
 // HasLegacyEntireHooks reports whether this linked checkout still has an

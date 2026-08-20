@@ -2292,6 +2292,10 @@ func TestUninstallDeselectedAgentHooks(t *testing.T) {
 
 func TestRunRemoveAgent_CodexPrimaryCheckoutReportsRepositoryWideEffect(t *testing.T) {
 	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
 
 	var output bytes.Buffer
 	if err := runRemoveAgent(context.Background(), &output, string(agent.AgentNameCodex)); err != nil {
@@ -2300,10 +2304,35 @@ func TestRunRemoveAgent_CodexPrimaryCheckoutReportsRepositoryWideEffect(t *testi
 	if !strings.Contains(output.String(), "affects all linked worktrees") {
 		t.Fatalf("removal output did not report repository-wide effect: %s", output.String())
 	}
+	if !strings.Contains(output.String(), filepath.Join(repoRoot, ".codex", "hooks.json")) {
+		t.Fatalf("removal output did not name the shared hooks file: %s", output.String())
+	}
+}
+
+func TestWriteSharedHooksNote_NamesRepositoryWideFile(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+
+	var output bytes.Buffer
+	writeSharedHooksNote(t.Context(), &output, ag)
+	if !strings.Contains(output.String(), filepath.Join(repoRoot, ".codex", "hooks.json")) {
+		t.Fatalf("shared hooks note did not name the shared file: %s", output.String())
+	}
 }
 
 func TestApplyAgentChanges_CodexRemovalReportsRepositoryWideEffect(t *testing.T) {
 	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
 
 	var output bytes.Buffer
 	if err := applyAgentChanges(
@@ -2317,6 +2346,9 @@ func TestApplyAgentChanges_CodexRemovalReportsRepositoryWideEffect(t *testing.T)
 	}
 	if !strings.Contains(output.String(), "affects all linked worktrees") {
 		t.Fatalf("interactive removal output did not report repository-wide effect: %s", output.String())
+	}
+	if !strings.Contains(output.String(), filepath.Join(repoRoot, ".codex", "hooks.json")) {
+		t.Fatalf("interactive removal output did not name the shared hooks file: %s", output.String())
 	}
 }
 

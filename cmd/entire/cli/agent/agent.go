@@ -161,12 +161,19 @@ type HookFreshness interface {
 	CheckHookConfig(ctx context.Context) HookConfigState
 }
 
-// RepositorySharedHooks is implemented when an agent's hook configuration is
+// HookInstallationSkipError marks a permanent limitation that should warn the
+// user without failing setup for other selected agents.
+type HookInstallationSkipError interface {
+	error
+	HookInstallationSkipped()
+}
+
+// RepositorySharedHooks is implemented when an agent can report the hook file
 // shared by every linked worktree of the repository.
 type RepositorySharedHooks interface {
 	Agent
 
-	HooksSharedAcrossWorktrees(ctx context.Context) bool
+	RepositorySharedHooksPath(ctx context.Context) (string, bool)
 }
 
 // FileWatcher is implemented by agents that use file-based detection.

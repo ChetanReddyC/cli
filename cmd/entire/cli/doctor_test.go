@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -545,7 +546,7 @@ func TestCheckCodexHookTrust_MalformedAuthorityReportsInvalid(t *testing.T) {
 	require.Contains(t, stdout.String(), "Codex hooks: INVALID")
 	require.NotContains(t, stdout.String(), "✓ Codex hooks: INSTALLED")
 	require.NotContains(t, stdout.String(), "Codex hook trust:")
-	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
+	require.NotContains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
 
 func TestCheckCodexHookTrust_SilentForUserOnlyHooks(t *testing.T) {
@@ -707,6 +708,33 @@ func TestCheckCodexHookTrust_LinkedWorktreeReportsLegacyFile(t *testing.T) {
 	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
 
+func TestCheckCodexHookTrust_SecondWorktreeMigration(t *testing.T) {
+	tmp, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+	ag := &codex.CodexAgent{}
+
+	t.Chdir(repoRoot)
+	count, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.Positive(t, count)
+
+	legacyPath := filepath.Join(linkedRoot, ".codex", "hooks.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0o750))
+	require.NoError(t, os.WriteFile(legacyPath, []byte(canonicalCodexHooksJSON()), 0o600))
+	t.Chdir(linkedRoot)
+	require.Equal(t, agent.HooksOutdated, ag.CheckHookConfig(context.Background()))
+
+	cmd, stdout := newTestCmd(t)
+	checkCodexHookTrust(cmd)
+	require.Contains(t, stdout.String(), "Codex hooks: LEGACY COPY FOUND")
+
+	count, err = ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.Zero(t, count)
+	require.NoFileExists(t, legacyPath)
+	require.Equal(t, agent.HooksCurrent, ag.CheckHookConfig(context.Background()))
+}
+
 func TestCheckCodexHookTrust_LinkedWorktreeReadsAuthoritativeMissingHooks(t *testing.T) {
 	tmp, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".codex"), 0o750))
@@ -742,6 +770,60 @@ func TestCheckCodexHookTrust_LinkedWorktreeReportsMissingProjectLayer(t *testing
 }
 
 func TestCheckCodexHookTrust_LinkedSubmoduleReportsUnsafeAuthority(t *testing.T) {
+	linkedSubmoduleRoot := setupLinkedSubmoduleForDoctorTest(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(linkedSubmoduleRoot, ".codex"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(linkedSubmoduleRoot, ".codex", "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
+	t.Chdir(linkedSubmoduleRoot)
+
+	cmd, stdout := newTestCmd(t)
+	checkCodexHookTrust(cmd)
+	require.Contains(t, stdout.String(), "UNSUPPORTED HOOK LOCATION")
+	require.Contains(t, stdout.String(), "will not write there")
+	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
+}
+
+func TestSetupAgentHooks_SkipsUnsupportedCodexLocation(t *testing.T) {
+	linkedSubmoduleRoot := setupLinkedSubmoduleForDoctorTest(t)
+	t.Chdir(linkedSubmoduleRoot)
+	ag := &codex.CodexAgent{}
+
+	result, err := setupAgentHooks(context.Background(), ag, false)
+	require.NoError(t, err)
+	require.Error(t, result.skipped)
+
+	var output bytes.Buffer
+	require.True(t, writeHookSetupSkipped(&output, ag, result))
+	require.Contains(t, output.String(), "Skipped Codex hooks")
+	require.Contains(t, output.String(), "not supported for derived hook root")
+}
+
+func TestCheckCodexHookTrust_ResolverFailureIsReported(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".codex"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"), []byte("not a gitdir file\n"), 0o600))
+	t.Chdir(dir)
+
+	cmd, stdout := newTestCmd(t)
+	checkCodexHookTrust(cmd)
+	require.Contains(t, stdout.String(), "Codex hooks: UNRESOLVED")
+	require.Contains(t, stdout.String(), ".git file has no gitdir prefix")
+}
+
+func setupLinkedRepoForDoctorTest(t *testing.T) (tmp, repoRoot, linkedRoot string) {
+	t.Helper()
+	tmp = t.TempDir()
+	repoRoot = filepath.Join(tmp, "repo")
+	linkedRoot = filepath.Join(tmp, "linked")
+	testutil.InitRepo(t, repoRoot)
+	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, repoRoot, "README.md")
+	testutil.GitCommit(t, repoRoot, "initial")
+	runGitForDoctorTest(t, repoRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	return tmp, repoRoot, linkedRoot
+}
+
+func setupLinkedSubmoduleForDoctorTest(t *testing.T) string {
+	t.Helper()
 	tmp := t.TempDir()
 	subjectRoot := filepath.Join(tmp, "subject")
 	superRoot := filepath.Join(tmp, "super")
@@ -757,28 +839,7 @@ func TestCheckCodexHookTrust_LinkedSubmoduleReportsUnsafeAuthority(t *testing.T)
 	testutil.GitAdd(t, superRoot, ".gitmodules", "sub")
 	testutil.GitCommit(t, superRoot, "add submodule")
 	runGitForDoctorTest(t, submoduleRoot, "worktree", "add", "-b", "linked", linkedSubmoduleRoot)
-	require.NoError(t, os.MkdirAll(filepath.Join(linkedSubmoduleRoot, ".codex"), 0o750))
-	require.NoError(t, os.WriteFile(filepath.Join(linkedSubmoduleRoot, ".codex", "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
-	t.Chdir(linkedSubmoduleRoot)
-
-	cmd, stdout := newTestCmd(t)
-	checkCodexHookTrust(cmd)
-	require.Contains(t, stdout.String(), "UNSUPPORTED LINKED SUBMODULE")
-	require.Contains(t, stdout.String(), "will not write there")
-	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
-}
-
-func setupLinkedRepoForDoctorTest(t *testing.T) (tmp, repoRoot, linkedRoot string) {
-	t.Helper()
-	tmp = t.TempDir()
-	repoRoot = filepath.Join(tmp, "repo")
-	linkedRoot = filepath.Join(tmp, "linked")
-	testutil.InitRepo(t, repoRoot)
-	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
-	testutil.GitAdd(t, repoRoot, "README.md")
-	testutil.GitCommit(t, repoRoot, "initial")
-	runGitForDoctorTest(t, repoRoot, "worktree", "add", "-b", "feature", linkedRoot)
-	return tmp, repoRoot, linkedRoot
+	return linkedSubmoduleRoot
 }
 
 func runGitForDoctorTest(t *testing.T, repoRoot string, args ...string) {

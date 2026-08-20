@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -84,8 +84,64 @@ func TestResolveHookLocation_Submodules(t *testing.T) {
 	require.False(t, ordinary.RepositoryWide)
 
 	_, err = resolveHookLocation(linkedSubmoduleRoot)
-	require.ErrorIs(t, err, ErrLinkedSubmoduleHooksUnsupported)
+	var unsupported *UnsupportedHookLocationError
+	require.ErrorAs(t, err, &unsupported)
 	require.ErrorContains(t, err, filepath.Join(".git", "modules"))
+	require.NotEmpty(t, unsupported.Location.LockPath)
+	require.Equal(t, canonicalHooksPath(t, linkedSubmoduleRoot), unsupported.Location.LegacyHooksPath)
+}
+
+func TestResolveHookLocation_BareRepositoryRefusesParentAsHookRoot(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	seedRoot := filepath.Join(tmp, "seed")
+	bareRoot := filepath.Join(tmp, "repo.git")
+	linkedRoot := filepath.Join(tmp, "linked")
+	initCommittedRepo(t, seedRoot)
+	runGit(t, tmp, "clone", "--bare", seedRoot, bareRoot)
+	runGitWithDir(t, tmp, "--git-dir", bareRoot, "worktree", "add", "-b", "feature", linkedRoot)
+
+	_, err := resolveHookLocation(linkedRoot)
+	var unsupported *UnsupportedHookLocationError
+	require.ErrorAs(t, err, &unsupported)
+	require.Equal(t, canonicalPathForTest(t, tmp), unsupported.HookRoot)
+	require.Equal(t, canonicalHooksPath(t, linkedRoot), unsupported.Location.LegacyHooksPath)
+	require.Equal(t, filepath.Join(canonicalPathForTest(t, bareRoot), "entire-codex-hooks.lock"), unsupported.Location.LockPath)
+}
+
+func TestResolveHookLocation_RefusesUserHomeAsHookRoot(t *testing.T) {
+	fakeHome := t.TempDir()
+	initCommittedRepo(t, fakeHome)
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("CODEX_HOME", "")
+
+	_, err := resolveHookLocation(fakeHome)
+	var unsupported *UnsupportedHookLocationError
+	require.ErrorAs(t, err, &unsupported)
+	require.Equal(t, canonicalPathForTest(t, fakeHome), unsupported.HookRoot)
+	require.Empty(t, unsupported.Location.LegacyHooksPath)
+}
+
+func TestResolveHookLocation_SeparateGitDirRefusesParentAsHookRoot(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	gitDir := filepath.Join(tmp, "git-storage")
+	mainRoot := filepath.Join(tmp, "main")
+	linkedRoot := filepath.Join(tmp, "linked")
+	runGitWithDir(t, tmp, "init", "--separate-git-dir", gitDir, mainRoot)
+	runGit(t, mainRoot, "config", "user.name", "Entire Test")
+	runGit(t, mainRoot, "config", "user.email", "test@entire.io")
+	runGit(t, mainRoot, "config", "commit.gpgsign", "false")
+	require.NoError(t, os.WriteFile(filepath.Join(mainRoot, "README.md"), []byte("initial\n"), 0o600))
+	runGit(t, mainRoot, "add", "README.md")
+	runGit(t, mainRoot, "commit", "--no-gpg-sign", "-m", "initial")
+	runGit(t, mainRoot, "worktree", "add", "-b", "feature", linkedRoot)
+
+	_, err := resolveHookLocation(linkedRoot)
+	var unsupported *UnsupportedHookLocationError
+	require.ErrorAs(t, err, &unsupported)
+	require.Equal(t, canonicalPathForTest(t, tmp), unsupported.HookRoot)
+	require.Equal(t, canonicalHooksPath(t, linkedRoot), unsupported.Location.LegacyHooksPath)
 }
 
 func setupBareWorktreeLayout(t *testing.T) (layoutRoot, mainRoot, featureRoot string) {
@@ -152,14 +208,17 @@ func readFile(t *testing.T, path string) string {
 
 func canonicalHooksPath(t *testing.T, root string) string {
 	t.Helper()
-	canonicalRoot, err := canonicalPath(root)
-	require.NoError(t, err)
-	return filepath.Join(canonicalRoot, ".codex", HooksFileName)
+	return filepath.Join(canonicalPathForTest(t, root), ".codex", HooksFileName)
 }
 
 func canonicalLockPath(t *testing.T, root string) string {
 	t.Helper()
-	canonicalRoot, err := canonicalPath(root)
+	return filepath.Join(canonicalPathForTest(t, root), ".git", "entire-codex-hooks.lock")
+}
+
+func canonicalPathForTest(t *testing.T, path string) string {
+	t.Helper()
+	canonical, err := canonicalPath(path)
 	require.NoError(t, err)
-	return filepath.Join(canonicalRoot, ".git", "entire-codex-hooks.lock")
+	return canonical
 }

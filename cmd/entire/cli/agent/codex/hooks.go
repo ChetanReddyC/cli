@@ -138,15 +138,9 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	location, err := ResolveHookLocation(ctx)
 	if err != nil {
-		if errors.Is(err, ErrLinkedSubmoduleHooksUnsupported) {
-			localPath, localErr := worktreeLocalHooksPath(ctx)
-			if localErr != nil {
-				return localErr
-			}
-			if !fileExists(localPath) {
-				return nil
-			}
-			return uninstallHooksFiles(ctx, location.LockPath, localPath)
+		var unsupported *UnsupportedHookLocationError
+		if errors.As(err, &unsupported) {
+			return uninstallHooksFiles(ctx, unsupported.Location.LockPath, unsupported.Location.LegacyHooksPath)
 		}
 		return err
 	}
@@ -156,7 +150,17 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 func uninstallHooksFiles(ctx context.Context, lockPath string, hooksPaths ...string) error {
 	hasFile := false
 	for _, hooksPath := range hooksPaths {
-		hasFile = hasFile || fileExists(hooksPath)
+		if hooksPath == "" {
+			continue
+		}
+		_, err := os.Stat(hooksPath)
+		if err == nil {
+			hasFile = true
+			continue
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("stat %s: %w", hooksPath, err)
+		}
 	}
 	if !hasFile {
 		return nil
@@ -201,8 +205,8 @@ func uninstallHooksFiles(ctx context.Context, lockPath string, hooksPaths ...str
 // an installed agent (`entire status`, the review and investigate pickers), and
 // answering it with the full set would drop Codex out of all of them the moment
 // a release adds an event — every existing install predates the addition. Drift
-// against today's set is MissingEntireHooks' job, which `entire doctor` reports
-// with the fix (`entire enable`).
+// against today's set is part of hook-config inspection, which `entire doctor`
+// reports with the fix (`entire enable`).
 func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 	location, err := ResolveHookLocation(ctx)
 	if err != nil || !location.ProjectLayerExists() {
@@ -217,7 +221,8 @@ func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 func (c *CodexAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
 	location, err := ResolveHookLocation(ctx)
 	if err != nil {
-		if errors.Is(err, ErrLinkedSubmoduleHooksUnsupported) && HasWorktreeLocalEntireHooks(ctx) {
+		var unsupported *UnsupportedHookLocationError
+		if errors.As(err, &unsupported) && unsupported.Location.LegacyHooksPath != "" && HasWorktreeLocalEntireHooks(ctx) {
 			return agent.HooksOutdated
 		}
 		return agent.HooksAbsent
@@ -225,7 +230,7 @@ func (c *CodexAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState 
 	inspection := inspectHookConfigAt(ctx, location.HooksPath)
 	switch inspection.State {
 	case HookFileInvalid:
-		return agent.HooksOutdated
+		return agent.HooksAbsent
 	case HookFileEntire:
 		if inspection.Current && location.ProjectLayerExists() && !HasLegacyEntireHooks(ctx) {
 			return agent.HooksCurrent
@@ -240,11 +245,10 @@ func (c *CodexAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState 
 	return agent.HooksAbsent
 }
 
-// HooksSharedAcrossWorktrees reports whether this mutation changes hooks used
-// by another registered checkout of the same repository.
-func (c *CodexAgent) HooksSharedAcrossWorktrees(ctx context.Context) bool {
+// RepositorySharedHooksPath returns the shared file changed by a hook mutation.
+func (c *CodexAgent) RepositorySharedHooksPath(ctx context.Context) (string, bool) {
 	location, err := ResolveHookLocation(ctx)
-	return err == nil && location.RepositoryWide
+	return location.HooksPath, err == nil && location.RepositoryWide
 }
 
 type managedHookSpec struct {
@@ -449,14 +453,6 @@ func writeHooksDocument(path string, document *hooksDocument) error {
 	}
 	document.exists = true
 	return nil
-}
-
-func fileExists(path string) bool {
-	if path == "" {
-		return false
-	}
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 func acquireHooksLock(ctx context.Context, path string) (func(), error) {

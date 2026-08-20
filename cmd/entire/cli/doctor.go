@@ -626,11 +626,23 @@ func checkHookDrift(cmd *cobra.Command) {
 func checkCodexHookTrust(cmd *cobra.Command) {
 	location, err := codex.ResolveHookLocation(cmd.Context())
 	if err != nil {
-		if errors.Is(err, codex.ErrLinkedSubmoduleHooksUnsupported) && codex.HasWorktreeLocalEntireHooks(cmd.Context()) {
-			w := cmd.OutOrStdout()
-			fmt.Fprintln(w, "Codex hooks: UNSUPPORTED LINKED SUBMODULE")
-			fmt.Fprintln(w, "  Current Codex resolves this checkout's hook root inside Git's internal submodule storage.")
-			fmt.Fprintln(w, "  Entire will not write there. Remove the ignored local hooks with `entire agent remove codex`.")
+		if !codex.WorktreeProjectLayerExists(cmd.Context()) && !codex.HasWorktreeLocalEntireHooks(cmd.Context()) {
+			return
+		}
+		w := cmd.OutOrStdout()
+		var unsupported *codex.UnsupportedHookLocationError
+		if errors.As(err, &unsupported) {
+			fmt.Fprintln(w, "Codex hooks: UNSUPPORTED HOOK LOCATION")
+			fmt.Fprintf(w, "  Current Codex derives this checkout's shared hook root as %s.\n", unsupported.HookRoot)
+			if unsupported.Location.LegacyHooksPath != "" {
+				fmt.Fprintln(w, "  Entire will not write there. Remove ignored local hooks with `entire agent remove codex`.")
+			} else {
+				fmt.Fprintln(w, "  Entire will not install or remove hooks at this user-wide location.")
+			}
+		} else {
+			fmt.Fprintln(w, "Codex hooks: UNRESOLVED")
+			fmt.Fprintf(w, "  Entire could not resolve Codex's authoritative hooks file: %v\n", err)
+			fmt.Fprintln(w, "  Fix the repository metadata before installing or removing Codex hooks.")
 		}
 		return
 	}
