@@ -4784,7 +4784,7 @@ func TestAddDirectoryToChanges_PathTraversal(t *testing.T) {
 		t.Fatalf("failed to write file: %v", err)
 	}
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, ".entire/metadata/session")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, metadataDir, ".entire/metadata/session")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -4815,7 +4815,7 @@ func TestMetadataDirectoryWalkersAllowDotDotPrefixedNames(t *testing.T) {
 
 	expectedPath := filepath.ToSlash(filepath.Join("checkpoint", "..generated", "schema.json"))
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, "checkpoint")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, metadataDir, "checkpoint")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -4867,7 +4867,7 @@ func TestAddDirectoryToChanges_SkipsSymlinks(t *testing.T) {
 		t.Fatalf("failed to create symlink: %v", err)
 	}
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, "checkpoint/")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, metadataDir, "checkpoint/")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -4927,7 +4927,7 @@ func TestAddDirectoryToChanges_SkipsSymlinkedDirectories(t *testing.T) {
 		t.Fatalf("failed to create directory symlink: %v", err)
 	}
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, "checkpoint/")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, metadataDir, "checkpoint/")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
