@@ -114,7 +114,7 @@ type mockAnalyzerAgent struct {
 
 	// onExtract, when set, is invoked from inside ExtractModifiedFilesFromOffset
 	// — i.e. mid-capture, after handleSubagentStopFinal has loaded its initial
-	// (pre-capture) session state snapshot but before captureSubagentTaskStep
+	// (pre-capture) session state snapshot but before completeSubagentTaskRecord
 	// returns. Tests use it to simulate a racing SessionEnd landing exactly in
 	// that window.
 	onExtract func()
@@ -2593,6 +2593,41 @@ func TestResolveSubagentSessionLink_AgentWithoutCapability(t *testing.T) {
 	}
 }
 
+// TestSaveSubagentSessionTaskStep_SecondTurn_MergesAndKeepsDeclaredPath pins
+// the upsert contract a hook-driven Worker turn cannot reach: a second turn
+// whose transcript ref is EMPTY must still merge its files with turn 1's and
+// must not erase turn 1's declared transcript path.
+func TestSaveSubagentSessionTaskStep_SecondTurn_MergesAndKeepsDeclaredPath(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+
+	step := subagentSessionStep{
+		link:          agent.SubagentSessionLink{ParentSessionID: "droid-parent", ToolUseID: "toolu_worker1", SubagentType: "worker"},
+		sessionID:     "droid-worker",
+		event:         &agent.Event{Type: agent.TurnEnd, SessionID: "droid-worker", Timestamp: time.Now()},
+		transcriptRef: "/tmp/worker.jsonl",
+		modifiedFiles: []string{"a.txt"},
+		agentType:     agent.AgentTypeClaudeCode,
+		strat:         GetStrategy(ctx),
+	}
+	require.NoError(t, saveSubagentSessionTaskStep(ctx, step))
+
+	step.transcriptRef = ""
+	step.modifiedFiles = []string{"b.txt"}
+	require.NoError(t, saveSubagentSessionTaskStep(ctx, step))
+
+	state, err := strategy.LoadSessionState(ctx, "droid-parent")
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	rec := state.FindTaskRecord("toolu_worker1")
+	require.NotNil(t, rec)
+	assert.ElementsMatch(t, []string{"a.txt", "b.txt"}, rec.Files, "the second turn must merge, not overwrite")
+	assert.Equal(t, "/tmp/worker.jsonl", rec.DeclaredTranscriptPath,
+		"an empty second-turn transcript ref must not erase the declared path")
+	assert.False(t, rec.CompletedAt.IsZero())
+}
+
 // --- handleLifecycleSubagentEnd: background launch marker + SubagentStop dispatch ---
 
 // setupSubagentEndTestRepo initializes a git repo with one commit and chdirs
@@ -2972,7 +3007,7 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_PhaseEnded_TriggersEagerCondens
 // TestHandleLifecycleSubagentEnd_SubagentStop_SessionEndsMidCapture_StillCondenses
 // is the regression for the eager-condense decision using a pre-capture phase
 // snapshot: handleSubagentStopFinal loads session state once at function
-// entry, then runs claimTaskRecord and captureSubagentTaskStep, and only
+// entry, then runs completeSubagentTaskRecord, and only
 // THEN decided whether to eagerly condense — using that stale, pre-capture
 // snapshot. If a racing SessionEnd flips the session to PhaseEnded during
 // that capture window (both serialize on the per-session gate, so the
@@ -2984,7 +3019,7 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_PhaseEnded_TriggersEagerCondens
 // not ended — unlike the sibling PhaseEnded_TriggersEagerCondense test above,
 // which starts already ended. The mock analyzer's onExtract callback fires
 // from inside ExtractModifiedFilesFromOffset, i.e. mid-way through
-// captureSubagentTaskStep, and flips the persisted session to PhaseEnded via
+// completeSubagentTaskRecord, and flips the persisted session to PhaseEnded via
 // strategy.MutateSessionState — simulating exactly where a racing SessionEnd
 // would land. It deliberately does not run a full endSessionNow; only the
 // phase transition matters here.

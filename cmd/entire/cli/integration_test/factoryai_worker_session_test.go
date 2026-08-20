@@ -86,6 +86,44 @@ func TestFactoryDroidWorkerSessionBecomesTaskCheckpoint(t *testing.T) {
 	if got := shadowBranches(env); len(got) != 0 {
 		t.Errorf("a Worker's turn must write a task record, not shadow data: %v", got)
 	}
+
+	// Multi-turn Workers upsert into the SAME record: a second turn must MERGE
+	// its files with turn 1's (not overwrite them) and re-declare the
+	// transcript path, with the record staying completed throughout.
+	t.Run("second worker turn merges files", func(t *testing.T) {
+		t.Parallel()
+		if err := env.SimulateFactoryDroidUserPromptSubmit(worker.ID); err != nil {
+			t.Fatalf("worker second UserPromptSubmit failed: %v", err)
+		}
+		env.WriteFile("docs/details.md", "More detail.\n")
+		// Turn 2's transcript names ONLY the new file, so turn 1's file can
+		// reappear on the record only via the upsert's merge.
+		worker.CreateDroidTranscript("# Task Tool Invocation", []FileChange{
+			{Path: "docs/details.md", Content: "More detail.\n"},
+		})
+		worker.MarkAsWorkerSession(parent.ID, toolUseID, "worker: Summarize the repo")
+		if err := env.SimulateFactoryDroidStop(worker.ID, worker.TranscriptPath); err != nil {
+			t.Fatalf("worker second Stop failed: %v", err)
+		}
+
+		state, err := env.GetSessionState(parent.ID)
+		if err != nil {
+			t.Fatalf("GetSessionState(parent) failed: %v", err)
+		}
+		rec := state.FindTaskRecord(toolUseID)
+		if rec == nil || rec.CompletedAt.IsZero() {
+			t.Fatalf("the record must stay completed across Worker turns, got %+v", rec)
+		}
+		if !containsFile(rec.Files, "docs/summary.md") || !containsFile(rec.Files, "docs/details.md") {
+			t.Errorf("a second Worker turn must merge files with turn 1's, got %v", rec.Files)
+		}
+		if !containsFile(state.FilesTouched, "docs/summary.md") || !containsFile(state.FilesTouched, "docs/details.md") {
+			t.Errorf("both turns' files must be in the parent's FilesTouched, got %v", state.FilesTouched)
+		}
+		if rec.DeclaredTranscriptPath != worker.TranscriptPath {
+			t.Errorf("turn 2 must re-declare the Worker transcript path, got %q", rec.DeclaredTranscriptPath)
+		}
+	})
 }
 
 // TestFactoryDroidTopLevelSessionStillCheckpoints guards the fallback: an

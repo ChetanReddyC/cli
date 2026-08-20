@@ -353,16 +353,38 @@ func (s *ManualCommitStrategy) EnsureSessionExists(ctx context.Context, sessionI
 	return s.ensureSessionInitialized(ctx, repo, sessionID, agentType)
 }
 
+// launchStubTaskRecord returns the launch-shaped subset of rec — exactly the
+// fields recordInFlightTaskLaunch would have stubbed — for producers that
+// create the record at completion time (foreground tasks, Droid Workers).
+func launchStubTaskRecord(rec session.TaskRecord) session.TaskRecord {
+	return session.TaskRecord{
+		ToolUseID:       rec.ToolUseID,
+		AgentID:         rec.AgentID,
+		StartedAt:       rec.StartedAt,
+		SubagentType:    rec.SubagentType,
+		TaskDescription: rec.TaskDescription,
+	}
+}
+
 // applyTaskRecordCompletion attaches a completed task's results to its record
 // and to the session: files merge into FilesTouched (invariant: carry-forward
 // and PostCommit gating must see task files exactly as the shadow task write
 // used to provide), and a zero-file completion bumps TranscriptOnlyTaskSteps
 // so the condensation triggers still fire for a read-only subagent (Task 4
 // rewires those triggers onto the records themselves).
-func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) {
+// Callers must pre-merge rec.Files with any existing record's files — this
+// overwrites live.Files rather than merging.
+func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) error {
 	live := state.FindTaskRecord(rec.ToolUseID)
+	if live == nil {
+		return fmt.Errorf("no task record for tool use %s", rec.ToolUseID)
+	}
 	live.Files = mergeFilesTouched(nil, rec.Files)
-	live.DeclaredTranscriptPath = rec.DeclaredTranscriptPath
+	// A completion with no path (e.g. a later Worker turn whose transcript ref
+	// is empty) must not erase an earlier turn's declared path.
+	if rec.DeclaredTranscriptPath != "" {
+		live.DeclaredTranscriptPath = rec.DeclaredTranscriptPath
+	}
 	if rec.TokenUsage != nil {
 		live.TokenUsage = rec.TokenUsage
 	}
@@ -373,6 +395,7 @@ func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) {
 	if len(rec.Files) == 0 {
 		state.TranscriptOnlyTaskSteps++
 	}
+	return nil
 }
 
 // CompleteTaskRecord marks the record for rec.ToolUseID completed exactly once
@@ -386,18 +409,14 @@ func CompleteTaskRecord(ctx context.Context, sessionID string, rec session.TaskR
 	completed := false
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 		if state.FindTaskRecord(rec.ToolUseID) == nil {
-			state.AddTaskRecord(session.TaskRecord{
-				ToolUseID:       rec.ToolUseID,
-				AgentID:         rec.AgentID,
-				StartedAt:       rec.StartedAt,
-				SubagentType:    rec.SubagentType,
-				TaskDescription: rec.TaskDescription,
-			})
+			state.AddTaskRecord(launchStubTaskRecord(rec))
 		}
 		if !state.CompleteTaskRecord(rec.ToolUseID, time.Now()) {
 			return ErrMutationSkip
 		}
-		applyTaskRecordCompletion(state, rec)
+		if err := applyTaskRecordCompletion(state, rec); err != nil {
+			return err
+		}
 		completed = true
 		return nil
 	})
@@ -416,17 +435,10 @@ func UpsertCompletedTaskRecord(ctx context.Context, sessionID string, rec sessio
 		if existing := state.FindTaskRecord(rec.ToolUseID); existing != nil {
 			rec.Files = mergeFilesTouched(existing.Files, rec.Files)
 		} else {
-			state.AddTaskRecord(session.TaskRecord{
-				ToolUseID:       rec.ToolUseID,
-				AgentID:         rec.AgentID,
-				StartedAt:       rec.StartedAt,
-				SubagentType:    rec.SubagentType,
-				TaskDescription: rec.TaskDescription,
-			})
+			state.AddTaskRecord(launchStubTaskRecord(rec))
 		}
 		state.CompleteTaskRecord(rec.ToolUseID, time.Now())
-		applyTaskRecordCompletion(state, rec)
-		return nil
+		return applyTaskRecordCompletion(state, rec)
 	})
 }
 
