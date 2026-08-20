@@ -2130,6 +2130,15 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 // addTrailerForAgentCommit handles the fast path when an agent is committing
 // (ACTIVE session + no TTY). It resolves a checkpoint ID and adds the trailer
 // directly, bypassing content detection and interactive prompts.
+//
+// The ID is resolved from this one ACTIVE session, deliberately NOT from every
+// session in the worktree the way PrepareCommitMsg's slow path does. Widening it
+// would let a stale reservation held by some other, already-ended session become
+// this commit's checkpoint ID, merging a live session's work into a checkpoint
+// reserved for an unrelated transcript range. The reserved session loses nothing
+// by being left out: ENDED + GitCommit carries ActionCondenseIfFilesTouched, so
+// PostCommit does not condense a no-files ENDED session under any ID, and
+// `entire doctor` is its retry path.
 func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error { //nolint:unparam // kept for signature stability
 	cpID, err := checkpointIDForSessions(logCtx, []*SessionState{state})
 	if err != nil {

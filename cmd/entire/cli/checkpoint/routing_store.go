@@ -242,6 +242,12 @@ func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
 
 func (s *kindRoutingStore) writeReservedSession(ctx context.Context, req ReservedSession) error {
 	checkpointID := WriteOptions(req).CheckpointID
+	if s.primaryType != BackendTypeGitBranch && s.primaryType != BackendTypeGitRefs {
+		// An unrecognised primary tells us nothing about which backend minted the
+		// ID, and picking one anyway would bypass the configured primary and all of
+		// its mirrors. readOrder's default arm makes the same call for reads.
+		return s.writer.Write(ctx, req) //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
+	}
 	target := s.branch
 	targetType := BackendTypeGitBranch
 	if checkpointID.Kind() == id.KindULID {
@@ -256,10 +262,22 @@ func (s *kindRoutingStore) writeReservedSession(ctx context.Context, req Reserve
 	updateReadTarget := false
 	if readTarget != target {
 		existing, err := readTarget.Read(ctx, checkpointID)
-		if err != nil {
-			return err //nolint:wrapcheck // read-target error prevents a potentially invisible write
+		switch {
+		case err != nil:
+			// Not fatal. readOrder puts this store ahead of target for this ID, and
+			// firstResolved falls through a non-final store that errors, so the
+			// target write below still resolves through normal reads. The cost of
+			// skipping the update is a migrated copy left stale — the same lag the
+			// mirror fan-out contract already permits — whereas failing here would
+			// abandon a condensation over a transient fetch error in the backend the
+			// checkpoint is not even stored in.
+			logging.Warn(ctx, "checkpoint: reserved session could not check the read-preferred backend; writing the ID's backend only",
+				slog.String("checkpoint_id", checkpointID.String()),
+				slog.String("primary_backend", s.primaryType),
+				slog.String("error", err.Error()))
+		default:
+			updateReadTarget = existing != nil
 		}
-		updateReadTarget = existing != nil
 	}
 	if err := target.Write(ctx, req); err != nil {
 		return err //nolint:wrapcheck // target error is the operation's error, surfaced verbatim
