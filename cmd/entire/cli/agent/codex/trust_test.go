@@ -3,6 +3,7 @@ package codex
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -238,4 +239,32 @@ trusted_hash = "sha256:aaa"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte(configTOML), 0o600))
 	require.Empty(t, inspectHookTrust(hooksPath).Gaps)
+}
+
+func TestHookTrustGaps_MatchesLogicalSymlinkPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory symlinks require privileges on Windows")
+	}
+	tmp := t.TempDir()
+	physicalRoot := filepath.Join(tmp, "physical", "repo")
+	logicalRoot := filepath.Join(tmp, "logical-repo")
+	codexHome := filepath.Join(tmp, "codex-home")
+	require.NoError(t, os.MkdirAll(filepath.Join(physicalRoot, ".codex"), 0o750))
+	require.NoError(t, os.MkdirAll(codexHome, 0o750))
+	require.NoError(t, os.Symlink(physicalRoot, logicalRoot))
+
+	physicalHooksPath := filepath.Join(physicalRoot, ".codex", HooksFileName)
+	require.NoError(t, os.WriteFile(physicalHooksPath, []byte(`{
+  "hooks": {
+    "SessionStart": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}]
+  }
+}`), 0o600))
+	logicalHooksPath := filepath.Join(logicalRoot, ".codex", HooksFileName)
+	configTOML := `[hooks.state."` + logicalHooksPath + `:session_start:0:0"]
+trusted_hash = "sha256:aaa"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(configTOML), 0o600))
+	t.Setenv("CODEX_HOME", codexHome)
+
+	require.Empty(t, inspectHookTrust(physicalHooksPath).Gaps)
 }

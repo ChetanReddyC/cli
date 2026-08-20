@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -66,10 +67,7 @@ func inspectHookTrust(hooksJSONPath string) HookTrustInspection {
 	inspection.Known = true
 
 	for _, ev := range declared {
-		// Match any handler index — Codex's state key is
-		// "<path>:<event>:<group>:<handler>". Trust on any handler counts.
-		prefix := hooksJSONPath + ":" + ev + ":"
-		if !codexAnyKeyHasPrefix(trusted, prefix) {
+		if !codexHasTrustedEvent(trusted, hooksJSONPath, ev) {
 			inspection.Gaps = append(inspection.Gaps, ev)
 		}
 	}
@@ -184,11 +182,44 @@ func readCodexTrustedKeys(configPath string) (map[string]struct{}, bool) {
 	return keys, true
 }
 
-func codexAnyKeyHasPrefix(keys map[string]struct{}, prefix string) bool {
-	for k := range keys {
-		if strings.HasPrefix(k, prefix) {
+func codexHasTrustedEvent(keys map[string]struct{}, hooksPath, event string) bool {
+	canonicalHooksPath, err := canonicalPath(hooksPath)
+	if err != nil {
+		return false
+	}
+	for key := range keys {
+		trustedHooksPath, trustedEvent, ok := parseCodexTrustKey(key)
+		if !ok || trustedEvent != event {
+			continue
+		}
+		// Codex preserves nested symlinks in trust keys, while Git resolves
+		// worktree roots to their physical paths.
+		canonicalTrustedPath, err := canonicalPath(trustedHooksPath)
+		if err == nil && canonicalTrustedPath == canonicalHooksPath {
 			return true
 		}
 	}
 	return false
+}
+
+func parseCodexTrustKey(key string) (hooksPath, event string, ok bool) {
+	handlerSeparator := strings.LastIndexByte(key, ':')
+	if handlerSeparator < 0 {
+		return "", "", false
+	}
+	groupSeparator := strings.LastIndexByte(key[:handlerSeparator], ':')
+	if groupSeparator < 0 {
+		return "", "", false
+	}
+	eventSeparator := strings.LastIndexByte(key[:groupSeparator], ':')
+	if eventSeparator < 0 {
+		return "", "", false
+	}
+	if _, err := strconv.Atoi(key[groupSeparator+1 : handlerSeparator]); err != nil {
+		return "", "", false
+	}
+	if _, err := strconv.Atoi(key[handlerSeparator+1:]); err != nil {
+		return "", "", false
+	}
+	return key[:eventSeparator], key[eventSeparator+1 : groupSeparator], true
 }
