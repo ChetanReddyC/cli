@@ -103,6 +103,18 @@ type condenseOpts struct {
 	parentCommitHash string              // HEAD's first parent hash for per-commit non-agent file detection
 	headCommitHash   string              // HEAD commit hash (passed through for attribution)
 	allAgentFiles    map[string]struct{} // Union of all sessions' FilesTouched for cross-session exclusion (nil = single-session)
+
+	// reconcileInterrupted allows this condensation to return a *different*
+	// checkpoint ID than the caller passed, when it recognises the transcript
+	// range in a checkpoint left behind by an interrupted write from a CLI that
+	// predates reservations. Only a caller that chooses the ID itself may set it.
+	//
+	// PostCommit must NOT: its ID comes from the commit's Entire-Checkpoint
+	// trailer, which is already written and cannot be revised. Redirecting the
+	// write there leaves the commit naming a checkpoint that was never stored,
+	// and updateCombinedAttributionForCheckpoint writing attribution under the
+	// same non-existent ID.
+	reconcileInterrupted bool
 }
 
 // redactSessionJSONLBytes runs the regex-only redaction pipeline (the
@@ -359,7 +371,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	if err != nil {
 		return nil, err
 	}
-	recovery := recoverInterruptedCondensation(ctx, logCtx, state.CondensationRecoveryPending, store, state, redactedTranscript, extractedAssets, sessionData, transcriptSizeBaseline)
+	recovery := recoverInterruptedCondensation(ctx, logCtx, o.reconcileInterrupted && state.CondensationRecoveryPending, store, state, redactedTranscript, extractedAssets, sessionData, transcriptSizeBaseline)
 	if recovery.done {
 		return recovery.result, recovery.err
 	}
@@ -409,9 +421,33 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}, nil
 }
 
+// condensationSessionWriteRequest returns the write request for one
+// condensation. Every condensation write is ReservedSession, unconditionally.
+//
+// The tempting refinement — send ReservedSession only when this session's own
+// CondensationAttemptID matches the checkpoint ID, and plain Session otherwise —
+// is wrong, and wrong in a worse direction than the problem it solves. A
+// checkpoint can hold several sessions, and only the one that reserved the ID
+// carries the reservation in its state. Routing per session would send the
+// reserving session's write to the backend the ID belongs to and every sibling's
+// write to the configured primary, splitting one checkpoint across both
+// backends. Reads are not symmetrical about that: a ULID resolves from git-refs
+// only, so the siblings written to the branch would simply be invisible. See
+// TestCondensationSessionWrites_KeepSharedReservedCheckpointInOneBackend.
+//
+// The cost of routing everything by ID format is narrow. It only diverges from
+// the configured primary when the ID's format disagrees with the primary, and
+// the two fail-soft defaults agree: GenerateCheckpointID mints hex when the
+// checkpoints config cannot be read, and resolvePrimaryType defaults to
+// git-branch on the same unreadable config. Reaching a mismatch on a *fresh* ID
+// therefore takes a config read that succeeds for one call and fails for the
+// other — and even then the checkpoint stays readable, because a hex ID under a
+// git-refs primary falls through to the branch on read.
+//
+// If the per-checkpoint routing decision ever does need to be conditional, it
+// has to be made once for the whole checkpoint (from the commit trailer or a
+// checkpoint-level flag), never per session.
 func condensationSessionWriteRequest(opts cpkg.WriteOptions) cpkg.WriteRequest {
-	// Condensation receives a checkpoint ID chosen before the write begins. Route
-	// every session sharing that ID through the same ID-derived backend.
 	return cpkg.ReservedSession(opts)
 }
 
@@ -1338,7 +1374,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 			return ErrMutationSkip
 		}
 
-		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil)
+		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{reconcileInterrupted: true})
 		if err != nil {
 			return fmt.Errorf("failed to condense session: %w", err)
 		}
@@ -1500,7 +1536,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			return ErrMutationSkip
 		}
 
-		result, condErr := s.CondenseSession(ctx, repo, checkpointID, state, nil)
+		result, condErr := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{reconcileInterrupted: true})
 		if condErr != nil {
 			logging.Warn(logCtx, "eager condense on session stop failed, PostCommit will retry",
 				slog.String("session_id", sessionID),
