@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
@@ -884,11 +885,21 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		preUntrackedFiles = preState.PreUntrackedFiles()
 	}
 
-	// Detect file changes via git status
+	// Detect file changes via git status. captureDegraded tracks whether any
+	// status scan feeding this turn breached its budget, so the marker
+	// persisted at turn end reflects the whole turn, not just this walk.
+	captureDegraded := preState != nil && preState.UntrackedScanSkipped
 	changes, err := DetectFileChanges(ctx, preUntrackedFiles)
 	if err != nil {
-		logging.Warn(logCtx, "failed to compute file changes",
-			slog.String("error", err.Error()))
+		captureDegraded = captureDegraded || errors.Is(err, gitrepo.ErrStatusBudgetExceeded)
+		logStatusDegrade(logCtx, "failed to compute file changes", err)
+	}
+	if changes != nil && preState != nil && preState.UntrackedScanSkipped {
+		// The turn-start untracked scan was skipped (e.g. status-walk budget
+		// breach), so there is no baseline: every untracked file in the
+		// worktree would be misreported as created by this turn.
+		logging.Warn(logCtx, "skipping new-file detection: pre-prompt untracked scan was skipped")
+		changes.New = nil
 	}
 	detectSpan.End()
 
@@ -918,6 +929,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
 	if totalChanges == 0 {
 		logging.Info(logCtx, "no files modified during session, skipping checkpoint")
+		recordCaptureDegraded(ctx, sessionID, captureDegraded)
 		transitionSessionTurnEnd(ctx, sessionID, event)
 		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
@@ -993,34 +1005,47 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		TokenUsage:               tokenUsage,
 	}
 
-	if err := strat.SaveStep(ctx, stepCtx); err != nil {
-		return fmt.Errorf("failed to save step: %w", err)
-	}
-
-	// Update session state with backfilled prompt after SaveStep.
-	// Done after SaveStep because SaveStep may reinitialize session state,
-	// which would overwrite an earlier LastPrompt update.
-	if backfilledPrompt != "" {
-		mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
-			if state.LastPrompt != "" {
-				return strategy.ErrMutationSkip
+	// finishTurn is the shared turn-end tail, run whether the save succeeded
+	// or was skipped on a status budget breach. The LastPrompt backfill must
+	// come after SaveStep because SaveStep may reinitialize session state,
+	// which would overwrite an earlier LastPrompt update — and SaveStep has
+	// initialized state even when it then failed on the budget.
+	finishTurn := func(degraded bool) {
+		if backfilledPrompt != "" {
+			mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+				if state.LastPrompt != "" {
+					return strategy.ErrMutationSkip
+				}
+				state.LastPrompt = backfilledPrompt
+				return nil
+			})
+			if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+				logging.Warn(logCtx, "failed to backfill LastPrompt in session state",
+					slog.String("error", mutErr.Error()))
 			}
-			state.LastPrompt = backfilledPrompt
-			return nil
-		})
-		if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
-			logging.Warn(logCtx, "failed to backfill LastPrompt in session state",
-				slog.String("error", mutErr.Error()))
+		}
+		recordCaptureDegraded(ctx, sessionID, degraded)
+		transitionSessionTurnEnd(ctx, sessionID, event)
+		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
+			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
+				slog.String("error", cleanupErr.Error()))
 		}
 	}
 
-	// Transition session phase and cleanup
-	transitionSessionTurnEnd(ctx, sessionID, event)
-	if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
-		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
-			slog.String("error", cleanupErr.Error()))
+	if err := strat.SaveStep(ctx, stepCtx); err != nil {
+		if errors.Is(err, gitrepo.ErrStatusBudgetExceeded) {
+			// The first-checkpoint status read inside the save breached its
+			// budget. Hooks must never fail on status cost — skip this turn's
+			// checkpoint, run the normal turn-end bookkeeping, and exit 0.
+			logging.Warn(logCtx, "checkpoint skipped: status budget exceeded during save; capture degraded this turn",
+				slog.String("error", err.Error()))
+			finishTurn(true)
+			return nil
+		}
+		return fmt.Errorf("failed to save step: %w", err)
 	}
 
+	finishTurn(captureDegraded)
 	return nil
 }
 
@@ -1191,6 +1216,25 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 	return nil
 }
 
+// declaredSubagentTranscript returns the agent-declared subagent transcript path
+// when it names a file that exists, else "".
+//
+// A declared-but-missing path warns rather than falling through silently: it means
+// the agent's contract and its behaviour disagree.
+func declaredSubagentTranscript(ctx context.Context, event *agent.Event) string {
+	declared := strings.TrimSpace(event.SubagentTranscriptPath)
+	if declared == "" {
+		return ""
+	}
+	if !fileExists(declared) {
+		logging.Warn(ctx, "agent declared a subagent transcript that does not exist",
+			slog.String("path", declared),
+			slog.String("agent_id", event.SubagentID))
+		return ""
+	}
+	return declared
+}
+
 // handleLifecycleSubagentEnd handles subagent completion. It dispatches on
 // event.Final — never on any payload sentinel — to tell a real completion
 // signal (SubagentStop) from the launch-time PostToolUse (post-task) stub:
@@ -1316,7 +1360,7 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		// unclaimed skip is either the expected foreground dedup, a duplicate
 		// event, or a misintegrated agent that sets Final without ever
 		// emitting the launch-time marker — worth surfacing over Debug.
-		if event.SubagentID != "" || event.SubagentTranscript != "" {
+		if event.SubagentID != "" || event.SubagentTranscriptPath != "" {
 			logging.Warn(logCtx, "no in-flight marker for completed subagent — foreground dedup, a duplicate event, or a misintegrated agent setting Final without launch markers",
 				slog.String("session_id", event.SessionID),
 				slog.String("tool_use_id", event.ToolUseID),
@@ -1426,25 +1470,12 @@ type subagentCaptureOptions struct {
 // declared transcript path land on the record; condensation later materializes
 // the transcript into the checkpoint. No shadow task step is written.
 func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *agent.Event, opts subagentCaptureOptions) error {
-	// Determine subagent transcript path (empty when the agent stores none).
-	// event.SubagentTranscript is authoritative when the hook payload supplies
-	// it directly (e.g. Claude Code's SubagentStop carries agent_transcript_path);
-	// ResolveAgentTranscriptPath is the fallback for launch-time PostToolUse
-	// events, which don't carry it.
-	subagentTranscriptPath := event.SubagentTranscript
-	if subagentTranscriptPath != "" {
-		if _, statErr := os.Stat(subagentTranscriptPath); statErr != nil {
-			// Still used as-is below (downstream reads fail soft), but a
-			// payload-supplied path that doesn't exist means the agent handed
-			// us something wrong — surface it rather than silently storing a
-			// transcript-less step.
-			logging.Warn(logCtx, "payload-supplied subagent transcript path does not exist",
-				slog.String("session_id", event.SessionID),
-				slog.String("tool_use_id", event.ToolUseID),
-				slog.String("subagent_transcript", subagentTranscriptPath),
-				slog.String("error", statErr.Error()))
-		}
-	} else {
+	// Prefer what the agent declared (Claude Code's SubagentStop, Codex, and
+	// Cursor all carry agent_transcript_path); see Event.SubagentTranscriptPath.
+	// The layout probe is the fallback for launch-time PostToolUse events, which
+	// don't carry it.
+	subagentTranscriptPath := declaredSubagentTranscript(logCtx, event)
+	if subagentTranscriptPath == "" {
 		subagentTranscriptPath = ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
 	}
 
@@ -1544,8 +1575,13 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		var changesErr error
 		changes, changesErr = DetectFileChanges(logCtx, preUntrackedFiles)
 		if changesErr != nil {
-			logging.Warn(logCtx, "failed to compute file changes",
-				slog.String("error", changesErr.Error()))
+			logStatusDegrade(logCtx, "failed to compute file changes", changesErr)
+		}
+		if changes != nil && preState != nil && preState.UntrackedScanSkipped {
+			// Same degradation as turn-end: without a pre-task baseline, every
+			// untracked file would be misreported as created by this task.
+			logging.Warn(logCtx, "skipping new-file detection: pre-task untracked scan was skipped")
+			changes.New = nil
 		}
 	}
 
@@ -1818,6 +1854,29 @@ func resolveTranscriptOffset(ctx context.Context, preState *PrePromptState, sess
 	}
 
 	return 0
+}
+
+// recordCaptureDegraded persists (or clears) the capture-degraded timestamp on
+// session state at turn end, so a status-budget breach is visible in
+// `entire status` instead of only in .entire/logs. A healthy turn clears it —
+// the marker means "the LAST turn degraded", not "some turn once did". Skips
+// the state write when nothing changes, which is the common case.
+func recordCaptureDegraded(ctx context.Context, sessionID string, degraded bool) {
+	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if !degraded && state.CaptureDegradedAt == nil {
+			return strategy.ErrMutationSkip
+		}
+		state.CaptureDegradedAt = nil
+		if degraded {
+			now := time.Now().UTC()
+			state.CaptureDegradedAt = &now
+		}
+		return nil
+	})
+	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to record capture degradation in session state",
+			slog.String("error", mutErr.Error()))
+	}
 }
 
 // transitionSessionTurnEnd transitions the session phase to IDLE and dispatches turn-end actions.

@@ -392,21 +392,58 @@ var (
 	protectedDirsCache []string
 )
 
+// warnUser logs a warning and, on a real terminal, repeats a one-line version
+// on stderr. Hooks log to .entire/logs/entire.log, where most users never
+// look, so anything the user must act on needs the breadcrumb too.
+func warnUser(ctx context.Context, component, msg, breadcrumb string, attrs ...any) {
+	logging.Warn(logging.WithComponent(ctx, component), msg, attrs...)
+	if interactive.IsTerminalWriter(os.Stderr) {
+		fmt.Fprintf(os.Stderr, "[entire] %s\n", breadcrumb)
+	}
+}
+
 var initRedactionOnce sync.Once
 
 // EnsureRedactionConfigured loads redaction settings and configures the
 // redact package: PII detection (opt-in), inline custom_redactions, and rule
 // packs auto-discovered from .entire/redactors/.
 //
-// Must be called at each process entry point before checkpoint writes.
-func EnsureRedactionConfigured() {
+// Call before checkpoint writes with a context descended from the root
+// pre-run, so redact's diagnostics reach .entire/logs/: hook contexts swallow
+// stderr, so otherwise a user grepping for component=redaction finds nothing
+// and concludes their rules never ran. Without a context logger they fall back
+// to stderr and the load-time summary is skipped.
+//
+// sync.Once: the first caller's context wins, and every caller is an entry
+// point that just built one.
+func EnsureRedactionConfigured(ctx context.Context) {
 	initRedactionOnce.Do(func() {
-		ctx := context.Background()
+		// Session-stamped: redact calls this logger without a context, so it
+		// cannot pick the session up the way logging.Warn does.
+		logger := logging.SessionLoggerFromContext(ctx)
+
+		// A canceled ctx (Ctrl-C mid-hook) would fail the settings read, consume
+		// the Once, and leave custom rules unconfigured — fail-open — for the
+		// rest of the process. Keep the ctx values, not its cancellation.
+		ctx := context.WithoutCancel(ctx)
+
 		s, err := settings.Load(ctx)
 		if err != nil {
 			logCtx := logging.WithComponent(ctx, "redaction")
 			logging.Warn(logCtx, "failed to load settings for redaction", slog.String("error", err.Error()))
 			return
+		}
+
+		// A tracked .entire/settings.local.json was ignored. Report it: the
+		// user's local overrides silently stopped applying, and the fix is
+		// not guessable from the symptom.
+		if reason := s.LocalLayerRejection(); reason != "" {
+			warnUser(ctx, "settings",
+				"ignoring .entire/settings.local.json",
+				"ignoring .entire/settings.local.json ("+reason+"); fix with: git rm --cached .entire/settings.local.json",
+				slog.String("reason", reason),
+				slog.String("remediation", "run: git rm --cached .entire/settings.local.json"),
+			)
 		}
 
 		// PII detection (opt-in).
@@ -416,6 +453,7 @@ func EnsureRedactionConfigured() {
 				Enabled:        true,
 				Categories:     make(map[redact.PIICategory]bool),
 				CustomPatterns: pii.CustomPatterns,
+				Logger:         logger,
 			}
 			cfg.Categories[redact.PIIEmail] = pii.Email == nil || *pii.Email
 			cfg.Categories[redact.PIIPhone] = pii.Phone == nil || *pii.Phone
@@ -435,33 +473,70 @@ func EnsureRedactionConfigured() {
 			logging.Warn(logCtx, "failed to resolve redactors path", slog.String("error", perr.Error()))
 			packsDir = packsRelPath
 		}
-		packs, lerr := redact.LoadPacks(packsDir)
+		packs, lerr := redact.LoadPacks(packsDir, logger)
 		if lerr != nil {
-			logCtx := logging.WithComponent(ctx, "redaction")
-			logging.Warn(logCtx, "failed to load redactor packs", slog.String("error", lerr.Error()))
-			// Hooks log to .entire/logs/entire.log, where most users never
-			// look. Surface a one-line breadcrumb on stderr when we have a
-			// real terminal so the user can find the detail.
-			if interactive.IsTerminalWriter(os.Stderr) {
-				fmt.Fprintf(os.Stderr, "[entire] redactor packs failed to load (%v); see .entire/logs/entire.log or run `entire doctor`.\n", lerr)
-			}
+			warnUser(ctx, "redaction",
+				"failed to load redactor packs",
+				fmt.Sprintf("redactor packs failed to load (%v); see .entire/logs/entire.log or run `entire doctor`.", lerr),
+				slog.String("error", lerr.Error()),
+			)
 		}
 		if len(inline) > 0 || len(packs) > 0 {
 			redact.ConfigureCustomRules(redact.CustomRulesConfig{
 				Inline: inline,
 				Packs:  packs,
+				Logger: logger,
 			})
 		}
 
 		// OpenAI Privacy Filter (opt-in 9th layer).
 		if s.Redaction != nil && s.Redaction.OpenAIPrivacyFilter != nil {
 			opf := s.Redaction.OpenAIPrivacyFilter
+			// The loader records rather than logs (see
+			// settings.enforceOPFCommandTrust); surface it here or a user
+			// whose configured binary is ignored gets no signal.
+			if cmd, reason, rejected := opf.CommandRejection(); rejected {
+				warnUser(ctx, "redaction",
+					"ignoring openai_privacy_filter.command; falling back to \"opf\" on $PATH",
+					fmt.Sprintf("ignoring openai_privacy_filter.command (%s); using \"opf\" from $PATH.", reason),
+					slog.String("reason", reason),
+					slog.String("ignored_command", cmd),
+					slog.String("remediation", "set redaction.openai_privacy_filter.command in .entire/settings.local.json, and keep that file out of version control"),
+				)
+			}
 			redact.ConfigurePrivacyFilter(redact.OPFConfig{
 				Enabled:    opf.Enabled,
 				Categories: opf.Categories,
 				Command:    opf.Command,
 				Timeout:    opf.TimeoutSeconds,
+				Logger:     logger,
 			})
+		}
+
+		// Load-time summary so "are my rules active?" is answerable from the
+		// log alone.
+		//
+		// Gated on an initialized logger: without one, logging.Info falls
+		// through to the process-default stderr logger, and an INFO line the
+		// user did not ask for would surface as terminal noise. WARN
+		// diagnostics are deliberately not gated — a broken rule is worth
+		// showing wherever it can be shown.
+		if logger != nil {
+			packRules := 0
+			for _, p := range packs {
+				packRules += len(p.Rules)
+			}
+			piiEnabled := s.Redaction != nil && s.Redaction.PII != nil && s.Redaction.PII.Enabled
+			logging.Info(logging.WithComponent(ctx, "redaction"), "redaction configured",
+				slog.Int("packs", len(packs)),
+				slog.Int("pack_rules", packRules),
+				slog.Int("inline_patterns", len(inline)),
+				// Configured counts above, compiled below: a gap between
+				// them means a rule failed to compile (warned separately).
+				slog.Int("active_rules", redact.ActiveCustomRules()),
+				slog.Bool("pii", piiEnabled),
+				slog.Bool("opf", redact.OPFEnabled()),
+			)
 		}
 	})
 }

@@ -237,14 +237,14 @@ func (c *ClaudeCodeAgent) parseSubagentStop(ctx context.Context, stdin io.Reader
 	}
 
 	return &agent.Event{
-		Type:               agent.SubagentEnd,
-		SessionID:          raw.SessionID,
-		SessionRef:         raw.TranscriptPath,
-		ToolUseID:          raw.ToolUseID,
-		SubagentID:         raw.AgentID,
-		SubagentTranscript: raw.AgentTranscriptPath,
-		Final:              true,
-		Timestamp:          time.Now(),
+		Type:                   agent.SubagentEnd,
+		SessionID:              raw.SessionID,
+		SessionRef:             raw.TranscriptPath,
+		ToolUseID:              raw.ToolUseID,
+		SubagentID:             raw.AgentID,
+		SubagentTranscriptPath: raw.AgentTranscriptPath,
+		Final:                  true,
+		Timestamp:              time.Now(),
 	}, nil
 }
 

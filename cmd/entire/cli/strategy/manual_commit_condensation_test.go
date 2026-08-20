@@ -746,6 +746,25 @@ func TestCondenseSession_TaskRecordMissingTranscriptPath_RecordsUnavailableReaso
 			},
 			wantReason: taskTranscriptReasonEmpty,
 		},
+		{
+			name:         "declared path exceeds the blob size cap",
+			toolUseID:    "toolu_toolarge",
+			checkpointID: "aabbccddaa04",
+			declaredPath: func(t *testing.T) string {
+				t.Helper()
+				p := filepath.Join(t.TempDir(), "agent-transcript.jsonl")
+				// Sanitizing leaves this as-is (no Codex payloads to strip), so
+				// the sanitized size the cap measures is the size written here.
+				line := `{"type":"user","content":"` + strings.Repeat("x", 4096) + `"}` + "\n"
+				var big strings.Builder
+				for big.Len() <= agent.MaxChunkSize {
+					big.WriteString(line)
+				}
+				require.NoError(t, os.WriteFile(p, []byte(big.String()), 0o644))
+				return p
+			},
+			wantReason: taskTranscriptReasonTooLarge,
+		},
 	}
 
 	for _, tt := range tests {
