@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -14,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/perf"
 
@@ -198,6 +200,9 @@ func (s *ManualCommitStrategy) ensureSessionInitialized(ctx context.Context, rep
 
 // SaveTaskStep saves a task step checkpoint to the shadow branch.
 // Uses checkpoint.EphemeralStore.Write with a checkpoint.TaskStep request.
+// Remains for incremental checkpoints only (post-todo and the turn-end
+// background backstop); final subagent captures write task records instead
+// (CompleteTaskRecord / UpsertCompletedTaskRecord).
 func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepContext) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -274,27 +279,6 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 
 		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
 
-		// A transcript-only task step (a background read-only subagent, saved
-		// via the SubagentStop Final path's no-changes bypass) touches no
-		// files, so the FilesTouched merge above is a no-op for it: it would
-		// otherwise register with neither FilesTouched nor StepCount, and every
-		// condensation trigger keys on one of those two signals — so it would
-		// sit on a shadow branch that gets marked FullyCondensed via
-		// CondenseAndMarkFullyCondensed's shortcut without ever being
-		// condensed, then destroyed as an orphan. TranscriptOnlyTaskSteps is
-		// the dedicated signal that makes those triggers take the real
-		// condense path. It is NOT StepCount: StepCount's ==0/==1 values carry
-		// first-checkpoint-baseline and transcript-anchor semantics in
-		// SaveStep (see SaveStep above), so incrementing StepCount here
-		// would make a background capture landing before the session's first
-		// SaveStep silently kill both. Incremental checkpoints are excluded:
-		// they intentionally stay invisible to condensation until a
-		// session-level step counts them, matching the existing per-todo
-		// incremental behavior.
-		if !step.IsIncremental && len(step.ModifiedFiles) == 0 && len(step.NewFiles) == 0 && len(step.DeletedFiles) == 0 {
-			state.TranscriptOnlyTaskSteps++
-		}
-
 		if !branchExisted {
 			logging.Info(logging.WithComponent(ctx, "checkpoint"), "created shadow branch and committed task checkpoint",
 				slog.String("shadow_branch", shadowBranchName))
@@ -355,6 +339,95 @@ func mergeFilesTouched(existing []string, fileLists ...[]string) []string {
 	// Sort for deterministic output
 	sort.Strings(result)
 	return result
+}
+
+// EnsureSessionExists creates sessionID's state when missing — SaveTaskStep's
+// old parent-state guarantee, for producers that write task records instead
+// of shadow task steps.
+func (s *ManualCommitStrategy) EnsureSessionExists(ctx context.Context, sessionID string, agentType types.AgentType) error {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to open git repository: %w", err)
+	}
+	defer repo.Close()
+	return s.ensureSessionInitialized(ctx, repo, sessionID, agentType)
+}
+
+// applyTaskRecordCompletion attaches a completed task's results to its record
+// and to the session: files merge into FilesTouched (invariant: carry-forward
+// and PostCommit gating must see task files exactly as the shadow task write
+// used to provide), and a zero-file completion bumps TranscriptOnlyTaskSteps
+// so the condensation triggers still fire for a read-only subagent (Task 4
+// rewires those triggers onto the records themselves).
+func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) {
+	live := state.FindTaskRecord(rec.ToolUseID)
+	live.Files = mergeFilesTouched(nil, rec.Files)
+	live.DeclaredTranscriptPath = rec.DeclaredTranscriptPath
+	if rec.TokenUsage != nil {
+		live.TokenUsage = rec.TokenUsage
+	}
+	if live.AgentID == "" {
+		live.AgentID = rec.AgentID
+	}
+	state.FilesTouched = mergeFilesTouched(state.FilesTouched, rec.Files)
+	if len(rec.Files) == 0 {
+		state.TranscriptOnlyTaskSteps++
+	}
+}
+
+// CompleteTaskRecord marks the record for rec.ToolUseID completed exactly once
+// and attaches the capture's results (files, declared transcript path, tokens)
+// in the same MutateSessionState closure, per session.State.CompleteTaskRecord's
+// contract. When no launch stub exists the record is created first: foreground
+// tasks have no launch hook, so completion is the only event that can produce
+// their record. Returns false without error when a racing Final event already
+// completed the record, or when no session state exists.
+func CompleteTaskRecord(ctx context.Context, sessionID string, rec session.TaskRecord) (bool, error) {
+	completed := false
+	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if state.FindTaskRecord(rec.ToolUseID) == nil {
+			state.AddTaskRecord(session.TaskRecord{
+				ToolUseID:       rec.ToolUseID,
+				AgentID:         rec.AgentID,
+				StartedAt:       rec.StartedAt,
+				SubagentType:    rec.SubagentType,
+				TaskDescription: rec.TaskDescription,
+			})
+		}
+		if !state.CompleteTaskRecord(rec.ToolUseID, time.Now()) {
+			return ErrMutationSkip
+		}
+		applyTaskRecordCompletion(state, rec)
+		completed = true
+		return nil
+	})
+	if errors.Is(mutErr, ErrStateNotFound) {
+		return false, nil
+	}
+	return completed, mutErr
+}
+
+// UpsertCompletedTaskRecord writes a COMPLETED task record, merging files into
+// any existing record for the same ToolUseID — the multi-turn producer shape
+// (Factory Droid Workers reach turn-end once per Worker turn, all attributed
+// to one parent tool use), unlike CompleteTaskRecord's exactly-once claim.
+func UpsertCompletedTaskRecord(ctx context.Context, sessionID string, rec session.TaskRecord) error {
+	return MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if existing := state.FindTaskRecord(rec.ToolUseID); existing != nil {
+			rec.Files = mergeFilesTouched(existing.Files, rec.Files)
+		} else {
+			state.AddTaskRecord(session.TaskRecord{
+				ToolUseID:       rec.ToolUseID,
+				AgentID:         rec.AgentID,
+				StartedAt:       rec.StartedAt,
+				SubagentType:    rec.SubagentType,
+				TaskDescription: rec.TaskDescription,
+			})
+		}
+		state.CompleteTaskRecord(rec.ToolUseID, time.Now())
+		applyTaskRecordCompletion(state, rec)
+		return nil
+	})
 }
 
 // accumulateTokenUsage adds new token usage to existing accumulated usage.

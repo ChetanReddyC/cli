@@ -399,10 +399,10 @@ type State struct {
 // so a later condensation can materialize its transcript. Consumed by the
 // turn-end incremental snapshot (captureInFlightTaskIncremental) and the
 // Final captures — the SubagentStop handler (handleSubagentStopFinal) and the
-// SessionEnd sweep (captureInFlightTaskFinal). A Final capture claims the
-// record up-front via claimTaskRecord (marking it completed, exactly once)
-// before capturing, so completion is recorded regardless of capture outcome.
-// Turn-end snapshots leave the record live (uncompleted).
+// SessionEnd sweep (completeLiveTaskRecords). A Final capture completes the
+// record LAST, after successful extraction (strategy.CompleteTaskRecord's
+// exactly-once mutation), so a failed capture leaves the record live for the
+// SessionEnd sweep to retry. Turn-end snapshots leave the record live.
 type TaskRecord struct {
 	// ToolUseID is the Task tool invocation's tool_use_id — the same ID used
 	// to key TaskMetadataDir. Dedup key for AddTaskRecord.
@@ -532,12 +532,9 @@ func (s *State) FindTaskRecord(toolUseID string) *TaskRecord {
 // The data fields (DeclaredTranscriptPath, Files, TokenUsage) are NOT set
 // here. They are populated separately by the producer after successful
 // extraction, via direct field mutation on the claimed record within the
-// same MutateSessionState closure that called CompleteTaskRecord — extraction
-// can fail independently of the claim, and a signature that also carried
-// these fields would need callers to pass zero values before they have
-// anything to report (claimTaskRecord runs before capture) or reject a
-// second, already-guarded call that tries to attach them (there is no such
-// call: extraction happens inside the same lock as the claim).
+// same MutateSessionState closure that called CompleteTaskRecord — see
+// strategy.CompleteTaskRecord, the producer-facing wrapper that pairs the
+// claim with the attach inside one lock.
 func (s *State) CompleteTaskRecord(toolUseID string, completedAt time.Time) bool {
 	for i := range s.TaskRecords {
 		if s.TaskRecords[i].ToolUseID != toolUseID {

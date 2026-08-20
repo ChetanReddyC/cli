@@ -123,8 +123,25 @@ func TestSubagentCheckpoints_FullFlow(t *testing.T) {
 		t.Error("Pre-task file should be removed after PostTask")
 	}
 
-	// Verify checkpoints are stored in final location (strategy-specific)
-	verifyCheckpointStorage(t, env, session.ID, taskToolUseID)
+	// Incremental checkpoints (PostTodo) still live on the shadow branch.
+	verifyIncrementalCheckpointStorage(t, env, session.ID, taskToolUseID)
+
+	// PostTask completes a durable task record on session state (#2058) —
+	// no final shadow task step is written anymore.
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	rec := state.FindTaskRecord(taskToolUseID)
+	if rec == nil || rec.CompletedAt.IsZero() {
+		t.Fatalf("expected a completed task record for %s after PostTask, got %+v", taskToolUseID, rec)
+	}
+	if !containsFile(rec.Files, "feature.go") || !containsFile(rec.Files, "feature_test.go") {
+		t.Errorf("the completed record must carry the task's files, got %v", rec.Files)
+	}
+	if !containsFile(state.FilesTouched, "feature.go") || !containsFile(state.FilesTouched, "feature_test.go") {
+		t.Errorf("task files must merge into FilesTouched, got %v", state.FilesTouched)
+	}
 }
 
 // TestSubagentCheckpoints_NoFileChanges tests that PostTodo is skipped when no file changes
@@ -279,20 +296,10 @@ func TestSubagentCheckpoints_NoPreTaskFile(t *testing.T) {
 	}
 }
 
-// verifyCheckpointStorage verifies that checkpoints are stored in the correct
-// location based on the strategy type.
-// Note: Incremental checkpoints are stored in separate commits during task execution,
-// while the final checkpoint.json is created at PostTask time.
-func verifyCheckpointStorage(t *testing.T, env *TestEnv, sessionID, taskToolUseID string) {
-	t.Helper()
-
-	// Manual-commit stores checkpoints in git tree on shadow branch (entire/<head-hash>)
-	// We need to verify that checkpoint data exists in the shadow branch tree
-	verifyShadowCheckpointStorage(t, env, sessionID, taskToolUseID)
-}
-
-// verifyShadowCheckpointStorage verifies that checkpoints are stored in the shadow branch git tree.
-func verifyShadowCheckpointStorage(t *testing.T, env *TestEnv, sessionID, taskToolUseID string) {
+// verifyIncrementalCheckpointStorage verifies PostTodo's incremental
+// checkpoints are stored in the shadow branch git tree (the surviving shadow
+// task write; final captures are task records on session state).
+func verifyIncrementalCheckpointStorage(t *testing.T, env *TestEnv, sessionID, taskToolUseID string) {
 	t.Helper()
 
 	repo, err := git.PlainOpen(env.RepoDir)
@@ -300,54 +307,25 @@ func verifyShadowCheckpointStorage(t *testing.T, env *TestEnv, sessionID, taskTo
 		t.Fatalf("failed to open repo: %v", err)
 	}
 
-	// Get shadow branch name using worktree-specific naming
 	shadowBranchName := env.GetShadowBranchName()
-
-	// Get shadow branch reference
 	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranchName), true)
 	if err != nil {
 		t.Fatalf("shadow branch %s not found: %v", shadowBranchName, err)
 	}
-
-	// Get the commit and tree from shadow branch
 	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
 	if err != nil {
 		t.Fatalf("failed to get shadow commit: %v", err)
 	}
-
 	shadowTree, err := shadowCommit.Tree()
 	if err != nil {
 		t.Fatalf("failed to get shadow tree: %v", err)
 	}
 
-	// Look for task metadata in the tree
-	// Path format: .entire/metadata/<session-id>/tasks/<task-id>/
-	taskMetadataPrefix := ".entire/metadata/" + sessionID + "/tasks/" + taskToolUseID + "/"
-	checkpointsPrefix := taskMetadataPrefix + "checkpoints/"
-
-	foundCheckpoint := false
+	checkpointsPrefix := ".entire/metadata/" + sessionID + "/tasks/" + taskToolUseID + "/checkpoints/"
 	foundCheckpointFiles := 0
-
 	err = shadowTree.Files().ForEach(func(f *object.File) error {
-		// Check for checkpoint file (final checkpoint)
-		if f.Name == taskMetadataPrefix+paths.CheckpointFileName {
-			foundCheckpoint = true
-			// Verify content is valid JSON
-			content, readErr := f.Contents()
-			if readErr != nil {
-				t.Errorf("failed to read %s: %v", paths.CheckpointFileName, readErr)
-				return nil
-			}
-			var cp strategy.TaskCheckpoint
-			if jsonErr := json.Unmarshal([]byte(content), &cp); jsonErr != nil {
-				t.Errorf("%s is invalid JSON: %v", paths.CheckpointFileName, jsonErr)
-			}
-		}
-
-		// Check for incremental checkpoints in checkpoints/ directory
 		if strings.HasPrefix(f.Name, checkpointsPrefix) && strings.HasSuffix(f.Name, ".json") {
 			foundCheckpointFiles++
-			// Verify content is valid checkpoint JSON
 			content, readErr := f.Contents()
 			if readErr != nil {
 				t.Errorf("failed to read checkpoint file %s: %v", f.Name, readErr)
@@ -357,7 +335,6 @@ func verifyShadowCheckpointStorage(t *testing.T, env *TestEnv, sessionID, taskTo
 			if jsonErr := json.Unmarshal([]byte(content), &cp); jsonErr != nil {
 				t.Errorf("checkpoint file %s is invalid JSON: %v", f.Name, jsonErr)
 			}
-			// Verify required fields
 			if cp.Type == "" {
 				t.Errorf("checkpoint file %s missing type field", f.Name)
 			}
@@ -365,22 +342,25 @@ func verifyShadowCheckpointStorage(t *testing.T, env *TestEnv, sessionID, taskTo
 				t.Errorf("checkpoint file %s missing tool_use_id field", f.Name)
 			}
 		}
-
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("failed to iterate shadow tree: %v", err)
 	}
 
-	if !foundCheckpoint {
-		t.Errorf("%s not found in shadow branch tree at %s", paths.CheckpointFileName, taskMetadataPrefix+paths.CheckpointFileName)
-	}
-
 	if foundCheckpointFiles == 0 {
-		t.Logf("Note: no incremental checkpoint files found in %s - they may be in earlier commits", checkpointsPrefix)
-	} else {
-		t.Logf("Found %d incremental checkpoint files in shadow branch tree", foundCheckpointFiles)
+		t.Errorf("expected incremental checkpoint files under %s", checkpointsPrefix)
 	}
+}
+
+// containsFile reports whether files contains path.
+func containsFile(files []string, path string) bool {
+	for _, f := range files {
+		if f == path {
+			return true
+		}
+	}
+	return false
 }
 
 // hasTaskRecord reports whether state has a record — live or completed — for
@@ -421,10 +401,12 @@ func hasLiveTaskRecord(state *strategy.SessionState, toolUseID string) bool {
 // TestSubagentCheckpoints_StoresSubagentTranscript uses) so the real
 // transcript analyzer, not a stub, is what extracts the modified file:
 //  1. post-task with run_in_background: true records an in-flight marker and
-//     writes NO task checkpoint — capture is deferred, not lost.
-//  2. subagent-stop (the authoritative final capture) writes the task
-//     checkpoint with the subagent's real modified file and its own
-//     transcript, and clears the marker.
+//     completes nothing — capture is deferred, not lost.
+//  2. subagent-stop (the authoritative final capture) completes the record
+//     with the subagent's real modified file and declared transcript path.
+//  3. the next commit's condensation materializes the record's transcript
+//     under the permanent checkpoint's tasks/ subtree (#2058's pointer model,
+//     anchored through the real hook pipeline).
 func TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
@@ -456,18 +438,13 @@ func TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop(t *testing.T)
 		t.Fatalf("SimulatePostTask (background stub) failed: %v", err)
 	}
 
-	// Marker recorded; no task checkpoint written from the stub.
+	// Marker recorded; nothing completed from the stub.
 	state, err := env.GetSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}
 	if state == nil || !hasLiveTaskRecord(state, taskToolUseID) {
 		t.Fatalf("expected in-flight marker for %s after background launch stub, state=%+v", taskToolUseID, state)
-	}
-
-	checkpointPath := paths.EntireMetadataDir + "/" + session.ID + "/tasks/" + taskToolUseID + "/" + paths.CheckpointFileName
-	if env.FileExistsInBranch(env.GetShadowBranchName(), checkpointPath) {
-		t.Fatalf("task checkpoint should not exist after the background launch stub (deferred to subagent-stop): %s", checkpointPath)
 	}
 
 	// The subagent does its actual work: a realistic transcript (parsed by the
@@ -489,40 +466,44 @@ func TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop(t *testing.T)
 		t.Fatalf("SimulateSubagentStop failed: %v", err)
 	}
 
-	// Marker cleared.
+	// The record is completed with the analyzer-extracted file and the
+	// declared transcript path, and the file joins the session's FilesTouched.
 	state, err = env.GetSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}
-	if state != nil && hasLiveTaskRecord(state, taskToolUseID) {
-		t.Errorf("in-flight marker for %s should be cleared (completed) after subagent-stop", taskToolUseID)
+	if state == nil || hasLiveTaskRecord(state, taskToolUseID) {
+		t.Fatalf("in-flight marker for %s should be completed after subagent-stop, state=%+v", taskToolUseID, state)
+	}
+	rec := state.FindTaskRecord(taskToolUseID)
+	if rec == nil {
+		t.Fatalf("expected a completed task record for %s", taskToolUseID)
+	}
+	if !containsFile(rec.Files, editedFile) {
+		t.Errorf("the completed record must carry the subagent's real modified file, got %v", rec.Files)
+	}
+	if rec.DeclaredTranscriptPath != subagentTranscriptPath {
+		t.Errorf("the completed record must carry the declared transcript path, got %q", rec.DeclaredTranscriptPath)
+	}
+	if !containsFile(state.FilesTouched, editedFile) {
+		t.Errorf("the subagent's file must merge into FilesTouched, got %v", state.FilesTouched)
 	}
 
-	// Task checkpoint now exists.
-	shadowBranch := env.GetShadowBranchName()
-	if !env.FileExistsInBranch(shadowBranch, checkpointPath) {
-		t.Fatalf("task checkpoint missing after subagent-stop: %s", checkpointPath)
+	// The next commit condenses the session; the materializer must store the
+	// record's transcript under the checkpoint's tasks/ subtree — the #2058
+	// end-to-end guarantee this whole pipeline exists for.
+	env.GitCommitWithShadowHooksAsAgent("Add background doc", editedFile)
+	checkpointID := env.TryGetLatestCheckpointID()
+	if checkpointID == "" {
+		t.Fatal("expected a condensed checkpoint after committing the subagent's work")
 	}
-
-	// The subagent's own transcript is stored and references the edited file.
-	// This pins what got captured, not how: the capture path merges the real
-	// transcript analyzer's output with git-status detection, so a second
-	// untracked file would also show up here via git status by design (unit
-	// tests cover the analyzer-extraction split in isolation).
-	transcriptWantPath := paths.EntireMetadataDir + "/" + session.ID + "/tasks/" + taskToolUseID + "/" + paths.AgentTranscriptFileName(subagentID)
-	content, ok := env.ReadFileFromBranch(shadowBranch, transcriptWantPath)
+	storedTranscript, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
+		CheckpointTaskFilePath(checkpointID, taskToolUseID, "agent-"+subagentID+".jsonl"))
 	if !ok {
-		t.Fatalf("subagent transcript not stored at %s", transcriptWantPath)
+		t.Fatalf("subagent transcript not materialized under the checkpoint's tasks/ subtree")
 	}
-	if !strings.Contains(content, editedFile) {
-		t.Errorf("stored subagent transcript does not reference the modified file %q: %q", editedFile, content)
-	}
-
-	// The modified file's real content was captured into the shadow tree at
-	// its real repo path — proof the checkpoint carries the subagent's actual
-	// work, not just an empty stub.
-	if !env.FileExistsInBranch(shadowBranch, editedFile) {
-		t.Errorf("modified file %s not captured into shadow branch tree", editedFile)
+	if !strings.Contains(storedTranscript, editedFile) {
+		t.Errorf("materialized subagent transcript does not reference the modified file %q: %q", editedFile, storedTranscript)
 	}
 }
 
@@ -590,12 +571,6 @@ func TestSubagentCheckpoints_TurnEndBackstop_ThenSubagentStop(t *testing.T) {
 		t.Fatalf("expected in-flight marker for %s to survive turn-end, state=%+v", taskToolUseID, state)
 	}
 
-	// The final (non-incremental) task checkpoint does not exist yet.
-	finalCheckpointPath := paths.EntireMetadataDir + "/" + session.ID + "/tasks/" + taskToolUseID + "/" + paths.CheckpointFileName
-	if env.FileExistsInBranch(shadowBranch, finalCheckpointPath) {
-		t.Fatalf("final task checkpoint should not exist before subagent-stop: %s", finalCheckpointPath)
-	}
-
 	// subagent-stop arrives: the authoritative final capture.
 	if err := env.SimulateSubagentStop(SubagentStopInput{
 		SessionID:           session.ID,
@@ -607,31 +582,31 @@ func TestSubagentCheckpoints_TurnEndBackstop_ThenSubagentStop(t *testing.T) {
 		t.Fatalf("SimulateSubagentStop failed: %v", err)
 	}
 
-	// Final capture landed; marker cleared. The full final-capture assertions
-	// (stored subagent transcript, captured file content) live in
+	// Final completion landed. The full final-capture assertions (declared
+	// transcript path, materialized transcript) live in
 	// TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop.
-	if !env.FileExistsInBranch(shadowBranch, finalCheckpointPath) {
-		t.Fatalf("final task checkpoint missing after subagent-stop: %s", finalCheckpointPath)
-	}
 	state, err = env.GetSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}
-	if state != nil && hasLiveTaskRecord(state, taskToolUseID) {
-		t.Errorf("in-flight marker for %s should be cleared (completed) after subagent-stop", taskToolUseID)
+	if state == nil || hasLiveTaskRecord(state, taskToolUseID) {
+		t.Errorf("in-flight marker for %s should be completed after subagent-stop", taskToolUseID)
+	}
+	rec := state.FindTaskRecord(taskToolUseID)
+	if rec == nil || !containsFile(rec.Files, editedFile) {
+		t.Errorf("the completed record must carry the subagent's file, got %+v", rec)
 	}
 }
 
 // TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce: a foreground task
-// (no run_in_background) is captured immediately at post-task time and never
-// records an in-flight marker. Claude Code fires SubagentStop for every
-// completed Task, foreground and background alike, so entire also sees a
-// SubagentStop for this same tool_use_id after the foreground capture already
-// ran. Without the marker-claim guard, that second event would re-run the
-// capture and produce a duplicate task checkpoint / commit. This verifies the
-// regression is closed: exactly one task checkpoint is written, no in-flight
-// marker is ever created for a foreground task, and the SubagentStop
-// double-fire produces no additional commit.
+// (no run_in_background) completes immediately at post-task time — its record
+// is created-on-completion, already completed. Claude Code fires SubagentStop
+// for every completed Task, foreground and background alike, so entire also
+// sees a SubagentStop for this same tool_use_id after the foreground
+// completion already ran. Without the exactly-once completion guard, that
+// second event would re-run the capture. This verifies the regression stays
+// closed: the record completes exactly once and the SubagentStop double-fire
+// produces no additional commit.
 func TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
@@ -664,24 +639,23 @@ func TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce(t *testing.T) {
 		t.Fatalf("SimulatePostTask failed: %v", err)
 	}
 
-	// Foreground tasks never record an in-flight marker.
+	// Foreground tasks complete their record at post-task time.
 	state, err := env.GetSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}
-	if state != nil && hasTaskRecord(state, taskToolUseID) {
-		t.Fatalf("foreground task should never record an in-flight marker, state=%+v", state)
+	if state == nil || !hasTaskRecord(state, taskToolUseID) || hasLiveTaskRecord(state, taskToolUseID) {
+		t.Fatalf("foreground post-task must leave a COMPLETED record, state=%+v", state)
 	}
-
-	checkpointPath := paths.EntireMetadataDir + "/" + session.ID + "/tasks/" + taskToolUseID + "/" + paths.CheckpointFileName
-	shadowBranch := env.GetShadowBranchName()
-	if !env.FileExistsInBranch(shadowBranch, checkpointPath) {
-		t.Fatalf("task checkpoint missing after foreground post-task: %s", checkpointPath)
+	rec := state.FindTaskRecord(taskToolUseID)
+	if !containsFile(rec.Files, editedFile) {
+		t.Fatalf("the foreground record must carry the task's file, got %v", rec.Files)
 	}
+	firstCompletedAt := rec.CompletedAt
 	commitsAfterPostTask := env.GetGitLog()
 
-	// The double-fire: SubagentStop for the same tool_use_id, with no marker
-	// left to claim. Must be a no-op, not a second capture.
+	// The double-fire: SubagentStop for the same tool_use_id, with the record
+	// already completed. Must be a no-op, not a second capture.
 	if err := env.SimulateSubagentStop(SubagentStopInput{
 		SessionID:      session.ID,
 		TranscriptPath: session.TranscriptPath,
@@ -697,17 +671,13 @@ func TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce(t *testing.T) {
 			len(commitsAfterPostTask), len(commitsAfterSubagentStop))
 	}
 
-	// Still exactly one task checkpoint, and still no marker was ever
-	// created.
-	shadowBranch = env.GetShadowBranchName()
-	if !env.FileExistsInBranch(shadowBranch, checkpointPath) {
-		t.Fatalf("task checkpoint missing after subagent-stop double-fire: %s", checkpointPath)
-	}
+	// Still exactly one completion.
 	state, err = env.GetSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}
-	if state != nil && hasTaskRecord(state, taskToolUseID) {
-		t.Errorf("in-flight marker for %s should not exist after a foreground double-fire", taskToolUseID)
+	rec = state.FindTaskRecord(taskToolUseID)
+	if rec == nil || !rec.CompletedAt.Equal(firstCompletedAt) {
+		t.Errorf("the double-fire must not re-complete the record, got %+v", rec)
 	}
 }

@@ -1601,13 +1601,15 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		_, refErr := repo.Reference(refName, true)
 		hasShadowBranch := refErr == nil
 
-		if !hasShadowBranch {
+		// Transcript-only task records never write a shadow branch, so their
+		// sessions must condense from the live transcript (CondenseSession's
+		// documented no-shadow-branch path) rather than take this shortcut.
+		if !hasShadowBranch && state.TranscriptOnlyTaskSteps <= 0 {
 			logging.Info(logCtx, "eager condense: no shadow branch",
 				slog.String("session_id", sessionID),
 				slog.String("shadow_branch", shadowBranchName),
 			)
 			state.StepCount = 0
-			state.TranscriptOnlyTaskSteps = 0
 			state.FullyCondensed = true
 			return nil
 		}
