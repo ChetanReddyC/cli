@@ -20,6 +20,26 @@ type interruptedRecoveryStore struct {
 	failAt       string
 }
 
+type multiCandidateRecoveryStore struct {
+	*interruptedRecoveryStore
+
+	unreadableID id.CheckpointID
+}
+
+func (s *multiCandidateRecoveryStore) List(context.Context) ([]cpkg.CheckpointInfo, error) {
+	return []cpkg.CheckpointInfo{
+		{CheckpointID: s.unreadableID, SessionID: s.sessionID},
+		{CheckpointID: s.checkpointID, SessionID: s.sessionID},
+	}, nil
+}
+
+func (s *multiCandidateRecoveryStore) Read(ctx context.Context, checkpointID id.CheckpointID) (*cpkg.CheckpointSummary, error) {
+	if checkpointID == s.unreadableID {
+		return nil, errors.New("checkpoint read failed")
+	}
+	return s.interruptedRecoveryStore.Read(ctx, checkpointID)
+}
+
 func (s *interruptedRecoveryStore) List(context.Context) ([]cpkg.CheckpointInfo, error) {
 	if s.failAt == "list" {
 		return nil, errors.New("list failed")
@@ -80,6 +100,34 @@ func TestFindInterruptedCondensation_PropagatesIndeterminateReadErrors(t *testin
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestFindInterruptedCondensation_ContinuesPastUnreadableCandidate(t *testing.T) {
+	t.Parallel()
+
+	state := &SessionState{
+		SessionID:                   "interrupted-session",
+		CheckpointTranscriptStart:   2,
+		TranscriptIdentifierAtStart: "transcript-start",
+		StepCount:                   1,
+	}
+	matchingID := id.MustCheckpointID("222222222222")
+	store := &multiCandidateRecoveryStore{
+		interruptedRecoveryStore: &interruptedRecoveryStore{
+			checkpointID: matchingID,
+			sessionID:    state.SessionID,
+		},
+		unreadableID: id.MustCheckpointID("111111111111"),
+	}
+
+	checkpointID, found, err := findInterruptedCondensation(
+		context.Background(), store, state,
+		redact.AlreadyRedacted([]byte("expected transcript")), nil,
+	)
+
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, matchingID, checkpointID)
 }
 
 func TestPostCommitProcessSessionLocked_PreservesDifferentReservedAttempt(t *testing.T) {

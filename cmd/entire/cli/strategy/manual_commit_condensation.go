@@ -371,7 +371,11 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	if err != nil {
 		return nil, err
 	}
-	recovery := recoverInterruptedCondensation(ctx, logCtx, o.reconcileInterrupted && state.NeedsCondensationRecovery(), store, state, redactedTranscript, extractedAssets, sessionData, transcriptSizeBaseline)
+	recovery := recoverInterruptedCondensation(
+		ctx, logCtx,
+		o.reconcileInterrupted && state.NeedsCondensationRecovery(),
+		store, state, redactedTranscript, extractedAssets, sessionData, transcriptSizeBaseline,
+	)
 	if recovery.done {
 		return recovery.result, recovery.err
 	}
@@ -451,6 +455,8 @@ func condensationSessionWriteRequest(opts cpkg.WriteOptions) cpkg.WriteRequest {
 	return cpkg.ReservedSession(opts)
 }
 
+// Post-commit emits regex-only blobs here. OPF runs later in the pre-push
+// rewrite path, never during condensation.
 func buildCondensationWriteOptions(
 	ctx context.Context,
 	repo *git.Repository,
@@ -1318,6 +1324,16 @@ func ensureCondensationAttemptID(ctx context.Context, state *SessionState) (id.C
 	return checkpointID, true, nil
 }
 
+// ReserveSessionEndCondensation records the write-ahead checkpoint ID for an
+// ENDED session that is eligible for eager condensation.
+func ReserveSessionEndCondensation(ctx context.Context, state *SessionState) error {
+	if state.Phase != session.PhaseEnded || len(state.FilesTouched) > 0 || state.StepCount <= 0 {
+		return nil
+	}
+	_, _, err := ensureCondensationAttemptID(ctx, state)
+	return err
+}
+
 func reserveDoctorCondensationAttempt(ctx context.Context, state *SessionState) (id.CheckpointID, error) {
 	checkpointID, created, err := ensureCondensationAttemptID(ctx, state)
 	if err != nil {
@@ -1428,6 +1444,37 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	return nil
 }
 
+func prepareEagerCondensation(
+	logCtx context.Context,
+	repo *git.Repository,
+	state *SessionState,
+) (shadowBranchName string, shouldCondense bool, err error) {
+	// Files waiting for a user commit belong to PostCommit's carry-forward path.
+	if len(state.FilesTouched) > 0 {
+		return "", false, ErrMutationSkip
+	}
+	if state.StepCount <= 0 {
+		state.FullyCondensed = true
+		state.ClearCondensationAttempt()
+		return "", false, nil
+	}
+
+	shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+	if _, refErr := repo.Reference(refName, true); refErr != nil {
+		logging.Info(logCtx, "eager condense: no shadow branch",
+			slog.String("session_id", state.SessionID),
+			slog.String("shadow_branch", shadowBranchName),
+		)
+		state.StepCount = 0
+		state.FullyCondensed = true
+		state.ClearCondensationAttempt()
+		return shadowBranchName, false, nil //nolint:nilerr // A missing shadow branch means there is no remaining work to condense.
+	}
+
+	return shadowBranchName, true, nil
+}
+
 // CondenseAndMarkFullyCondensed condenses an ENDED session and marks it
 // FullyCondensed in one operation. Used by the session stop hook to eagerly
 // clean up sessions so PostCommit doesn't have to process them.
@@ -1454,46 +1501,39 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 
 	var shadowBranchName string
 	var checkpointID id.CheckpointID
-	var shouldCondense bool
-	reserveErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		if len(state.FilesTouched) > 0 {
-			return ErrMutationSkip
-		}
-		if state.StepCount <= 0 {
-			state.FullyCondensed = true
-			state.ClearCondensationAttempt()
-			return nil
-		}
-
-		shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		refName := plumbing.NewBranchReferenceName(shadowBranchName)
-		if _, refErr := repo.Reference(refName, true); refErr != nil {
-			logging.Info(logCtx, "eager condense: no shadow branch",
-				slog.String("session_id", sessionID),
-				slog.String("shadow_branch", shadowBranchName),
-			)
-			state.StepCount = 0
-			state.FullyCondensed = true
-			state.ClearCondensationAttempt()
-			return nil //nolint:nilerr // A missing shadow branch means there is no remaining work to condense.
-		}
-
-		var reserveErr error
-		checkpointID, _, reserveErr = ensureCondensationAttemptID(logCtx, state)
-		if reserveErr == nil {
-			shouldCondense = true
-		}
-		return reserveErr
-	})
-	if errors.Is(reserveErr, ErrStateNotFound) || errors.Is(reserveErr, ErrMutationSkip) {
-		return nil
-	}
-	if reserveErr != nil {
-		logging.Warn(logCtx, "eager condense: failed to reserve checkpoint ID",
+	reservedState, loadErr := s.loadSessionState(ctx, sessionID)
+	if loadErr != nil {
+		logging.Warn(logCtx, "eager condense: failed to load reserved checkpoint ID",
 			slog.String("session_id", sessionID),
-			slog.String("error", reserveErr.Error()),
+			slog.String("error", loadErr.Error()),
 		)
 		return nil
+	}
+	if reservedState == nil {
+		return nil
+	}
+	checkpointID = reservedState.PendingCondensationID()
+	shouldCondense := checkpointID != id.EmptyCheckpointID
+	if !shouldCondense {
+		reserveErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+			var preflightErr error
+			shadowBranchName, shouldCondense, preflightErr = prepareEagerCondensation(logCtx, repo, state)
+			if preflightErr != nil || !shouldCondense {
+				return preflightErr
+			}
+			checkpointID, _, preflightErr = ensureCondensationAttemptID(logCtx, state)
+			return preflightErr
+		})
+		if errors.Is(reserveErr, ErrStateNotFound) || errors.Is(reserveErr, ErrMutationSkip) {
+			return nil
+		}
+		if reserveErr != nil {
+			logging.Warn(logCtx, "eager condense: failed to reserve checkpoint ID",
+				slog.String("session_id", sessionID),
+				slog.String("error", reserveErr.Error()),
+			)
+			return nil
+		}
 	}
 	if !shouldCondense {
 		return nil
@@ -1501,34 +1541,10 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 
 	var didCondense bool
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		// Sessions with FilesTouched must be processed by PostCommit for
-		// carry-forward tracking — each user commit that overlaps with
-		// tracked files gets its own checkpoint. Eagerly condensing here
-		// would prevent that 1:1 linkage.
-		if len(state.FilesTouched) > 0 {
-			return ErrMutationSkip
-		}
-
-		if state.StepCount <= 0 {
-			state.FullyCondensed = true
-			state.ClearCondensationAttempt()
-			return nil
-		}
-
-		shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		refName := plumbing.NewBranchReferenceName(shadowBranchName)
-		_, refErr := repo.Reference(refName, true)
-		hasShadowBranch := refErr == nil
-
-		if !hasShadowBranch {
-			logging.Info(logCtx, "eager condense: no shadow branch",
-				slog.String("session_id", sessionID),
-				slog.String("shadow_branch", shadowBranchName),
-			)
-			state.StepCount = 0
-			state.FullyCondensed = true
-			state.ClearCondensationAttempt()
-			return nil
+		var preflightErr error
+		shadowBranchName, shouldCondense, preflightErr = prepareEagerCondensation(logCtx, repo, state)
+		if preflightErr != nil || !shouldCondense {
+			return preflightErr
 		}
 
 		checkpointID = state.PendingCondensationID()
@@ -1538,7 +1554,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 
 		result, condErr := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{reconcileInterrupted: true})
 		if condErr != nil {
-			logging.Warn(logCtx, "eager condense on session stop failed, PostCommit will retry",
+			logging.Warn(logCtx, "eager condense on session stop failed, doctor will retry",
 				slog.String("session_id", sessionID),
 				slog.String("error", condErr.Error()),
 			)

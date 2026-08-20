@@ -1134,7 +1134,7 @@ func sessionEndCondenseDeadline(ag agent.Agent) time.Time {
 // (handleLifecycleSessionEnd) and the exited-session sweep
 // (finalizeExitedSessions), so the two stay in lockstep.
 //
-// The condense is fail-open (PostCommit retries on the next commit); an error
+// The condense is fail-open. Doctor retries no-files ENDED sessions; an error
 // marking the session ended is returned so callers can react, and skips the
 // condense since the state may be inconsistent. event may be nil when no hook
 // event drives the end (the sweep), which skips event-metadata persistence.
@@ -1638,6 +1638,11 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 				slog.String("error", transErr.Error()))
 		}
 		state.EndedAt = &endedAt
+		if reserveErr := strategy.ReserveSessionEndCondensation(ctx, state); reserveErr != nil {
+			logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to reserve session-end checkpoint ID",
+				slog.String("session_id", sessionID),
+				slog.String("error", reserveErr.Error()))
+		}
 		ended = true
 		return nil
 	})

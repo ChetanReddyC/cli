@@ -3,6 +3,7 @@ package strategy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -56,24 +57,29 @@ func findInterruptedCondensation(
 	if err != nil {
 		return id.EmptyCheckpointID, false, fmt.Errorf("list checkpoints: %w", err)
 	}
+	var candidateErrors []error
 	for _, info := range checkpoints {
 		if info.ListedStub || (info.SessionID != state.SessionID && !slices.Contains(info.SessionIDs, state.SessionID)) {
 			continue
 		}
 		summary, readErr := store.Read(ctx, info.CheckpointID)
 		if readErr != nil {
-			return id.EmptyCheckpointID, false, fmt.Errorf("read checkpoint %s: %w", info.CheckpointID, readErr)
+			candidateErrors = append(candidateErrors, fmt.Errorf("read checkpoint %s: %w", info.CheckpointID, readErr))
+			continue
 		}
 		if summary == nil {
-			return id.EmptyCheckpointID, false, fmt.Errorf("read checkpoint %s: %w", info.CheckpointID, cpkg.ErrCheckpointNotFound)
+			candidateErrors = append(candidateErrors, fmt.Errorf("read checkpoint %s: %w", info.CheckpointID, cpkg.ErrCheckpointNotFound))
+			continue
 		}
 		for sessionIndex := range len(summary.Sessions) {
 			metadata, metadataErr := store.ReadSessionMetadata(ctx, info.CheckpointID, sessionIndex)
 			if metadataErr != nil {
-				return id.EmptyCheckpointID, false, fmt.Errorf("read checkpoint %s session %d metadata: %w", info.CheckpointID, sessionIndex, metadataErr)
+				candidateErrors = append(candidateErrors, fmt.Errorf("read checkpoint %s session %d metadata: %w", info.CheckpointID, sessionIndex, metadataErr))
+				continue
 			}
 			if metadata == nil {
-				return id.EmptyCheckpointID, false, fmt.Errorf("read checkpoint %s session %d metadata: %w", info.CheckpointID, sessionIndex, cpkg.ErrCheckpointNotFound)
+				candidateErrors = append(candidateErrors, fmt.Errorf("read checkpoint %s session %d metadata: %w", info.CheckpointID, sessionIndex, cpkg.ErrCheckpointNotFound))
+				continue
 			}
 			if metadata.SessionID != state.SessionID ||
 				metadata.Strategy != StrategyNameManualCommit ||
@@ -89,15 +95,20 @@ func findInterruptedCondensation(
 			}
 			content, contentErr := store.ReadSessionContent(ctx, info.CheckpointID, sessionIndex)
 			if contentErr != nil {
-				return id.EmptyCheckpointID, false, fmt.Errorf("read checkpoint %s session %d content: %w", info.CheckpointID, sessionIndex, contentErr)
+				candidateErrors = append(candidateErrors, fmt.Errorf("read checkpoint %s session %d content: %w", info.CheckpointID, sessionIndex, contentErr))
+				continue
 			}
 			if content == nil {
-				return id.EmptyCheckpointID, false, fmt.Errorf("read checkpoint %s session %d content: %w", info.CheckpointID, sessionIndex, cpkg.ErrCheckpointNotFound)
+				candidateErrors = append(candidateErrors, fmt.Errorf("read checkpoint %s session %d content: %w", info.CheckpointID, sessionIndex, cpkg.ErrCheckpointNotFound))
+				continue
 			}
 			if bytes.Equal(content.Transcript, expectedTranscript) {
 				return info.CheckpointID, true, nil
 			}
 		}
+	}
+	if len(candidateErrors) > 0 {
+		return id.EmptyCheckpointID, false, errors.Join(candidateErrors...)
 	}
 	return id.EmptyCheckpointID, false, nil
 }
