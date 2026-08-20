@@ -10,6 +10,15 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
+// committedHookConfigAgents are the agents whose Entire hook config this repo
+// commits: .claude/settings.json, .opencode/plugins/entire.ts, and
+// .pi/extensions/entire/index.ts. Each must be found and current.
+//
+// Named rather than counted. A count would let a newly added agent paper over a
+// committed config that went missing — one appears, one disappears, the total
+// still matches and the test keeps passing while silently guarding less.
+var committedHookConfigAgents = []string{"claude-code", "opencode", "pi"}
+
 // TestCommittedHookConfigsAreCurrent pins this repo's own committed Entire hook
 // configs against what the CLI would install today.
 //
@@ -38,7 +47,7 @@ func TestCommittedHookConfigsAreCurrent(t *testing.T) {
 	t.Chdir(repoRootFromSource(t))
 
 	ctx := context.Background()
-	checked := 0
+	checked := make(map[string]agent.HookConfigState)
 	for _, name := range agent.List() {
 		ag, err := agent.Get(name)
 		if err != nil {
@@ -49,44 +58,52 @@ func TestCommittedHookConfigsAreCurrent(t *testing.T) {
 		if !ok {
 			continue // this agent has no drift check
 		}
-		switch hf.CheckHookConfig(ctx) {
-		case agent.HooksAbsent:
-			// This repo commits no config for this agent — nothing to pin.
-		case agent.HooksCurrent:
-			checked++
-		case agent.HooksOutdated:
-			checked++
+		state := hf.CheckHookConfig(ctx)
+		checked[string(name)] = state
+		if state == agent.HooksOutdated {
 			t.Errorf("committed %s hook config is stale: it no longer matches what "+
 				"InstallHooks writes today. Regenerate with `entire enable --force` "+
 				"at the repo root and commit the result.", ag.Type())
 		}
 	}
 
-	// Without this the test passes vacuously if the committed configs are moved
-	// or renamed: every agent would report HooksAbsent and nothing would be
-	// compared. Failing loudly is the point — a drift guard that quietly stops
-	// guarding is worse than none.
-	if checked == 0 {
-		t.Fatal("no committed hook configs were checked; expected at least one " +
-			"(.pi/extensions/entire/index.ts, .opencode/plugins/entire.ts, " +
-			".claude/settings.json). Either they moved or CheckHookConfig now " +
-			"reports HooksAbsent for all of them")
+	// Assert per agent, not in aggregate. Checking only that *something* was
+	// compared would let this test keep passing while quietly no longer guarding
+	// one of the configs — the same silent-rot failure mode it exists to catch.
+	for _, name := range committedHookConfigAgents {
+		state, ok := checked[name]
+		switch {
+		case !ok:
+			t.Errorf("%s reported no hook-config drift check; this repo commits a "+
+				"config for it, so it must still implement agent.HookFreshness", name)
+		case state == agent.HooksAbsent:
+			t.Errorf("no committed hook config found for %s; this repo is supposed to "+
+				"commit one. If it was intentionally removed, drop %s from "+
+				"committedHookConfigAgents", name, name)
+		}
 	}
 }
 
-// repoRootFromSource returns this repo's root, derived from this file's own
-// compiled-in path rather than the working directory: package cli has tests that
-// t.Chdir, and the root must not depend on what an earlier one left behind.
+// repoRootFromSource returns this repo's root: the nearest directory at or above
+// this file that holds a go.mod.
+//
+// Anchored on this file's own compiled-in path rather than the working
+// directory, because package cli has tests that t.Chdir and the root must not
+// depend on what an earlier one left behind.
 func repoRootFromSource(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller: no caller information")
 	}
-	// This file lives at <root>/cmd/entire/cli/dogfood_hooks_test.go.
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
-	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
-		t.Fatalf("derived repo root %q has no go.mod (did this file move?): %v", root, err)
+	for dir := filepath.Dir(file); ; {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("no go.mod at or above %s", filepath.Dir(file))
+		}
+		dir = parent
 	}
-	return root
 }
