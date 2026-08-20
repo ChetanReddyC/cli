@@ -1285,7 +1285,7 @@ func newTrailUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&statusStr, "status", "", "Update status")
 	cmd.Flags().StringVar(&title, "title", "", "Update title")
 	cmd.Flags().StringVar(&body, "body", "", "Replace the description (--body= clears it)")
-	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "Replace the description unconditionally, even if it changed since being read")
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "Replace the description unconditionally, even if it changed since being read (only applies when --body is also given)")
 	cmd.Flags().StringVar(&branch, "branch", "", "Branch to update trail for (defaults to current)")
 	cmd.Flags().StringSliceVar(&assigneeAdd, "add-assignee", nil, "Add assignee(s) by login")
 	cmd.Flags().StringSliceVar(&assigneeRemove, "remove-assignee", nil, "Remove assignee(s) by login")
@@ -1687,7 +1687,7 @@ func sendTrailBody(ctx context.Context, client *api.Client, path, body, ifMatch 
 	if err := checkTrailResponse(resp); err != nil {
 		switch {
 		case api.IsHTTPErrorStatus(err, http.StatusPreconditionFailed):
-			return fmt.Errorf("%w — trail body changed since it was read; re-run to see the current text, or pass --overwrite", err)
+			return fmt.Errorf("%w — trail body changed since it was read; run 'entire trail show' to see the current text and merge it in, then re-run — or pass --overwrite to discard it", err)
 		case api.IsHTTPErrorStatus(err, http.StatusConflict):
 			return fmt.Errorf("%w — trail body is not empty; pass --overwrite to replace it", err)
 		default:
