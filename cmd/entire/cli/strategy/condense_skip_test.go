@@ -459,11 +459,16 @@ func TestTryAgentCommitFastPath_IdleTaskRecordEligibility(t *testing.T) {
 	staleRecord := []session.TaskRecord{
 		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now().Add(-25 * time.Hour)},
 	}
+	completedRecord := []session.TaskRecord{
+		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now(), CompletedAt: time.Now()},
+	}
+	boundaryRecord := []session.TaskRecord{
+		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now().Add(-activeSessionInteractionThreshold)},
+	}
 	tests := []struct {
 		name        string
 		phase       session.Phase
 		taskRecords []session.TaskRecord
-		stepCount   int
 		wantLinked  bool
 	}{
 		{
@@ -474,11 +479,18 @@ func TestTryAgentCommitFastPath_IdleTaskRecordEligibility(t *testing.T) {
 			wantLinked:  true,
 		},
 		{
+			// A completed record is still unmaterialized until the next
+			// condensation, so it links exactly like an in-flight one.
+			name:        "AcceptsIdleSessionWithCompletedTaskRecord",
+			phase:       session.PhaseIdle,
+			taskRecords: completedRecord,
+			wantLinked:  true,
+		},
+		{
 			// An idle session with no records is an ordinary post-turn commit
 			// and must stay unlinked.
 			name:       "DeclinesIdleSessionWithoutTaskRecords",
 			phase:      session.PhaseIdle,
-			stepCount:  1,
 			wantLinked: false,
 		},
 		{
@@ -497,6 +509,13 @@ func TestTryAgentCommitFastPath_IdleTaskRecordEligibility(t *testing.T) {
 			taskRecords: staleRecord,
 			wantLinked:  false,
 		},
+		{
+			// The bound is exclusive: a record exactly at 24h is already out.
+			name:        "DeclinesIdleSessionAtFreshnessBoundary",
+			phase:       session.PhaseIdle,
+			taskRecords: boundaryRecord,
+			wantLinked:  false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -512,7 +531,6 @@ func TestTryAgentCommitFastPath_IdleTaskRecordEligibility(t *testing.T) {
 				AgentType:      "Claude Code",
 				Phase:          tt.phase,
 				TranscriptPath: "/some/path/to/transcript.jsonl",
-				StepCount:      tt.stepCount,
 				TaskRecords:    tt.taskRecords,
 			}
 

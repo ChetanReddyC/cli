@@ -2460,36 +2460,53 @@ func TestWarnStaleEndedSessions_RateLimit(t *testing.T) {
 	assert.Contains(t, buf.String(), "entire doctor")
 }
 
-// TestPostCommit_IdleSessionWithTaskRecord_CondensesMaterializedContent
-// verifies that an idle session with a fresh task record — eligible for the
-// fast-path trailer via tryAgentCommitFastPath — actually condenses, and that
-// the condensation materializes the record's transcript-so-far into the
-// permanent checkpoint's tasks/ subtree. This is the scenario the incident's
-// fix depends on: a background subagent commits its own work mid-task, so the
-// session never picks up a FilesTouched/committed-file overlap the "content
-// detection" path normally requires for a non-active session. Idle +
-// EventGitCommit routes unconditionally to ActionCondense (session/phase.go),
-// hasNew is true because the session carries a task record, and
-// idleWithTaskContent's overlap-check bypass (shouldCondenseWithOverlapCheck)
-// is what lets condensation proceed without overlap evidence. Without a fresh
-// record, that overlap requirement still applies unchanged.
-func TestPostCommit_IdleSessionWithTaskRecord_CondensesMaterializedContent(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
+// TestPostCommit_TaskRecordCondensationScope pins both sides of
+// idleWithTaskContent's overlap-check bypass. Idle+fresh is the incident fix: a
+// background subagent commits its own work mid-task, so the session never picks
+// up the FilesTouched overlap a non-active session normally needs, and only the
+// bypass lets the condensation run and materialize the record's
+// transcript-so-far under the checkpoint's tasks/ subtree — proving the trailer
+// resolves to something real. Ended+lingering is the scoping regression: a
+// crashed ENDED session can carry a stale record indefinitely, and an earlier
+// bypass keyed only on "has a record" condensed a later, unrelated human commit
+// into it.
+func TestPostCommit_TaskRecordCondensationScope(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T, s *ManualCommitStrategy, repo *git.Repository, dir string)
+	}{
+		{
+			name: "IdleSessionWithTaskRecord_CondensesMaterializedContent",
+			run:  runIdleTaskRecordCondenses,
+		},
+		{
+			name: "EndedSessionWithLingeringRecord_UnrelatedCommitNotCondensed",
+			run:  runEndedLingeringRecordNotCondensed,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setupGitRepo(t)
+			t.Chdir(dir)
+			repo, err := git.PlainOpen(dir)
+			require.NoError(t, err)
+			tt.run(t, &ManualCommitStrategy{}, repo, dir)
+		})
+	}
+}
 
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-postcommit-idle-record"
-	toolUseID := "toolu_idlerecord1"
-	agentID := "agent-idlerecord1"
+func runIdleTaskRecordCondenses(t *testing.T, s *ManualCommitStrategy, repo *git.Repository, dir string) {
+	t.Helper()
+	const (
+		sessionID = "test-postcommit-idle-record"
+		toolUseID = "toolu_idlerecord1"
+		agentID   = "agent-idlerecord1"
+	)
 
 	worktreePath, err := paths.WorktreeRoot(context.Background())
 	require.NoError(t, err)
 	worktreeID, err := paths.GetWorktreeID(worktreePath)
 	require.NoError(t, err)
-
 	head, err := repo.Head()
 	require.NoError(t, err)
 
@@ -2525,33 +2542,14 @@ func TestPostCommit_IdleSessionWithTaskRecord_CondensesMaterializedContent(t *te
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensing the idle+record session")
 
-	// The content guarantee: the trailer's checkpoint must actually carry the
-	// record's transcript-so-far, materialized by the condensation itself.
 	jsonlContent, ok := checkpointTaskFile(t, repo, id.MustCheckpointID("a1a1a1a1a1a1"), "tasks/"+toolUseID+"/agent-"+agentID+".jsonl")
 	require.True(t, ok, "the condensed checkpoint must materialize the task record's transcript under tasks/")
 	assert.Contains(t, jsonlContent, "background widget progress")
 }
 
-// TestPostCommit_EndedSessionWithLingeringRecord_UnrelatedCommitNotCondensed
-// is the regression for a scoping bug in the idle+record overlap-check
-// bypass: a PhaseEnded session can carry a stale task record indefinitely
-// (e.g. a crashed agent whose session was swept), alongside FilesTouched left
-// over from its real earlier work. An earlier version of the bypass keyed
-// only on "has a record" (not on phase), so it also fired for this ENDED
-// session and trusted its record enough to skip the overlap check —
-// condensing a later, completely unrelated human commit into it.
-// idleWithTaskContent must be scoped to state.Phase == PhaseIdle so an ENDED
-// session with a lingering record still needs real file-overlap evidence like
-// any other stale session.
-func TestPostCommit_EndedSessionWithLingeringRecord_UnrelatedCommitNotCondensed(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-postcommit-ended-lingering-record"
+func runEndedLingeringRecordNotCondensed(t *testing.T, s *ManualCommitStrategy, repo *git.Repository, dir string) {
+	t.Helper()
+	const sessionID = "test-postcommit-ended-lingering-record"
 
 	// Real earlier work: test.txt modified, shadow branch has content.
 	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
@@ -2573,10 +2571,8 @@ func TestPostCommit_EndedSessionWithLingeringRecord_UnrelatedCommitNotCondensed(
 	originalBaseCommit := state.BaseCommit
 
 	// A later, completely unrelated human commit: a new file, test.txt
-	// untouched. Carries an Entire-Checkpoint trailer so PostCommit's own
-	// no-trailer early bail (~line 947) doesn't short-circuit before ever
-	// reaching the overlap check this test exists to exercise — without the
-	// trailer, this test would trivially pass for the wrong reason.
+	// untouched. It carries a trailer so PostCommit's no-trailer early bail
+	// doesn't short-circuit before ever reaching the overlap check.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "other-work.txt"), []byte("unrelated work"), 0o644))
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
@@ -2591,12 +2587,10 @@ func TestPostCommit_EndedSessionWithLingeringRecord_UnrelatedCommitNotCondensed(
 
 	require.NoError(t, s.PostCommit(context.Background()))
 
-	// Must NOT condense: no permanent checkpoint, shadow branch survives.
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.Error(t, err, "an unrelated commit must not condense a stale ended session's lingering marker")
+	require.Error(t, err, "an unrelated commit must not condense a stale ended session's lingering record")
 
-	refName := plumbing.NewBranchReferenceName(shadowBranch)
-	_, err = repo.Reference(refName, true)
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
 	require.NoError(t, err, "shadow branch must survive an unrelated commit")
 
 	state, err = s.loadSessionState(context.Background(), sessionID)
@@ -2605,43 +2599,4 @@ func TestPostCommit_EndedSessionWithLingeringRecord_UnrelatedCommitNotCondensed(
 		"BaseCommit must not move for an ended session on an unrelated commit")
 	assert.Len(t, state.TaskRecords, 1,
 		"the lingering record must remain untouched by an unrelated commit")
-}
-
-// TestShouldCondenseWithOverlapCheck_ReadOnlySkipSparesTaskContent covers the
-// dangling-trailer hazard: tryAgentCommitFastPath mints a trailer for an idle
-// session on the strength of a fresh task record alone (its empty-session guard
-// exempts HasTaskContent), so PostCommit must not then drop that same session
-// through the read-only skip, which fires precisely when a session has no
-// tracked files — the defining shape of a read-only subagent's record.
-func TestShouldCondenseWithOverlapCheck_ReadOnlySkipSparesTaskContent(t *testing.T) {
-	t.Parallel()
-
-	recent := time.Now()
-	tests := []struct {
-		name           string
-		hasNew         bool
-		isActive       bool
-		hasTaskContent bool
-		want           bool
-	}{
-		{name: "task content survives the read-only skip", hasNew: true, hasTaskContent: true, want: true},
-		{name: "read-only active session still skipped", hasNew: true, isActive: true, want: false},
-		{name: "no new content short-circuits", hasTaskContent: true, want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			h := &postCommitActionHandler{
-				ctx:                        context.Background(),
-				hasNew:                     tt.hasNew,
-				filesTouchedBefore:         nil, // the read-only shape: no tracked files
-				sessionsWithCommittedFiles: 1,   // another session claims the committed files
-			}
-			var last *time.Time
-			if tt.isActive {
-				last = &recent
-			}
-			assert.Equal(t, tt.want, h.shouldCondenseWithOverlapCheck(tt.isActive, last, tt.hasTaskContent))
-		})
-	}
 }
