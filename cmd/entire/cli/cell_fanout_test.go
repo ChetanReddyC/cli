@@ -156,11 +156,12 @@ func TestGroupReposByCell_ProcessingPrimaryPreferred(t *testing.T) {
 
 // TestGroupReposByCell_CanonicalModeIgnoresElection verifies routeCanonical
 // picks by the row-ID convention even when core elected a different
-// processing primary. Broad (pin-less) fan-out and code search must route
-// this way: the leaves narrow a pin-less search to the placements canonical
-// in their own cell, so following the election there would search a
-// divergently elected repo nowhere — and the BFF's code-search.ts ignores the
-// election for the same rows (ENT-1672).
+// processing primary. Code search routes this way in both modes: the whole
+// code-READ chain — hits, /symbols, /usages, the web's file viewer — resolves
+// the canonical placement, so canonical keeps a hit and its follow-ups on the
+// same copy, matching the BFF's code-search.ts (ENT-1672; flip tracked on
+// ENT-1776). Semantic search does NOT use this mode anymore — it follows the
+// election everywhere since the leaves narrow broad scope by it.
 func TestGroupReposByCell_CanonicalModeIgnoresElection(t *testing.T) {
 	t.Parallel()
 	repos := []coreapi.RepoIndexEntry{
@@ -263,6 +264,18 @@ func TestGroupReposByCell_UnreadyCanonicalSkipped(t *testing.T) {
 	}
 	if got := strings.Join(cells[0].repoIDs, ","); got != testPlacementNoStatus {
 		t.Fatalf("repoIDs = %q, want 01NOSTATUS", got)
+	}
+}
+
+// TestRoutedRepoPlacement_NoPlacements pins the defensive guard: an entry
+// with no placements is unroutable (ok=false), never a panic. groupReposByCell
+// routes such entries via the top-level legacy fields before calling this.
+func TestRoutedRepoPlacement_NoPlacements(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []placementRouting{routeByElection, routeCanonical} {
+		if _, ok := routedRepoPlacement(coreapi.RepoIndexEntry{ID: testPlacementA}, mode); ok {
+			t.Fatalf("mode %v: ok = true for entry with no placements, want false", mode)
+		}
 	}
 }
 

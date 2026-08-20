@@ -172,7 +172,9 @@ const (
 // is the git-data writer — GitHub itself for github mirrors — so it can never
 // route a search.)
 //
-// ok is false when the chosen placement is not routable: it carries no ID, or
+// ok is false when r has no placements at all (the caller routes those via
+// the top-level legacy fields, so this arm is defensive), or when the chosen
+// placement is not routable: it carries no ID, or
 // it is not ready. An elected-but-unready primary is NOT substituted with a
 // ready mirror — it may predate the clone, and the BFF's searchPlacement
 // returns the same pick as-is for its caller to skip; the two clients must
@@ -180,6 +182,9 @@ const (
 // arm is defensive; any unrecognized future status is treated as not ready,
 // which skips the repo WITH a report rather than searching an unknown state.
 func routedRepoPlacement(r coreapi.RepoIndexEntry, mode placementRouting) (coreapi.RepoPlacement, bool) {
+	if len(r.Placements) == 0 {
+		return coreapi.RepoPlacement{}, false
+	}
 	p := r.Placements[0]
 	pick := func(id string) bool {
 		if id == "" {

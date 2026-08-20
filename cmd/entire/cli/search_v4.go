@@ -141,7 +141,7 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 			// searches everything it holds, so a skipped repo only stops
 			// contributing to WHICH cells are queried; claiming it was
 			// excluded would be wrong. Debug-log for diagnosability.
-			logging.Debug(ctx, "semantic search: repos without a routable canonical placement", "repos", strings.Join(skipped, ","))
+			logging.Debug(ctx, "semantic search: repos without a routable home placement", "repos", strings.Join(skipped, ","))
 		}
 	}
 
@@ -537,8 +537,8 @@ func sortTier0Rows(tier0 []tier0Row) {
 }
 
 // dedupSemanticResults removes cross-cell duplicates by type+id, keeping the
-// first (higher-ranked) copy. The fan-out routes each repo to one canonical
-// cell (ENT-1672), so per-repo rows no longer repeat — this guards the cases
+// first (higher-ranked) copy. The fan-out routes each repo to one home cell
+// (ENT-1672/ENT-1776), so per-repo rows no longer repeat — this guards the cases
 // that still can: a crosslinked session attached to repos in different cells,
 // and unfiltered queries where overlapping cell scopes return the same row.
 // Results without an id are always kept. The per-type dupe tally feeds the
