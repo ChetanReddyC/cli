@@ -2414,12 +2414,12 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// version is stale but still ours, and uninstall must still offer to remove
 	// it rather than reporting that Entire is not installed here.
 	gitHooksInstalled := strategy.AnyGitHookInstalled(ctx)
-	agentsWithInstalledHooks := GetAgentsWithHooksInstalled(ctx)
+	agentsWithRemovableHooks := removableAgentHookNames(ctx)
 	entireDirExists := checkEntireDirExists(ctx)
 
 	// Check if there's anything to uninstall
 	if !entireDirExists && !gitHooksInstalled && sessionStateCount == 0 &&
-		shadowBranchCount == 0 && len(agentsWithInstalledHooks) == 0 {
+		shadowBranchCount == 0 && len(agentsWithRemovableHooks) == 0 {
 		fmt.Fprintln(w, "Entire is not installed in this repository.")
 		return nil
 	}
@@ -2439,8 +2439,8 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		if shadowBranchCount > 0 {
 			fmt.Fprintf(w, "  - Shadow branches (%d)\n", shadowBranchCount)
 		}
-		if len(agentsWithInstalledHooks) > 0 {
-			fmt.Fprintf(w, "  - Agent hooks (%s)\n", strings.Join(agentDisplayNames(agentsWithInstalledHooks), ", "))
+		if len(agentsWithRemovableHooks) > 0 {
+			fmt.Fprintf(w, "  - Agent hooks (%s)\n", strings.Join(agentDisplayNames(agentsWithRemovableHooks), ", "))
 		}
 		fmt.Fprintln(w)
 
@@ -2539,7 +2539,23 @@ func checkEntireDirExists(ctx context.Context) bool {
 	return err == nil
 }
 
-// removeAgentHooks removes hooks from all agents that support hooks.
+func removableAgentHookNames(ctx context.Context) []types.AgentName {
+	var names []types.AgentName
+	for _, name := range agent.List() {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		hookAgent, ok := agent.AsHookSupport(ag)
+		if ok && hooksPresentOrOutdated(ctx, hookAgent, ag) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// removeAgentHooks sweeps every hook-capable agent so legacy configurations
+// that predate an agent's current detection logic are still cleaned up.
 func removeAgentHooks(ctx context.Context, w io.Writer) error {
 	var errs []error
 	for _, name := range agent.List() {

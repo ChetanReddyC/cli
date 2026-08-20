@@ -2320,6 +2320,51 @@ func TestApplyAgentChanges_CodexRemovalReportsRepositoryWideEffect(t *testing.T)
 	}
 }
 
+func TestRunUninstall_CodexOutdatedLinkedWorktreeWithoutProjectLayer(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	linkedRoot := filepath.Join(filepath.Dir(repoRoot), "linked")
+	if err := os.RemoveAll(filepath.Join(linkedRoot, ".codex")); err != nil {
+		t.Fatalf("remove linked Codex project layer: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	if hookAgent.AreHooksInstalled(t.Context()) {
+		t.Fatal("Codex hooks must be inactive without the linked checkout's .codex project layer")
+	}
+	freshness, ok := ag.(agent.HookFreshness)
+	if !ok || freshness.CheckHookConfig(t.Context()) != agent.HooksOutdated {
+		t.Fatal("root-authoritative Codex hooks should still be removable as outdated configuration")
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(t.Context(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("uninstall Entire: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); !os.IsNotExist(err) {
+		t.Fatalf("authoritative Codex hooks still exist after uninstall: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Removed Codex hooks") {
+		t.Fatalf("uninstall did not report removed Codex hooks: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "affects all linked worktrees") {
+		t.Fatalf("uninstall did not report repository-wide effect: %s", stdout.String())
+	}
+}
+
 func setupCodexRepositoryWithLinkedWorktree(t *testing.T) {
 	t.Helper()
 	tmp := setupTestDir(t)
