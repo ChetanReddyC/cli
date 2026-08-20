@@ -466,21 +466,11 @@ func newRefreshTrailEnablementCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Detached child with discarded stdout/stderr: the root
+			// PersistentPreRun has already routed logging into
+			// .entire/logs/entire.log, so a failing background refresh (e.g.
+			// an unreachable host) is diagnosable there rather than vanishing.
 			ctx := cmd.Context()
-			// Detached child with discarded stdout/stderr: initialize file
-			// logging so a failing background refresh (e.g. an unreachable
-			// host) is diagnosable in .entire/logs/entire.log rather than
-			// vanishing. Guard on WorktreeRoot first — matching resume/rewind/
-			// reset/explain — so a child whose worktree was removed or relocated
-			// between spawn and exec (or a manual invocation outside a repo)
-			// doesn't create a stray .entire/logs/ in an arbitrary directory;
-			// logging.Init falls back to cwd when WorktreeRoot fails.
-			if _, err := paths.WorktreeRoot(ctx); err == nil {
-				logging.SetLogLevelGetter(GetLogLevel)
-				if err := logging.Init(ctx, ""); err == nil {
-					defer logging.Close()
-				}
-			}
 			return runTrailEnablementRefresh(ctx)
 		},
 	}

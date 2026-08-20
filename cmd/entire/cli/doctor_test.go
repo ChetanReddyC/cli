@@ -495,16 +495,22 @@ func TestRunSessionsFix_HandlerLogsStayOffTheTerminal(t *testing.T) {
 		StartedAt:  time.Now().Add(-2 * time.Hour),
 	}))
 
-	// Start from no logger so this asserts doctor's own setup, not one left
-	// installed by an earlier test in this package.
-	logging.Close()
+	// Anything reaching slog.Default() is on the user's terminal in production.
 	var fallback bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&fallback, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
+	// The root pre-run installs the logger for every command; this stands in for
+	// it, since runSessionsFix is called directly rather than through the tree.
+	l, logErr := newLogger(context.Background())
+	require.NoError(t, logErr)
+	t.Cleanup(func() { _ = l.Close() })
+
 	cmd, _ := newTestCmd(t)
+	cmd.SetContext(logging.WithLogger(cmd.Context(), l))
 	require.NoError(t, runSessionsFix(cmd, true))
+	require.NoError(t, l.Close()) // flush before reading the file
 
 	assert.Empty(t, fallback.String(),
 		"handler logs went to slog.Default() (the user's terminal) instead of .entire/logs/")

@@ -59,8 +59,16 @@ For each stuck session, you can choose to:
 
 Use --force to condense all fixable sessions without prompting.  Sessions that can't
 be condensed will be discarded.`,
-		PreRun: func(_ *cobra.Command, _ []string) {
-			strategy.EnsureRedactionConfigured()
+		PreRun: func(cmd *cobra.Command, _ []string) {
+			// Cobra runs the persistent pre-runs before a command's own PreRun,
+			// so the root hook has already put an initialized logger in this
+			// context: redaction diagnostics and the load-time summary land in
+			// .entire/logs/, which is where `entire doctor bundle` collects them
+			// and where a user debugging custom rules greps for
+			// component=redaction. Answering "did my rules load?" is doctor's
+			// job, so it must not be the one command whose diagnostics go to
+			// bare stderr.
+			strategy.EnsureRedactionConfigured(cmd.Context())
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runSessionsFix(cmd, forceFlag)
@@ -140,15 +148,6 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
 	defer repo.Close()
-
-	// Route logging to .entire/logs/ for the rest of the command. Doctor emits
-	// none itself, but the sweep below and the condense/discard handlers further
-	// down all do, and with no logger installed those land on the user's terminal
-	// via slog.Default(), interleaved with doctor's own report. It belongs here
-	// rather than inside the sweep: the sweep returns early — without touching
-	// logging — whenever no session needs finalizing, which is the common case
-	// for a run that still has time-based stuck sessions to condense.
-	defer ensureCommandLogging(ctx)()
 
 	// Finalize any ACTIVE session whose agent process has exited (no SessionStop
 	// hook fired). A gone process is unambiguous, so these are condensed on the
