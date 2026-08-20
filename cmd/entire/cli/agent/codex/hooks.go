@@ -22,6 +22,8 @@ const HooksFileName = "hooks.json"
 // run between turns, where Codex allows up to its standard 600s.
 const defaultHookTimeoutSec = 30
 
+const hooksLockWaitTimeout = 5 * time.Second
+
 // managedHook describes one hooks.json event Entire owns. Keeping the event
 // key, verb, timeout and production wrapper together means adding or removing
 // an event is a single table edit rather than parallel edits in InstallHooks,
@@ -458,10 +460,24 @@ func fileExists(path string) bool {
 }
 
 func acquireHooksLock(ctx context.Context, path string) (func(), error) {
+	return acquireHooksLockWithin(ctx, path, hooksLockWaitTimeout)
+}
+
+func acquireHooksLockWithin(ctx context.Context, path string, wait time.Duration) (func(), error) {
 	const retryDelay = 25 * time.Millisecond
+	lockCtx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+
 	lock := flock.New(path)
-	locked, err := lock.TryLockContext(ctx, retryDelay)
+	locked, err := lock.TryLockContext(lockCtx, retryDelay)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return nil, fmt.Errorf(
+				"timed out after %s waiting for another Entire process to update Codex hooks: %w",
+				wait,
+				err,
+			)
+		}
 		return nil, fmt.Errorf("acquire file lock: %w", err)
 	}
 	if !locked {
