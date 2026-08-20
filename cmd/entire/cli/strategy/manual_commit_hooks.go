@@ -1201,10 +1201,11 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 ) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	if state.CondensationAttemptID != id.EmptyCheckpointID && state.CondensationAttemptID != checkpointID {
+	reservedCheckpointID := state.PendingCondensationID()
+	if reservedCheckpointID != id.EmptyCheckpointID && reservedCheckpointID != checkpointID {
 		logging.Warn(logCtx, "post-commit: preserving interrupted condensation with a different checkpoint ID",
 			slog.String("session_id", state.SessionID),
-			slog.String("reserved_checkpoint_id", state.CondensationAttemptID.String()),
+			slog.String("reserved_checkpoint_id", reservedCheckpointID.String()),
 			slog.String("commit_checkpoint_id", checkpointID.String()))
 		uncondensedActiveOnBranch[shadowBranchName] = true
 		return
@@ -2174,8 +2175,8 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 
 func checkpointIDForSessions(ctx context.Context, states []*SessionState) (id.CheckpointID, error) {
 	for _, state := range states {
-		if state.CondensationAttemptID != id.EmptyCheckpointID {
-			return state.CondensationAttemptID, nil
+		if checkpointID := state.PendingCondensationID(); checkpointID != id.EmptyCheckpointID {
+			return checkpointID, nil
 		}
 	}
 	checkpointID, err := checkpoint.GenerateCheckpointID(ctx)

@@ -88,10 +88,10 @@ func TestPostCommitProcessSessionLocked_PreservesDifferentReservedAttempt(t *tes
 	reservedID := id.MustCheckpointID("111111111111")
 	commitID := id.MustCheckpointID("222222222222")
 	state := &SessionState{
-		SessionID:             "interrupted-session",
-		BaseCommit:            "base-commit",
-		CondensationAttemptID: reservedID,
+		SessionID:  "interrupted-session",
+		BaseCommit: "base-commit",
 	}
+	state.BeginCondensationAttempt(reservedID)
 	preservedBranches := make(map[string]bool)
 
 	(&ManualCommitStrategy{}).postCommitProcessSessionLocked(
@@ -99,7 +99,7 @@ func TestPostCommitProcessSessionLocked_PreservesDifferentReservedAttempt(t *tes
 		nil, nil, nil, nil, preservedBranches, nil, 0,
 	)
 
-	require.Equal(t, reservedID, state.CondensationAttemptID)
+	require.Equal(t, reservedID, state.PendingCondensationID())
 	require.True(t, preservedBranches[getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)])
 }
 
@@ -113,10 +113,10 @@ func TestReserveDoctorCondensationAttempt_PreservesLegacyRecoveryAcrossRetries(t
 	firstID, err := reserveDoctorCondensationAttempt(context.Background(), state)
 	require.NoError(t, err)
 	require.False(t, firstID.IsEmpty())
-	require.True(t, state.CondensationRecoveryPending)
+	require.True(t, state.NeedsCondensationRecovery())
 
 	secondID, err := reserveDoctorCondensationAttempt(context.Background(), state)
 	require.NoError(t, err)
 	require.Equal(t, firstID, secondID)
-	require.True(t, state.CondensationRecoveryPending)
+	require.True(t, state.NeedsCondensationRecovery())
 }

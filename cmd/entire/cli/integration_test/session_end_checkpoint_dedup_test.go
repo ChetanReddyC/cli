@@ -19,17 +19,15 @@ import (
 // afterwards saves the session bookkeeping that records the write. A process
 // death in that window (Codex SIGKILLs a hook that overruns its session-end
 // budget) used to leave the transcript looking unfinished, so the next retry
-// minted a second checkpoint ID over the same transcript range — the duplicate
-// in #2035.
+// minted a second checkpoint ID over the same transcript range.
 //
 // These tests drive the real binary through that window. Everything up to the
 // crash is real: real hooks, real shadow branch, real condensation, real
 // checkpoint. The crash itself is forged with WriteSessionState, because the
 // only alternative is a fault-injection kill point in shipped code (see the PR
 // description). What is written back is exactly the state the reserving
-// MutateSessionState persists — the pre-condense snapshot plus
-// CondensationAttemptID — so the retry starts from the same bytes a killed hook
-// would have left behind.
+// MutateSessionState persists — the pre-condense snapshot plus the pending
+// attempt — so the retry starts from the same bytes a killed hook would leave.
 
 // listStoredCheckpoints returns every checkpoint in the repo, backend-agnostic
 // (the routing store unions git-branch and git-refs), so a test can assert on
@@ -150,7 +148,11 @@ func forgeInterruptedCondensation(t *testing.T, env *TestEnv, sessionID string, 
 	crashed.Phase = session.PhaseEnded
 	crashed.FullyCondensed = false
 	crashed.LastCheckpointID = id.EmptyCheckpointID
-	crashed.CondensationAttemptID = reservedID
+	if reservedID.IsEmpty() {
+		crashed.ClearCondensationAttempt()
+	} else {
+		crashed.BeginCondensationAttempt(reservedID)
+	}
 	if err := env.WriteSessionState(sessionID, &crashed); err != nil {
 		t.Fatalf("WriteSessionState failed: %v", err)
 	}
@@ -189,8 +191,8 @@ func TestSessionEndCondensation_NormalFlowIsOneCheckpointPerSession(t *testing.T
 		if !state.FullyCondensed {
 			t.Error("session should be FullyCondensed after an uninterrupted session end")
 		}
-		if !state.CondensationAttemptID.IsEmpty() {
-			t.Errorf("reservation should be cleared after a successful write, got %s", state.CondensationAttemptID)
+		if pendingID := state.PendingCondensationID(); !pendingID.IsEmpty() {
+			t.Errorf("reservation should be cleared after a successful write, got %s", pendingID)
 		}
 		if state.LastCheckpointID != firstCheckpoints[0].CheckpointID {
 			t.Errorf("LastCheckpointID = %s, want %s", state.LastCheckpointID, firstCheckpoints[0].CheckpointID)
@@ -208,9 +210,9 @@ func TestSessionEndCondensation_NormalFlowIsOneCheckpointPerSession(t *testing.T
 }
 
 // TestSessionEndCondensation_InterruptedWriteRetriedByDoctor is the headline
-// regression test for #2035 on the doctor path named in the issue: `entire
-// doctor --force`, run through the real binary, must reuse the interrupted
-// checkpoint instead of minting a second one.
+// regression test for the doctor retry path: `entire doctor --force`, run
+// through the real binary, must reuse the interrupted checkpoint instead of
+// minting a second one.
 func TestSessionEndCondensation_InterruptedWriteRetriedByDoctor(t *testing.T) {
 	t.Parallel()
 
@@ -239,8 +241,8 @@ func TestSessionEndCondensation_InterruptedWriteRetriedByDoctor(t *testing.T) {
 		if state.LastCheckpointID != written {
 			t.Errorf("LastCheckpointID = %s, want %s", state.LastCheckpointID, written)
 		}
-		if !state.CondensationAttemptID.IsEmpty() {
-			t.Errorf("reservation should be cleared after the retry, got %s", state.CondensationAttemptID)
+		if pendingID := state.PendingCondensationID(); !pendingID.IsEmpty() {
+			t.Errorf("reservation should be cleared after the retry, got %s", pendingID)
 		}
 	}
 }
@@ -351,9 +353,9 @@ func TestSessionEndCondensation_AgentCommitLeavesInterruptedSessionForDoctor(t *
 	if state == nil {
 		t.Fatal("the interrupted session state was deleted without being condensed")
 	}
-	if state.CondensationAttemptID != reserved {
+	if pendingID := state.PendingCondensationID(); pendingID != reserved {
 		t.Errorf("reservation = %s, want %s preserved for the doctor retry",
-			state.CondensationAttemptID, reserved)
+			pendingID, reserved)
 	}
 
 	// And doctor still finishes the job afterwards, reusing the reserved ID.

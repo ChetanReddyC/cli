@@ -40,8 +40,9 @@ type PersistentStore interface {
 //
 // Four requests are session-level (Session, ReservedSession, SessionTranscript,
 // SessionSummary) and one is checkpoint-level (CheckpointAttribution). Adding
-// a write operation is a new request type plus one dispatch case — the Store
-// interface stays unchanged and existing backends keep compiling.
+// a write operation is a new request type plus one dispatch case in every
+// backend. The Store interface stays unchanged, so seam tests must exercise the
+// full union because Go does not exhaustively check type switches.
 type WriteRequest interface {
 	isWriteRequest()
 }

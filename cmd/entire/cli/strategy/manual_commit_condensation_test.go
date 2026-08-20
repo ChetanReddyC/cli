@@ -635,7 +635,7 @@ func TestCondenseAndMarkFullyCondensed_ReusesReservedAttemptAfterInterruptedWrit
 	state, err := s.loadSessionState(context.Background(), sessionID)
 	require.NoError(t, err)
 	assert.Equal(t, reservedID, state.LastCheckpointID)
-	assert.Empty(t, state.CondensationAttemptID)
+	assert.True(t, state.PendingCondensationID().IsEmpty())
 	assert.True(t, state.FullyCondensed)
 }
 
@@ -653,7 +653,7 @@ func TestPrepareCommitMsg_ReusesReservedAttemptAfterSessionResume(t *testing.T) 
 
 	reservedID := id.MustCheckpointID("111111111111")
 	require.NoError(t, MutateSessionState(context.Background(), sessionID, func(state *SessionState) error {
-		state.CondensationAttemptID = reservedID
+		state.BeginCondensationAttempt(reservedID)
 		return nil
 	}))
 
@@ -661,7 +661,7 @@ func TestPrepareCommitMsg_ReusesReservedAttemptAfterSessionResume(t *testing.T) 
 	resumed, err := s.loadSessionState(context.Background(), sessionID)
 	require.NoError(t, err)
 	require.Equal(t, session.PhaseActive, resumed.Phase)
-	require.Equal(t, reservedID, resumed.CondensationAttemptID)
+	require.Equal(t, reservedID, resumed.PendingCondensationID())
 
 	commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
 	require.NoError(t, os.WriteFile(commitMsgFile, []byte("commit after resume\n"), 0o600))

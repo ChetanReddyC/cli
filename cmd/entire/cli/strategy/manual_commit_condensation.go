@@ -371,7 +371,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	if err != nil {
 		return nil, err
 	}
-	recovery := recoverInterruptedCondensation(ctx, logCtx, o.reconcileInterrupted && state.CondensationRecoveryPending, store, state, redactedTranscript, extractedAssets, sessionData, transcriptSizeBaseline)
+	recovery := recoverInterruptedCondensation(ctx, logCtx, o.reconcileInterrupted && state.NeedsCondensationRecovery(), store, state, redactedTranscript, extractedAssets, sessionData, transcriptSizeBaseline)
 	if recovery.done {
 		return recovery.result, recovery.err
 	}
@@ -425,7 +425,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 // condensation. Every condensation write is ReservedSession, unconditionally.
 //
 // The tempting refinement — send ReservedSession only when this session's own
-// CondensationAttemptID matches the checkpoint ID, and plain Session otherwise —
+// pending attempt matches the checkpoint ID, and plain Session otherwise —
 // is wrong, and wrong in a worse direction than the problem it solves. A
 // checkpoint can hold several sessions, and only the one that reserved the ID
 // carries the reservation in its state. Routing per session would send the
@@ -1307,14 +1307,14 @@ func clearFilesystemPrompt(ctx context.Context, sessionID string) {
 }
 
 func ensureCondensationAttemptID(ctx context.Context, state *SessionState) (id.CheckpointID, bool, error) {
-	if state.CondensationAttemptID != id.EmptyCheckpointID {
-		return state.CondensationAttemptID, false, nil
+	if checkpointID := state.PendingCondensationID(); checkpointID != id.EmptyCheckpointID {
+		return checkpointID, false, nil
 	}
 	checkpointID, err := cpkg.GenerateCheckpointID(ctx)
 	if err != nil {
 		return id.EmptyCheckpointID, false, fmt.Errorf("generate checkpoint ID: %w", err)
 	}
-	state.CondensationAttemptID = checkpointID
+	state.BeginCondensationAttempt(checkpointID)
 	return checkpointID, true, nil
 }
 
@@ -1324,7 +1324,7 @@ func reserveDoctorCondensationAttempt(ctx context.Context, state *SessionState) 
 		return id.EmptyCheckpointID, err
 	}
 	if created && state.Phase == session.PhaseEnded && len(state.FilesTouched) == 0 {
-		state.CondensationRecoveryPending = true
+		state.RequireCondensationRecovery()
 	}
 	return checkpointID, nil
 }
@@ -1356,7 +1356,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	var shadowBranchName string
 	var clearAfter bool
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		if state.CondensationAttemptID != checkpointID {
+		if state.PendingCondensationID() != checkpointID {
 			return ErrMutationSkip
 		}
 
@@ -1384,7 +1384,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 				slog.String("session_id", sessionID),
 			)
 			state.FullyCondensed = true
-			clearCondensationAttempt(state)
+			state.ClearCondensationAttempt()
 			return nil
 		}
 
@@ -1461,7 +1461,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		}
 		if state.StepCount <= 0 {
 			state.FullyCondensed = true
-			clearCondensationAttempt(state)
+			state.ClearCondensationAttempt()
 			return nil
 		}
 
@@ -1474,7 +1474,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			)
 			state.StepCount = 0
 			state.FullyCondensed = true
-			clearCondensationAttempt(state)
+			state.ClearCondensationAttempt()
 			return nil //nolint:nilerr // A missing shadow branch means there is no remaining work to condense.
 		}
 
@@ -1511,7 +1511,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 
 		if state.StepCount <= 0 {
 			state.FullyCondensed = true
-			clearCondensationAttempt(state)
+			state.ClearCondensationAttempt()
 			return nil
 		}
 
@@ -1527,11 +1527,11 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			)
 			state.StepCount = 0
 			state.FullyCondensed = true
-			clearCondensationAttempt(state)
+			state.ClearCondensationAttempt()
 			return nil
 		}
 
-		checkpointID = state.CondensationAttemptID
+		checkpointID = state.PendingCondensationID()
 		if checkpointID == id.EmptyCheckpointID {
 			return ErrMutationSkip
 		}
@@ -1550,7 +1550,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 				slog.String("session_id", sessionID),
 			)
 			state.FullyCondensed = true
-			clearCondensationAttempt(state)
+			state.ClearCondensationAttempt()
 			return nil
 		}
 

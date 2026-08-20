@@ -29,10 +29,9 @@ import (
 // updateCombinedAttributionForCheckpoint writes attribution under that same
 // non-existent ID.
 //
-// This is reachable without a process kill. CondenseSessionByID persists
-// CondensationRecoveryPending in its reserving mutation; if the condense that
-// follows returns an error, `entire doctor` prints a warning and moves on,
-// leaving the flag set for every later commit to trip over.
+// This is reachable without a process kill. CondenseSessionByID persists a
+// recovery-required attempt before condensing; if condensation fails, the
+// attempt remains for a later retry.
 func TestCondenseSession_KeepsCallerSuppliedCheckpointIDWhenRecoveryIsPending(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
@@ -64,8 +63,8 @@ func TestCondenseSession_KeepsCallerSuppliedCheckpointIDWhenRecoveryIsPending(t 
 	// condensing — so the flag is still set when the next commit arrives.
 	trailerID := id.MustCheckpointID("222222222222")
 	require.NoError(t, MutateSessionState(context.Background(), sessionID, func(state *SessionState) error {
-		state.CondensationAttemptID = trailerID
-		state.CondensationRecoveryPending = true
+		state.BeginCondensationAttempt(trailerID)
+		state.RequireCondensationRecovery()
 		return nil
 	}))
 

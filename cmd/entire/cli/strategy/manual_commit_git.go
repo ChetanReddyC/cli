@@ -395,13 +395,8 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
 	state.CheckpointTokenUsage = nil
-	clearCondensationAttempt(state)
+	state.ClearCondensationAttempt()
 	state.RebaselineSubagentTokens()
-}
-
-func clearCondensationAttempt(state *SessionState) {
-	state.CondensationAttemptID = id.EmptyCheckpointID
-	state.CondensationRecoveryPending = false
 }
 
 // deleteShadowBranch deletes a shadow branch by name.
