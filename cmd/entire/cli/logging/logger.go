@@ -119,8 +119,9 @@ func (l *Logger) EnsureOpen() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Already open, already closed, or already failed: open() would leak the
-	// current file handle if called a second time.
+	// A second open() would reassign buf and file, leaking the handle this
+	// logger already holds. A previous failure needs no guard of its own here:
+	// open() memoizes openErr and returns it without retrying the syscalls.
 	if l.closed || l.buf != nil {
 		return l.openErr
 	}

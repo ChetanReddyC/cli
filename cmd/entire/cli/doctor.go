@@ -629,7 +629,8 @@ func checkLogSink(cmd *cobra.Command) {
 	fmt.Fprintf(w, "  Entire's diagnostics are being dropped, including the redaction warnings\n")
 	fmt.Fprintf(w, "  that explain why a custom rule isn't matching. `entire doctor logs` and\n")
 	fmt.Fprintf(w, "  `entire doctor bundle` have nothing to report until this is fixed.\n")
-	fmt.Fprintf(w, "  Fix: make %s writable, then re-run.\n", logging.LogsDir)
+	fmt.Fprintf(w, "  Fix: resolve the error above so %s is a writable directory — commonly\n", logging.LogsDir)
+	fmt.Fprintln(w, "  ownership or permissions, a regular file occupying the path, or a full disk.")
 }
 
 // checkHookDrift warns when an installed agent's Entire hook config is out of
