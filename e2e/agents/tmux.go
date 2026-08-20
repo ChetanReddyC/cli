@@ -164,6 +164,17 @@ func stableContent(content string) string {
 	return strings.Join(lines, "\n")
 }
 
+// paneLines counts the lines in a pane capture. WaitFor compares growth
+// rather than raw inequality: the tail lines a capture ends with repaint on
+// their own (spinners, clocks, prompt redraws) without adding lines, so only
+// growth is evidence of appended output.
+func paneLines(content string) int {
+	if content == "" {
+		return 0
+	}
+	return strings.Count(content, "\n") + 1
+}
+
 func (s *TmuxSession) WaitFor(pattern string, timeout time.Duration) (string, error) {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
@@ -196,9 +207,11 @@ func (s *TmuxSession) WaitFor(pattern string, timeout time.Duration) (string, er
 		// Detect content change since Send was called. The stripped compare
 		// aliases when a fast agent's entire response fits in the stripped
 		// tail (a 2-line echo is identical before and after "Working/Done/>"
-		// are appended and stripped), so also compare the raw pane: appended
-		// output always changes it, while the unsubmitted echo does not.
-		if !contentChanged && (stable != s.stableAtSend || (s.rawAtSend != "" && content != s.rawAtSend)) {
+		// are appended and stripped), so also accept the raw pane having
+		// grown: an unsubmitted echo plus tail-chrome repaints adds no lines.
+		// Copilot's custom Send leaves rawAtSend unset; the empty check keeps
+		// its exact previous behavior.
+		if !contentChanged && (stable != s.stableAtSend || (s.rawAtSend != "" && paneLines(content) > paneLines(s.rawAtSend))) {
 			contentChanged = true
 		}
 
