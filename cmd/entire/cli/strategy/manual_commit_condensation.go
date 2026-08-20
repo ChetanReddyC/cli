@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -199,6 +200,139 @@ func prepareTranscriptForStorage(
 	return externalized, assets, int64(len(sanitized))
 }
 
+// prepareTaskTranscriptForStorage runs the sanitize -> externalize -> redact
+// chain for a single subagent transcript, mirroring prepareTranscriptForStorage's
+// first two steps and then completing with the same redaction the session
+// transcript gets (see redactSessionTranscript). It is a SEPARATE entry point
+// rather than a wrapper around prepareTranscriptForStorage for one reason:
+// that function returns the session transcript's sanitized SIZE, which seeds
+// CondenseResult.TranscriptSizeBaseline — the session's own growth-dedup
+// baseline (SessionState.CheckpointTranscriptSize). A task transcript must
+// NEVER contribute to that coordinate (it is not the session transcript), so
+// this helper only returns the pipeline's terminal artifacts: redacted bytes
+// and any externalized image assets. Callers append the assets to the
+// checkpoint's own Assets list (TaskPayload has no Assets field of its own).
+func prepareTaskTranscriptForStorage(
+	ctx, logCtx context.Context,
+	ag agent.Agent,
+	state *SessionState,
+	raw []byte,
+) (redacted redact.RedactedBytes, assets []cpkg.TranscriptAsset, err error) {
+	sanitized := agent.SanitizeTranscriptForStorage(ag, raw)
+	externalized, assets := externalizeSessionImages(ctx, logCtx, state, sanitized)
+	redacted, _, err = redactSessionTranscript(logCtx, externalized)
+	if err != nil {
+		return redact.RedactedBytes{}, nil, err
+	}
+	return redacted, assets, nil
+}
+
+// resolveTaskTranscriptPath falls back to the agent-layout convention when a
+// task record has no declared transcript path (e.g. an agent that reports the
+// path only on some events, or a legacy record captured before an agent
+// started reporting one at all). Mirrors cli.ResolveAgentTranscriptPath,
+// which this package cannot call directly — the cli package imports strategy,
+// so the reverse import would cycle — and the logic itself is small enough
+// that duplicating it here beats introducing a new shared package for this
+// one call site (moving the transcript resolver into paths is deliberately
+// out of scope for the durable-records plan this implements).
+func resolveTaskTranscriptPath(state *SessionState, agentID string) string {
+	if agentID == "" || state.TranscriptPath == "" {
+		return ""
+	}
+	transcriptDir := filepath.Dir(state.TranscriptPath)
+	name := paths.AgentTranscriptFileName(agentID)
+	if nested := filepath.Join(paths.SubagentsDir(transcriptDir, state.SessionID), name); fileExists(nested) {
+		return nested
+	}
+	if legacy := filepath.Join(transcriptDir, name); fileExists(legacy) {
+		return legacy
+	}
+	return ""
+}
+
+// materializeTaskRecords resolves and redacts each of state.TaskRecords'
+// subagent transcripts for storage under this checkpoint's
+// tasks/<tool-use-id>/ subtree — the durable-records materializer for #2058:
+// subagent transcripts used to die at condensation because no producer ever
+// set the (now deleted) WriteOptions.IsTask route.
+//
+// Every record is materialized on every condensation, whether completed or
+// still in flight: a completed record's transcript is stored once here and
+// then removed from session state by the caller (see resetCheckpointWindow);
+// an in-flight record's transcript-so-far is stored and the record stays so
+// the next condensation re-materializes it. A record whose transcript cannot
+// be resolved or read still produces a payload — with TranscriptUnavailableReason
+// set instead of a Transcript — so the pointer is never silently dropped.
+//
+// Task assets are appended to the incoming assets slice and returned (rather
+// than living on TaskPayload, which has no Assets field of its own) so they
+// join the checkpoint's own Assets list — see WriteOptions.Assets.
+func (s *ManualCommitStrategy) materializeTaskRecords(
+	ctx, logCtx context.Context,
+	ag agent.Agent,
+	state *SessionState,
+	assets []cpkg.TranscriptAsset,
+) ([]cpkg.TaskPayload, []cpkg.TranscriptAsset) {
+	if len(state.TaskRecords) == 0 {
+		return nil, assets
+	}
+
+	payloads := make([]cpkg.TaskPayload, 0, len(state.TaskRecords))
+	for _, record := range state.TaskRecords {
+		payload := cpkg.TaskPayload{
+			ToolUseID:       record.ToolUseID,
+			AgentID:         record.AgentID,
+			SubagentType:    record.SubagentType,
+			TaskDescription: record.TaskDescription,
+			Files:           record.Files,
+			TokenUsage:      record.TokenUsage,
+			StartedAt:       record.StartedAt,
+			CompletedAt:     record.CompletedAt,
+		}
+
+		transcriptPath := record.DeclaredTranscriptPath
+		if transcriptPath == "" {
+			transcriptPath = resolveTaskTranscriptPath(state, record.AgentID)
+		}
+		if transcriptPath == "" {
+			payload.TranscriptUnavailableReason = "no declared or resolved transcript path"
+			payloads = append(payloads, payload)
+			continue
+		}
+
+		raw, readErr := os.ReadFile(transcriptPath) //nolint:gosec // path is agent-declared or resolved from session state, not user input
+		if readErr != nil {
+			payload.TranscriptUnavailableReason = "read transcript: " + readErr.Error()
+			payloads = append(payloads, payload)
+			continue
+		}
+		if len(raw) == 0 {
+			payload.TranscriptUnavailableReason = "transcript file is empty"
+			payloads = append(payloads, payload)
+			continue
+		}
+
+		redacted, taskAssets, prepErr := prepareTaskTranscriptForStorage(ctx, logCtx, ag, state, raw)
+		if prepErr != nil {
+			logging.Warn(logCtx, "failed to redact subagent transcript; storing task without it",
+				slog.String("session_id", state.SessionID),
+				slog.String("tool_use_id", record.ToolUseID),
+				slog.String("error", prepErr.Error()),
+			)
+			payload.TranscriptUnavailableReason = "redact transcript: " + prepErr.Error()
+			payloads = append(payloads, payload)
+			continue
+		}
+
+		payload.Transcript = bytes.NewBuffer(redacted.Bytes())
+		assets = append(assets, taskAssets...)
+		payloads = append(payloads, payload)
+	}
+
+	return payloads, assets
+}
+
 // sidecarSessionImages captures images an agent stores OUTSIDE the transcript
 // (e.g. Cursor's per-session SQLite blob store) as checkpoint assets, so they are
 // preserved with the session even though they never appear in full.jsonl. Unlike
@@ -355,6 +489,11 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// check, so the sqlite3 shell-out is avoided when the checkpoint is discarded.
 	extractedAssets = append(extractedAssets, sidecarSessionImages(ctx, logCtx, ag, state)...)
 
+	// Materialize this session's subagent task records (#2058): every
+	// completed-or-in-flight record's transcript is resolved, redacted, and
+	// stored under this checkpoint's tasks/<tool-use-id>/ subtree.
+	taskPayloads, extractedAssets := s.materializeTaskRecords(ctx, logCtx, ag, state, extractedAssets)
+
 	store, err := s.getPersistentStore(ctx, repo)
 	if err != nil {
 		return nil, err
@@ -402,6 +541,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		Branch:                      branchName,
 		Transcript:                  redactedTranscript,
 		Assets:                      extractedAssets,
+		Tasks:                       taskPayloads,
 		Prompts:                     sessionData.Prompts,
 		FilesTouched:                sessionData.FilesTouched,
 		CheckpointsCount:            checkpointStepCount(state),

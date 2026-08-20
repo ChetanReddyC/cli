@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -4367,38 +4368,173 @@ func TestUpdateSummary_RedactsSecrets(t *testing.T) {
 	}
 }
 
-func TestWriteCommitted_SubagentTranscript_JSONLFallback(t *testing.T) {
+// TestWriteCommitted_TaskPayload_MaterializesTranscriptAndMetadata is the core
+// #2058 regression: subagent task data used to die at condensation because no
+// producer ever set the old IsTask/ToolUseID route, leaving
+// writeTaskCheckpointEntries permanently unreachable. WriteOptions.Tasks
+// replaces that route; this proves a TaskPayload actually lands under the
+// checkpoint's tasks/<tool-use-id>/ subtree on both persistent backends —
+// which applySessionWrite backs identically (see writeTaskRecordEntries), so
+// covering both here guards against a backend later shadowing or
+// de-embedding that shared write path.
+func TestWriteCommitted_TaskPayload_MaterializesTranscriptAndMetadata(t *testing.T) {
+	tests := []struct {
+		name      string
+		newStore  func(repo *git.Repository) sessionMetadataStore
+		fetchTree func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree
+	}{
+		{
+			name:     "git-branch store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return NewGitStore(repo, DefaultV1Refs()) },
+			fetchTree: func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree {
+				t.Helper()
+				store := NewGitStore(repo, DefaultV1Refs())
+				tree, err := store.getCheckpointFetchingTree(context.Background(), cid)
+				if err != nil {
+					t.Fatalf("getCheckpointFetchingTree() error = %v", err)
+				}
+				return tree
+			},
+		},
+		{
+			name:     "git-refs store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return newGitRefsStore(repo) },
+			fetchTree: func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree {
+				t.Helper()
+				store := newGitRefsStore(repo)
+				tree, err := store.checkpointTree(context.Background(), cid)
+				if err != nil {
+					t.Fatalf("checkpointTree() error = %v", err)
+				}
+				return tree
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, _ := setupBranchTestRepo(t)
+			store := tt.newStore(repo)
+			checkpointID := id.MustCheckpointID("aabbccddeef9")
+
+			redactedTranscript := `{"role":"assistant","content":"secret is ` + highEntropySecret + `"}` + "\n"
+			redacted, err := redact.JSONLBytes([]byte(redactedTranscript))
+			if err != nil {
+				t.Fatalf("redact.JSONLBytes() error = %v", err)
+			}
+
+			started := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
+			completed := started.Add(2 * time.Minute)
+
+			err = store.Write(context.Background(), Session{
+				CheckpointID:     checkpointID,
+				SessionID:        "task-payload-session",
+				Strategy:         "manual-commit",
+				Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
+				CheckpointsCount: 1,
+				AuthorName:       "Test Author",
+				AuthorEmail:      "test@example.com",
+				Tasks: []TaskPayload{
+					{
+						ToolUseID:       "toolu_test123",
+						AgentID:         "agent1",
+						SubagentType:    "explore",
+						TaskDescription: "look for the bug",
+						Transcript:      bytes.NewBuffer(redacted.Bytes()),
+						Files:           []string{"a.go"},
+						StartedAt:       started,
+						CompletedAt:     completed,
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+
+			tree := tt.fetchTree(t, repo, checkpointID)
+
+			agentPath := "tasks/toolu_test123/agent-agent1.jsonl"
+			file, err := tree.File(agentPath)
+			if err != nil {
+				t.Fatalf("task transcript should exist at %s: %v", agentPath, err)
+			}
+			content, err := file.Contents()
+			if err != nil {
+				t.Fatalf("failed to read task transcript: %v", err)
+			}
+			if strings.Contains(content, highEntropySecret) {
+				t.Error("task transcript should not contain the raw secret")
+			}
+			if !strings.Contains(content, "REDACTED") {
+				t.Error("task transcript should contain REDACTED placeholder")
+			}
+
+			taskJSONPath := "tasks/toolu_test123/task.json"
+			taskFile, err := tree.File(taskJSONPath)
+			if err != nil {
+				t.Fatalf("task.json should exist at %s: %v", taskJSONPath, err)
+			}
+			taskContent, err := taskFile.Contents()
+			if err != nil {
+				t.Fatalf("failed to read task.json: %v", err)
+			}
+			var meta taskRecordMetadata
+			if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
+				t.Fatalf("failed to unmarshal task.json: %v", err)
+			}
+			if meta.ToolUseID != "toolu_test123" || meta.AgentID != "agent1" {
+				t.Errorf("task.json identifiers = %+v, want tool_use_id=toolu_test123 agent_id=agent1", meta)
+			}
+			if meta.SubagentType != "explore" || meta.TaskDescription != "look for the bug" {
+				t.Errorf("task.json labels = %+v, want subagent_type=explore task_description=%q", meta, "look for the bug")
+			}
+			if !slices.Equal(meta.Files, []string{"a.go"}) {
+				t.Errorf("task.json Files = %v, want [a.go]", meta.Files)
+			}
+			if !meta.StartedAt.Equal(started) || !meta.CompletedAt.Equal(completed) {
+				t.Errorf("task.json timestamps = started=%v completed=%v, want started=%v completed=%v",
+					meta.StartedAt, meta.CompletedAt, started, completed)
+			}
+			if meta.TranscriptUnavailableReason != "" {
+				t.Errorf("task.json TranscriptUnavailableReason = %q, want empty", meta.TranscriptUnavailableReason)
+			}
+		})
+	}
+}
+
+// TestWriteCommitted_TaskPayload_UnavailableTranscript_RecordsReasonWithoutJSONL
+// covers the "missing/unreadable transcript" half of the materializer contract:
+// a nil TaskPayload.Transcript must still produce task.json (with the
+// unavailable reason recorded so the pointer is not silently lost) but no
+// agent-<id>.jsonl, and the rest of the checkpoint (the session's own
+// transcript) must be unaffected.
+func TestWriteCommitted_TaskPayload_UnavailableTranscript_RecordsReasonWithoutJSONL(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupBranchTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
-	checkpointID := id.MustCheckpointID("aabbccddeef9")
-
-	// Create a temp file with invalid JSONL containing a secret
-	tmpDir := t.TempDir()
-	transcriptPath := filepath.Join(tmpDir, "agent.jsonl")
-	invalidJSONL := "this is not valid JSON but has a secret " + highEntropySecret + " in it"
-	if err := os.WriteFile(transcriptPath, []byte(invalidJSONL), 0o644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
+	checkpointID := id.MustCheckpointID("aabbccddeefa")
 
 	err := store.Write(context.Background(), Session{
-		CheckpointID:           checkpointID,
-		SessionID:              "jsonl-fallback-session",
-		Strategy:               "manual-commit",
-		Transcript:             redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
-		CheckpointsCount:       1,
-		AuthorName:             "Test Author",
-		AuthorEmail:            "test@example.com",
-		IsTask:                 true,
-		ToolUseID:              "toolu_test123",
-		AgentID:                "agent1",
-		SubagentTranscriptPath: transcriptPath,
+		CheckpointID:     checkpointID,
+		SessionID:        "task-payload-unavailable-session",
+		Strategy:         "manual-commit",
+		Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"session transcript intact"}` + "\n")),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+		Tasks: []TaskPayload{
+			{
+				ToolUseID:                   "toolu_missing",
+				AgentID:                     "agent2",
+				Transcript:                  nil,
+				TranscriptUnavailableReason: "no declared or resolved transcript path",
+			},
+		},
 	})
 	if err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
+		t.Fatalf("Write() error = %v", err)
 	}
 
-	// Read back the subagent transcript from the tree
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		t.Fatalf("failed to get branch ref: %v", err)
@@ -4412,26 +4548,76 @@ func TestWriteCommitted_SubagentTranscript_JSONLFallback(t *testing.T) {
 		t.Fatalf("failed to get tree: %v", err)
 	}
 
-	agentPath := checkpointID.Path() + "/tasks/toolu_test123/agent-agent1.jsonl"
-	file, err := tree.File(agentPath)
-	if err != nil {
-		t.Fatalf("subagent transcript should exist at %s (JSONL fallback should not drop it): %v", agentPath, err)
+	agentPath := checkpointID.Path() + "/tasks/toolu_missing/agent-agent2.jsonl"
+	if _, err := tree.File(agentPath); err == nil {
+		t.Errorf("agent-agent2.jsonl should not exist when Transcript is nil, but was found at %s", agentPath)
 	}
 
-	content, err := file.Contents()
+	taskJSONPath := checkpointID.Path() + "/tasks/toolu_missing/task.json"
+	taskFile, err := tree.File(taskJSONPath)
 	if err != nil {
-		t.Fatalf("failed to read subagent transcript: %v", err)
+		t.Fatalf("task.json should exist at %s: %v", taskJSONPath, err)
+	}
+	taskContent, err := taskFile.Contents()
+	if err != nil {
+		t.Fatalf("failed to read task.json: %v", err)
+	}
+	var meta taskRecordMetadata
+	if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
+		t.Fatalf("failed to unmarshal task.json: %v", err)
+	}
+	if meta.TranscriptUnavailableReason != "no declared or resolved transcript path" {
+		t.Errorf("task.json TranscriptUnavailableReason = %q, want %q", meta.TranscriptUnavailableReason, "no declared or resolved transcript path")
 	}
 
-	// Verify the transcript was stored (not dropped) and secret was redacted
-	if content == "" {
-		t.Error("subagent transcript should not be empty")
+	// The session's own transcript must be unaffected by the unavailable task transcript.
+	sessionContent, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() error = %v", err)
 	}
-	if strings.Contains(content, highEntropySecret) {
-		t.Error("subagent transcript should not contain the secret after fallback redaction")
+	if !strings.Contains(string(sessionContent.Transcript), "session transcript intact") {
+		t.Errorf("session transcript = %q, want it to contain %q", sessionContent.Transcript, "session transcript intact")
 	}
-	if !strings.Contains(content, "REDACTED") {
-		t.Error("subagent transcript should contain REDACTED from fallback redaction")
+}
+
+// TestWriteCommitted_NoTasks_NoTaskDirectory guards the no-op path: an empty
+// Tasks slice (every session before subagent-work durability landed, and
+// every ordinary session with no subagent work) must not create a tasks/
+// subtree at all.
+func TestWriteCommitted_NoTasks_NoTaskDirectory(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	checkpointID := id.MustCheckpointID("aabbccddeefb")
+
+	err := store.Write(context.Background(), Session{
+		CheckpointID:     checkpointID,
+		SessionID:        "no-tasks-session",
+		Strategy:         "manual-commit",
+		Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get branch ref: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("failed to get commit: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	if _, err := tree.Tree(checkpointID.Path() + "/tasks"); err == nil {
+		t.Error("tasks/ subtree should not exist when Tasks is empty")
 	}
 }
 

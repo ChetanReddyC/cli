@@ -412,11 +412,41 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 // in this file, plus SessionState.SubagentTokensBaseline). Shared by all three
 // condensation reset sites (CondenseSessionByID, CondenseAndMarkFullyCondensed,
 // condenseAndUpdateState) so the baseline capture cannot drift between them.
+//
+// It is also the single post-write mutation site for the task-record
+// lifecycle (#2058): every one of the three callers only reaches here after a
+// successful (non-skipped) CondenseSession write, so this is exactly the
+// point at which materializeTaskRecords' payloads have just been durably
+// stored — see removeCompletedTaskRecords.
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
 	state.TranscriptOnlyTaskSteps = 0
 	state.CheckpointTokenUsage = nil
 	state.RebaselineSubagentTokens()
+	removeCompletedTaskRecords(state)
+}
+
+// removeCompletedTaskRecords drops every completed task record (CompletedAt
+// non-zero) from state after a successful condensation write: the record's
+// payload — a transcript or, when unavailable, the reason it wasn't — is now
+// durably stored under this checkpoint's tasks/<tool-use-id>/ subtree, so the
+// pointer no longer needs to live in session state (RemoveTaskRecord's
+// contract). In-flight records (CompletedAt zero) are left alone; the next
+// condensation re-materializes their transcript-so-far.
+//
+// Collects the IDs to remove before calling RemoveTaskRecord: that method
+// mutates state.TaskRecords in place (shifting the backing array), so
+// removing while ranging over the live slice would skip elements.
+func removeCompletedTaskRecords(state *SessionState) {
+	var completedIDs []string
+	for _, record := range state.TaskRecords {
+		if !record.CompletedAt.IsZero() {
+			completedIDs = append(completedIDs, record.ToolUseID)
+		}
+	}
+	for _, toolUseID := range completedIDs {
+		state.RemoveTaskRecord(toolUseID)
+	}
 }
 
 // deleteShadowBranch deletes a shadow branch by name.

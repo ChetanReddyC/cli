@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -539,6 +540,245 @@ func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T)
 	require.Equal(t, string(session.KindAgentInvestigate), meta.Kind, "per-session Kind")
 	require.Equal(t, "0123456789ab", meta.InvestigateRunID, "per-session InvestigateRunID")
 	require.Equal(t, "Why is checkout flaky?", meta.InvestigateTopic, "per-session InvestigateTopic")
+}
+
+// taskTranscriptSecret is a string with Shannon entropy > 4.5 that will
+// trigger redaction — mirrors checkpoint_test.go's highEntropySecret so task
+// transcript redaction is verified the same way session transcript redaction
+// is.
+const taskTranscriptSecret = "sk-ant-api03-xK9mZ2vL8nQ5rT1wY4bC7dF0gH3jE6pA"
+
+// setupCondensableSessionWithTranscript creates a git repo, writes a session
+// transcript, and runs SaveStep so the session has a shadow branch and passes
+// CondenseSession's existing no-transcript-no-files skip gate — the fixture
+// shared by the task-record materializer tests below.
+func setupCondensableSessionWithTranscript(t *testing.T, sessionID string) (*git.Repository, *SessionState) {
+	t.Helper()
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	transcript := `{"type":"human","message":{"content":"dispatch a subagent"}}
+{"type":"assistant","message":{"content":"On it."}}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
+
+	trackedFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(trackedFile, []byte("agent-modified content"), 0o644))
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"test.txt"},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "checkpoint 1",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	return repo, state
+}
+
+// checkpointTaskFile reads one file from a committed checkpoint's
+// tasks/<tool-use-id>/ subtree off the metadata branch, returning ("", false)
+// when the file doesn't exist.
+func checkpointTaskFile(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID, relPath string) (string, bool) {
+	t.Helper()
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+
+	file, err := tree.File(checkpointID.Path() + "/" + relPath)
+	if err != nil {
+		return "", false
+	}
+	content, err := file.Contents()
+	require.NoError(t, err)
+	return content, true
+}
+
+// TestCondenseSession_MaterializesCompletedTaskRecord_RegressionFor2058 is THE
+// #2058 regression: a completed task record's transcript used to die at
+// condensation because no producer ever set the (now deleted) WriteOptions
+// IsTask/ToolUseID route, leaving writeTaskCheckpointEntries permanently
+// unreachable. This proves CondenseSession now materializes a completed
+// record's transcript (redacted) and metadata into the checkpoint tree, and
+// that resetCheckpointWindow — the real post-write mutation site — then
+// removes the record from session state.
+func TestCondenseSession_MaterializesCompletedTaskRecord_RegressionFor2058(t *testing.T) {
+	sessionID := "2026-08-19-task-record-materialize"
+	repo, state := setupCondensableSessionWithTranscript(t, sessionID)
+
+	dir := t.TempDir()
+	agentTranscriptPath := filepath.Join(dir, "agent-transcript.jsonl")
+	agentTranscript := `{"role":"assistant","content":"found it: ` + taskTranscriptSecret + `"}` + "\n"
+	require.NoError(t, os.WriteFile(agentTranscriptPath, []byte(agentTranscript), 0o644))
+
+	started := time.Date(2026, 8, 19, 9, 0, 0, 0, time.UTC)
+	completed := started.Add(90 * time.Second)
+	state.TaskRecords = []session.TaskRecord{
+		{
+			ToolUseID:              "toolu_regress2058",
+			AgentID:                "agent-1",
+			SubagentType:           "explorer",
+			TaskDescription:        "find the bug",
+			DeclaredTranscriptPath: agentTranscriptPath,
+			Files:                  []string{"found.go"},
+			StartedAt:              started,
+			CompletedAt:            completed,
+		},
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	checkpointID := id.MustCheckpointID("aabbccdd2058")
+	result, err := (&ManualCommitStrategy{}).CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped)
+
+	jsonlContent, ok := checkpointTaskFile(t, repo, checkpointID, "tasks/toolu_regress2058/agent-agent-1.jsonl")
+	require.True(t, ok, "tasks/toolu_regress2058/agent-agent-1.jsonl must exist — this is the #2058 regression")
+	require.NotContains(t, jsonlContent, taskTranscriptSecret, "task transcript must be redacted")
+	require.Contains(t, jsonlContent, "REDACTED")
+
+	taskJSON, ok := checkpointTaskFile(t, repo, checkpointID, "tasks/toolu_regress2058/task.json")
+	require.True(t, ok, "task.json must exist")
+	var meta struct {
+		ToolUseID       string   `json:"tool_use_id"`
+		AgentID         string   `json:"agent_id"`
+		SubagentType    string   `json:"subagent_type"`
+		TaskDescription string   `json:"task_description"`
+		Files           []string `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(taskJSON), &meta))
+	require.Equal(t, "toolu_regress2058", meta.ToolUseID)
+	require.Equal(t, "agent-1", meta.AgentID)
+	require.Equal(t, "explorer", meta.SubagentType)
+	require.Equal(t, "find the bug", meta.TaskDescription)
+	require.Equal(t, []string{"found.go"}, meta.Files)
+
+	// Record lifecycle: resetCheckpointWindow is the real post-write mutation
+	// site all three condensation callers use. A completed record's payload
+	// is now durably stored, so it must be removed from session state.
+	resetCheckpointWindow(state)
+	require.Empty(t, state.TaskRecords, "completed task record must be removed after materialization")
+}
+
+// TestCondenseSession_InFlightTaskRecord_TranscriptSoFarStoredRecordSurvives
+// covers the in-flight half of the materializer contract: a record with
+// CompletedAt still zero has its transcript-so-far stored (every checkpoint
+// is self-contained), but the record itself must survive
+// resetCheckpointWindow so the NEXT condensation re-materializes it.
+func TestCondenseSession_InFlightTaskRecord_TranscriptSoFarStoredRecordSurvives(t *testing.T) {
+	sessionID := "2026-08-19-task-record-inflight"
+	repo, state := setupCondensableSessionWithTranscript(t, sessionID)
+
+	dir := t.TempDir()
+	agentTranscriptPath := filepath.Join(dir, "agent-transcript.jsonl")
+	require.NoError(t, os.WriteFile(agentTranscriptPath, []byte(`{"role":"assistant","content":"still working"}`+"\n"), 0o644))
+
+	state.TaskRecords = []session.TaskRecord{
+		{
+			ToolUseID:              "toolu_inflight",
+			AgentID:                "agent-2",
+			DeclaredTranscriptPath: agentTranscriptPath,
+			StartedAt:              time.Date(2026, 8, 19, 9, 0, 0, 0, time.UTC),
+			// CompletedAt intentionally left zero: still in flight.
+		},
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	checkpointID := id.MustCheckpointID("aabbccddaa01")
+	result, err := (&ManualCommitStrategy{}).CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped)
+
+	jsonlContent, ok := checkpointTaskFile(t, repo, checkpointID, "tasks/toolu_inflight/agent-agent-2.jsonl")
+	require.True(t, ok, "in-flight record's transcript-so-far must be stored")
+	require.Contains(t, jsonlContent, "still working")
+
+	resetCheckpointWindow(state)
+	require.Len(t, state.TaskRecords, 1, "in-flight record must survive so the next condensation re-materializes it")
+	require.True(t, state.TaskRecords[0].CompletedAt.IsZero())
+}
+
+// TestCondenseSession_TaskRecordMissingTranscriptPath_RecordsUnavailableReason
+// covers the missing/unreadable-transcript half: a record whose declared path
+// doesn't resolve to any file must still produce task.json (with the
+// unavailable reason recorded, so the pointer isn't silently dropped) but no
+// agent-<id>.jsonl, and condensation must otherwise proceed normally.
+func TestCondenseSession_TaskRecordMissingTranscriptPath_RecordsUnavailableReason(t *testing.T) {
+	sessionID := "2026-08-19-task-record-missing"
+	repo, state := setupCondensableSessionWithTranscript(t, sessionID)
+
+	state.TaskRecords = []session.TaskRecord{
+		{
+			ToolUseID:              "toolu_missing",
+			AgentID:                "agent-3",
+			DeclaredTranscriptPath: "", // no declared path
+			CompletedAt:            time.Date(2026, 8, 19, 9, 5, 0, 0, time.UTC),
+		},
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	checkpointID := id.MustCheckpointID("aabbccddaa02")
+	result, err := (&ManualCommitStrategy{}).CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped, "condensation must proceed normally even when a task transcript is unavailable")
+
+	_, ok := checkpointTaskFile(t, repo, checkpointID, "tasks/toolu_missing/agent-agent-3.jsonl")
+	require.False(t, ok, "no jsonl should be written when the transcript is unavailable")
+
+	taskJSON, ok := checkpointTaskFile(t, repo, checkpointID, "tasks/toolu_missing/task.json")
+	require.True(t, ok, "task.json must still exist, recording the unavailable reason")
+	var meta struct {
+		TranscriptUnavailableReason string `json:"transcript_unavailable_reason"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(taskJSON), &meta))
+	require.NotEmpty(t, meta.TranscriptUnavailableReason)
+
+	// The session's own transcript must be unaffected.
+	summary := readCommittedSummary(t, repo, checkpointID)
+	require.NotEmpty(t, summary.Sessions)
+}
+
+// TestResetCheckpointWindow_RemovesCompletedTaskRecordsKeepsInFlight is a
+// focused unit test on resetCheckpointWindow's task-record removal, isolated
+// from the full condensation write path.
+func TestResetCheckpointWindow_RemovesCompletedTaskRecordsKeepsInFlight(t *testing.T) {
+	t.Parallel()
+
+	state := &SessionState{
+		TaskRecords: []session.TaskRecord{
+			{ToolUseID: "completed-1", CompletedAt: time.Date(2026, 8, 19, 9, 0, 0, 0, time.UTC)},
+			{ToolUseID: "inflight-1"},
+			{ToolUseID: "completed-2", CompletedAt: time.Date(2026, 8, 19, 9, 1, 0, 0, time.UTC)},
+			{ToolUseID: "inflight-2"},
+		},
+	}
+
+	resetCheckpointWindow(state)
+
+	require.Len(t, state.TaskRecords, 2)
+	remaining := map[string]bool{}
+	for _, r := range state.TaskRecords {
+		remaining[r.ToolUseID] = true
+	}
+	require.True(t, remaining["inflight-1"])
+	require.True(t, remaining["inflight-2"])
+	require.False(t, remaining["completed-1"])
+	require.False(t, remaining["completed-2"])
 }
 
 // TestCheckpointStepCount covers the prompt-window math that produces the

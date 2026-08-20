@@ -3602,8 +3602,13 @@ func TestHandleLifecycleSessionEnd_InFlightTask_FinalCapture(t *testing.T) {
 	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
 	require.NoError(t, loadErr)
 	require.NotNil(t, state)
-	assert.Len(t, state.TaskRecords, 2, "records must persist after completion — they must not be deleted, since the future materializer reads them at condensation")
-	assert.Empty(t, state.LiveTaskRecords(), "session end must finalize (not merely snapshot) any still-in-flight task")
+	// Both records were completed by the sweep above and then materialized by
+	// endSessionNow's eager condense (which succeeded — see FullyCondensed
+	// below): the durable-records materializer (#2058) stores each completed
+	// record's payload under the permanent checkpoint's tasks/<id>/ subtree
+	// and resetCheckpointWindow removes it from session state, since the
+	// payload no longer needs to live there.
+	assert.Empty(t, state.TaskRecords, "completed records must be removed from session state once materialized into the permanent checkpoint")
 	assert.True(t, state.FullyCondensed, "the final capture must run before endSessionNow's eager condense, so the condense sweeps it")
 
 	// The eager condense consumes the shadow branch's content into a permanent
