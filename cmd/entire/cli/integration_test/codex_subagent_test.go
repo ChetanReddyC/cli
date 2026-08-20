@@ -8,14 +8,15 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/stretchr/testify/require"
 )
 
 // TestCodexSubagent_StoresDeclaredSubagentTranscript drives Codex's subagent hooks
-// end to end — subagent-start → the subagent edits a file → subagent-stop — and
-// asserts the completed task record points at the subagent's own rollout, which
-// is what the materializer follows at condensation (#2058).
+// end to end — subagent-start → the subagent edits a file → subagent-stop → commit —
+// and asserts the declared rollout reaches the condensed checkpoint's tasks/ subtree
+// via the task record the materializer follows (#2058).
 //
 // The rollout path here is deliberately flat, matching Codex's real layout and
 // matching neither candidate the Claude Code fallback probes, so the assertion can
@@ -74,4 +75,14 @@ func TestCodexSubagent_StoresDeclaredSubagentTranscript(t *testing.T) {
 		"the declared agent_transcript_path was not honoured")
 	require.True(t, containsFile(rec.Files, editedFile),
 		"the record must carry the subagent's edit, got %v", rec.Files)
+
+	// Committing condenses the session, and the materializer must store the rollout
+	// itself — the storage guarantee this test is named for.
+	env.GitCommitWithShadowHooksAsAgent("Add red doc", editedFile)
+	checkpointID := env.TryGetLatestCheckpointID()
+	require.NotEmpty(t, checkpointID, "expected a condensed checkpoint after committing the subagent's work")
+	stored, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
+		CheckpointTaskFilePath(checkpointID, agentID, paths.AgentTranscriptFileName(agentID)))
+	require.True(t, ok, "declared rollout not materialized under the checkpoint's tasks/ subtree")
+	require.Contains(t, stored, editedFile, "materialized transcript is not the subagent's rollout")
 }
