@@ -1640,7 +1640,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	}
 
 	files := mergeUnique(mergeUnique(relModifiedFiles, relNewFiles), relDeletedFiles)
-	completed, err := strategy.CompleteTaskRecord(logCtx, event.SessionID, session.TaskRecord{
+	rec := session.TaskRecord{
 		ToolUseID:              event.ToolUseID,
 		AgentID:                event.SubagentID,
 		StartedAt:              time.Now(),
@@ -1649,7 +1649,20 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		DeclaredTranscriptPath: subagentTranscriptPath,
 		Files:                  files,
 		TokenUsage:             event.TokenUsage,
-	})
+	}
+	// Exactly-once needs an identity to be "once" about. Copilot CLI's
+	// SubagentEnd carries no correlation ID at all, so every one of its
+	// subagents keys on "" — the claim would match the first one's completed
+	// record and silently drop each later subagent's files. Merge instead, the
+	// same shape multi-turn Droid Workers use.
+	if event.ToolUseID == "" && event.SubagentID == "" {
+		if err := strategy.UpsertCompletedTaskRecord(logCtx, event.SessionID, rec); err != nil {
+			return fmt.Errorf("failed to record uncorrelated task: %w", err)
+		}
+		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+		return nil
+	}
+	completed, err := strategy.CompleteTaskRecord(logCtx, event.SessionID, rec)
 	if err != nil {
 		return fmt.Errorf("failed to complete task record: %w", err)
 	}

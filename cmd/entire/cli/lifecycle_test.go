@@ -3288,6 +3288,34 @@ func TestHandleLifecycleSubagentEnd_LaunchDispatch(t *testing.T) {
 		assert.Contains(t, state.FilesTouched, "foreground.txt",
 			"task files must merge into FilesTouched so carry-forward and PostCommit gating see them")
 	})
+
+	// uncorrelated guards agents whose SubagentEnd carries no correlation ID at
+	// all — Copilot CLI keys every subagent on "", so the exactly-once claim
+	// would match the first one's completed record and drop each later
+	// subagent's files. They must merge instead.
+	t.Run("uncorrelated subagents merge instead of claiming once", func(t *testing.T) {
+		repoDir, headHash := setupSubagentEndTestRepo(t)
+		ctx := context.Background()
+		sessionID := "uncorrelated-session"
+
+		saveInFlightSession(ctx, t, sessionID, headHash)
+
+		for _, file := range []string{"first.txt", "second.txt"} {
+			testutil.WriteFile(t, repoDir, file, "written by an uncorrelated subagent")
+			require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), &agent.Event{
+				Type:      agent.SubagentEnd,
+				SessionID: sessionID,
+				Timestamp: time.Now(),
+			}))
+		}
+
+		state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+		require.NoError(t, loadErr)
+		require.Len(t, state.TaskRecords, 1, "uncorrelated subagents share one record")
+		assert.Contains(t, state.FilesTouched, "first.txt")
+		assert.Contains(t, state.FilesTouched, "second.txt",
+			"the second uncorrelated subagent's files must not be dropped by the exactly-once claim")
+	})
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_CapturesUsingLaunchRecordedLabel
