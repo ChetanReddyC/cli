@@ -98,11 +98,7 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) (cells []cellGroup, skippe
 		if len(r.Placements) > 0 {
 			p, ok := routedRepoPlacement(r)
 			if !ok {
-				label := r.FullName
-				if label == "" {
-					label = r.ID
-				}
-				skipped = append(skipped, label)
+				skipped = append(skipped, skippedRepoLabel(r))
 				continue
 			}
 			// The picked placement carries its own cluster slug, cell, and
@@ -111,6 +107,12 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) (cells []cellGroup, skippe
 			// catalog join (bySlug) instead of jurisdiction-default routing.
 			addToGroup(p.ID, p.Cell, p.Jurisdiction, p.ClusterSlug)
 		} else {
+			// An ID-less legacy row goes through the same reporting channel as
+			// the placement path above; addToGroup would drop it silently.
+			if strings.TrimSpace(r.ID) == "" {
+				skipped = append(skipped, skippedRepoLabel(r))
+				continue
+			}
 			addToGroup(r.ID, r.Cell, r.Jurisdiction, r.ClusterSlug) //nolint:staticcheck // top-level Cell/ClusterSlug deprecated by /repos spec bump; migrate to per-placement fields separately
 		}
 	}
@@ -126,6 +128,20 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) (cells []cellGroup, skippe
 		return cells[i].jurisdiction < cells[j].jurisdiction
 	})
 	return cells, skipped
+}
+
+// skippedRepoLabel names an unroutable repo in the skipped list. FullName is
+// what the user typed and recognizes; the row ID is the fallback. The
+// placeholder keeps a row carrying neither from rendering as an empty name in
+// the user-facing warning.
+func skippedRepoLabel(r coreapi.RepoIndexEntry) string {
+	if name := strings.TrimSpace(r.FullName); name != "" {
+		return name
+	}
+	if id := strings.TrimSpace(r.ID); id != "" {
+		return id
+	}
+	return "(unidentified repo)"
 }
 
 // routedRepoPlacement picks the entry's PROCESSING placement — the one every
@@ -158,6 +174,11 @@ func groupReposByCell(repos []coreapi.RepoIndexEntry) (cells []cellGroup, skippe
 // cell_target.go's resolveProcessingPlacement, which tolerates a
 // mid-processing placement for single-repo reads (trail data can exist
 // mid-clone) — nothing is INDEXED to search until the placement is ready.
+// Expected symptom while that holds: during a placement migration (a new
+// cell elected while it is still cloning), the repo drops out of broad
+// search and a pinned search answers no results plus a skip warning, even
+// though the previously ready placement still holds a full index. Trails
+// and experts keep working throughout (they tolerate mid-processing).
 // The ListRepos decoder validates status against the closed enum, so "not
 // ready" here means processing, failed, or suspended; a status this build
 // doesn't know fails the whole index read upstream, never this pick.

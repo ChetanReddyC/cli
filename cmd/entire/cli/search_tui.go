@@ -166,8 +166,23 @@ type searchModel struct {
 	codeStats      codesearch.Stats    // aggregate stats
 	codeLoading    bool                // true while async code search runs
 	codeSearchErr  string              // error from code search
+	codeWarning    string              // code tab's completeness note (failed regions, skipped repos)
 	codeSearchOpts codeSearchOpts      // opts for code search (set by caller)
 	codeSearchGen  uint64              // generation counter; incremented on each new code search
+}
+
+// codeSearchWarning summarizes a code response's scope loss for the status
+// row — the code-tab counterpart of the semantic path's Warnings, so a
+// narrowed scope is not invisible in the TUI.
+func codeSearchWarning(resp *codesearch.SearchResponse) string {
+	var parts []string
+	if len(resp.FailedJurisdictions) > 0 {
+		parts = append(parts, "some regions failed: "+strings.Join(resp.FailedJurisdictions, ", "))
+	}
+	if len(resp.SkippedRepos) > 0 {
+		parts = append(parts, "skipped repos with no searchable placement: "+strings.Join(resp.SkippedRepos, ", "))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // filteredResults returns results matching the active type filter.
@@ -397,6 +412,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 			m.codeResults = msg.resp.Results
 			m.codeStats = msg.resp.Stats
 			m.codeSearchErr = ""
+			m.codeWarning = codeSearchWarning(msg.resp)
 		}
 		if m.filterType == typeFilterCode {
 			m.cursor = 0
@@ -988,8 +1004,12 @@ func (m searchModel) viewListStatusRow() string {
 	if pages := m.totalPages(); pages > 1 {
 		right = fmt.Sprintf("page %d/%d · %d results", m.page+1, pages, n)
 	}
-	if m.warning != "" {
-		right = "⚠ " + m.warning + " · " + right
+	warning := m.warning
+	if m.filterType == typeFilterCode {
+		warning = m.codeWarning
+	}
+	if warning != "" {
+		right = "⚠ " + warning + " · " + right
 	}
 	if lipgloss.Width(right) > contentWidth {
 		right = stringutil.TruncateRunes(right, contentWidth, "…")

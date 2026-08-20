@@ -821,14 +821,18 @@ const (
 // the writer supports them (styles.colorEnabled); piped output stays plain.
 func writeCodeSearchText(w io.Writer, resp *codesearch.SearchResponse, styles statusStyles, caseSensitive bool) {
 	if len(resp.Results) == 0 {
-		switch {
-		case len(resp.FailedJurisdictions) > 0:
-			fmt.Fprintf(w, "No code search results found (some regions failed: %s)\n",
-				strings.Join(resp.FailedJurisdictions, ", "))
-		case len(resp.SkippedRepos) > 0:
-			fmt.Fprintf(w, "No code search results found (skipped repos with no searchable placement: %s)\n",
-				strings.Join(resp.SkippedRepos, ", "))
-		default:
+		// Both causes can hold at once; reporting only the first leaves the
+		// user to discover the other from a bare result count.
+		var causes []string
+		if len(resp.FailedJurisdictions) > 0 {
+			causes = append(causes, "some regions failed: "+strings.Join(resp.FailedJurisdictions, ", "))
+		}
+		if len(resp.SkippedRepos) > 0 {
+			causes = append(causes, "skipped repos with no searchable placement: "+strings.Join(resp.SkippedRepos, ", "))
+		}
+		if len(causes) > 0 {
+			fmt.Fprintf(w, "No code search results found (%s)\n", strings.Join(causes, "; "))
+		} else {
 			fmt.Fprintln(w, "No code search results found.")
 		}
 		return
