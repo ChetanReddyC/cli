@@ -714,43 +714,150 @@ func TestCondenseSession_InFlightTaskRecord_TranscriptSoFarStoredRecordSurvives(
 }
 
 // TestCondenseSession_TaskRecordMissingTranscriptPath_RecordsUnavailableReason
-// covers the missing/unreadable-transcript half: a record whose declared path
-// doesn't resolve to any file must still produce task.json (with the
-// unavailable reason recorded, so the pointer isn't silently dropped) but no
-// agent-<id>.jsonl, and condensation must otherwise proceed normally.
+// covers both unavailable-transcript shapes: a record with no resolvable path
+// at all, and one whose declared path exists but reads as empty. Either way
+// task.json must still be produced (with a stable, path-free reason category
+// recorded, so the pointer isn't silently dropped) but no agent-<id>.jsonl,
+// and condensation must otherwise proceed normally.
 func TestCondenseSession_TaskRecordMissingTranscriptPath_RecordsUnavailableReason(t *testing.T) {
-	sessionID := "2026-08-19-task-record-missing"
+	tests := []struct {
+		name         string
+		toolUseID    string
+		checkpointID string
+		declaredPath func(t *testing.T) string
+		wantReason   string
+	}{
+		{
+			name:         "no declared or resolvable path",
+			toolUseID:    "toolu_missing",
+			checkpointID: "aabbccddaa02",
+			declaredPath: func(*testing.T) string { return "" },
+			wantReason:   taskTranscriptReasonUnresolvable,
+		},
+		{
+			name:         "declared path exists but is empty",
+			toolUseID:    "toolu_empty",
+			checkpointID: "aabbccddaa03",
+			declaredPath: func(t *testing.T) string {
+				t.Helper()
+				p := filepath.Join(t.TempDir(), "agent-transcript.jsonl")
+				require.NoError(t, os.WriteFile(p, nil, 0o644))
+				return p
+			},
+			wantReason: taskTranscriptReasonEmpty,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessionID := "2026-08-19-task-record-missing-" + tt.toolUseID
+			repo, state := setupCondensableSessionWithTranscript(t, sessionID)
+
+			state.TaskRecords = []session.TaskRecord{
+				{
+					ToolUseID:              tt.toolUseID,
+					AgentID:                "agent-3",
+					DeclaredTranscriptPath: tt.declaredPath(t),
+					CompletedAt:            time.Date(2026, 8, 19, 9, 5, 0, 0, time.UTC),
+				},
+			}
+			require.NoError(t, SaveSessionState(context.Background(), state))
+
+			checkpointID := id.MustCheckpointID(tt.checkpointID)
+			result, err := (&ManualCommitStrategy{}).CondenseSession(context.Background(), repo, checkpointID, state, nil)
+			require.NoError(t, err)
+			require.False(t, result.Skipped, "condensation must proceed normally even when a task transcript is unavailable")
+
+			_, ok := checkpointTaskFile(t, repo, checkpointID, "tasks/"+tt.toolUseID+"/agent-agent-3.jsonl")
+			require.False(t, ok, "no jsonl should be written when the transcript is unavailable")
+
+			taskJSON, ok := checkpointTaskFile(t, repo, checkpointID, "tasks/"+tt.toolUseID+"/task.json")
+			require.True(t, ok, "task.json must still exist, recording the unavailable reason")
+			var meta struct {
+				TranscriptUnavailableReason string `json:"transcript_unavailable_reason"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(taskJSON), &meta))
+			require.Equal(t, tt.wantReason, meta.TranscriptUnavailableReason)
+			require.NotContains(t, meta.TranscriptUnavailableReason, string(filepath.Separator),
+				"the reason must be a stable category, never a local filesystem path")
+
+			// The session's own transcript must be unaffected.
+			summary := readCommittedSummary(t, repo, checkpointID)
+			require.NotEmpty(t, summary.Sessions)
+		})
+	}
+}
+
+// TestCondenseSession_PoisonedTaskRecord_SkippedNotWedged is the regression
+// for the "poisoned record must not wedge condensation forever" hardening: a
+// record with an unsafe ToolUseID must not abort the whole checkpoint write
+// (which would re-fail on every future condensation, since completed records
+// are only removed after a successful write), nor should it silently produce
+// a task.json it can't safely be placed under. Alongside a valid record, the
+// valid one must still materialize, condensation must still succeed, and the
+// poisoned record — being completed — must still be dropped by
+// resetCheckpointWindow's batch removal: it can never materialize, so keeping
+// it around would retry it forever.
+func TestCondenseSession_PoisonedTaskRecord_SkippedNotWedged(t *testing.T) {
+	sessionID := "2026-08-19-task-record-poisoned"
 	repo, state := setupCondensableSessionWithTranscript(t, sessionID)
 
+	dir := t.TempDir()
+	validTranscriptPath := filepath.Join(dir, "agent-transcript.jsonl")
+	require.NoError(t, os.WriteFile(validTranscriptPath, []byte(`{"role":"assistant","content":"done"}`+"\n"), 0o644))
+
+	completedAt := time.Date(2026, 8, 19, 9, 10, 0, 0, time.UTC)
 	state.TaskRecords = []session.TaskRecord{
 		{
-			ToolUseID:              "toolu_missing",
-			AgentID:                "agent-3",
-			DeclaredTranscriptPath: "", // no declared path
-			CompletedAt:            time.Date(2026, 8, 19, 9, 5, 0, 0, time.UTC),
+			// Path-unsafe: fails validation.ValidateToolUseID.
+			ToolUseID:              "../escape",
+			AgentID:                "agent-poison",
+			DeclaredTranscriptPath: validTranscriptPath,
+			CompletedAt:            completedAt,
+		},
+		{
+			ToolUseID:              "toolu_valid",
+			AgentID:                "agent-valid",
+			DeclaredTranscriptPath: validTranscriptPath,
+			CompletedAt:            completedAt,
 		},
 	}
 	require.NoError(t, SaveSessionState(context.Background(), state))
 
-	checkpointID := id.MustCheckpointID("aabbccddaa02")
+	checkpointID := id.MustCheckpointID("aabbccddaa04")
 	result, err := (&ManualCommitStrategy{}).CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err, "a poisoned task record must not fail the whole checkpoint write")
+	require.False(t, result.Skipped)
+
+	jsonlContent, ok := checkpointTaskFile(t, repo, checkpointID, "tasks/toolu_valid/agent-agent-valid.jsonl")
+	require.True(t, ok, "the valid record alongside the poisoned one must still materialize")
+	require.Contains(t, jsonlContent, "done")
+
+	// The poisoned record must produce no payload at all: tasks/ must contain
+	// exactly the valid record's directory, nothing derived from "../escape".
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err)
-	require.False(t, result.Skipped, "condensation must proceed normally even when a task transcript is unavailable")
-
-	_, ok := checkpointTaskFile(t, repo, checkpointID, "tasks/toolu_missing/agent-agent-3.jsonl")
-	require.False(t, ok, "no jsonl should be written when the transcript is unavailable")
-
-	taskJSON, ok := checkpointTaskFile(t, repo, checkpointID, "tasks/toolu_missing/task.json")
-	require.True(t, ok, "task.json must still exist, recording the unavailable reason")
-	var meta struct {
-		TranscriptUnavailableReason string `json:"transcript_unavailable_reason"`
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	commitTree, err := commit.Tree()
+	require.NoError(t, err)
+	tasksTree, err := commitTree.Tree(checkpointID.Path() + "/tasks")
+	require.NoError(t, err)
+	var taskDirs []string
+	for _, entry := range tasksTree.Entries {
+		taskDirs = append(taskDirs, entry.Name)
 	}
-	require.NoError(t, json.Unmarshal([]byte(taskJSON), &meta))
-	require.NotEmpty(t, meta.TranscriptUnavailableReason)
+	require.Equal(t, []string{"toolu_valid"}, taskDirs,
+		"tasks/ must contain only the valid record's directory")
 
-	// The session's own transcript must be unaffected.
-	summary := readCommittedSummary(t, repo, checkpointID)
-	require.NotEmpty(t, summary.Sessions)
+	resetCheckpointWindow(state)
+	remaining := map[string]bool{}
+	for _, r := range state.TaskRecords {
+		remaining[r.ToolUseID] = true
+	}
+	require.False(t, remaining["../escape"],
+		"a completed poisoned record can never materialize, so it must still be removed rather than retried forever")
+	require.False(t, remaining["toolu_valid"], "the completed valid record was materialized and must also be removed")
 }
 
 // TestResetCheckpointWindow_RemovesCompletedTaskRecordsKeepsInFlight is a

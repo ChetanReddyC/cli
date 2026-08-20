@@ -1,7 +1,6 @@
 package checkpoint
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -4440,7 +4439,7 @@ func TestWriteCommitted_TaskPayload_MaterializesTranscriptAndMetadata(t *testing
 						AgentID:         "agent1",
 						SubagentType:    "explore",
 						TaskDescription: "look for the bug",
-						Transcript:      bytes.NewBuffer(redacted.Bytes()),
+						Transcript:      redacted,
 						Files:           []string{"a.go"},
 						StartedAt:       started,
 						CompletedAt:     completed,
@@ -4504,7 +4503,7 @@ func TestWriteCommitted_TaskPayload_MaterializesTranscriptAndMetadata(t *testing
 
 // TestWriteCommitted_TaskPayload_UnavailableTranscript_RecordsReasonWithoutJSONL
 // covers the "missing/unreadable transcript" half of the materializer contract:
-// a nil TaskPayload.Transcript must still produce task.json (with the
+// an empty TaskPayload.Transcript must still produce task.json (with the
 // unavailable reason recorded so the pointer is not silently lost) but no
 // agent-<id>.jsonl, and the rest of the checkpoint (the session's own
 // transcript) must be unaffected.
@@ -4526,8 +4525,7 @@ func TestWriteCommitted_TaskPayload_UnavailableTranscript_RecordsReasonWithoutJS
 			{
 				ToolUseID:                   "toolu_missing",
 				AgentID:                     "agent2",
-				Transcript:                  nil,
-				TranscriptUnavailableReason: "no declared or resolved transcript path",
+				TranscriptUnavailableReason: "transcript path unresolvable",
 			},
 		},
 	})
@@ -4566,8 +4564,8 @@ func TestWriteCommitted_TaskPayload_UnavailableTranscript_RecordsReasonWithoutJS
 	if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
 		t.Fatalf("failed to unmarshal task.json: %v", err)
 	}
-	if meta.TranscriptUnavailableReason != "no declared or resolved transcript path" {
-		t.Errorf("task.json TranscriptUnavailableReason = %q, want %q", meta.TranscriptUnavailableReason, "no declared or resolved transcript path")
+	if meta.TranscriptUnavailableReason != "transcript path unresolvable" {
+		t.Errorf("task.json TranscriptUnavailableReason = %q, want %q", meta.TranscriptUnavailableReason, "transcript path unresolvable")
 	}
 
 	// The session's own transcript must be unaffected by the unavailable task transcript.

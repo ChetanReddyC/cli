@@ -1,7 +1,6 @@
 package checkpoint
 
 import (
-	"bytes"
 	"encoding/json"
 	"time"
 
@@ -42,9 +41,13 @@ type TaskPayload struct {
 
 	// Transcript is the subagent's transcript content, already run through
 	// the sanitize -> externalize -> redact pipeline (the same one the
-	// session transcript gets). nil means the transcript was unavailable —
-	// see TranscriptUnavailableReason — and no agent-<id>.jsonl is written.
-	Transcript *bytes.Buffer
+	// session transcript gets — see redact.RedactedBytes for why callers
+	// must not hand this field raw bytes). Empty (Len() == 0) means the
+	// transcript was unavailable — see TranscriptUnavailableReason, which is
+	// non-empty exactly when this is empty — and no agent-<id>.jsonl is
+	// written. This mirrors how WriteOptions.Transcript itself expresses
+	// "no content": a value type, not a pointer, with emptiness read via Len().
+	Transcript redact.RedactedBytes
 
 	// Files is the set of files touched by this subagent.
 	Files []string
@@ -61,9 +64,12 @@ type TaskPayload struct {
 	// transcript (if any) is a transcript-so-far snapshot, not the final one.
 	CompletedAt time.Time
 
-	// TranscriptUnavailableReason explains why Transcript is nil (e.g. "no
-	// declared or resolved transcript path", "read transcript: <error>").
-	// Empty when Transcript is non-nil.
+	// TranscriptUnavailableReason explains why Transcript is empty. A stable
+	// category string (e.g. "transcript unreadable", "transcript path
+	// unresolvable", "transcript empty") — never the underlying error detail,
+	// which may embed an absolute local path and must not enter a pushed
+	// task.json; log that detail via logging.Warn instead. Empty exactly when
+	// Transcript is non-empty.
 	TranscriptUnavailableReason string
 }
 

@@ -1,7 +1,6 @@
 package strategy
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,6 +27,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/imageextract"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
 
@@ -172,7 +172,8 @@ func externalizeSessionImages(ctx, logCtx context.Context, state *SessionState, 
 // prepareTranscriptForStorage runs the first two steps of the stored-copy pipeline
 // in order — sanitize (drop non-portable agent state), then externalize inline
 // images. Redaction is the caller's next step, so the whole pipeline reads
-// sanitize -> externalize -> redact.
+// sanitize -> externalize -> redact. See prepareTaskTranscriptForStorage for
+// the twin that runs the same pipeline over a subagent's own transcript.
 //
 // Each step has to precede the next:
 //
@@ -251,6 +252,20 @@ func resolveTaskTranscriptPath(state *SessionState, agentID string) string {
 	return ""
 }
 
+// taskTranscriptReasonUnresolvable, taskTranscriptReasonUnreadable,
+// taskTranscriptReasonEmpty, and taskTranscriptReasonRedactionFailed are the
+// stable TaskPayload.TranscriptUnavailableReason categories. They deliberately
+// carry no path or underlying-error detail: task.json is pushed to
+// entire/checkpoints/v1, so a local filesystem path (which os.ReadFile's error
+// text embeds) must never end up in it. The detailed error goes only to
+// logging.Warn at the call site.
+const (
+	taskTranscriptReasonUnresolvable    = "transcript path unresolvable"
+	taskTranscriptReasonUnreadable      = "transcript unreadable"
+	taskTranscriptReasonEmpty           = "transcript empty"
+	taskTranscriptReasonRedactionFailed = "transcript redaction failed"
+)
+
 // materializeTaskRecords resolves and redacts each of state.TaskRecords'
 // subagent transcripts for storage under this checkpoint's
 // tasks/<tool-use-id>/ subtree — the durable-records materializer for #2058:
@@ -264,6 +279,17 @@ func resolveTaskTranscriptPath(state *SessionState, agentID string) string {
 // the next condensation re-materializes it. A record whose transcript cannot
 // be resolved or read still produces a payload — with TranscriptUnavailableReason
 // set instead of a Transcript — so the pointer is never silently dropped.
+//
+// A record with an unsafe or empty ToolUseID, or one whose AgentID is unsafe
+// or empty at the point a transcript would be written, is skipped entirely —
+// no payload at all, not even a reason-only one: an unsafe ToolUseID has no
+// safe tasks/<id>/ directory to put a task.json under in the first place, and
+// an empty/unsafe AgentID would corrupt the agent-<id>.jsonl filename (see
+// writeTaskRecordEntries, which re-validates as a last resort). This must
+// never wedge condensation — a poisoned record produces zero payloads, not an
+// error, and the caller's normal completed-record removal
+// (resetCheckpointWindow) still drops it once completed, since a record that
+// can never materialize would otherwise retry forever.
 //
 // Task assets are appended to the incoming assets slice and returned (rather
 // than living on TaskPayload, which has no Assets field of its own) so they
@@ -280,6 +306,14 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 
 	payloads := make([]cpkg.TaskPayload, 0, len(state.TaskRecords))
 	for _, record := range state.TaskRecords {
+		if record.ToolUseID == "" || validation.ValidateToolUseID(record.ToolUseID) != nil {
+			logging.Warn(logCtx, "skipping task record: unsafe or empty tool_use_id",
+				slog.String("session_id", state.SessionID),
+				slog.String("tool_use_id", record.ToolUseID),
+			)
+			continue
+		}
+
 		payload := cpkg.TaskPayload{
 			ToolUseID:       record.ToolUseID,
 			AgentID:         record.AgentID,
@@ -291,24 +325,50 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 			CompletedAt:     record.CompletedAt,
 		}
 
-		transcriptPath := record.DeclaredTranscriptPath
-		if transcriptPath == "" {
-			transcriptPath = resolveTaskTranscriptPath(state, record.AgentID)
+		// Candidate transcript paths, tried in order: the agent-declared path
+		// first, then the agent-layout fallback — declared paths are
+		// unreliable (agents relocate/clean up transcripts), which is why the
+		// fallback resolver exists at all, so a declared-but-unreadable path
+		// must not short-circuit past it.
+		var candidates []string
+		if record.DeclaredTranscriptPath != "" {
+			candidates = append(candidates, record.DeclaredTranscriptPath)
 		}
-		if transcriptPath == "" {
-			payload.TranscriptUnavailableReason = "no declared or resolved transcript path"
+		if fallback := resolveTaskTranscriptPath(state, record.AgentID); fallback != "" && fallback != record.DeclaredTranscriptPath {
+			candidates = append(candidates, fallback)
+		}
+		if len(candidates) == 0 {
+			payload.TranscriptUnavailableReason = taskTranscriptReasonUnresolvable
 			payloads = append(payloads, payload)
 			continue
 		}
 
-		raw, readErr := os.ReadFile(transcriptPath) //nolint:gosec // path is agent-declared or resolved from session state, not user input
+		// A transcript is about to be read and, if valid, stored as
+		// agent-<agent-id>.jsonl — the agent ID becomes part of that path, so
+		// it must be present and path-safe before going any further. Skip the
+		// WHOLE record rather than merely omitting the transcript: this is
+		// the same "poisoned identifier" shape as the ToolUseID check above.
+		if record.AgentID == "" || validation.ValidateAgentID(record.AgentID) != nil {
+			logging.Warn(logCtx, "skipping task record: unsafe or missing agent_id",
+				slog.String("session_id", state.SessionID),
+				slog.String("tool_use_id", record.ToolUseID),
+			)
+			continue
+		}
+
+		raw, readErr := readFirstTranscript(candidates)
 		if readErr != nil {
-			payload.TranscriptUnavailableReason = "read transcript: " + readErr.Error()
+			logging.Warn(logCtx, "failed to read subagent transcript; storing task without it",
+				slog.String("session_id", state.SessionID),
+				slog.String("tool_use_id", record.ToolUseID),
+				slog.String("error", readErr.Error()),
+			)
+			payload.TranscriptUnavailableReason = taskTranscriptReasonUnreadable
 			payloads = append(payloads, payload)
 			continue
 		}
 		if len(raw) == 0 {
-			payload.TranscriptUnavailableReason = "transcript file is empty"
+			payload.TranscriptUnavailableReason = taskTranscriptReasonEmpty
 			payloads = append(payloads, payload)
 			continue
 		}
@@ -320,17 +380,32 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 				slog.String("tool_use_id", record.ToolUseID),
 				slog.String("error", prepErr.Error()),
 			)
-			payload.TranscriptUnavailableReason = "redact transcript: " + prepErr.Error()
+			payload.TranscriptUnavailableReason = taskTranscriptReasonRedactionFailed
 			payloads = append(payloads, payload)
 			continue
 		}
 
-		payload.Transcript = bytes.NewBuffer(redacted.Bytes())
+		payload.Transcript = redacted
 		assets = append(assets, taskAssets...)
 		payloads = append(payloads, payload)
 	}
 
 	return payloads, assets
+}
+
+// readFirstTranscript tries each candidate path in order and returns the
+// bytes of the first one that reads successfully. Returns the last error when
+// every candidate fails (callers only reach here with at least one candidate).
+func readFirstTranscript(candidates []string) ([]byte, error) {
+	var lastErr error
+	for _, path := range candidates {
+		data, err := os.ReadFile(path) //nolint:gosec // path is agent-declared or resolved from session state, not user input
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 // sidecarSessionImages captures images an agent stores OUTSIDE the transcript
@@ -650,7 +725,8 @@ func newSkippedResult(checkpointID id.CheckpointID, sessionID string) *CondenseR
 
 // redactSessionTranscript redacts the transcript once for use by both the compact
 // package and the checkpoint stores. Returns the redacted bytes and the duration
-// of the redaction operation for perf logging.
+// of the redaction operation for perf logging. Also the redaction step
+// prepareTaskTranscriptForStorage reuses for a subagent's own transcript.
 func redactSessionTranscript(ctx context.Context, transcript []byte) (redact.RedactedBytes, time.Duration, error) {
 	start := time.Now()
 	_, span := perf.Start(ctx, "redact_transcript")
