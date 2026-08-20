@@ -1288,6 +1288,11 @@ func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error 
 // record completed with no additional fields populated — accepted; a later
 // completion attempt will see it already completed and skip.
 //
+// The returned record is the PRE-completion snapshot (its CompletedAt is
+// still zero) — read before CompleteTaskRecord runs, so callers can label
+// the capture (SubagentType/TaskDescription/AgentID) from what the record
+// carried at launch time.
+//
 // Tolerates strategy.ErrStateNotFound (the session state may already be gone,
 // e.g. an ended/swept session) the same way SaveTaskStep tolerates a missing
 // state.
@@ -1298,7 +1303,7 @@ func claimTaskRecord(logCtx context.Context, sessionID, toolUseID string) (sessi
 		if marker := state.FindTaskRecord(toolUseID); marker != nil {
 			claimed = *marker
 		}
-		found = state.CompleteTaskRecord(toolUseID, time.Now(), "", nil, nil)
+		found = state.CompleteTaskRecord(toolUseID, time.Now())
 		return nil
 	})
 	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
@@ -2034,16 +2039,20 @@ func captureInFlightTaskIncremental(logCtx context.Context, ag agent.Agent, sess
 // zero-files skip path and after a successful incremental save — either way,
 // the transcript at this size has now been fully accounted for.
 //
-// The record must still exist under its own ToolUseID: incremental snapshots
-// never claim/complete it (only Final captures do via claimTaskRecord). The
-// only way it could be gone here is a Final capture racing this same call
-// between the earlier LoadSessionState in captureInFlightTasks and now —
-// tolerated the same way the rest of this path tolerates a vanished marker
-// (nothing to update).
+// The record itself is no longer removed once created — CompleteTaskRecord
+// marks it completed rather than deleting it — so marker == nil here would
+// mean the whole session state vanished between the earlier LoadSessionState
+// in captureInFlightTasks and now, or (nothing currently does this) the
+// record was explicitly removed; tolerated the same way the rest of this
+// path tolerates a vanished marker (nothing to update). A Final capture
+// racing this same call (claimTaskRecord) instead marks the SAME record
+// completed, so this write can land on an already-completed record — harmless
+// but pointless (this incremental-only field dies along with the rest of the
+// turn-end backstop in Task 4), so skip the write once completion has landed.
 func persistCapturedTranscriptSize(logCtx context.Context, sessionID, toolUseID string, transcriptSize int64) {
 	mutErr := strategy.MutateSessionState(logCtx, sessionID, func(state *strategy.SessionState) error {
 		marker := state.FindTaskRecord(toolUseID)
-		if marker == nil {
+		if marker == nil || !marker.CompletedAt.IsZero() {
 			return nil
 		}
 		marker.LastCapturedTranscriptBytes = transcriptSize

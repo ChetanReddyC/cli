@@ -521,14 +521,24 @@ func (s *State) FindTaskRecord(toolUseID string) *TaskRecord {
 	return nil
 }
 
-// CompleteTaskRecord marks the record for toolUseID as completed: sets
-// CompletedAt and, when non-empty/non-nil, the completion fields
-// (declaredTranscriptPath, files, tokenUsage). Returns false — a no-op — when
-// no record exists for toolUseID or it was already completed (CompletedAt
-// already non-zero), giving every caller an exactly-once completion guard
-// equivalent to the old claim-and-remove semantics: whichever caller observes
-// true proceeds with the capture, a racing duplicate sees false and skips.
-func (s *State) CompleteTaskRecord(toolUseID string, completedAt time.Time, declaredTranscriptPath string, files []string, tokenUsage *agent.TokenUsage) bool {
+// CompleteTaskRecord marks the record for toolUseID as consumed exactly
+// once: it sets CompletedAt and returns true, or returns false — a no-op —
+// when no record exists for toolUseID or it was already completed
+// (CompletedAt already non-zero). This is the exactly-once completion guard
+// equivalent to the old claim-and-remove semantics: whichever caller
+// observes true proceeds with the capture, a racing duplicate sees false and
+// skips.
+//
+// The data fields (DeclaredTranscriptPath, Files, TokenUsage) are NOT set
+// here. They are populated separately by the producer after successful
+// extraction, via direct field mutation on the claimed record within the
+// same MutateSessionState closure that called CompleteTaskRecord — extraction
+// can fail independently of the claim, and a signature that also carried
+// these fields would need callers to pass zero values before they have
+// anything to report (claimTaskRecord runs before capture) or reject a
+// second, already-guarded call that tries to attach them (there is no such
+// call: extraction happens inside the same lock as the claim).
+func (s *State) CompleteTaskRecord(toolUseID string, completedAt time.Time) bool {
 	for i := range s.TaskRecords {
 		if s.TaskRecords[i].ToolUseID != toolUseID {
 			continue
@@ -537,26 +547,20 @@ func (s *State) CompleteTaskRecord(toolUseID string, completedAt time.Time, decl
 			return false
 		}
 		s.TaskRecords[i].CompletedAt = completedAt
-		if declaredTranscriptPath != "" {
-			s.TaskRecords[i].DeclaredTranscriptPath = declaredTranscriptPath
-		}
-		if files != nil {
-			s.TaskRecords[i].Files = files
-		}
-		if tokenUsage != nil {
-			s.TaskRecords[i].TokenUsage = tokenUsage
-		}
 		return true
 	}
 	return false
 }
 
 // LiveTaskRecords returns the records not yet completed (CompletedAt zero) —
-// i.e. still in flight. Trigger paths and in-flight diagnostics (the
-// fast-path empty-session guard, the turn-end/SessionEnd backstop's "any
-// in-flight work?" check) must use this rather than the raw TaskRecords
-// slice: since CompleteTaskRecord no longer removes a record, TaskRecords
-// mixes live records with already-completed ones awaiting materialization.
+// i.e. still in flight. Trigger paths and in-flight diagnostics (currently
+// just the turn-end/SessionEnd backstop's "any in-flight work?" check and its
+// task selection) must use this rather than the raw TaskRecords slice: since
+// CompleteTaskRecord no longer removes a record, TaskRecords mixes live
+// records with already-completed ones awaiting materialization. The
+// session-empty fast-path guard is a separate consumer still keyed on
+// TranscriptOnlyTaskSteps today; it gets rewired onto task records in Task 4
+// once TranscriptOnlyTaskSteps itself is retired.
 func (s *State) LiveTaskRecords() []TaskRecord {
 	var live []TaskRecord
 	for _, r := range s.TaskRecords {

@@ -895,42 +895,42 @@ func TestState_TaskRecordAccessors(t *testing.T) {
 // the future condensation materializer rather than being deleted.
 // Regression this guards: two racing Final-path captures for the same
 // ToolUseID (a late SubagentStop arriving just as SessionEnd sweeps, or a
-// duplicate SubagentStop delivery) must capture exactly once.
+// duplicate SubagentStop delivery) must capture exactly once. Note:
+// CompleteTaskRecord only sets CompletedAt — DeclaredTranscriptPath/Files/
+// TokenUsage are populated separately by the producer, via direct field
+// mutation on the claimed record within the same MutateSessionState closure
+// (see the type doc comment), so this test does not exercise those fields.
 func TestState_CompleteTaskRecord_ExactlyOnce(t *testing.T) {
 	t.Parallel()
 
 	t.Run("absent_record_is_a_noop", func(t *testing.T) {
 		t.Parallel()
 		s := &State{}
-		ok := s.CompleteTaskRecord("does-not-exist", time.Now(), "", nil, nil)
+		ok := s.CompleteTaskRecord("does-not-exist", time.Now())
 		assert.False(t, ok)
 	})
 
-	t.Run("first_completion_succeeds_and_sets_fields", func(t *testing.T) {
+	t.Run("first_completion_succeeds", func(t *testing.T) {
 		t.Parallel()
 		s := &State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1", StartedAt: time.Now()}}}
 		completedAt := time.Now().UTC().Truncate(time.Second)
-		tokens := &agent.TokenUsage{InputTokens: 10}
-		ok := s.CompleteTaskRecord("toolu_1", completedAt, "/tmp/agent-1.jsonl", []string{"a.go"}, tokens)
+		ok := s.CompleteTaskRecord("toolu_1", completedAt)
 		require.True(t, ok)
 		require.Len(t, s.TaskRecords, 1, "completing a record must not remove it — it must persist for the materializer")
-		record := s.TaskRecords[0]
-		assert.True(t, completedAt.Equal(record.CompletedAt))
-		assert.Equal(t, "/tmp/agent-1.jsonl", record.DeclaredTranscriptPath)
-		assert.Equal(t, []string{"a.go"}, record.Files)
-		assert.Same(t, tokens, record.TokenUsage)
+		assert.True(t, completedAt.Equal(s.TaskRecords[0].CompletedAt))
 	})
 
 	t.Run("second_completion_is_rejected", func(t *testing.T) {
 		t.Parallel()
 		s := &State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1", StartedAt: time.Now()}}}
-		require.True(t, s.CompleteTaskRecord("toolu_1", time.Now(), "", nil, nil))
+		firstCompletedAt := time.Now().UTC().Truncate(time.Second)
+		require.True(t, s.CompleteTaskRecord("toolu_1", firstCompletedAt))
 
 		// A second completion attempt (the racing duplicate) must be rejected
-		// and must not overwrite the fields the first completion set.
-		second := s.CompleteTaskRecord("toolu_1", time.Now().Add(time.Hour), "/tmp/other.jsonl", []string{"other.go"}, nil)
+		// and must not move CompletedAt.
+		second := s.CompleteTaskRecord("toolu_1", firstCompletedAt.Add(time.Hour))
 		assert.False(t, second)
-		assert.Empty(t, s.TaskRecords[0].DeclaredTranscriptPath, "a rejected second completion must not overwrite the first completion's fields")
+		assert.True(t, firstCompletedAt.Equal(s.TaskRecords[0].CompletedAt), "a rejected second completion must not move CompletedAt")
 	})
 }
 
