@@ -140,23 +140,21 @@ const (
 	// `primaries.processing` ULID — the cell that does the repo's heavy
 	// lifting (trails, runners, checkpoint ingest), where searchable content
 	// originates — falling back to the canonical convention for rows
-	// predating that field (the BFF's searchPlacement). ONLY safe when the
-	// caller pins the picked placement's ULID on the request: query-serve
-	// resolves explicit pins from its all-accessible-placements byID set, so
-	// the elected cell answers for the repo even when it is not canonical
-	// there. Used by scoped semantic search.
+	// predating that field (the BFF's searchPlacement). Used by ALL semantic
+	// search: scoped requests pin the picked placement's ULID (query-serve
+	// resolves explicit pins from its all-accessible-placements byID set),
+	// and pin-less broad requests are narrowed by query-serve to the same
+	// election since ENT-1776 (entire-search#188), so the elected cell
+	// answers for the repo either way.
 	routeByElection placementRouting = iota
 	// routeCanonical ignores the election and picks by the canonical
 	// convention: the placement whose ID equals the entry's own ID, else the
-	// first (the BFF's canonicalPlacement). Required wherever the request
-	// carries no pin — both leaf services narrow a pin-less broad search to
-	// the placements canonical (row ID) in their OWN cell, so routing a
-	// divergently elected repo by the election would search it NOWHERE (the
-	// elected cell excludes it from broad scope; the canonical cell never
-	// gets a leg). Code search uses it for pinned requests too, matching the
-	// BFF deliberately: code content is placement-replicated git data, and
-	// the web's follow-up reads from a hit resolve the canonical placement.
-	// Unify on the election once the leaves narrow broad scope by it.
+	// first (the BFF's canonicalPlacement). Used by code search only,
+	// matching the BFF's code-search.ts deliberately: the whole code-READ
+	// chain — hits, /symbols, /usages, the web's file viewer — resolves the
+	// canonical placement, so canonical keeps a hit and its follow-ups on
+	// the same copy. Flip only when that entire chain routes by the election
+	// (tracked on ENT-1776).
 	routeCanonical
 )
 

@@ -124,11 +124,12 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 			logging.Debug(ctx, "semantic search: repo index truncated; cross-repo results may be incomplete")
 			warnings = append(warnings, "repo index truncated; cross-repo results may be incomplete")
 		}
-		// Broad requests send no repo pins, and query-serve narrows a pin-less
-		// search to the placements canonical in its own cell — routing by the
-		// election would search a divergently elected repo nowhere. Canonical
-		// convention, like the BFF's unfiltered path (see routeCanonical).
-		cells, skipped = groupReposByCell(index.Repos, routeCanonical)
+		// Broad requests send no repo pins; query-serve narrows a pin-less
+		// search to the placements whose HOME (elected processing primary,
+		// else the canonical convention) is its own cell since ENT-1776
+		// (entire-search#188), so broad routing follows the same election —
+		// like the BFF's unfiltered path (entire.io#3801).
+		cells, skipped = groupReposByCell(index.Repos, routeByElection)
 	}
 	if len(skipped) > 0 {
 		if scoped {

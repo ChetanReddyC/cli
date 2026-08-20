@@ -528,11 +528,11 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.Searc
 
 	// Step 3: Group repos by cell and resolve baseURLs via shared helpers.
 	// Code search routes CANONICAL in both modes, deliberately ignoring the
-	// processing-primary election (matching the BFF's code-search.ts): code
-	// content is placement-replicated git data — nothing code-searchable
-	// originates only in the elected cell — and the web's follow-up reads from
-	// a hit resolve the canonical placement, so canonical keeps web and CLI on
-	// the same copy.
+	// processing-primary election (matching the BFF's code-search.ts): the
+	// whole code-READ chain — hits, /symbols, /usages, the web's file viewer —
+	// resolves the canonical placement, so canonical keeps a hit and its
+	// follow-ups on the same copy, and keeps web and CLI identical. Flip only
+	// when that entire chain routes by the election (tracked on ENT-1776).
 	cells, skippedRepos := groupReposByCell(indexRepos, routeCanonical)
 	if len(skippedRepos) > 0 {
 		logging.Debug(ctx, "code search: repos without a routable canonical placement", "repos", strings.Join(skippedRepos, ","))
