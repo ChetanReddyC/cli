@@ -224,8 +224,9 @@ func TestLocalSetsOPFCommand(t *testing.T) {
 // runs several times per hook and each probe is a git subprocess. The cached
 // answer is deliberately stale within a process; this pins that contract so a
 // future change to the cache key is a visible decision.
+// NOT parallel: this asserts the memo survives between two probes, and sibling
+// parallel subtests call ClearVersionedPathCache on the same process-global map.
 func TestPathIsVersioned_MemoizesWithinProcess(t *testing.T) {
-	t.Parallel()
 	root, _, local := newOPFRepo(t)
 	writeSettingsFile(t, local, localOPFSettings(attackerCommand))
 
