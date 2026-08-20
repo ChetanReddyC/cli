@@ -526,6 +526,11 @@ func JSONLBytes(b []byte) (RedactedBytes, error) {
 	s := string(b)
 	redacted, err := JSONLContent(s)
 	if err != nil {
+		// Degradation outranks a walk error: callers' errors.Is guards must
+		// see the sentinel so no error path can reach a Bytes fallback.
+		if scannerDegradedSole() {
+			return RedactedBytes{}, fmt.Errorf("%w (content walk also failed: %w)", ErrScannerDegraded, err)
+		}
 		return RedactedBytes{}, err
 	}
 	if scannerDegradedSole() {
@@ -546,6 +551,10 @@ func JSONLBytesWithPrivacyFilter(ctx context.Context, b []byte) (RedactedBytes, 
 	s := string(b)
 	redacted, err := JSONLContentWithPrivacyFilter(ctx, s)
 	if err != nil {
+		// Degradation outranks a walk error; see JSONLBytes.
+		if scannerDegradedSole() {
+			return RedactedBytes{}, fmt.Errorf("%w (content walk also failed: %w)", ErrScannerDegraded, err)
+		}
 		return RedactedBytes{}, err
 	}
 	if scannerDegradedSole() {

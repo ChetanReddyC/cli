@@ -31,7 +31,8 @@ func SetScannerDegradedForTest(v bool) {
 func WithScannerDegradedSole(t testing.TB) {
 	t.Helper()
 	t.Cleanup(func() {
-		SetScannerDegradedForTest(false)
+		// ConfigureScanners resets the degradation flag itself; no explicit
+		// clear, so that reset behavior stays load-bearing here.
 		if err := ConfigureScanners(ScannersConfig{Betterleaks: true}); err != nil {
 			t.Fatalf("restore scanners: %v", err)
 		}
