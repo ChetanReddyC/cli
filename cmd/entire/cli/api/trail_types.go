@@ -9,43 +9,10 @@ import (
 )
 
 // TrailListResponse is the response from entire-api's trail list endpoint.
-// Trails is retained as the CLI-facing page field; UnmarshalJSON fills it from
-// the backend's standard {items,nextPageToken,totalCount} envelope.
 type TrailListResponse struct {
 	Trails        []TrailResource `json:"items"`
 	Total         int             `json:"totalCount"`
 	NextPageToken *string         `json:"nextPageToken"`
-
-	// Legacy metadata fields remain source-compatible for integration fixtures;
-	// entire-api's standard list envelope no longer emits them.
-	Limit         int       `json:"-"`
-	Offset        int       `json:"-"`
-	RepoFullName  string    `json:"-"`
-	DefaultBranch string    `json:"-"`
-	UpdatedAt     time.Time `json:"-"`
-}
-
-func (r *TrailListResponse) UnmarshalJSON(data []byte) error {
-	var wire struct {
-		Items         []TrailResource `json:"items"`
-		Trails        []TrailResource `json:"trails"`
-		TotalCount    int             `json:"totalCount"`
-		Total         int             `json:"total"`
-		NextPageToken *string         `json:"nextPageToken"`
-	}
-	if err := decodeNormalizedTrailJSON(data, &wire); err != nil {
-		return fmt.Errorf("decode trail list: %w", err)
-	}
-	r.Trails = wire.Items
-	if r.Trails == nil {
-		r.Trails = wire.Trails
-	}
-	r.Total = wire.TotalCount
-	if r.Total == 0 {
-		r.Total = wire.Total
-	}
-	r.NextPageToken = wire.NextPageToken
-	return nil
 }
 
 // TrailResource represents a trail returned by entire-api. The backend uses
@@ -77,11 +44,6 @@ type TrailResource struct {
 	CheckpointCount    int                `json:"checkpointCount,omitempty"`
 	CommitsAhead       int                `json:"commitsAhead,omitempty"`
 	BodyDocument       *TrailBodyDocument `json:"bodyDocument,omitempty"`
-}
-
-func (r *TrailResource) UnmarshalJSON(data []byte) error {
-	type plain TrailResource
-	return decodeNormalizedTrailJSON(data, (*plain)(r))
 }
 
 // TrailBodyDocument is the trail's description editor document. TextSnapshot
@@ -196,7 +158,7 @@ func (a *TrailApproval) UnmarshalJSON(data []byte) error {
 		CommitSHA string          `json:"commitSha"`
 		CreatedAt time.Time       `json:"createdAt"`
 	}
-	if err := decodeNormalizedTrailJSON(data, &wire); err != nil {
+	if err := json.Unmarshal(data, &wire); err != nil {
 		return fmt.Errorf("decode trail approval: %w", err)
 	}
 	a.ID, a.Event, a.CommitSHA, a.CreatedAt = wire.ID, wire.Event, wire.CommitSHA, wire.CreatedAt

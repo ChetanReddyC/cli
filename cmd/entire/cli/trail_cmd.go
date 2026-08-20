@@ -1007,7 +1007,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 	}
 	client, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), owner+"/"+repoName)
 	if err != nil {
-		return renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), err)
+		return renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+repoName, err)
 	}
 
 	branchState, err := prepareTrailCreateBranch(w, errW, repo, branch, currentBranch, noBranch)
