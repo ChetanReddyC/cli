@@ -556,6 +556,48 @@ func TestWriteCodeSearchText_Empty(t *testing.T) {
 	}
 }
 
+// TestWriteCodeSearchText_SkippedRepos pins the skipped-repo channel in both
+// shapes: the empty-results explanation (a search emptied by skips must not
+// print a bare "no results") and the trailing warning under real results.
+func TestWriteCodeSearchText_SkippedRepos(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	writeCodeSearchText(&buf, &codesearch.SearchResponse{SkippedRepos: []string{"acme/cloning"}}, newStatusStyles(&buf), false)
+	if got := buf.String(); !strings.Contains(got, "skipped repos with no searchable placement: acme/cloning") {
+		t.Errorf("empty-results output missing skip explanation:\n%s", got)
+	}
+
+	buf.Reset()
+	writeCodeSearchText(&buf, &codesearch.SearchResponse{
+		Results:      []codesearch.Result{{Repo: "acme/web", Path: "main.go", Line: 1, ContextLine: "x"}},
+		SkippedRepos: []string{"acme/cloning"},
+	}, newStatusStyles(&buf), false)
+	if got := buf.String(); !strings.Contains(got, "Warning: skipped repo(s) with no searchable placement (missing or not ready): acme/cloning") {
+		t.Errorf("results output missing skip warning:\n%s", got)
+	}
+}
+
+// TestWriteCodeSearchJSON_SkippedRepos pins skipped_repos in the JSON shape —
+// the agent-facing channel for a narrowed scope.
+func TestWriteCodeSearchJSON_SkippedRepos(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	if err := writeCodeSearchJSON(&buf, &codesearch.SearchResponse{SkippedRepos: []string{"acme/cloning"}}); err != nil {
+		t.Fatalf("writeCodeSearchJSON: %v", err)
+	}
+	var out struct {
+		SkippedRepos []string `json:"skipped_repos"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if strings.Join(out.SkippedRepos, ",") != "acme/cloning" {
+		t.Fatalf("skipped_repos = %v, want [acme/cloning]", out.SkippedRepos)
+	}
+}
+
 func TestMergeSearchResults(t *testing.T) {
 	t.Parallel()
 

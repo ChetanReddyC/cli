@@ -14,7 +14,7 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// Placement ULIDs reused across the canonical-placement tests.
+// Placement ULIDs and cell/slug names reused across the fan-out tests.
 const (
 	testPlacementFallback = "01FALLBACK"
 	testClusterSlugEU     = "eu-prod"
@@ -24,8 +24,15 @@ const (
 	euCentralCell         = "aws-eu-central-1"
 	testPlacementEU       = "01EU"
 	testPlacementAU       = "01AU"
-	testPlacementNoStatus = "01NOSTATUS"
 )
+
+// readyPlacement is the common fan-out fixture. Mirror is true because real
+// /repos rows mark EVERY placement Mirror:true (the pick must never key on
+// it); deliberate exceptions (unready, empty ID, no slug) stay literal so the
+// exception is the thing that looks unusual.
+func readyPlacement(id, cell, slug, jurisdiction string) coreapi.RepoPlacement {
+	return coreapi.RepoPlacement{ID: id, Cell: cell, ClusterSlug: slug, Jurisdiction: jurisdiction, Mirror: true, Status: coreapi.RepoPlacementStatusReady}
+}
 
 func TestGroupReposByCell(t *testing.T) {
 	t.Parallel()
@@ -66,22 +73,18 @@ func TestGroupReposByCell(t *testing.T) {
 }
 
 // TestGroupReposByCell_Placements verifies that a repo with Placements routes
-// to its HOME placement only — with no election on the row, the canonical
-// convention picks the placement whose ID equals the entry's ID. Mirror
-// placements are replicated copies of the same content in other cells;
-// searching them returns duplicate/stale rows and diverges from the web
-// (ENT-1672).
+// to ONE placement — with no election on the row, the canonical convention
+// picks the placement whose ID equals the entry's ID, never the Mirror flag
+// (see routedRepoPlacement).
 func TestGroupReposByCell_Placements(t *testing.T) {
 	t.Parallel()
 	repos := []coreapi.RepoIndexEntry{
 		{
-			// US-homed repo with an EU mirror. Real /repos rows mark EVERY
-			// placement Mirror:true (including the canonical one), so canonical
-			// selection must key on the ID match, never the Mirror flag.
+			// US-homed repo with an EU mirror.
 			ID: testPlacementUS, Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us",
 			Placements: []coreapi.RepoPlacement{
-				{ID: testPlacementUS, Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us", Mirror: true, Status: coreapi.RepoPlacementStatusReady},
-				{ID: testPlacementEU, Cell: euCentralCell, ClusterSlug: testClusterSlugEU, Jurisdiction: "eu", Mirror: true, Status: coreapi.RepoPlacementStatusReady},
+				readyPlacement(testPlacementUS, usEastCell, testClusterSlugUS, "us"),
+				readyPlacement(testPlacementEU, euCentralCell, testClusterSlugEU, "eu"),
 			},
 		},
 		{
@@ -123,8 +126,8 @@ func TestGroupReposByCell_ProcessingPrimaryPreferred(t *testing.T) {
 			ID: testPlacementUS, Jurisdiction: "us",
 			Primaries: coreapi.NewOptRepoPrimaries(coreapi.RepoPrimaries{Processing: testPlacementEU}),
 			Placements: []coreapi.RepoPlacement{
-				{ID: testPlacementUS, Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us", Mirror: true, Status: coreapi.RepoPlacementStatusReady},
-				{ID: testPlacementEU, Cell: euCentralCell, ClusterSlug: testClusterSlugEU, Jurisdiction: "eu", Mirror: true, Status: coreapi.RepoPlacementStatusReady},
+				readyPlacement(testPlacementUS, usEastCell, testClusterSlugUS, "us"),
+				readyPlacement(testPlacementEU, euCentralCell, testClusterSlugEU, "eu"),
 			},
 		},
 		{
@@ -133,7 +136,7 @@ func TestGroupReposByCell_ProcessingPrimaryPreferred(t *testing.T) {
 			ID: testPlacementFallback, Jurisdiction: "us",
 			Primaries: coreapi.NewOptRepoPrimaries(coreapi.RepoPrimaries{Processing: "01ELSEWHERE"}),
 			Placements: []coreapi.RepoPlacement{
-				{ID: testPlacementFallback, Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us", Status: coreapi.RepoPlacementStatusReady},
+				readyPlacement(testPlacementFallback, usEastCell, testClusterSlugUS, "us"),
 			},
 		},
 	}
@@ -150,7 +153,7 @@ func TestGroupReposByCell_ProcessingPrimaryPreferred(t *testing.T) {
 		t.Fatalf("eu group = %+v, want processing primary %s", eu, testPlacementEU)
 	}
 	if us.cell != usEastCell || strings.Join(us.repoIDs, ",") != testPlacementFallback {
-		t.Fatalf("us group = %+v, want row-ID fallback 01FALLBACK", us)
+		t.Fatalf("us group = %+v, want row-ID fallback %s", us, testPlacementFallback)
 	}
 }
 
@@ -165,17 +168,17 @@ func TestGroupReposByCell_CanonicalNotFirst(t *testing.T) {
 		{
 			ID: testPlacementAU, Jurisdiction: "us",
 			Placements: []coreapi.RepoPlacement{
-				{ID: testPlacementUS, Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us", Mirror: true, Status: coreapi.RepoPlacementStatusReady},
-				{ID: testPlacementEU, Cell: euCentralCell, ClusterSlug: testClusterSlugEU, Jurisdiction: "eu", Mirror: true, Status: coreapi.RepoPlacementStatusReady},
-				{ID: testPlacementAU, Cell: "aws-ap-southeast-2", ClusterSlug: "au-prod", Jurisdiction: "au", Mirror: true, Status: coreapi.RepoPlacementStatusReady},
+				readyPlacement(testPlacementUS, usEastCell, testClusterSlugUS, "us"),
+				readyPlacement(testPlacementEU, euCentralCell, testClusterSlugEU, "eu"),
+				readyPlacement(testPlacementAU, "aws-ap-southeast-2", "au-prod", "au"),
 			},
 		},
 		{
 			// No placement matches the entry ID — fall back to placements[0].
 			ID: "01GONE", Jurisdiction: "us",
 			Placements: []coreapi.RepoPlacement{
-				{ID: "01FIRST", Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us", Status: coreapi.RepoPlacementStatusReady},
-				{ID: "01SECOND", Cell: euCentralCell, ClusterSlug: testClusterSlugEU, Jurisdiction: "eu", Status: coreapi.RepoPlacementStatusReady},
+				readyPlacement("01FIRST", usEastCell, testClusterSlugUS, "us"),
+				readyPlacement("01SECOND", euCentralCell, testClusterSlugEU, "eu"),
 			},
 		},
 	}
@@ -189,18 +192,17 @@ func TestGroupReposByCell_CanonicalNotFirst(t *testing.T) {
 	// Sorted: aws-ap-southeast-2 < aws-us-east-2.
 	au, us := cells[0], cells[1]
 	if au.cell != "aws-ap-southeast-2" || strings.Join(au.repoIDs, ",") != testPlacementAU {
-		t.Fatalf("au group = %+v, want canonical 01AU", au)
+		t.Fatalf("au group = %+v, want canonical %s", au, testPlacementAU)
 	}
 	if us.cell != usEastCell || strings.Join(us.repoIDs, ",") != "01FIRST" {
 		t.Fatalf("us group = %+v, want fallback 01FIRST", us)
 	}
 }
 
-// TestGroupReposByCell_UnreadyCanonicalSkipped verifies a canonical placement
-// that is explicitly not ready (processing/failed/suspended) is not routed —
-// there is nothing searchable there yet — and the repo is reported so callers
-// can warn instead of silently narrowing the search. An empty status (older
-// cores that predate the field) stays routable.
+// TestGroupReposByCell_UnreadyCanonicalSkipped verifies a picked placement
+// that is not ready (processing/failed/suspended) is not routed — there is
+// nothing searchable there yet — and the repo is reported so callers can warn
+// instead of silently narrowing the search.
 func TestGroupReposByCell_UnreadyCanonicalSkipped(t *testing.T) {
 	t.Parallel()
 	repos := []coreapi.RepoIndexEntry{
@@ -208,28 +210,19 @@ func TestGroupReposByCell_UnreadyCanonicalSkipped(t *testing.T) {
 			ID: "01CLONING", FullName: "acme/cloning", Jurisdiction: "us",
 			Placements: []coreapi.RepoPlacement{
 				{ID: "01CLONING", Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us", Status: coreapi.RepoPlacementStatusProcessing},
-				{ID: "01CLONEEU", Cell: euCentralCell, ClusterSlug: testClusterSlugEU, Jurisdiction: "eu", Status: coreapi.RepoPlacementStatusReady},
-			},
-		},
-		{
-			ID: testPlacementNoStatus, Jurisdiction: "us",
-			Placements: []coreapi.RepoPlacement{
-				{ID: testPlacementNoStatus, Cell: usEastCell, ClusterSlug: testClusterSlugUS, Jurisdiction: "us"},
+				readyPlacement("01CLONEEU", euCentralCell, testClusterSlugEU, "eu"),
 			},
 		},
 	}
 	cells, skipped := groupReposByCell(repos)
-	// The unready canonical is skipped entirely — a ready mirror is NOT a
+	// The unready canonical is skipped entirely — the ready mirror is NOT a
 	// substitute (it may predate the clone; the BFF treats the repo as
 	// unroutable the same way).
 	if strings.Join(skipped, ",") != "acme/cloning" {
 		t.Fatalf("skipped = %v, want [acme/cloning]", skipped)
 	}
-	if len(cells) != 1 {
-		t.Fatalf("groups = %d, want 1: %+v", len(cells), cells)
-	}
-	if got := strings.Join(cells[0].repoIDs, ","); got != testPlacementNoStatus {
-		t.Fatalf("repoIDs = %q, want 01NOSTATUS", got)
+	if len(cells) != 0 {
+		t.Fatalf("groups = %d, want 0: %+v", len(cells), cells)
 	}
 }
 
@@ -240,6 +233,34 @@ func TestRoutedRepoPlacement_NoPlacements(t *testing.T) {
 	t.Parallel()
 	if _, ok := routedRepoPlacement(coreapi.RepoIndexEntry{ID: testPlacementA}); ok {
 		t.Fatal("ok = true for entry with no placements, want false")
+	}
+}
+
+// TestReportableSkippedRepos pins the surfacing gate: pinned requests report
+// every skip; broad requests stay silent while any cell is queried, but
+// report when the skips left nothing to query (a bare "no results" would be
+// misleading). Regression guard for inverting the gate — nothing else fails.
+func TestReportableSkippedRepos(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	skipped := []string{"acme/cloning"}
+	cases := []struct {
+		name         string
+		pinned       bool
+		queriedCells int
+		want         int
+	}{
+		{"pinned always reports", true, 2, 1},
+		{"broad with cells stays silent", false, 2, 0},
+		{"broad with nothing to query reports", false, 0, 1},
+	}
+	for _, tc := range cases {
+		if got := reportableSkippedRepos(ctx, tc.pinned, tc.queriedCells, skipped); len(got) != tc.want {
+			t.Fatalf("%s: reported %v, want %d entries", tc.name, got, tc.want)
+		}
+	}
+	if got := reportableSkippedRepos(ctx, true, 0, nil); got != nil {
+		t.Fatalf("no skips: reported %v, want nil", got)
 	}
 }
 
@@ -262,7 +283,7 @@ func TestGroupReposByCell_PlacementEmptyID(t *testing.T) {
 		t.Fatalf("groups = %d, want 0 (all placement IDs empty): %+v", len(cells), cells)
 	}
 	if strings.Join(skipped, ",") != testPlacementA {
-		t.Fatalf("skipped = %v, want the ID-less repo reported as [01A]", skipped)
+		t.Fatalf("skipped = %v, want the ID-less repo reported as [%s]", skipped, testPlacementA)
 	}
 }
 

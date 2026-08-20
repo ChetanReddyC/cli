@@ -109,8 +109,7 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 			return nil, err
 		}
 		// Scoped requests pin the picked placement's ULID (repoIDs below),
-		// which query-serve resolves from its all-accessible byID set — the
-		// BFF's filtered path applies the same home-placement rule.
+		// which query-serve resolves from its all-accessible byID set.
 		cells, skipped = groupReposByCell(entries)
 	} else {
 		index, err := s.listFullIndex(ctx)
@@ -124,25 +123,14 @@ func (s *semanticSearchV4Session) search(ctx context.Context, cfg search.Config)
 			logging.Debug(ctx, "semantic search: repo index truncated; cross-repo results may be incomplete")
 			warnings = append(warnings, "repo index truncated; cross-repo results may be incomplete")
 		}
-		// Broad requests send no repo pins; query-serve narrows a pin-less
-		// search to the placements whose HOME (elected processing primary,
-		// else the canonical convention) is its own cell since ENT-1776
-		// (entire-search#188), so broad routing follows the same election —
-		// like the BFF's unfiltered path (entire.io#3801).
+		// Broad requests send no repo pins; query-serve narrows pin-less
+		// scope by the same election routedRepoPlacement picks by (ENT-1776),
+		// so one grouping serves both request shapes.
 		cells, skipped = groupReposByCell(index.Repos)
 	}
+	skipped = reportableSkippedRepos(ctx, scoped, len(cells), skipped)
 	if len(skipped) > 0 {
-		if scoped {
-			// Scoped queries pin each cell to explicit repo IDs, so a skipped
-			// repo is genuinely excluded — tell the user.
-			warnings = append(warnings, fmt.Sprintf("skipped %d repo(s) with no searchable placement (missing or not ready): %s", len(skipped), strings.Join(skipped, ", ")))
-		} else {
-			// Unfiltered queries send no repo param — each queried cell
-			// searches everything it holds, so a skipped repo only stops
-			// contributing to WHICH cells are queried; claiming it was
-			// excluded would be wrong. Debug-log for diagnosability.
-			logging.Debug(ctx, "semantic search: repos without a routable home placement", "repos", strings.Join(skipped, ","))
-		}
+		warnings = append(warnings, fmt.Sprintf("skipped %d repo(s) with no searchable placement (missing or not ready): %s", len(skipped), strings.Join(skipped, ", ")))
 	}
 
 	if len(cells) == 0 {
