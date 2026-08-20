@@ -2606,3 +2606,42 @@ func TestPostCommit_EndedSessionWithLingeringRecord_UnrelatedCommitNotCondensed(
 	assert.Len(t, state.TaskRecords, 1,
 		"the lingering record must remain untouched by an unrelated commit")
 }
+
+// TestShouldCondenseWithOverlapCheck_ReadOnlySkipSparesTaskContent covers the
+// dangling-trailer hazard: tryAgentCommitFastPath mints a trailer for an idle
+// session on the strength of a fresh task record alone (its empty-session guard
+// exempts HasTaskContent), so PostCommit must not then drop that same session
+// through the read-only skip, which fires precisely when a session has no
+// tracked files — the defining shape of a read-only subagent's record.
+func TestShouldCondenseWithOverlapCheck_ReadOnlySkipSparesTaskContent(t *testing.T) {
+	t.Parallel()
+
+	recent := time.Now()
+	tests := []struct {
+		name           string
+		hasNew         bool
+		isActive       bool
+		hasTaskContent bool
+		want           bool
+	}{
+		{name: "task content survives the read-only skip", hasNew: true, hasTaskContent: true, want: true},
+		{name: "read-only active session still skipped", hasNew: true, isActive: true, want: false},
+		{name: "no new content short-circuits", hasTaskContent: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := &postCommitActionHandler{
+				ctx:                        context.Background(),
+				hasNew:                     tt.hasNew,
+				filesTouchedBefore:         nil, // the read-only shape: no tracked files
+				sessionsWithCommittedFiles: 1,   // another session claims the committed files
+			}
+			var last *time.Time
+			if tt.isActive {
+				last = &recent
+			}
+			assert.Equal(t, tt.want, h.shouldCondenseWithOverlapCheck(tt.isActive, last, tt.hasTaskContent))
+		})
+	}
+}

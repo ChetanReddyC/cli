@@ -779,7 +779,12 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	// session has no recent interaction and falls through to the overlap
 	// check unless it has fresh (IDLE) task records.
 	if (isActive && isRecentInteraction(lastInteraction)) || hasTaskContent {
-		if h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 {
+		// Task content is itself the evidence, so the read-only skip below must
+		// not fire for it: a read-only subagent's record has no files by
+		// definition, tryAgentCommitFastPath already minted this commit's
+		// trailer on exactly that basis, and skipping here would leave it
+		// dangling over a checkpoint the materializer never filled.
+		if !hasTaskContent && h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 {
 			logging.Debug(h.ctx, "post-commit: skipping read-only session (no tracked files, other sessions claim committed files)",
 				slog.Bool("is_active", isActive),
 				slog.Bool("idle_with_task_content", hasTaskContent),
