@@ -1009,6 +1009,7 @@ func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error 
 		CoverageIncomplete bool            `json:"coverage_incomplete,omitempty"`
 		TruncatedTypes     map[string]bool `json:"truncated_types,omitempty"`
 		CountsLowerBound   map[string]bool `json:"counts_lower_bound,omitempty"`
+		Reranked           *bool           `json:"reranked,omitempty"`
 	}{
 		Results:            pageResults,
 		Total:              total,
@@ -1021,6 +1022,7 @@ func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error 
 		CoverageIncomplete: resp.CoverageIncomplete,
 		TruncatedTypes:     resp.TruncatedTypes,
 		CountsLowerBound:   resp.CountsLowerBound,
+		Reranked:           resp.Reranked,
 	}
 	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
 	if err != nil {
@@ -1124,6 +1126,7 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int)
 		CoverageIncomplete bool            `json:"coverage_incomplete,omitempty"`
 		TruncatedTypes     map[string]bool `json:"truncated_types,omitempty"`
 		CountsLowerBound   map[string]bool `json:"counts_lower_bound,omitempty"`
+		Reranked           *bool           `json:"reranked,omitempty"`
 	}{
 		Results:            hits,
 		Total:              total,
@@ -1136,6 +1139,7 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int)
 		CoverageIncomplete: resp.CoverageIncomplete,
 		TruncatedTypes:     resp.TruncatedTypes,
 		CountsLowerBound:   resp.CountsLowerBound,
+		Reranked:           resp.Reranked,
 	}
 	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
 	if err != nil {
