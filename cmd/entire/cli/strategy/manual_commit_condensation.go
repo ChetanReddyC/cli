@@ -1581,10 +1581,20 @@ func ensureCondensationAttemptID(ctx context.Context, state *SessionState) (id.C
 	return checkpointID, true, nil
 }
 
-// ReserveSessionEndCondensation records the write-ahead checkpoint ID for an
-// ENDED session that is eligible for eager condensation.
-func ReserveSessionEndCondensation(ctx context.Context, state *SessionState) error {
-	if state.Phase != session.PhaseEnded || len(state.FilesTouched) > 0 || (state.StepCount <= 0 && !state.HasTaskContent()) {
+func hasEagerCondensationContent(state *SessionState) bool {
+	return state.StepCount > 0 || state.HasTaskContent()
+}
+
+// PrepareSessionEndCondensation reserves an ID for content-bearing ENDED
+// sessions or marks empty ENDED sessions fully condensed. File-bearing sessions
+// remain eligible for PostCommit.
+func PrepareSessionEndCondensation(ctx context.Context, state *SessionState) error {
+	if state.Phase != session.PhaseEnded || len(state.FilesTouched) > 0 {
+		return nil
+	}
+	if !hasEagerCondensationContent(state) {
+		state.FullyCondensed = true
+		state.ClearCondensationAttempt()
 		return nil
 	}
 	_, _, err := ensureCondensationAttemptID(ctx, state)
@@ -1711,7 +1721,7 @@ func prepareEagerCondensation(
 	if len(state.FilesTouched) > 0 {
 		return "", false, ErrMutationSkip
 	}
-	if state.StepCount <= 0 && !state.HasTaskContent() {
+	if !hasEagerCondensationContent(state) {
 		state.FullyCondensed = true
 		state.ClearCondensationAttempt()
 		return "", false, nil
@@ -1768,6 +1778,10 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		return nil
 	}
 	if reservedState == nil {
+		return nil
+	}
+	if len(reservedState.FilesTouched) > 0 ||
+		(reservedState.FullyCondensed && !hasEagerCondensationContent(reservedState)) {
 		return nil
 	}
 	checkpointID = reservedState.PendingCondensationID()

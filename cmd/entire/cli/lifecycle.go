@@ -1986,10 +1986,10 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 				slog.String("error", transErr.Error()))
 		}
 		state.EndedAt = &endedAt
-		if reserveErr := strategy.ReserveSessionEndCondensation(ctx, state); reserveErr != nil {
-			logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to reserve session-end checkpoint ID",
+		if prepareErr := strategy.PrepareSessionEndCondensation(ctx, state); prepareErr != nil {
+			logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to prepare session-end condensation",
 				slog.String("session_id", sessionID),
-				slog.String("error", reserveErr.Error()))
+				slog.String("error", prepareErr.Error()))
 		}
 		ended = true
 		return nil

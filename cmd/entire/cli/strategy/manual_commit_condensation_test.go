@@ -1094,9 +1094,9 @@ func TestCondenseSession_PoisonedTaskRecord_SkippedNotWedged(t *testing.T) {
 // TestCondenseAndMarkFullyCondensed_RecordsOnlySessionMaterializes is the
 // trigger half of invariant 7: a records-only session (read-only background
 // subagent; no SaveStep, no shadow branch, no files, no parent transcript)
-// must condense into a real checkpoint carrying tasks/<id>/, not be
-// short-circuited to FullyCondensed by the empty-session/no-shadow-branch
-// shortcuts or CondenseSession's own skip gates.
+// must condense into a real checkpoint carrying tasks/<id>/. FullyCondensed is
+// already true here because the task may complete after SessionEnd condensed
+// the earlier state; the new task content must make the session eligible again.
 func TestCondenseAndMarkFullyCondensed_RecordsOnlySessionMaterializes(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
@@ -1110,7 +1110,7 @@ func TestCondenseAndMarkFullyCondensed_RecordsOnlySessionMaterializes(t *testing
 	now := time.Now()
 	s := &ManualCommitStrategy{}
 	require.NoError(t, s.saveSessionState(context.Background(), &SessionState{
-		SessionID: sessionID, StartedAt: now, Phase: session.PhaseEnded,
+		SessionID: sessionID, StartedAt: now, Phase: session.PhaseEnded, FullyCondensed: true,
 		TaskRecords: []session.TaskRecord{{
 			ToolUseID: "toolu_recordsonly", AgentID: "agent-ro", SubagentType: "reviewer",
 			DeclaredTranscriptPath: agentTranscriptPath, StartedAt: now, CompletedAt: now,
