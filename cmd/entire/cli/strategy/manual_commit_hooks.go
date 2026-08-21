@@ -1019,7 +1019,6 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	}
 
 	loopCtx, processSessionsLoop := perf.StartLoop(ctx, "process_sessions")
-	anyCondensed := false
 	for _, sess := range sessions {
 		if sess.FullyCondensed && sess.Phase == session.PhaseEnded {
 			continue
@@ -1027,12 +1026,10 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		sessionID := sess.SessionID
 		iterCtx, iterSpan := processSessionsLoop.Iteration(loopCtx)
 		mutErr := MutateSessionState(iterCtx, sessionID, func(state *SessionState) error {
-			if s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
+			s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
 				head, commit, newHead, worktreePath, headTree, parentTree,
 				committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
-				sessionsWithCommittedFiles) {
-				anyCondensed = true
-			}
+				sessionsWithCommittedFiles)
 			return nil
 		})
 		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
@@ -1043,10 +1040,6 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		iterSpan.End()
 	}
 	processSessionsLoop.End()
-
-	if !anyCondensed {
-		warnDanglingCheckpointTrailer(logCtx, checkpointID, sessions)
-	}
 
 	if err := s.updateCombinedAttributionForCheckpoint(ctx, repo, checkpointID, headTree, parentTree, worktreePath); err != nil {
 		logging.Warn(logCtx, "failed to update combined checkpoint attribution",
@@ -1082,25 +1075,6 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-// warnDanglingCheckpointTrailer reports a commit whose Entire-Checkpoint trailer
-// no session filled: the end state of every trailer/condense divergence, and
-// unlike "session not eligible" never a routine outcome, so it warns.
-func warnDanglingCheckpointTrailer(logCtx context.Context, checkpointID id.CheckpointID, sessions []*SessionState) {
-	phases := make([]string, 0, len(sessions))
-	totalTaskRecords := 0
-	for _, state := range sessions {
-		phases = append(phases, string(state.Phase))
-		totalTaskRecords += len(state.TaskRecords)
-	}
-	logging.Warn(logCtx, "post-commit: trailer left dangling, no session condensed into it",
-		slog.String("strategy", "manual-commit"),
-		slog.String("checkpoint_id", checkpointID.String()),
-		slog.Int("sessions", len(sessions)),
-		slog.Any("session_phases", phases),
-		slog.Int("task_records", totalTaskRecords),
-	)
 }
 
 // updateCombinedAttributionForCheckpoint computes holistic attribution across all sessions.
@@ -1229,8 +1203,6 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 // Pre-resolved git objects (headTree, parentTree) are shared across all sessions;
 // per-session shadow ref/tree are resolved once here and threaded through sub-calls.
 //
-// Returns whether this session condensed into checkpointID.
-//
 // MUST be called from inside MutateSessionState. Mutations to state are persisted
 // by the caller's outer save — calling this function standalone silently loses
 // every field change (StepCount, FilesTouched, CheckpointTranscriptStart, …).
@@ -1250,7 +1222,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	uncondensedActiveOnBranch map[string]bool,
 	allAgentFiles map[string]struct{},
 	sessionsWithCommittedFiles int,
-) bool {
+) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 
@@ -1427,8 +1399,6 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	if state.Phase.IsActive() && !handler.condensed {
 		uncondensedActiveOnBranch[shadowBranchName] = true
 	}
-
-	return handler.condensed
 }
 
 // condenseAndUpdateState runs condensation for a session and updates state afterward.
