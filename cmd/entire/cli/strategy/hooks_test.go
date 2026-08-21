@@ -1454,9 +1454,25 @@ func TestGitHookCommitMsg_MissingEntireStillRunsChainedHook(t *testing.T) {
 	if err := os.WriteFile(msgFile, []byte("commit message\n"), 0o600); err != nil {
 		t.Fatalf("failed to write commit message: %v", err)
 	}
-	fakeDirname := "#!/bin/sh\ncase \"$1\" in */*) printf '%s\\n' \"${1%/*}\" ;; *) printf '.\\n' ;; esac\n"
-	if err := os.WriteFile(filepath.Join(binDir, "dirname"), []byte(fakeDirname), 0o755); err != nil {
-		t.Fatalf("failed to write fake dirname: %v", err)
+	// The generated hook calls dirname (hooks.go: _entire_hook_dir=...), and
+	// envWithPath makes binDir the entire PATH, so binDir has to provide it.
+	// Symlink the real one instead of writing a stand-in script: a
+	// written-then-exec'd file is an ETXTBSY target (golang/go#22315). Between
+	// os.WriteFile's open-for-write and its close, any of this package's ~33
+	// parallel tests can fork, the child inherits the write fd, and exec of
+	// that file then fails with "Text file busy" until the child closes it.
+	// Go's os/exec retries ETXTBSY for commands it starts, but this exec
+	// happens inside the sh subprocess, so nothing retries: the hook dies at
+	// its first dirname call and the test reports "backup hook did not run",
+	// which points nowhere near the cause. A symlink is never a write target,
+	// and the stand-in it replaces only reimplemented ${1%/*}, so behaviour
+	// here is unchanged.
+	realDirname, err := exec.LookPath("dirname")
+	if err != nil {
+		t.Skip("dirname not available")
+	}
+	if err := os.Symlink(realDirname, filepath.Join(binDir, "dirname")); err != nil {
+		t.Fatalf("failed to link dirname into the fake PATH: %v", err)
 	}
 
 	hook := findHookSpec(t, buildHookSpecs("entire"), "commit-msg")
