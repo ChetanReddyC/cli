@@ -8,10 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -335,6 +338,32 @@ func TestFindSessionsForWorktree_AmbiguityResolvedByLiveness(t *testing.T) {
 		assert.Equal(t, "sess-live-c", got[0].SessionID, "identity must rescue the ambiguous commit")
 		assert.Empty(t, buf.String(), "a rescued commit must not tell the user nothing was linked")
 	})
+
+	t.Run("git sequence operation suppresses the decline hint", func(t *testing.T) {
+		dir := identityTestRepo(t)
+		wtA := addSiblingWorktree(t, dir, "rebase-a")
+		wtB := addSiblingWorktree(t, dir, "rebase-b")
+		saveIdentitySession(t, "sess-rebase-a", func(st *SessionState) { st.WorktreePath = wtA })
+		saveIdentitySession(t, "sess-rebase-b", func(st *SessionState) { st.WorktreePath = wtB })
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git", "rebase-merge"), 0o755))
+		buf := captureStderrWriter(t)
+
+		s := NewManualCommitStrategy()
+		got, err := s.findSessionsForCommitLinking(ctx, dir)
+		require.NoError(t, err)
+		assert.Empty(t, got)
+		assert.Empty(t, buf.String(), "replayed commits must not suggest adopting a session")
+	})
+}
+
+func TestIsSessionHomeWorktree_CleansPaths(t *testing.T) {
+	t.Parallel()
+
+	statePath := filepath.Join("some", "repo")
+	state := &SessionState{WorktreePath: statePath}
+	worktreePath := statePath + string(os.PathSeparator) + "."
+
+	assert.True(t, isSessionHomeWorktree(worktreePath, state))
 }
 
 // Guest-linked sessions (identity-matched from a worktree other than their
@@ -369,6 +398,58 @@ func TestUpdateBaseCommitIfChanged_GuestWorktreeGating(t *testing.T) {
 	s.updateBaseCommitIfChanged(ctx, guest, "2222222222222222222222222222222222222222", dir)
 	assert.Equal(t, "1111111111111111111111111111111111111111", guest.BaseCommit,
 		"a guest-linked session's BaseCommit tracks its home worktree, not this commit")
+}
+
+// A guest condensation may advance transcript bookkeeping, but it must not
+// consume or unpin the home worktree's pending shadow state. The home branch
+// still contains uncommitted files that must survive until a home commit.
+//
+// Not parallel: uses t.Chdir().
+func TestPostCommit_GuestCondensationPreservesHomeShadowState(t *testing.T) {
+	ctx := context.Background()
+	homeDir := setupGitRepo(t)
+	t.Chdir(homeDir)
+
+	homeRepo, err := gitrepo.OpenPath(homeDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = homeRepo.Close() })
+
+	s := NewManualCommitStrategy()
+	sessionID := "sess-guest-shadow"
+	setupSessionWithCheckpoint(t, s, homeRepo, homeDir, sessionID)
+
+	state, err := s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	state.Owner = selfAncestorOwner(t)
+	state.WorktreePath = homeDir
+	state.Phase = session.PhaseActive
+	require.NoError(t, s.saveSessionState(ctx, state))
+
+	baseCommitBefore := state.BaseCommit
+	stepCountBefore := state.StepCount
+	filesTouchedBefore := append([]string(nil), state.FilesTouched...)
+	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	shadowRefBefore, err := homeRepo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
+	require.NoError(t, err)
+
+	guestDir := addSiblingWorktree(t, homeDir, "guest-condense")
+	t.Chdir(guestDir)
+	testutil.WriteFile(t, guestDir, "guest.txt", "guest worktree content")
+	testutil.GitAdd(t, guestDir, "guest.txt")
+	testutil.GitCommit(t, guestDir, "guest commit\n\n"+trailers.CheckpointTrailerKey+": a1b2c3d4e5f6\n")
+
+	guestStrategy := NewManualCommitStrategy()
+	require.NoError(t, guestStrategy.PostCommit(ctx))
+
+	state, err = guestStrategy.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, baseCommitBefore, state.BaseCommit, "guest commit must not advance the home worktree base")
+	assert.Equal(t, stepCountBefore, state.StepCount, "guest condensation must keep the home shadow branch pinned")
+	assert.Equal(t, filesTouchedBefore, state.FilesTouched, "guest condensation must preserve home pending files")
+
+	shadowRefAfter, err := homeRepo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
+	require.NoError(t, err)
+	assert.Equal(t, shadowRefBefore.Hash(), shadowRefAfter.Hash(), "home shadow ref must remain byte-identical")
 }
 
 // Not parallel: uses t.Chdir()

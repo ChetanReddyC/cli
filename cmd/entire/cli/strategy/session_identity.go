@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
@@ -38,7 +39,7 @@ func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context,
 	if guest := s.findSessionByCommitAncestry(ctx, allStates); guest != nil && !linkingSetContains(sessions, guest.SessionID) {
 		sessions = append(sessions, guest)
 	}
-	if ambiguous && len(sessions) == 0 {
+	if ambiguous && len(sessions) == 0 && !isGitSequenceOperation(ctx) {
 		fmt.Fprintln(stderrWriter,
 			"[entire] Agent sessions in several other worktrees could match this commit; none was linked. Run 'entire session adopt' in this worktree to link future commits to your session.")
 	}
@@ -119,7 +120,7 @@ func (s *ManualCommitStrategy) findSessionByCommitAncestry(ctx context.Context, 
 // here and read resolution failure as "home", which would have mutated a
 // guest session's state in exactly the way the gate exists to prevent.
 func isSessionHomeWorktree(worktreePath string, state *SessionState) bool {
-	return worktreePath == "" || state.WorktreePath == "" || state.WorktreePath == worktreePath
+	return worktreePath == "" || state.WorktreePath == "" || filepath.Clean(state.WorktreePath) == filepath.Clean(worktreePath)
 }
 
 func interactedAfter(a, b *SessionState) bool {

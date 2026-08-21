@@ -1396,10 +1396,10 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	shadowBranchName string,
 	shadowBranchesToDelete map[string]struct{},
 	committedFiles map[string]struct{},
-	opts ...condenseOpts,
+	opts condenseOpts,
 ) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
-	result, err := s.CondenseSession(ctx, repo, checkpointID, state, committedFiles, opts...)
+	result, err := s.CondenseSession(ctx, repo, checkpointID, state, committedFiles, opts)
 	if err != nil {
 		logging.Warn(logCtx, "condensation failed",
 			slog.String("session_id", state.SessionID),
@@ -1425,14 +1425,16 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	// (or letting the caller rebuild it via carry-forward, which reads file
 	// CONTENT from the current — wrong — worktree) would replace the home
 	// worktree's in-flight state with the committing worktree's files.
-	var isHome bool
-	if len(opts) > 0 {
-		isHome = isSessionHomeWorktree(opts[0].repoDir, state)
-	}
+	isHome := isSessionHomeWorktree(opts.repoDir, state)
 	if !isHome {
 		state.LastCheckpointID = checkpointID
 		state.LastCheckpointCommitHash = head.Hash().String()
+		pendingStepCount := state.StepCount
 		resetCheckpointWindow(state)
+		// The checkpoint window was consumed, but the home worktree's shadow
+		// content was not. Keep its existing SaveStep count as the ownership
+		// pin used by cleanup and doctor until a home commit consumes it.
+		state.StepCount = pendingStepCount
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 		logging.Info(logCtx, "session guest-condensed from a sibling worktree; shadow state untouched",
