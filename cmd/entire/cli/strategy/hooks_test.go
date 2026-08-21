@@ -1421,10 +1421,14 @@ func TestGitHookCommitMsg_EntireFailureAllowsCommit(t *testing.T) {
 		t.Fatalf("failed to write commit message: %v", err)
 	}
 
-	fakeEntire := filepath.Join(binDir, "entire")
-	if err := os.WriteFile(fakeEntire, []byte("#!/bin/sh\nexit 42\n"), 0o755); err != nil {
-		t.Fatalf("failed to write fake entire: %v", err)
-	}
+	// The hook only needs an `entire` that exists and fails: it emits
+	// `if command -v entire ...; then entire hooks git commit-msg "$1" || true;
+	// else <warn>; fi`, so the name has to resolve (or the warning this test
+	// forbids would print) and `|| true` discards whatever it exits with. The
+	// script this replaces exited 42, but no code path read that value, so
+	// linking `false` preserves the behaviour under test and — being a link,
+	// not a written file — cannot hit the ETXTBSY race described above.
+	linkExecutable(t, filepath.Join(binDir, "entire"), "false")
 
 	hook := findHookSpec(t, buildHookSpecs("entire"), "commit-msg")
 	hookPath := filepath.Join(tempDir, "commit-msg")
@@ -1456,24 +1460,9 @@ func TestGitHookCommitMsg_MissingEntireStillRunsChainedHook(t *testing.T) {
 	}
 	// The generated hook calls dirname (hooks.go: _entire_hook_dir=...), and
 	// envWithPath makes binDir the entire PATH, so binDir has to provide it.
-	// Symlink the real one instead of writing a stand-in script: a
-	// written-then-exec'd file is an ETXTBSY target (golang/go#22315). Between
-	// os.WriteFile's open-for-write and its close, any of this package's ~33
-	// parallel tests can fork, the child inherits the write fd, and exec of
-	// that file then fails with "Text file busy" until the child closes it.
-	// Go's os/exec retries ETXTBSY for commands it starts, but this exec
-	// happens inside the sh subprocess, so nothing retries: the hook dies at
-	// its first dirname call and the test reports "backup hook did not run",
-	// which points nowhere near the cause. A symlink is never a write target,
-	// and the stand-in it replaces only reimplemented ${1%/*}, so behaviour
-	// here is unchanged.
-	realDirname, err := exec.LookPath("dirname")
-	if err != nil {
-		t.Skip("dirname not available")
-	}
-	if err := os.Symlink(realDirname, filepath.Join(binDir, "dirname")); err != nil {
-		t.Fatalf("failed to link dirname into the fake PATH: %v", err)
-	}
+	// The stand-in it replaces only reimplemented ${1%/*}, so linking the real
+	// one is behaviour-identical.
+	linkExecutable(t, filepath.Join(binDir, "dirname"), "dirname")
 
 	hook := findHookSpec(t, buildHookSpecs("entire"), "commit-msg")
 	hookPath := filepath.Join(tempDir, "commit-msg")
@@ -1495,6 +1484,40 @@ func TestGitHookCommitMsg_MissingEntireStillRunsChainedHook(t *testing.T) {
 	}
 	if _, err := os.Stat(markerFile); err != nil {
 		t.Fatalf("backup hook did not run: %v\n%s", err, output)
+	}
+}
+
+// linkExecutable places an ETXTBSY-immune stand-in for the real `name` binary
+// at dst, for tests that hand a fabricated PATH to a shell subprocess.
+//
+// Writing the stand-in as a script is the shape to avoid: a written-then-exec'd
+// file is an ETXTBSY target (golang/go#22315). Between os.WriteFile's
+// open-for-write and its close, any of this package's parallel tests can fork,
+// the child inherits the write fd, and exec of that file then fails with "Text
+// file busy" until the child closes it. Go's os/exec retries ETXTBSY for
+// commands it starts, but these execs happen inside the sh subprocess, so
+// nothing retries: the hook dies mid-script and the test reports whichever
+// later assertion noticed, which points nowhere near the cause. A link is never
+// a write target, so the race has no purchase.
+//
+// Symlink first, hard link second: Windows without Developer Mode or admin
+// refuses symlinks, while a hard link is the same inode (equally immune) but
+// cannot cross filesystems, which is the common case here since t.TempDir and
+// the system binary usually differ. Skip if neither works — this is a test
+// prerequisite, like requireShell's missing sh, not a failure of the code under
+// test.
+func linkExecutable(t *testing.T, dst, name string) {
+	t.Helper()
+
+	realPath, err := exec.LookPath(name)
+	if err != nil {
+		t.Skipf("%s not available on PATH", name)
+	}
+	if symlinkErr := os.Symlink(realPath, dst); symlinkErr == nil {
+		return
+	}
+	if linkErr := os.Link(realPath, dst); linkErr != nil {
+		t.Skipf("cannot link %s into the fake PATH: %v", name, linkErr)
 	}
 }
 
