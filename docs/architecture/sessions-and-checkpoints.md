@@ -197,8 +197,9 @@ matching at the same depth (one agent process hosting several sessions) fall
 back to the most recently interacting one. On platforms proclive cannot introspect (Windows),
 identity matching reports nothing and linking falls back to worktree
 matching. This makes an agent-made commit link to
-its own session **in any worktree**, with no bookkeeping to drift. A commit
-identity-matched outside the session's home worktree is **guest-linked**: it
+its own session **in any worktree**, with no bookkeeping to drift. Any session
+matched outside its home worktree is **guest-linked**, whether it came from
+identity matching or the pre-existing single-worktree fallback below: it
 condenses and links, but never mutates worktree-coupled state (`BaseCommit`,
 shadow-branch realignment) — those follow only the session's own worktree HEAD.
 
@@ -210,7 +211,11 @@ they are historical records. When candidates span several worktrees, sessions
 that interacted within the last 15 minutes are preferred; if a single live
 worktree remains it links, otherwise the hook declines with a stderr hint
 naming `entire session adopt` (two genuinely live sessions in different
-worktrees are never guessed between).
+worktrees are never guessed between). This liveness filter intentionally turns
+some cases the old code declined outright into a best-candidate link. The
+15-minute `recentSessionWindow` is therefore a correctness tradeoff: a session
+in a long-running build or tool call can age out, allowing the remaining recent
+worktree to win.
 
 Under `go test`, the session state store refuses to open outside the temp
 root (both `session.NewStateStore` and `NewStateStoreForWorktree`), so a test

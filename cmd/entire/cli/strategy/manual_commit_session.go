@@ -259,8 +259,11 @@ func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Con
 
 // recentSessionWindow bounds the liveness filter below: a session that
 // interacted within this window is plausibly the one whose work is being
-// committed right now; one idle for days is not. Commits follow agent
-// activity by seconds to minutes.
+// committed right now; one idle for days is not. This deliberately converts
+// some multi-worktree cases the old code declined into a best-candidate link:
+// a session in a long-running build or tool call can age out and leave the
+// other recent worktree to win. Commits normally follow agent activity by
+// seconds to minutes, so 15 minutes is the chosen correctness tradeoff.
 const recentSessionWindow = 15 * time.Minute
 
 // resolveWorktreeCandidates reduces fallback candidates to a linkable set.
