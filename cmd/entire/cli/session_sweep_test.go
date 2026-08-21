@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -129,10 +130,19 @@ func TestIsSweepableZombie(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "idle session is never a zombie",
+			name: "idle with dead owner is a zombie",
 			state: session.State{
-				Phase:     session.PhaseIdle,
-				StepCount: 3,
+				Phase: session.PhaseIdle,
+				Owner: deadOwner,
+			},
+			want: true,
+		},
+		{
+			name: "imported non-ended session is never a zombie",
+			state: session.State{
+				Phase: session.PhaseIdle,
+				Owner: deadOwner,
+				Kind:  session.KindImported,
 			},
 			want: false,
 		},
@@ -319,11 +329,15 @@ func TestMaybeSpawnSessionSweep_SeamAndThrottle(t *testing.T) {
 	var spawns atomic.Int32
 	var gotRoot atomic.Value
 	prevSpawn := sweepSpawn
+	prevGitCommonDir := sweepGitCommonDir
 	sweepSpawn = func(worktreeRoot string) {
 		spawns.Add(1)
 		gotRoot.Store(worktreeRoot)
 	}
-	t.Cleanup(func() { sweepSpawn = prevSpawn })
+	t.Cleanup(func() {
+		sweepSpawn = prevSpawn
+		sweepGitCommonDir = prevGitCommonDir
+	})
 
 	// No zombies: no spawn (and no throttle marker written — the throttle is
 	// only consulted once a zombie nominates).
@@ -340,6 +354,15 @@ func TestMaybeSpawnSessionSweep_SeamAndThrottle(t *testing.T) {
 		EndedAt:    &old,
 	}
 	require.NoError(t, strategy.SaveSessionState(ctx, zombie))
+
+	// A common-dir failure means there is no safe repository-wide throttle key.
+	// Fail closed rather than forking an unbounded child on every session start.
+	sweepGitCommonDir = func(context.Context) (string, error) {
+		return "", errors.New("common dir unavailable")
+	}
+	maybeSpawnSessionSweep(ctx)
+	assert.Equal(t, int32(0), spawns.Load(), "common-dir failure must not spawn a sweep")
+	sweepGitCommonDir = prevGitCommonDir
 
 	// Zombie present: exactly one spawn, with the worktree root.
 	maybeSpawnSessionSweep(ctx)

@@ -24,7 +24,7 @@ const endedSessionSweepAge = 24 * time.Hour
 
 // isSweepableZombie reports whether the state marks this session as safe for
 // the background sweep to fix. It deliberately needs no repository access —
-// the priciest thing it does is OwnerExited()'s per-active-state process
+// the priciest thing it does is OwnerExited()'s per-non-ended-state process
 // probe, which the `entire status` path already pays per state — so the
 // session-start hook caller stays cheap. The sweep itself re-validates
 // before acting (see runSessionSweep's safety notes).
@@ -33,15 +33,15 @@ const endedSessionSweepAge = 24 * time.Hour
 // shadow branch are doctor's discard case, filtered later — this
 // predicate only ever nominates sessions, it never acts.
 func isSweepableZombie(st *session.State, now time.Time) bool {
-	if st.Phase.IsActive() {
-		return st.OwnerExited()
-	}
 	// Imported sessions are historical records: complete by design, never
 	// condensable (no BaseCommit), and exempt from the stale purge — so they
-	// look like ENDED zombies forever. Nominating one would spawn a doomed
-	// sweep on every session start, forever.
+	// may look like zombies forever. Nominating one would spawn a doomed sweep
+	// on every session start, forever.
 	if st.Kind.IsImported() {
 		return false
+	}
+	if !st.IsEnded() {
+		return st.OwnerExited()
 	}
 	if st.Phase != session.PhaseEnded || st.FullyCondensed || st.StepCount <= 0 {
 		return false
@@ -57,8 +57,8 @@ func isSweepableZombie(st *session.State, now time.Time) bool {
 }
 
 // runSessionSweep is the detached background pass that fixes zombie sessions:
-// ACTIVE sessions whose owning agent process is gone are finalized exactly as
-// a clean SessionStop would (finalizeExitedSessions, which re-validates
+// Non-ended sessions whose owning agent process is gone are finalized exactly
+// as a clean SessionStop would (finalizeExitedSessions, which re-validates
 // OwnerExited under the per-session lock), and ENDED sessions past the
 // carry-forward window with condensable data are condensed via the same
 // engine `entire doctor --force` uses.
@@ -92,9 +92,11 @@ func runSessionSweep(ctx context.Context) error {
 		return fmt.Errorf("failed to list session states: %w", err)
 	}
 
-	// Active sessions with a dead owner: finalize + eager condense. This also
+	// Non-ended sessions with a dead owner: finalize + eager condense. This
+	// command is detached, so a zero deadline lets the backlog drain in one pass
+	// instead of inheriting the interactive status/doctor budget. This also
 	// refreshes the matched entries in `states` from disk.
-	if n := finalizeExitedSessions(ctx, states); n > 0 {
+	if n := finalizeExitedSessions(ctx, states, time.Time{}); n > 0 {
 		logging.Info(logCtx, "sweep finalized exited sessions", slog.Int("count", n))
 	}
 
@@ -111,8 +113,8 @@ func runSessionSweep(ctx context.Context) error {
 
 	now := time.Now()
 	for _, st := range states {
-		// ENDED-only here: ACTIVE zombies were finalizeExitedSessions' job
-		// above. isSweepableZombie returns true for a still-ACTIVE dead-owner
+		// ENDED-only here: non-ended zombies were finalizeExitedSessions' job
+		// above. isSweepableZombie returns true for a non-ended dead-owner
 		// session (its finalize failed above), so this phase check is what
 		// keeps those out of the condense path — and skips their pointless
 		// re-load.
@@ -174,6 +176,11 @@ func countSweepableZombies(states []*session.State, now time.Time) int {
 // spawnDetachedSessionSweepProcess.
 var sweepSpawn = spawnDetachedSessionSweepProcess
 
+// sweepGitCommonDir is the repository-scope seam used by
+// maybeSpawnSessionSweep. Swapped in tests to prove a throttle-key failure
+// fails closed without depending on a malformed repository fixture.
+var sweepGitCommonDir = session.GetGitCommonDir
+
 // spawnDetachedSessionSweepProcess starts `entire __sweep_sessions` as a
 // detached child so the sweep's repo work can't add latency to the
 // session-start hook that spawned it. The child runs from the worktree root
@@ -220,6 +227,17 @@ func maybeSpawnSessionSweep(ctx context.Context) {
 			slog.String("error", err.Error()))
 		return
 	}
+	commonDir, err := sweepGitCommonDir(ctx)
+	if err != nil {
+		logging.Debug(logCtx, "skipping sweep spawn: could not resolve git common dir",
+			slog.String("error", err.Error()))
+		return
+	}
+	// Zombie discovery deliberately precedes the throttle check. The shared
+	// marker is check-and-record, so consulting it before discovery would burn
+	// the whole throttle window on the overwhelmingly common no-zombie case. A
+	// read-only marker check would permit reordering if this scan becomes a
+	// measurable hook-latency cost.
 	states, err := strategy.ListSessionStates(ctx)
 	if err != nil {
 		logging.Warn(logCtx, "skipping sweep check", slog.String("error", err.Error()))
@@ -229,8 +247,7 @@ func maybeSpawnSessionSweep(ctx context.Context) {
 	if n == 0 {
 		return
 	}
-	if commonDir, cerr := session.GetGitCommonDir(ctx); cerr == nil &&
-		sweepRecentlySpawned(commonDir, time.Now()) {
+	if sweepRecentlySpawned(commonDir, time.Now()) {
 		return
 	}
 	sweepSpawn(root)
