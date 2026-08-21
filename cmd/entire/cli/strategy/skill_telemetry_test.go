@@ -225,6 +225,48 @@ func TestMutateSessionStateOnSaved_NestedEffectHeldForTheOuterFrame(t *testing.T
 	}
 }
 
+// A panicking frame never saved, so it must announce nothing — and must leave
+// the gate usable, since the release happens before the (discarded) effects.
+func TestMutateSessionStateOnSaved_PanicDiscardsQueuedEffects(t *testing.T) {
+	writeTelemetrySettings(t, "true")
+
+	sessionID := "sess-panic-discard"
+	require.NoError(t, (&ManualCommitStrategy{}).InitializeSession(
+		t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", ""))
+
+	effects := 0
+	func() {
+		defer func() {
+			require.NotNil(t, recover(), "the panic must propagate out of the mutation")
+		}()
+		//nolint:errcheck // the closure panics, so this call never returns a value.
+		MutateSessionStateOnSaved(t.Context(), sessionID, func(_ *SessionState) error {
+			require.NoError(t, MutateSessionStateOnSaved(t.Context(), sessionID,
+				func(nested *SessionState) error {
+					nested.LastPrompt = "written-by-nested"
+					return nil
+				},
+				func() { effects++ },
+			))
+			panic("boom")
+		}, func() { effects++ })
+	}()
+	require.Zero(t, effects, "a panicking frame must not announce anything")
+
+	reloaded, err := LoadSessionState(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.NotEqual(t, "written-by-nested", reloaded.LastPrompt,
+		"the panic aborted the save, so nothing may be on disk")
+
+	// The gate must be free (release runs before the effects would have) and
+	// the panicking frame's queue must not survive into this one.
+	require.NoError(t, MutateSessionStateOnSaved(t.Context(), sessionID, func(state *SessionState) error {
+		state.StepCount++
+		return nil
+	}, nil))
+	require.Zero(t, effects, "a later frame ran an effect the panicking frame queued")
+}
+
 // The queue is per-frame: effects owed to one outer frame must not fire again
 // for the next one on the same session.
 func TestMutateSessionStateOnSaved_NestedEffectDoesNotLeakToTheNextFrame(t *testing.T) {
