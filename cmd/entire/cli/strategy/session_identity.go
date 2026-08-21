@@ -120,7 +120,7 @@ func (s *ManualCommitStrategy) findSessionByCommitAncestry(ctx context.Context, 
 // here and read resolution failure as "home", which would have mutated a
 // guest session's state in exactly the way the gate exists to prevent.
 func isSessionHomeWorktree(worktreePath string, state *SessionState) bool {
-	return worktreePath == "" || state.WorktreePath == "" || filepath.Clean(state.WorktreePath) == filepath.Clean(worktreePath)
+	return worktreePath != "" && state.WorktreePath != "" && filepath.Clean(state.WorktreePath) == filepath.Clean(worktreePath)
 }
 
 func interactedAfter(a, b *SessionState) bool {

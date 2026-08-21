@@ -366,6 +366,20 @@ func TestIsSessionHomeWorktree_CleansPaths(t *testing.T) {
 	assert.True(t, isSessionHomeWorktree(worktreePath, state))
 }
 
+func TestIsSessionHomeWorktree_RejectsUnknownPaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("commit worktree", func(t *testing.T) {
+		t.Parallel()
+		assert.False(t, isSessionHomeWorktree("", &SessionState{WorktreePath: "/session/home"}))
+	})
+
+	t.Run("session worktree", func(t *testing.T) {
+		t.Parallel()
+		assert.False(t, isSessionHomeWorktree("/commit/worktree", &SessionState{}))
+	})
+}
+
 // Guest-linked sessions (identity-matched from a worktree other than their
 // home) must never have worktree-coupled state advanced by the foreign
 // commit: BaseCommit keys the shadow branch, and rewriting it from another
