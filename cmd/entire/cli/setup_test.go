@@ -1395,6 +1395,13 @@ func TestRunUninstall_ReportsUnremovedExternalAgentHooks(t *testing.T) {
 	if !strings.Contains(errOut, "entire-agent-"+agentName+" uninstall-hooks") {
 		t.Errorf("warning must say how to remove the leftover hooks, stderr:\n%s", errOut)
 	}
+	// The protocol guarantees every subcommand these, so a bare invocation is a
+	// command a conforming plugin may reject — useless as the user's last resort.
+	for _, want := range []string{"ENTIRE_REPO_ROOT=", "ENTIRE_PROTOCOL_VERSION="} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("recovery command must carry %s, stderr:\n%s", want, errOut)
+		}
+	}
 	if !strings.Contains(errOut, "will not reach these plugins") {
 		t.Errorf("warning must say a re-run cannot retry the plugin, stderr:\n%s", errOut)
 	}

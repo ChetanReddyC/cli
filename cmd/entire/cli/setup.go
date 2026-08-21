@@ -2366,7 +2366,8 @@ func promptVercelDeploymentDisable() (bool, error) {
 // runUninstall completely removes Entire from the repository.
 func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// Check if we're in a git repository
-	if _, err := paths.WorktreeRoot(ctx); err != nil {
+	repoRoot, rootErr := paths.WorktreeRoot(ctx)
+	if rootErr != nil {
 		fmt.Fprintln(errW, "Not a git repository. Nothing to uninstall.")
 		return NewSilentError(errors.New("not a git repository"))
 	}
@@ -2467,7 +2468,14 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// re-run, since its leftover hooks keep the installed set non-empty.
 	if len(failedExternal) > 0 {
 		for _, name := range failedExternal {
-			fmt.Fprintf(errW, "  %s hooks are still installed. Remove them with `entire-agent-%s uninstall-hooks`.\n", agentDisplayName(name), name)
+			// The protocol promises every subcommand ENTIRE_REPO_ROOT,
+			// ENTIRE_PROTOCOL_VERSION and a repo-root working directory
+			// (docs/architecture/external-agent-protocol.md), so a plugin is
+			// entitled to rely on them. Printing the bare binary hands the user a
+			// command that a conforming plugin can reject.
+			fmt.Fprintf(errW, "  %s hooks are still installed. Remove them with:\n", agentDisplayName(name))
+			fmt.Fprintf(errW, "    cd %s && ENTIRE_REPO_ROOT=%s ENTIRE_PROTOCOL_VERSION=%d entire-agent-%s uninstall-hooks\n",
+				repoRoot, repoRoot, external.ProtocolVersion, name)
 		}
 		fmt.Fprintln(errW, "  Re-running `entire disable --uninstall` will not reach these plugins once .entire/ is gone.")
 	}
