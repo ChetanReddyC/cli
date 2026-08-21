@@ -78,37 +78,50 @@ func priorAICommitTouchedFiles(ctx context.Context, repoRoot string, files []str
 	return false
 }
 
-// condensedTelemetrySignal captures, while the session gate is held, the few
+// commitCondensedSignal captures, while the session gate is held, the few
 // state/result fields the condensed-checkpoint signal needs. Everything
 // expensive — the env/settings gates, the git-log density probe, machine-ID
 // lookup, and the detached-process spawn — runs later in
-// emitCheckpointCondensedTelemetry, after MutateSessionState has released the
+// emitCommitCondensedTelemetry, after MutateSessionState has released the
 // gate, matching the skill-event telemetry pattern.
-type condensedTelemetrySignal struct {
+type commitCondensedSignal struct {
 	agentType    types.AgentType
 	usedSearch   bool
 	filesTouched []string
 }
 
-// newCondensedTelemetrySignal snapshots the signal inputs for a successful
+// newCommitCondensedSignal snapshots the signal inputs for a successful
 // condensation, or nil when there is nothing to report. Cheap and I/O-free by
 // design — it is the only part of this signal that runs under the session
 // gate. FilesTouched is copied because the caller mutates state after
 // condensing.
-func newCondensedTelemetrySignal(state *SessionState, result *CondenseResult) *condensedTelemetrySignal {
+//
+// Commit-scoped by construction: the sole caller is condenseAndUpdateState,
+// reached only from postCommitProcessSessionLocked. That is a scoping decision,
+// not an oversight. The payload describes a commit — files_committed counts its
+// files, and prior_ai_history's git-log probe passes --skip=1 precisely to
+// exclude the commit just made — and it feeds the ratio "commits that landed
+// AI-dense files without consulting search". The other condensation paths
+// (CondenseSessionByID via doctor, CondenseAndMarkFullyCondensed at session
+// end) condense real checkpoints but have no commit: --skip=1 would exclude an
+// unrelated HEAD, and the resulting rows would be indistinguishable from
+// genuine misses, inflating the denominator instead of completing it. Covering
+// them means a trigger discriminator plus nullable commit-scoped fields — a
+// change to what the metric means, not a bug fix.
+func newCommitCondensedSignal(state *SessionState, result *CondenseResult) *commitCondensedSignal {
 	if result == nil || result.Skipped || state == nil {
 		return nil
 	}
 	files := make([]string, len(result.FilesTouched))
 	copy(files, result.FilesTouched)
-	return &condensedTelemetrySignal{
+	return &commitCondensedSignal{
 		agentType:    state.AgentType,
 		usedSearch:   result.UsedSearch,
 		filesTouched: files,
 	}
 }
 
-// emitCheckpointCondensedTelemetry sends the content-free adoption signal for
+// emitCommitCondensedTelemetry sends the content-free adoption signal for
 // one condensed checkpoint: did the session consult search, and did the files
 // it committed already carry AI checkpoint history? Together these give the
 // "sessions that edited history-dense files without searching" denominator
@@ -119,7 +132,7 @@ func newCondensedTelemetrySignal(state *SessionState, result *CondenseResult) *c
 // and best-effort throughout: the PostHog call happens in a detached child and
 // never blocks the hook. Call it AFTER the surrounding MutateSessionState
 // returns, never inside its closure.
-func emitCheckpointCondensedTelemetry(ctx context.Context, sig *condensedTelemetrySignal) {
+func emitCommitCondensedTelemetry(ctx context.Context, sig *commitCondensedSignal) {
 	if sig == nil {
 		return
 	}
@@ -142,7 +155,7 @@ func emitCheckpointCondensedTelemetry(ctx context.Context, sig *condensedTelemet
 	if ag, agErr := agent.GetByAgentType(sig.agentType); agErr == nil && ag != nil {
 		agentName = string(ag.Name())
 	}
-	telemetry.TrackCheckpointCondensedDetached(telemetry.CheckpointCondensedSignal{
+	telemetry.TrackCommitCondensedDetached(telemetry.CommitCondensedSignal{
 		Agent:          agentName,
 		UsedSearch:     sig.usedSearch,
 		PriorAIHistory: priorAIHistory,

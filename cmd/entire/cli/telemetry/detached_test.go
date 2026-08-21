@@ -257,20 +257,20 @@ func TestBuildSkillEventPayload_UnlistedSkillNameIsNotSent(t *testing.T) {
 	}
 }
 
-func TestBuildCheckpointCondensedPayload(t *testing.T) {
+func TestBuildCommitCondensedPayload(t *testing.T) {
 	t.Parallel()
-	payload := BuildCheckpointCondensedPayload(CheckpointCondensedSignal{
+	payload := BuildCommitCondensedPayload(CommitCondensedSignal{
 		Agent:          testAgentName,
 		UsedSearch:     true,
 		PriorAIHistory: true,
 		FilesCommitted: 4,
 	}, true, "1.2.3")
 	if payload == nil {
-		t.Fatal("BuildCheckpointCondensedPayload returned nil")
+		t.Fatal("BuildCommitCondensedPayload returned nil")
 		return
 	}
-	if payload.Event != "cli_checkpoint_condensed" {
-		t.Errorf("Event = %q, want %q", payload.Event, "cli_checkpoint_condensed")
+	if payload.Event != "cli_commit_condensed" {
+		t.Errorf("Event = %q, want %q", payload.Event, "cli_commit_condensed")
 	}
 	if got := payload.Properties["agent"]; got != testAgentName {
 		t.Errorf("agent property = %v, want %q", got, testAgentName)

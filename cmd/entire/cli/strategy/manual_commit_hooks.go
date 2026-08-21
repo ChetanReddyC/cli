@@ -693,7 +693,7 @@ type postCommitActionHandler struct {
 	// condensedSignal is the missed-opportunity adoption signal snapshotted
 	// by condensation; emitted by the PostCommit loop after the session's
 	// MutateSessionState saves.
-	condensedSignal *condensedTelemetrySignal
+	condensedSignal *commitCondensedSignal
 }
 
 // parentCommitHash returns the first parent's hash as a string, or empty for initial commits.
@@ -1038,7 +1038,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		sessionID := sess.SessionID
 		iterCtx, iterSpan := processSessionsLoop.Iteration(loopCtx)
 		var newSkillEvents []agent.SkillEvent
-		var condensedSignal *condensedTelemetrySignal
+		var condensedSignal *commitCondensedSignal
 		stateSaved, mutErr := MutateSessionStateSaved(iterCtx, sessionID, func(state *SessionState) error {
 			newSkillEvents, condensedSignal = s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
 				head, commit, newHead, worktreePath, headTree, parentTree,
@@ -1053,7 +1053,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		}
 		if stateSaved {
 			EmitSkillInvocationTelemetry(iterCtx, newSkillEvents)
-			emitCheckpointCondensedTelemetry(iterCtx, condensedSignal)
+			emitCommitCondensedTelemetry(iterCtx, condensedSignal)
 		}
 		iterSpan.End()
 	}
@@ -1240,7 +1240,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	uncondensedActiveOnBranch map[string]bool,
 	allAgentFiles map[string]struct{},
 	sessionsWithCommittedFiles int,
-) (newSkillEvents []agent.SkillEvent, condensedSignal *condensedTelemetrySignal) {
+) (newSkillEvents []agent.SkillEvent, condensedSignal *commitCondensedSignal) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	reservedCheckpointID := state.PendingCondensationID()
@@ -1447,7 +1447,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	shadowBranchesToDelete map[string]struct{},
 	committedFiles map[string]struct{},
 	opts condenseOpts,
-) (condensed bool, newSkillEvents []agent.SkillEvent, condensedSignal *condensedTelemetrySignal) {
+) (condensed bool, newSkillEvents []agent.SkillEvent, condensedSignal *commitCondensedSignal) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	result, err := s.CondenseSession(ctx, repo, checkpointID, state, committedFiles, opts)
 	if err != nil {
@@ -1475,7 +1475,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	// commit is still a commit — the transcript was condensed and the trailer
 	// stamped — so the payload describes something real, and skipping it would
 	// under-count exactly the cross-worktree sessions.
-	condensedSignal = newCondensedTelemetrySignal(state, result)
+	condensedSignal = newCommitCondensedSignal(state, result)
 
 	// Guest-linked commit (identity-matched from a sibling worktree): the
 	// transcript is condensed and the trailer stamped, but every mutation of

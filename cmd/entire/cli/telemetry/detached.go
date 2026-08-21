@@ -323,14 +323,22 @@ func TrackSkillInvocationsDetached(invocations []SkillInvocation, isEntireEnable
 	spawnDetachedAnalyticsBatch(payloads)
 }
 
-// CheckpointCondensedSignal is the content-free adoption signal emitted when a
+// CommitCondensedSignal is the content-free adoption signal emitted when a
 // commit condenses a session checkpoint: whether the session consulted entire
 // search, and whether the committed files already carried AI checkpoint
 // history. Together these give the "sessions that edited history-dense files
 // without searching" denominator that raw command counts cannot. Content-free
 // metadata only — booleans, a count, and the agent identifier; never file
 // paths, prompts, or transcript content.
-type CheckpointCondensedSignal struct {
+//
+// A commit is part of the event's identity, not an incidental trigger, which is
+// why it is named for one. Every property is commit-scoped: FilesCommitted
+// counts that commit's files, and PriorAIHistory asks whether commits *before*
+// this one already touched them. The condensation paths that run without a
+// commit (doctor repair, session-end leftovers) deliberately emit nothing —
+// see newCommitCondensedSignal for why folding them in would corrupt the
+// denominator rather than complete it.
+type CommitCondensedSignal struct {
 	// Agent is the session-owning agent's registry key (e.g. "claude-code"),
 	// matching the agent property on skill and command events.
 	Agent string
@@ -344,10 +352,10 @@ type CheckpointCondensedSignal struct {
 	FilesCommitted int
 }
 
-// BuildCheckpointCondensedPayload constructs the telemetry payload for one
+// BuildCommitCondensedPayload constructs the telemetry payload for one
 // condensed checkpoint. Exported for testing. Returns nil if the payload
 // cannot be built.
-func BuildCheckpointCondensedPayload(sig CheckpointCondensedSignal, isEntireEnabled bool, version string) *EventPayload {
+func BuildCommitCondensedPayload(sig CommitCondensedSignal, isEntireEnabled bool, version string) *EventPayload {
 	machineID, err := telemetryMachineID()
 	if err != nil {
 		return nil
@@ -372,22 +380,22 @@ func BuildCheckpointCondensedPayload(sig CheckpointCondensedSignal, isEntireEnab
 	}
 
 	return &EventPayload{
-		Event:      "cli_checkpoint_condensed",
+		Event:      "cli_commit_condensed",
 		DistinctID: machineID,
 		Properties: properties,
 		Timestamp:  time.Now(),
 	}
 }
 
-// TrackCheckpointCondensedDetached records one condensed checkpoint's adoption
+// TrackCommitCondensedDetached records one condensed checkpoint's adoption
 // signal. Like TrackPluginDetached, it only honors the env opt-out itself —
 // call sites must gate on the user's opt-in telemetry setting.
-func TrackCheckpointCondensedDetached(sig CheckpointCondensedSignal, isEntireEnabled bool, version string) {
+func TrackCommitCondensedDetached(sig CommitCondensedSignal, isEntireEnabled bool, version string) {
 	if IsEnvOptedOut() {
 		return
 	}
 
-	payload := BuildCheckpointCondensedPayload(sig, isEntireEnabled, version)
+	payload := BuildCommitCondensedPayload(sig, isEntireEnabled, version)
 	if payload == nil {
 		return
 	}
