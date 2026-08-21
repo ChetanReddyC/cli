@@ -281,7 +281,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 					fmt.Fprintln(w, "No results found.")
 					return nil
 				}
-				renderSearchStatic(w, resp.Results, query, resp.Total, styles)
+				renderSearchStatic(w, resp.Results, query, resp.Total, len(resp.CountsLowerBound) > 0, styles)
 				return nil
 			}
 
@@ -305,6 +305,11 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles, codeOpts)
 			model.semanticSearch = searcher
 			model.warning = strings.Join(resp.Warnings, "; ")
+			// The initial response's counts metadata must reach the model the
+			// same way a re-search's does, or the tab counts and their
+			// lower-bound "+" are missing on the first view (ENT-1777).
+			model.counts = resp.Counts
+			model.countsLowerBound = resp.CountsLowerBound
 			p := tea.NewProgram(model)
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("TUI error: %w", err)
@@ -997,13 +1002,27 @@ func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error 
 		TotalPages int                `json:"total_pages"`
 		Limit      int                `json:"limit"`
 		Counts     *search.TypeCounts `json:"counts,omitempty"`
+		// Completeness metadata, passed through from the merged response with
+		// the BFF's names and semantics (ENT-1777).
+		Partial            bool            `json:"partial,omitempty"`
+		Truncated          bool            `json:"truncated,omitempty"`
+		CoverageIncomplete bool            `json:"coverage_incomplete,omitempty"`
+		TruncatedTypes     map[string]bool `json:"truncated_types,omitempty"`
+		CountsLowerBound   map[string]bool `json:"counts_lower_bound,omitempty"`
+		Reranked           *bool           `json:"reranked,omitempty"`
 	}{
-		Results:    pageResults,
-		Total:      total,
-		Page:       page,
-		TotalPages: totalPages,
-		Limit:      limit,
-		Counts:     resp.Counts,
+		Results:            pageResults,
+		Total:              total,
+		Page:               page,
+		TotalPages:         totalPages,
+		Limit:              limit,
+		Counts:             resp.Counts,
+		Partial:            resp.Partial,
+		Truncated:          resp.Truncated,
+		CoverageIncomplete: resp.CoverageIncomplete,
+		TruncatedTypes:     resp.TruncatedTypes,
+		CountsLowerBound:   resp.CountsLowerBound,
+		Reranked:           resp.Reranked,
 	}
 	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
 	if err != nil {
@@ -1100,13 +1119,27 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int)
 		TotalPages int                `json:"total_pages"`
 		Limit      int                `json:"limit"`
 		Counts     *search.TypeCounts `json:"counts,omitempty"`
+		// Completeness metadata, passed through from the merged response with
+		// the BFF's names and semantics (ENT-1777).
+		Partial            bool            `json:"partial,omitempty"`
+		Truncated          bool            `json:"truncated,omitempty"`
+		CoverageIncomplete bool            `json:"coverage_incomplete,omitempty"`
+		TruncatedTypes     map[string]bool `json:"truncated_types,omitempty"`
+		CountsLowerBound   map[string]bool `json:"counts_lower_bound,omitempty"`
+		Reranked           *bool           `json:"reranked,omitempty"`
 	}{
-		Results:    hits,
-		Total:      total,
-		Page:       page,
-		TotalPages: totalPages,
-		Limit:      limit,
-		Counts:     resp.Counts,
+		Results:            hits,
+		Total:              total,
+		Page:               page,
+		TotalPages:         totalPages,
+		Limit:              limit,
+		Counts:             resp.Counts,
+		Partial:            resp.Partial,
+		Truncated:          resp.Truncated,
+		CoverageIncomplete: resp.CoverageIncomplete,
+		TruncatedTypes:     resp.TruncatedTypes,
+		CountsLowerBound:   resp.CountsLowerBound,
+		Reranked:           resp.Reranked,
 	}
 	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
 	if err != nil {
