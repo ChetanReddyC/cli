@@ -109,7 +109,7 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 	dotGitPath := filepath.Join(worktreeRoot, ".git")
 	info, err := os.Stat(dotGitPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return location, nil
+		return validateHookLocation(location)
 	}
 	if err != nil {
 		return HookLocation{}, fmt.Errorf("stat .git path: %w", err)
@@ -121,7 +121,7 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 		}
 		location.LockPath = filepath.Join(gitDir, "entire-codex-hooks.lock")
 		location.RepositoryWide = hasRegisteredLinkedWorktree(gitDir)
-		return location, nil
+		return validateHookLocation(location)
 	}
 
 	gitDir, err := readGitDirFile(dotGitPath, worktreeRoot)
@@ -131,7 +131,7 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 	location.LockPath = filepath.Join(gitDir, "entire-codex-hooks.lock")
 	worktreesDir := filepath.Dir(gitDir)
 	if filepath.Base(worktreesDir) != "worktrees" {
-		return location, nil
+		return validateHookLocation(location)
 	}
 
 	commonDir, err := readCommonDir(gitDir, filepath.Dir(worktreesDir))
@@ -164,7 +164,7 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 
 	location.HooksPath = filepath.Join(authoritativeRoot, ".codex", HooksFileName)
 	location.RepositoryWide = true
-	return omitAliasedLegacyHooks(location)
+	return validateHookLocation(location)
 }
 
 func supportsSharedHookRoot(commonDir string) bool {

@@ -118,6 +118,100 @@ func TestInstallHooks_LinkedWorktreeDoesNotCleanAliasedAuthoritativeFile(t *test
 	require.Equal(t, agentpkg.HooksCurrent, ag.CheckHookConfig(context.Background()))
 }
 
+func TestInstallHooks_RejectsAuthoritativeCodexDirectoryOutsideCheckout(t *testing.T) {
+	if runtime.GOOS == testWindowsOS {
+		t.Skip("directory symlinks require privileges on Windows")
+	}
+	repoRoot, _ := setupLinkedWorktreeEnv(t)
+	outsideDir := filepath.Join(t.TempDir(), "outside")
+	require.NoError(t, os.MkdirAll(outsideDir, 0o750))
+	require.NoError(t, os.Symlink(outsideDir, filepath.Join(repoRoot, ".codex")))
+
+	_, err := (&CodexAgent{}).InstallHooks(context.Background(), false)
+	require.ErrorContains(t, err, "outside the checkout")
+	require.NoFileExists(t, filepath.Join(outsideDir, HooksFileName))
+}
+
+func TestInstallHooks_PreservesContainedHooksFileSymlink(t *testing.T) {
+	if runtime.GOOS == testWindowsOS {
+		t.Skip("file symlinks require privileges on Windows")
+	}
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	initCommittedRepo(t, repoRoot)
+	t.Chdir(repoRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+
+	projectDir := filepath.Join(repoRoot, ".codex")
+	managedDir := filepath.Join(repoRoot, "managed")
+	targetPath := filepath.Join(managedDir, HooksFileName)
+	hooksPath := filepath.Join(projectDir, HooksFileName)
+	require.NoError(t, os.MkdirAll(projectDir, 0o750))
+	require.NoError(t, os.MkdirAll(managedDir, 0o750))
+	require.NoError(t, os.WriteFile(targetPath, []byte(`{"user_setting":{"keep":true}}`), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join("..", "managed", HooksFileName), hooksPath))
+
+	count, err := (&CodexAgent{}).InstallHooks(context.Background(), true)
+	require.NoError(t, err)
+	require.Equal(t, len(managedHooks), count)
+	info, err := os.Lstat(hooksPath)
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&os.ModeSymlink, "install must preserve hooks.json symlink")
+	require.Contains(t, readFile(t, targetPath), "user_setting")
+	require.Contains(t, readFile(t, targetPath), "entire hooks codex stop")
+}
+
+func TestUninstallHooks_PreservesContainedHooksFileSymlink(t *testing.T) {
+	if runtime.GOOS == testWindowsOS {
+		t.Skip("file symlinks require privileges on Windows")
+	}
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	initCommittedRepo(t, repoRoot)
+	t.Chdir(repoRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+
+	projectDir := filepath.Join(repoRoot, ".codex")
+	managedDir := filepath.Join(repoRoot, "managed")
+	targetPath := filepath.Join(managedDir, HooksFileName)
+	hooksPath := filepath.Join(projectDir, HooksFileName)
+	require.NoError(t, os.MkdirAll(projectDir, 0o750))
+	require.NoError(t, os.MkdirAll(managedDir, 0o750))
+	require.NoError(t, os.WriteFile(targetPath, []byte(`{}`), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join("..", "managed", HooksFileName), hooksPath))
+
+	ag := &CodexAgent{}
+	_, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.NoError(t, ag.UninstallHooks(context.Background()))
+	info, err := os.Lstat(hooksPath)
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&os.ModeSymlink, "uninstall must preserve hooks.json symlink")
+	require.JSONEq(t, `{}`, readFile(t, targetPath))
+}
+
+func TestInstallHooks_RejectsHooksFileSymlinkOutsideCheckout(t *testing.T) {
+	if runtime.GOOS == testWindowsOS {
+		t.Skip("file symlinks require privileges on Windows")
+	}
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	initCommittedRepo(t, repoRoot)
+	t.Chdir(repoRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+
+	projectDir := filepath.Join(repoRoot, ".codex")
+	outsidePath := filepath.Join(t.TempDir(), HooksFileName)
+	hooksPath := filepath.Join(projectDir, HooksFileName)
+	require.NoError(t, os.MkdirAll(projectDir, 0o750))
+	require.NoError(t, os.WriteFile(outsidePath, []byte(`{"user_setting":{"keep":true}}`), 0o600))
+	require.NoError(t, os.Symlink(outsidePath, hooksPath))
+
+	_, err := (&CodexAgent{}).InstallHooks(context.Background(), false)
+	require.ErrorContains(t, err, "outside the checkout")
+	info, statErr := os.Lstat(hooksPath)
+	require.NoError(t, statErr)
+	require.NotZero(t, info.Mode()&os.ModeSymlink)
+	require.JSONEq(t, `{"user_setting":{"keep":true}}`, readFile(t, outsidePath))
+}
+
 func TestRepositorySharedHooksPath_PrimaryCheckoutWithLinkedWorktree(t *testing.T) {
 	repoRoot, _ := setupLinkedWorktreeEnv(t)
 	t.Chdir(repoRoot)
@@ -187,6 +281,24 @@ func TestInstallHooks_LinkedWorktreeMigratesLegacyConfig(t *testing.T) {
 	require.Zero(t, count)
 	require.Equal(t, authoritative, readFile(t, authoritativePath))
 	require.Equal(t, legacy, readFile(t, legacyPath))
+}
+
+func TestInstallHooks_LinkedWorktreeInstallsAuthoritativeBeforeMalformedLegacyError(t *testing.T) {
+	repoRoot, linkedRoot := setupLinkedWorktreeEnv(t)
+	authoritativePath := filepath.Join(repoRoot, ".codex", HooksFileName)
+	legacyPath := filepath.Join(linkedRoot, ".codex", HooksFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacyPath), 0o750))
+	const malformed = `{not-json`
+	require.NoError(t, os.WriteFile(legacyPath, []byte(malformed), 0o600))
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(context.Background(), false)
+	require.Equal(t, len(managedHooks), count)
+	require.ErrorContains(t, err, "authoritative Codex hooks are installed")
+	require.ErrorContains(t, err, "legacy cleanup failed")
+	require.FileExists(t, authoritativePath)
+	require.True(t, ag.AreHooksInstalled(context.Background()))
+	require.Equal(t, malformed, readFile(t, legacyPath))
 }
 
 func TestInstallHooks_LinkedWorktreeDeletesManagedOnlyLegacyFile(t *testing.T) {

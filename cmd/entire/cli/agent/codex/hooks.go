@@ -82,10 +82,6 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 			return 0, fmt.Errorf("create linked-worktree .codex project layer: %w", err)
 		}
 	}
-	location, err = omitAliasedLegacyHooks(location)
-	if err != nil {
-		return 0, err
-	}
 	release, err := acquireHooksLock(ctx, location.LockPath)
 	if err != nil {
 		return 0, fmt.Errorf("lock Codex hooks file: %w", err)
@@ -95,13 +91,6 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 	destination, err := readHooksDocument(location.HooksPath)
 	if err != nil {
 		return 0, err
-	}
-	var legacy *hooksDocument
-	if location.LegacyHooksPath != "" {
-		legacy, err = readHooksDocument(location.LegacyHooksPath)
-		if err != nil {
-			return 0, fmt.Errorf("read legacy worktree-local hooks: %w", err)
-		}
 	}
 
 	count, err := installManagedHooks(ctx, destination, force)
@@ -113,16 +102,8 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 			return 0, err
 		}
 	}
-	if legacy != nil && legacy.exists {
-		changed, removeErr := removeEntireHooksFromDocument(legacy)
-		if removeErr != nil {
-			return 0, fmt.Errorf("clean legacy worktree-local hooks: %w", removeErr)
-		}
-		if changed {
-			if err := writeHooksDocument(location.LegacyHooksPath, legacy); err != nil {
-				return 0, fmt.Errorf("clean legacy worktree-local hooks: %w", err)
-			}
-		}
+	if err := cleanLegacyHooks(location.LegacyHooksPath); err != nil {
+		return count, fmt.Errorf("authoritative Codex hooks are installed, but legacy cleanup failed: %w", err)
 	}
 
 	// No .codex/config.toml is written: hooks are enabled by default in
@@ -401,6 +382,30 @@ func installManagedHooks(ctx context.Context, document *hooksDocument, force boo
 	return count, nil
 }
 
+func cleanLegacyHooks(path string) error {
+	if path == "" {
+		return nil
+	}
+	document, err := readHooksDocument(path)
+	if err != nil {
+		return fmt.Errorf("read worktree-local hooks: %w", err)
+	}
+	if !document.exists {
+		return nil
+	}
+	changed, err := removeEntireHooksFromDocument(document)
+	if err != nil {
+		return fmt.Errorf("remove Entire hooks from worktree-local config: %w", err)
+	}
+	if !changed {
+		return nil
+	}
+	if err := writeHooksDocument(path, document); err != nil {
+		return fmt.Errorf("write worktree-local hooks: %w", err)
+	}
+	return nil
+}
+
 func removeEntireHooksFromDocument(document *hooksDocument) (bool, error) {
 	managedEvents := make(map[string]struct{})
 	for _, hook := range managedHooks {
@@ -426,6 +431,10 @@ func removeEntireHooksFromDocument(document *hooksDocument) (bool, error) {
 }
 
 func writeHooksDocument(path string, document *hooksDocument) error {
+	destination, err := resolveHookDestination(path)
+	if err != nil {
+		return err
+	}
 	if len(document.rawHooks) > 0 {
 		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(document.rawHooks)
 		if err != nil {
@@ -435,20 +444,20 @@ func writeHooksDocument(path string, document *hooksDocument) error {
 	} else {
 		delete(document.topLevel, "hooks")
 	}
-	if len(document.topLevel) == 0 {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if len(document.topLevel) == 0 && !destination.fileSymlink {
+		if err := os.Remove(destination.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove empty hooks.json: %w", err)
 		}
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(destination.path), 0o750); err != nil {
 		return fmt.Errorf("create .codex directory: %w", err)
 	}
 	output, err := jsonutil.MarshalIndentWithNewline(document.topLevel, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal hooks.json: %w", err)
 	}
-	if err := jsonutil.WriteFileAtomic(path, output, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomic(destination.path, output, 0o600); err != nil {
 		return fmt.Errorf("failed to write hooks.json: %w", err)
 	}
 	document.exists = true
