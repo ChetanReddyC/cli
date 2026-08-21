@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
+
+const maxGitMetadataFileBytes = 64 * 1024
 
 // HookLocation describes the hooks file Codex actually discovers for the
 // current checkout and any obsolete worktree-local file Entire may migrate.
@@ -107,12 +110,15 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 		}
 	}
 	dotGitPath := filepath.Join(worktreeRoot, ".git")
-	info, err := os.Stat(dotGitPath)
+	info, err := os.Lstat(dotGitPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return validateHookLocation(location)
 	}
 	if err != nil {
 		return HookLocation{}, fmt.Errorf("stat .git path: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return validateHookLocation(location)
 	}
 	if info.IsDir() {
 		gitDir, resolveErr := canonicalPath(dotGitPath)
@@ -123,39 +129,24 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 		location.RepositoryWide = hasRegisteredLinkedWorktree(gitDir)
 		return validateHookLocation(location)
 	}
-
-	gitDir, err := readGitDirFile(dotGitPath, worktreeRoot)
-	if err != nil {
-		return HookLocation{}, err
-	}
-	location.LockPath = filepath.Join(gitDir, "entire-codex-hooks.lock")
-	worktreesDir := filepath.Dir(gitDir)
-	if filepath.Base(worktreesDir) != "worktrees" {
+	if !info.Mode().IsRegular() {
 		return validateHookLocation(location)
 	}
 
-	commonDir, err := readCommonDir(gitDir, filepath.Dir(worktreesDir))
+	gitDir, err := readGitDirFile(dotGitPath, worktreeRoot)
 	if err != nil {
-		return HookLocation{}, err
+		return validateHookLocation(location)
 	}
-	expectedCommonDir, err := canonicalPath(filepath.Dir(worktreesDir))
-	if err != nil {
-		return HookLocation{}, fmt.Errorf("resolve expected common Git directory: %w", err)
-	}
-	if commonDir != expectedCommonDir {
-		return HookLocation{}, fmt.Errorf("linked worktree common directory %q does not match Git directory %q", commonDir, expectedCommonDir)
-	}
-	if !looksLikeGitDir(commonDir) {
-		return HookLocation{}, fmt.Errorf("linked worktree common directory %q is not a Git directory", commonDir)
+	commonDir, authoritativeRoot, ok := resolveSharedHookRoot(gitDir, worktreeRoot)
+	if !ok {
+		return validateHookLocation(location)
 	}
 	location.LockPath = filepath.Join(commonDir, "entire-codex-hooks.lock")
 	location.LegacyHooksPath = filepath.Join(worktreeRoot, ".codex", HooksFileName)
-
-	authoritativeRoot, err := canonicalPath(filepath.Dir(commonDir))
-	if err != nil {
-		return HookLocation{}, fmt.Errorf("resolve Codex hook root: %w", err)
-	}
-	if !supportsSharedHookRoot(commonDir) || isInsideGitMetadata(authoritativeRoot) || isUserHookRoot(authoritativeRoot) {
+	if isInsideGitMetadata(authoritativeRoot) || isUserHookRoot(authoritativeRoot) {
+		if _, validateErr := resolveHookDestination(location.LegacyHooksPath); validateErr != nil {
+			return HookLocation{}, validateErr
+		}
 		return HookLocation{}, &UnsupportedHookLocationError{
 			Location: location,
 			HookRoot: authoritativeRoot,
@@ -167,9 +158,64 @@ func resolveHookLocation(worktreeRoot string) (HookLocation, error) {
 	return validateHookLocation(location)
 }
 
-func supportsSharedHookRoot(commonDir string) bool {
-	base := filepath.Base(commonDir)
-	return base == ".git" || base == ".bare"
+// Codex falls back to worktree-local config unless both the linked checkout
+// and candidate root prove ownership of the common Git directory.
+func resolveSharedHookRoot(gitDir, worktreeRoot string) (commonDir, authoritativeRoot string, ok bool) {
+	worktreesDir := filepath.Dir(gitDir)
+	if filepath.Base(worktreesDir) != "worktrees" {
+		return "", "", false
+	}
+	commonDir, err := readCommonDir(gitDir)
+	if err != nil {
+		return "", "", false
+	}
+	expectedCommonDir, err := canonicalPath(filepath.Dir(worktreesDir))
+	if err != nil || commonDir != expectedCommonDir || !looksLikeGitDir(commonDir) {
+		return "", "", false
+	}
+	authoritativeRoot, err = canonicalPath(filepath.Dir(commonDir))
+	if err != nil {
+		return "", "", false
+	}
+	if !worktreeRegistrationValid(gitDir, worktreeRoot) || !ownsCommonDir(authoritativeRoot, commonDir) {
+		return "", "", false
+	}
+	return commonDir, authoritativeRoot, true
+}
+
+// The registration backlink proves that Git recognizes this checkout.
+func worktreeRegistrationValid(gitDir, worktreeRoot string) bool {
+	data, err := readGitMetadataFile(filepath.Join(gitDir, "gitdir"))
+	if err != nil {
+		return false
+	}
+	target := strings.TrimSpace(string(data))
+	if target == "" || filepath.Base(target) != ".git" {
+		return false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(gitDir, target)
+	}
+	registeredRoot, err := canonicalPath(filepath.Dir(target))
+	return err == nil && registeredRoot == worktreeRoot
+}
+
+// The candidate root owns the common directory only through its own .git entry.
+func ownsCommonDir(candidateRoot, commonDir string) bool {
+	dotGit := filepath.Join(candidateRoot, ".git")
+	info, err := os.Lstat(dotGit)
+	if err != nil {
+		return false
+	}
+	if info.IsDir() {
+		resolved, resolveErr := canonicalPath(dotGit)
+		return resolveErr == nil && resolved == commonDir
+	}
+	if !info.Mode().IsRegular() {
+		return false
+	}
+	resolved, err := readGitDirFile(dotGit, candidateRoot)
+	return err == nil && resolved == commonDir
 }
 
 func isUserHookRoot(hookRoot string) bool {
@@ -233,7 +279,7 @@ func hasRegisteredLinkedWorktree(commonDir string) bool {
 }
 
 func readGitDirFile(dotGitPath, worktreeRoot string) (string, error) {
-	data, err := os.ReadFile(dotGitPath) //nolint:gosec // dotGitPath is derived from the resolved worktree root.
+	data, err := readGitMetadataFile(dotGitPath)
 	if err != nil {
 		return "", fmt.Errorf("read .git file: %w", err)
 	}
@@ -249,6 +295,13 @@ func readGitDirFile(dotGitPath, worktreeRoot string) (string, error) {
 	if !filepath.IsAbs(value) {
 		value = filepath.Join(worktreeRoot, value)
 	}
+	info, err := os.Lstat(value)
+	if err != nil {
+		return "", fmt.Errorf("inspect gitdir: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("gitdir %q is not a directory", value)
+	}
 	resolved, err := canonicalPath(value)
 	if err != nil {
 		return "", fmt.Errorf("resolve gitdir: %w", err)
@@ -256,11 +309,8 @@ func readGitDirFile(dotGitPath, worktreeRoot string) (string, error) {
 	return resolved, nil
 }
 
-func readCommonDir(gitDir, fallback string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(gitDir, "commondir")) //nolint:gosec // gitDir comes from the checked-out repository's .git file.
-	if errors.Is(err, os.ErrNotExist) {
-		return canonicalPath(fallback)
-	}
+func readCommonDir(gitDir string) (string, error) {
+	data, err := readGitMetadataFile(filepath.Join(gitDir, "commondir"))
 	if err != nil {
 		return "", fmt.Errorf("read commondir file: %w", err)
 	}
@@ -276,6 +326,46 @@ func readCommonDir(gitDir, fallback string) (string, error) {
 		return "", fmt.Errorf("resolve common Git directory: %w", err)
 	}
 	return resolved, nil
+}
+
+func readGitMetadataFile(path string) ([]byte, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect git metadata file %q: %w", path, err)
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("git metadata path %q is not a regular file", path)
+	}
+	if before.Size() > maxGitMetadataFileBytes {
+		return nil, fmt.Errorf("git metadata file %q exceeds %d bytes", path, maxGitMetadataFileBytes)
+	}
+	file, err := os.Open(path) //nolint:gosec // Callers derive paths from the current repository's Git metadata.
+	if err != nil {
+		return nil, fmt.Errorf("open git metadata file %q: %w", path, err)
+	}
+	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect opened git metadata file %q: %w", path, err)
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return nil, fmt.Errorf("git metadata file %q changed while opening", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxGitMetadataFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read git metadata file %q: %w", path, err)
+	}
+	if len(data) > maxGitMetadataFileBytes {
+		return nil, fmt.Errorf("git metadata file %q exceeds %d bytes", path, maxGitMetadataFileBytes)
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("reinspect git metadata file %q: %w", path, err)
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return nil, fmt.Errorf("git metadata file %q changed while reading", path)
+	}
+	return data, nil
 }
 
 func canonicalPath(path string) (string, error) {

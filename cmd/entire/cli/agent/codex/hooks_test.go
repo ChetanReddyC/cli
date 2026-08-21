@@ -95,6 +95,28 @@ func TestInstallHooks_LinkedWorktreeUsesAuthoritativeRoot(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(linkedRoot, ".codex", HooksFileName))
 }
 
+// In the maintainer's --separate-git-dir counterexample, Codex resolves the
+// storage parent as its project root from a linked worktree. Installation must
+// write the one file Codex reads there without modifying the primary checkout.
+func TestInstallHooks_SeparateGitDirWritesCodexResolvedStorageFile(t *testing.T) {
+	tmp := t.TempDir()
+	storageRoot := filepath.Join(tmp, "storage")
+	require.NoError(t, os.MkdirAll(storageRoot, 0o750))
+	mainRoot, linkedRoot := setupSeparateGitDirWorktree(t, tmp, filepath.Join(storageRoot, ".git"))
+	t.Chdir(linkedRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.Equal(t, len(managedHooks), count)
+	require.FileExists(t, filepath.Join(storageRoot, ".codex", HooksFileName))
+	require.NoDirExists(t, filepath.Join(mainRoot, ".codex"))
+	require.DirExists(t, filepath.Join(linkedRoot, ".codex"))
+	require.NoFileExists(t, filepath.Join(linkedRoot, ".codex", HooksFileName))
+	require.True(t, ag.AreHooksInstalled(context.Background()))
+}
+
 func TestInstallHooks_LinkedWorktreeDoesNotCleanAliasedAuthoritativeFile(t *testing.T) {
 	if runtime.GOOS == testWindowsOS {
 		t.Skip("directory symlinks require privileges on Windows")
@@ -365,6 +387,26 @@ func TestInstallHooks_BareLayoutUpdatesOneSharedFile(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(featureRoot, ".codex", HooksFileName))
 }
 
+// Without the container's .git ownership pointer, Codex falls back to the
+// current worktree. Installing into the container would succeed on disk but
+// silently leave hooks disabled, so both the file and lock must remain local.
+func TestInstallHooks_PointerlessBareContainerUsesWorktreeLocalFile(t *testing.T) {
+	layoutRoot, _, featureRoot := setupBareWorktreeLayout(t)
+	require.NoError(t, os.Remove(filepath.Join(layoutRoot, ".git")))
+	t.Chdir(featureRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.Equal(t, len(managedHooks), count)
+	require.NoDirExists(t, filepath.Join(layoutRoot, ".codex"))
+	require.FileExists(t, filepath.Join(featureRoot, ".codex", HooksFileName))
+	require.FileExists(t, filepath.Join(featureRoot, ".codex", HooksFileName+".lock"))
+	require.NoFileExists(t, filepath.Join(layoutRoot, ".bare", "entire-codex-hooks.lock"))
+	require.True(t, ag.AreHooksInstalled(context.Background()))
+}
+
 func TestInstallHooks_OrdinarySubmoduleUsesLocalRoot(t *testing.T) {
 	ordinarySubmoduleRoot, _ := setupSubmoduleWorktrees(t)
 	t.Chdir(ordinarySubmoduleRoot)
@@ -377,7 +419,10 @@ func TestInstallHooks_OrdinarySubmoduleUsesLocalRoot(t *testing.T) {
 	require.FileExists(t, filepath.Join(ordinarySubmoduleRoot, ".codex", HooksFileName))
 }
 
-func TestInstallHooks_LinkedSubmoduleRefusesGitInternalPath(t *testing.T) {
+// A linked submodule worktree fails Codex's ownership proof (its common
+// directory lives in .git/modules), so hooks install worktree-locally — the
+// file Codex actually reads there — and Git metadata is never written to.
+func TestInstallHooks_LinkedSubmoduleInstallsWorktreeLocalHooks(t *testing.T) {
 	_, linkedSubmoduleRoot := setupSubmoduleWorktrees(t)
 	t.Chdir(linkedSubmoduleRoot)
 	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
@@ -388,15 +433,14 @@ func TestInstallHooks_LinkedSubmoduleRefusesGitInternalPath(t *testing.T) {
 	unsafeRoot := filepath.Dir(filepath.Dir(filepath.Dir(gitDir)))
 
 	ag := &CodexAgent{}
-	_, err = ag.InstallHooks(context.Background(), false)
-	var unsupported *UnsupportedHookLocationError
-	require.ErrorAs(t, err, &unsupported)
+	count, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.Equal(t, len(managedHooks), count)
 	require.NoDirExists(t, filepath.Join(unsafeRoot, ".codex"))
 
 	localPath := filepath.Join(linkedSubmoduleRoot, ".codex", HooksFileName)
-	require.NoError(t, os.MkdirAll(filepath.Dir(localPath), 0o750))
-	require.NoError(t, os.WriteFile(localPath, []byte(`{"hooks":{"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop"}]}]}}`), 0o600))
-	require.Equal(t, agentpkg.HooksOutdated, ag.CheckHookConfig(context.Background()))
+	require.FileExists(t, localPath)
+	require.Equal(t, agentpkg.HooksCurrent, ag.CheckHookConfig(context.Background()))
 	require.NoError(t, ag.UninstallHooks(context.Background()))
 	require.NoFileExists(t, localPath)
 	require.NoDirExists(t, filepath.Join(unsafeRoot, ".codex"))

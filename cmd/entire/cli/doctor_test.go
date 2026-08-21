@@ -769,11 +769,29 @@ func TestCheckCodexHookTrust_LinkedWorktreeReportsMissingProjectLayer(t *testing
 	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
 
-func TestCheckCodexHookTrust_LinkedSubmoduleReportsUnsafeAuthority(t *testing.T) {
+// A linked submodule worktree fails Codex's ownership proof, so its
+// worktree-local hooks file is the authoritative one and doctor treats it as
+// a regular installation.
+func TestCheckCodexHookTrust_LinkedSubmoduleUsesWorktreeLocalHooks(t *testing.T) {
 	linkedSubmoduleRoot := setupLinkedSubmoduleForDoctorTest(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(linkedSubmoduleRoot, ".codex"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(linkedSubmoduleRoot, ".codex", "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
 	t.Chdir(linkedSubmoduleRoot)
+
+	cmd, stdout := newTestCmd(t)
+	checkCodexHookTrust(cmd)
+	require.NotContains(t, stdout.String(), "UNSUPPORTED HOOK LOCATION")
+	require.NotContains(t, stdout.String(), "MISPLACED")
+	require.Contains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
+}
+
+func TestCheckCodexHookTrust_CodexHomeCollisionReportsUnsupported(t *testing.T) {
+	_, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".codex"), 0o750))
+	require.NoError(t, os.MkdirAll(filepath.Join(linkedRoot, ".codex"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(linkedRoot, ".codex", "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
+	t.Chdir(linkedRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(repoRoot, ".codex"))
 
 	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
@@ -783,8 +801,10 @@ func TestCheckCodexHookTrust_LinkedSubmoduleReportsUnsafeAuthority(t *testing.T)
 }
 
 func TestSetupAgentHooks_SkipsUnsupportedCodexLocation(t *testing.T) {
-	linkedSubmoduleRoot := setupLinkedSubmoduleForDoctorTest(t)
-	t.Chdir(linkedSubmoduleRoot)
+	_, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".codex"), 0o750))
+	t.Chdir(linkedRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(repoRoot, ".codex"))
 	ag := &codex.CodexAgent{}
 
 	result, err := setupAgentHooks(context.Background(), ag, false)
@@ -799,14 +819,14 @@ func TestSetupAgentHooks_SkipsUnsupportedCodexLocation(t *testing.T) {
 
 func TestCheckCodexHookTrust_ResolverFailureIsReported(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".codex"), 0o750))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"), []byte("not a gitdir file\n"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".codex", "hooks.json"), 0o750))
 	t.Chdir(dir)
 
 	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
 	require.Contains(t, stdout.String(), "Codex hooks: UNRESOLVED")
-	require.Contains(t, stdout.String(), ".git file has no gitdir prefix")
+	require.Contains(t, stdout.String(), "hooks.json")
+	require.Contains(t, stdout.String(), "resolves to a directory")
 }
 
 func setupLinkedRepoForDoctorTest(t *testing.T) (tmp, repoRoot, linkedRoot string) {
