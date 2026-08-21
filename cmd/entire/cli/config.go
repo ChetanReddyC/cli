@@ -157,20 +157,24 @@ func OutdatedHookAgentDisplayNames(ctx context.Context) []string {
 func agentDisplayNames(names []types.AgentName) []string {
 	displayNames := make([]string, 0, len(names))
 	for _, name := range names {
-		if display := agentDisplayName(name); display != "" {
-			displayNames = append(displayNames, display)
-		}
+		displayNames = append(displayNames, agentDisplayName(name))
 	}
 	return displayNames
 }
 
-// agentDisplayName returns one agent's user-facing name, or "" if it is not
-// registered. Prose names an agent this way; only a command line the user is
-// meant to run keeps the registry name, which is what the binary is called.
+// agentDisplayName returns one agent's user-facing name, falling back to the
+// registry name when it cannot be looked up. Prose names an agent this way;
+// only a command line the user is meant to run keeps the registry name, which
+// is what the binary is called.
+//
+// The fallback matters because these names are how the user learns what a
+// command is about to touch, or has left behind. Dropping an unresolvable name
+// would list one fewer agent than will be acted on, and an empty one renders as
+// a gap in the sentence.
 func agentDisplayName(name types.AgentName) string {
 	ag, err := agent.Get(name)
 	if err != nil {
-		return ""
+		return string(name)
 	}
 	return string(ag.Type())
 }
