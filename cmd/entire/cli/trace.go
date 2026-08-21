@@ -36,8 +36,11 @@ type traceEntry struct {
 	// Slow marks a root span that exceeded the slow threshold and was therefore
 	// logged at WARN rather than DEBUG (see perf.DefaultSlowSpanThreshold), which
 	// is what makes these visible in a default-level session at all.
-	Slow  bool        `json:"slow,omitempty"`
-	Time  time.Time   `json:"time"`
+	Slow bool `json:"slow,omitempty"`
+	// Time is omitted when zero rather than serialized as year 1: the parser
+	// tolerates a missing or malformed time key, and a JSON consumer should see
+	// the absence rather than a timestamp that was never recorded.
+	Time  time.Time   `json:"time,omitzero"`
 	Steps []traceStep `json:"steps,omitempty"`
 }
 
@@ -212,8 +215,14 @@ func traceStepChildIndex(parentName, childName string) (int, bool) {
 
 // collectTraceEntries reads a JSONL log file and returns the last N trace entries,
 // ordered newest first. If hookFilter is non-empty, only entries with a matching
-// Op field are included.
-func collectTraceEntries(logFile string, last int, hookFilter string) ([]traceEntry, error) {
+// Op field are included; if slowOnly is set, only entries flagged slow are.
+//
+// Both filters are applied before the last-N truncation, so "the last N" always
+// means the last N entries the caller asked to see. Filtering after truncation
+// instead would make --slow return the slow entries among the last N traces
+// rather than the last N slow traces — which reads as "no traces" whenever
+// DEBUG logging fills the window with fast ones.
+func collectTraceEntries(logFile string, last int, hookFilter string, slowOnly bool) ([]traceEntry, error) {
 	f, err := os.Open(logFile) //nolint:gosec // logFile is a CLI-resolved path, not user-supplied input
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -233,6 +242,9 @@ func collectTraceEntries(logFile string, last int, hookFilter string) ([]traceEn
 			continue
 		}
 		if hookFilter != "" && entry.Op != hookFilter {
+			continue
+		}
+		if slowOnly && !entry.Slow {
 			continue
 		}
 		entries = append(entries, *entry)
@@ -477,13 +489,20 @@ func summarizeTraces(entries []traceEntry) traceSummary {
 
 // percentileMs returns the p-th percentile of a sorted slice using nearest-rank,
 // so p50 of one sample is that sample rather than an interpolation.
+//
+// The rank is ceil(p/100 * n), converted to a 0-based index. Truncating instead
+// of rounding up overshoots by one whole sample whenever p*n divides evenly,
+// which is exactly the round-numbered case: p90 of 10 samples would report the
+// maximum, making the P90 and MAX columns duplicates of each other.
 func percentileMs(sorted []int64, p int) int64 {
 	if len(sorted) == 0 {
 		return 0
 	}
-	idx := (p * len(sorted)) / 100
-	if idx >= len(sorted) {
-		idx = len(sorted) - 1
+	n := len(sorted)
+	rank := (p*n + 99) / 100 // ceil(p*n/100)
+	idx := max(rank-1, 0)
+	if idx >= n {
+		idx = n - 1
 	}
 	return sorted[idx]
 }
@@ -509,17 +528,23 @@ func renderTraceSummary(w io.Writer, summary traceSummary) {
 
 	fmt.Fprintf(w, "%d trace(s), %d slow\n\n", summary.Total, summary.Slow)
 
-	fmt.Fprintf(w, "  %-22s %6s %6s %9s %9s %9s  %s\n", "HOOK", "N", "SLOW", "P50", "P90", "MAX", "DOMINANT STEP")
+	// Durations are rendered into strings and padded as strings so the header and
+	// the rows share one width. Padding the number and appending "ms" instead
+	// makes each column two characters wider than its header, which stays
+	// invisible until a five-digit duration shows up.
+	ms := func(v int64) string { return strconv.FormatInt(v, 10) + "ms" }
+
+	fmt.Fprintf(w, "  %-22s %6s %10s %10s %10s %10s  %s\n", "HOOK", "N", "SLOW", "P50", "P90", "MAX", "DOMINANT STEP")
 	for _, op := range summary.Ops {
-		fmt.Fprintf(w, "  %-22s %6d %6d %8dms %8dms %8dms  %s\n",
-			op.Op, op.Count, op.Slow, op.P50Ms, op.P90Ms, op.MaxMs, op.Dominant)
+		fmt.Fprintf(w, "  %-22s %6d %10d %10s %10s %10s  %s\n",
+			op.Op, op.Count, op.Slow, ms(op.P50Ms), ms(op.P90Ms), ms(op.MaxMs), op.Dominant)
 	}
 
 	if len(summary.StepCounts) > 0 {
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  %-42s %6s %11s\n", "DOMINANT STEP", "N", "TOTAL")
 		for _, sc := range summary.StepCounts {
-			fmt.Fprintf(w, "  %-42s %6d %9dms\n", sc.Step, sc.Count, sc.TotalMs)
+			fmt.Fprintf(w, "  %-42s %6d %11s\n", sc.Step, sc.Count, ms(sc.TotalMs))
 		}
 	}
 }

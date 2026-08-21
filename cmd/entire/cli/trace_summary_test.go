@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -151,4 +153,75 @@ func TestParseTraceEntry_ReadsSlowMarker(t *testing.T) {
 	e = parseTraceEntry(`{"msg":"perf","op":"stop","duration_ms":42,"steps.a_ms":10}`)
 	require.NotNil(t, e)
 	require.False(t, e.Slow, "absent slow key means not slow")
+}
+
+// TestCollectTraceEntries_SlowFilterAppliesBeforeTruncation pins the ordering of
+// the two filters. Filtering slow entries after the last-N cut returns "the slow
+// traces among the last N", which under DEBUG logging is usually none — so
+// --slow would report no traces while hundreds sat in the log.
+func TestCollectTraceEntries_SlowFilterAppliesBeforeTruncation(t *testing.T) {
+	t.Parallel()
+
+	// Two slow traces, then three fast ones on top of them.
+	lines := []string{
+		`{"time":"2026-01-15T10:00:00Z","level":"WARN","msg":"perf","op":"stop","duration_ms":4000,"slow":true}`,
+		`{"time":"2026-01-15T10:01:00Z","level":"WARN","msg":"perf","op":"stop","duration_ms":5000,"slow":true}`,
+		`{"time":"2026-01-15T10:02:00Z","level":"DEBUG","msg":"perf","op":"stop","duration_ms":10}`,
+		`{"time":"2026-01-15T10:03:00Z","level":"DEBUG","msg":"perf","op":"stop","duration_ms":11}`,
+		`{"time":"2026-01-15T10:04:00Z","level":"DEBUG","msg":"perf","op":"stop","duration_ms":12}`,
+	}
+	logFile := filepath.Join(t.TempDir(), "trace.jsonl")
+	require.NoError(t, os.WriteFile(logFile, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
+
+	// --last 2 --slow must mean "the last 2 slow traces", not "the slow ones
+	// among the last 2 traces" (which would be empty, since both are fast).
+	entries, err := collectTraceEntries(logFile, 2, "", true)
+	require.NoError(t, err)
+	require.Len(t, entries, 2, "slow entries must survive the last-N window")
+	require.Equal(t, int64(5000), entries[0].DurationMs, "newest slow trace first")
+	require.Equal(t, int64(4000), entries[1].DurationMs)
+
+	// Without --slow the same window is the three most recent, all fast.
+	all, err := collectTraceEntries(logFile, 3, "", false)
+	require.NoError(t, err)
+	require.Len(t, all, 3)
+	for _, e := range all {
+		require.False(t, e.Slow)
+	}
+}
+
+// TestPercentileMs_NearestRank guards the round-numbered cases, where truncating
+// the rank overshoots by a full sample and makes P90 a duplicate of MAX.
+func TestPercentileMs_NearestRank(t *testing.T) {
+	t.Parallel()
+
+	ten := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+
+	require.Equal(t, int64(9), percentileMs(ten, 90), "p90 of 10 samples is the 9th, not the max")
+	require.Equal(t, int64(5), percentileMs(ten, 50), "p50 of 10 samples is the 5th")
+	require.Equal(t, int64(10), percentileMs(ten, 100))
+	require.Equal(t, int64(1), percentileMs(ten, 1), "a percentile below one rank still lands on the first sample")
+
+	require.Equal(t, int64(7), percentileMs([]int64{7}, 50), "p50 of one sample is that sample")
+	require.Equal(t, int64(7), percentileMs([]int64{7}, 90))
+	require.Equal(t, int64(1), percentileMs([]int64{1, 2}, 50), "p50 of an even count takes the lower median")
+	require.Equal(t, int64(0), percentileMs(nil, 50))
+}
+
+// TestRenderTraceJSON_OmitsUnsetTime keeps the JSON honest: the parser tolerates
+// a missing time key, and a consumer should see its absence rather than a
+// year-1 timestamp that was never recorded.
+func TestRenderTraceJSON_OmitsUnsetTime(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	require.NoError(t, renderTraceJSON(&buf, []traceEntry{{Op: "stop", DurationMs: 12}}))
+
+	require.NotContains(t, buf.String(), "0001-01-01")
+
+	var decoded []map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &decoded))
+	require.Len(t, decoded, 1)
+	_, hasTime := decoded[0]["time"]
+	require.False(t, hasTime, "an unrecorded time must be absent, not zero")
 }

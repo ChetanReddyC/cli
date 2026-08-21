@@ -7,6 +7,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/perf"
 	"github.com/spf13/cobra"
 )
 
@@ -25,11 +26,14 @@ func newTraceCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "trace",
 		Short: "Show hook performance traces",
-		Long: `Show timing information for recent hook invocations.
+		// The threshold and env var come from perf rather than being written out
+		// here: this help text already went stale once by describing the old
+		// DEBUG-only behaviour, and a hardcoded copy is what let that happen.
+		Long: fmt.Sprintf(`Show timing information for recent hook invocations.
 
-Hooks that take 1.5s or longer are traced by default, at WARN level, so a slow
+Hooks that take %s or longer are traced by default, at WARN level, so a slow
 hook records its own breakdown without any configuration. Set
-ENTIRE_PERF_SLOW_MS=0 to turn that off; a log_level above WARN also hides them.
+%s=0 to turn that off; a log_level above WARN also hides them.
 
 To trace every hook, including fast ones, raise verbosity instead:
   - Set ENTIRE_LOG_LEVEL=DEBUG in your shell profile
@@ -42,6 +46,7 @@ Examples:
   entire doctor trace --summary           Aggregate: which step dominates, per hook
   entire doctor trace --summary --slow    Aggregate only the slow traces
   entire doctor trace --last 20 --json    Machine-readable output`,
+			perf.DefaultSlowSpanThreshold, perf.SlowSpanEnvVar),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if last < 1 {
 				return fmt.Errorf("--last must be at least 1, got %d", last)
@@ -62,19 +67,9 @@ Examples:
 
 			logFile := filepath.Join(repoRoot, logging.LogsDir, "entire.log")
 
-			entries, err := collectTraceEntries(logFile, last, hookFilter)
+			entries, err := collectTraceEntries(logFile, last, hookFilter, slowOnly)
 			if err != nil {
 				return fmt.Errorf("collecting trace entries: %w", err)
-			}
-
-			if slowOnly {
-				kept := make([]traceEntry, 0, len(entries))
-				for _, e := range entries {
-					if e.Slow {
-						kept = append(kept, e)
-					}
-				}
-				entries = kept
 			}
 
 			switch {
