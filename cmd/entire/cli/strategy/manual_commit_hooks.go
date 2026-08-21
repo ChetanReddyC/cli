@@ -1616,6 +1616,7 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 				slog.String("phase", string(state.Phase)),
 				slog.Int("files_touched", len(state.FilesTouched)),
 			)
+			continue
 		}
 		if s.staleRecordIsOnlyContent(ctx, repo, state, stagedFiles) {
 			logging.Debug(logCtx, "filterSessionsWithNewContent: session's only content is a stale task record, not stamping a trailer",
@@ -1625,9 +1626,7 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 			)
 			continue
 		}
-		if hasNew {
-			result = append(result, state)
-		}
+		result = append(result, state)
 	}
 
 	return result
