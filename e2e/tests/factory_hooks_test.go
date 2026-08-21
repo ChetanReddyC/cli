@@ -5,8 +5,10 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -37,7 +39,7 @@ func TestFactoryTaskRecordExistsBeforeCommit(t *testing.T) {
 		// file wait must absorb the Worker's runtime (60-120s turns on CI).
 		testutil.WaitForFileExists(t, s.Dir, "docs/factory-hook-check.md", 120*time.Second)
 
-		waitForCompletedTaskRecord(t, s.Dir, 30*time.Second)
+		waitForCompletedTaskRecord(t, s.Dir, "docs/factory-hook-check.md", 30*time.Second)
 		assertNoShadowTaskData(t, s.Dir)
 	})
 }
@@ -65,7 +67,7 @@ func TestFactoryCommittedCheckpointExcludesPreExistingUntrackedFiles(t *testing.
 		// See TestFactoryTaskRecordExistsBeforeCommit: the file wait must
 		// absorb the Worker's runtime because WaitFor can return mid-turn.
 		testutil.WaitForFileExists(t, s.Dir, "docs/factory-prehook-worker.md", 120*time.Second)
-		waitForCompletedTaskRecord(t, s.Dir, 30*time.Second)
+		waitForCompletedTaskRecord(t, s.Dir, "docs/factory-prehook-worker.md", 30*time.Second)
 		assertNoShadowTaskData(t, s.Dir)
 
 		s.Git(t, "add", "docs/factory-prehook-worker.md")
@@ -92,7 +94,9 @@ func TestFactoryCommittedCheckpointExcludesPreExistingUntrackedFiles(t *testing.
 // These two helpers pin that contract in both directions. The positive one
 // replaced a poll for a shadow-branch tasks/ path, which asserted the
 // pre-#2032 behaviour and so failed on every push to main from ed9c31c0d
-// onwards; the negative one is the same assertion #2032 added to
+// onwards; it requires the Worker's own output on a completed record, so it
+// cannot be satisfied by an unrelated task. The negative one is the same
+// assertion #2032 added to
 // TestFactoryDroidWorkerSessionBecomesTaskCheckpoint ("a Worker's turn must
 // write a task record, not shadow data"), narrowed to task data because a
 // parent session legitimately has shadow branches of its own (shadow pinning
@@ -100,12 +104,14 @@ func TestFactoryCommittedCheckpointExcludesPreExistingUntrackedFiles(t *testing.
 //
 // Whether losing the pre-commit shadow copy weakens durability is #2058's
 // question, not this test's: these assert the shipped contract.
-func waitForCompletedTaskRecord(t *testing.T, dir string, timeout time.Duration) {
+func waitForCompletedTaskRecord(t *testing.T, dir, wantFile string, timeout time.Duration) {
 	t.Helper()
 
 	stateDir := filepath.Join(dir, ".git", "entire-sessions")
 	deadline := time.Now().Add(timeout)
+	var seen []string
 	for time.Now().Before(deadline) {
+		seen = nil
 		entries, err := os.ReadDir(stateDir)
 		if err != nil {
 			// The directory may not exist yet; keep polling.
@@ -123,17 +129,32 @@ func waitForCompletedTaskRecord(t *testing.T, dir string, timeout time.Duration)
 			}
 			var state struct {
 				TaskRecords []struct {
-					ToolUseID   string `json:"tool_use_id"`
-					CompletedAt string `json:"completed_at"`
+					ToolUseID string   `json:"tool_use_id"`
+					AgentID   string   `json:"agent_id"`
+					Files     []string `json:"files"`
+					// Decoded as time.Time, NOT string: CompletedAt is tagged
+					// omitempty, and omitempty does not drop a zero struct — an
+					// in-flight record serializes as "0001-01-01T00:00:00Z", so a
+					// non-empty-string test would report every record complete.
+					// IsZero is the only honest check.
+					CompletedAt time.Time `json:"completed_at"`
 				} `json:"task_records"`
 			}
 			if err := json.Unmarshal(data, &state); err != nil {
 				continue
 			}
-			// An in-flight record has a zero CompletedAt, which omitempty drops
-			// from the file entirely — so a non-empty value is the completion.
 			for _, rec := range state.TaskRecords {
-				if rec.ToolUseID != "" && rec.CompletedAt != "" {
+				seen = append(seen, fmt.Sprintf("{tool_use_id:%q agent_id:%q completed:%t files:%v}",
+					rec.ToolUseID, rec.AgentID, !rec.CompletedAt.IsZero(), rec.Files))
+				if rec.CompletedAt.IsZero() {
+					continue
+				}
+				// Require the Worker's own output on the record, not merely that
+				// some task completed: saveSubagentSessionTaskStep always sets
+				// Files from the Worker turn's detected changes, so the file the
+				// caller already waited for must be there. Without this the
+				// assertion would pass on any unrelated completed record.
+				if slices.Contains(rec.Files, wantFile) {
 					return
 				}
 			}
@@ -141,7 +162,8 @@ func waitForCompletedTaskRecord(t *testing.T, dir string, timeout time.Duration)
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	t.Fatalf("expected a completed task record in %s within %s", stateDir, timeout)
+	t.Fatalf("expected a completed task record carrying %q in %s within %s; records seen: %v",
+		wantFile, stateDir, timeout, seen)
 }
 
 // assertNoShadowTaskData asserts no shadow branch carries task metadata.
