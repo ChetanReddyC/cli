@@ -9,6 +9,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 // sweepCondenseBudget caps how much wall clock one sweep may spend condensing,
@@ -24,9 +25,9 @@ import (
 // So every candidate is always marked ended (that is what un-sticks it from
 // `entire status`), while condensing runs only while the budget lasts. Skipping
 // it is the same fail-open path a failed condense already takes: FullyCondensed
-// stays false and PostCommit retries, with `entire doctor` reporting the session
-// as "ended with uncondensed checkpoint data" in the meantime. A backlog
-// therefore drains over successive invocations instead of stalling one.
+// stays false, PostCommit handles sessions with pending files, and doctor retries
+// no-files ENDED sessions. A backlog therefore drains over successive
+// invocations instead of stalling one.
 const sweepCondenseBudget = time.Second
 
 // finalizeExitedSessions finalizes every non-ended session in states whose
@@ -41,7 +42,7 @@ const sweepCondenseBudget = time.Second
 // callers can re-filter/re-render without their own reload — and returns the
 // number finalized. Each session is best-effort: a failure to mark one ended is
 // logged and skipped; a condense failure is logged but the session is still
-// counted (PostCommit will retry the condense later).
+// counted so PostCommit or doctor can retry it later, depending on pending files.
 func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 	// Nothing to do is overwhelmingly the common case, and returning here keeps
 	// the sweep off the logging and store setup below entirely.
@@ -51,6 +52,16 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 
 	logCtx := logging.WithComponent(ctx, "session")
 	condenseDeadline := time.Now().Add(sweepCondenseBudget)
+
+	// This sweep writes checkpoints; a scanner-config failure must not silently
+	// use the default scanner set, so skip the condense work (an already-expired
+	// deadline) while still marking sessions ended below.
+	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
+		logging.Warn(logging.WithComponent(ctx, "redaction"),
+			"skipping sweep condense: redaction scanner configuration failed",
+			slog.String("error", err.Error()))
+		condenseDeadline = time.Now()
+	}
 
 	// Created up front: the record-completion pre-check and the post-finalize
 	// refresh below both need fresh loads.

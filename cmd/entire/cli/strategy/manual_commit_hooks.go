@@ -465,9 +465,9 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	}
 	readCommitMessageSpan.End()
 
-	// Generate a fresh checkpoint ID and resolve session metadata
+	// Resolve the checkpoint ID and session metadata.
 	_, resolveMetadataSpan := perf.Start(ctx, "resolve_session_metadata")
-	checkpointID, err := checkpoint.GenerateCheckpointID(ctx)
+	checkpointID, err := checkpointIDForSessions(ctx, sessionsWithContent)
 	if err != nil {
 		resolveMetadataSpan.RecordError(err)
 		resolveMetadataSpan.End()
@@ -1225,6 +1225,15 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 ) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	reservedCheckpointID := state.PendingCondensationID()
+	if reservedCheckpointID != id.EmptyCheckpointID && reservedCheckpointID != checkpointID {
+		logging.Warn(logCtx, "post-commit: preserving interrupted condensation with a different checkpoint ID",
+			slog.String("session_id", state.SessionID),
+			slog.String("reserved_checkpoint_id", reservedCheckpointID.String()),
+			slog.String("commit_checkpoint_id", checkpointID.String()))
+		uncondensedActiveOnBranch[shadowBranchName] = true
+		return
+	}
 
 	// Pre-resolve shadow branch ref and tree for this session.
 	// These are read 4+ times across sessionHasNewContent, filesOverlapWithContent,
@@ -1455,7 +1464,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	// Save checkpoint ID so subsequent commits can reuse it (e.g., amend restores trailer).
 	// LastCheckpointCommitHash records the exact commit SHA so the reconcile path can
 	// distinguish a true reset (same SHA) from cherry-pick/rebase (same trailer, new SHA).
-	state.LastCheckpointID = checkpointID
+	state.LastCheckpointID = result.CheckpointID
 	state.LastCheckpointCommitHash = newHead
 
 	logging.Info(logCtx, "session condensed",
@@ -2194,15 +2203,18 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 	return false
 }
 
-// addTrailerForAgentCommit handles the fast path when an agent is committing.
-// The caller (tryAgentCommitFastPath) has already gated on skipContentDetection
-// (no TTY, or commit_linking="always") before ever reaching this function, so
-// by the time we're here the eligible session — ACTIVE, or IDLE with a fresh
-// task record — is trusted unconditionally: generate a
-// checkpoint ID and add the trailer directly, bypassing content detection and
-// interactive prompts.
+// addTrailerForAgentCommit handles the fast path for an eligible agent session.
+// The caller has already gated on no TTY or commit_linking="always" and selected
+// an ACTIVE session or an IDLE session with a fresh task record.
+//
+// Resolve the checkpoint ID from only that selected session, deliberately not
+// from every session in the worktree as PrepareCommitMsg's slow path does. A
+// stale reservation held by some other, already-ended session must not become
+// this commit's checkpoint ID and merge unrelated transcript ranges. The ended
+// session loses nothing: without touched files PostCommit does not condense it,
+// and `entire doctor` remains its retry path.
 func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error { //nolint:unparam // kept for signature stability
-	cpID, err := checkpoint.GenerateCheckpointID(logCtx)
+	cpID, err := checkpointIDForSessions(logCtx, []*SessionState{state})
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
@@ -2232,6 +2244,19 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
 	return nil
+}
+
+func checkpointIDForSessions(ctx context.Context, states []*SessionState) (id.CheckpointID, error) {
+	for _, state := range states {
+		if checkpointID := state.PendingCondensationID(); checkpointID != id.EmptyCheckpointID {
+			return checkpointID, nil
+		}
+	}
+	checkpointID, err := checkpoint.GenerateCheckpointID(ctx)
+	if err != nil {
+		return id.EmptyCheckpointID, fmt.Errorf("generate checkpoint ID: %w", err)
+	}
+	return checkpointID, nil
 }
 
 // addCheckpointTrailer adds the Entire-Checkpoint trailer to a commit message.
@@ -2990,6 +3015,15 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	redactedTranscript, redactErr := redact.JSONLBytes(fullTranscript)
 	redactSpan.End()
 	if redactErr != nil {
+		if errors.Is(redactErr, redact.ErrScannerDegraded) {
+			// Keep TurnCheckpointIDs: the flag is per-process, so the next
+			// hook process retries.
+			logging.Warn(logCtx, "finalize: transcript redaction degraded, skipping",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", redactErr.Error()),
+			)
+			return 1
+		}
 		logging.Warn(logCtx, "finalize: transcript redaction failed, dropping transcript",
 			slog.String("session_id", state.SessionID),
 			slog.String("error", redactErr.Error()),
