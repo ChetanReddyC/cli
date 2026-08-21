@@ -263,14 +263,14 @@ func CurrentAncestry() (Ancestry, bool) {
 // Depth returns id's position in the snapshot chain — 0 is the nearest
 // ancestor (the current process's parent) — or -1 when id is not an
 // ancestor. Matching requires the full identity to hold: same host, same
-// boot (when the identity recorded one), and the start fingerprint equal to
+// boot (when both sides could read one), and the start fingerprint equal to
 // the recorded one — so a recycled PID or an identity from another machine
 // can never match.
 func (a Ancestry) Depth(id Identity) int {
 	if id.PID <= 0 || id.Start == "" || id.Host == "" || id.Host != a.host {
 		return -1
 	}
-	if id.Boot != "" && (a.boot == "" || a.boot != id.Boot) {
+	if id.Boot != "" && a.boot != "" && a.boot != id.Boot {
 		return -1
 	}
 	for depth, ancestor := range a.chain {
