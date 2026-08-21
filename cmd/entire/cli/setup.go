@@ -1630,8 +1630,13 @@ func checkDisabledGuard(ctx context.Context, w io.Writer) bool {
 // uninstallDeselectedAgentHooks removes hooks for agents that were previously
 // installed but are not in the selected list. This handles the case where a user
 // re-runs `entire enable` and deselects an agent.
+//
+// Seeds from removableAgentHookNames, not GetAgentsWithHooksInstalled: a linked
+// worktree with repository-wide (e.g. Codex) hooks but no local project layer
+// reports those hooks as Outdated rather than Installed, and deselecting the
+// agent there must still remove the root-authoritative configuration.
 func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAgents []agent.Agent) error {
-	installedNames := GetAgentsWithHooksInstalled(ctx)
+	installedNames := removableAgentHookNames(ctx)
 	if len(installedNames) == 0 {
 		return nil
 	}

@@ -2511,6 +2511,56 @@ func TestRunUninstall_CodexOutdatedLinkedWorktreeWithoutProjectLayer(t *testing.
 	}
 }
 
+func TestUninstallDeselectedAgentHooks_CodexOutdatedLinkedWorktreeWithoutProjectLayer(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	linkedRoot := filepath.Join(filepath.Dir(repoRoot), "linked")
+	if err := os.RemoveAll(filepath.Join(linkedRoot, ".codex")); err != nil {
+		t.Fatalf("remove linked Codex project layer: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	if hookAgent.AreHooksInstalled(t.Context()) {
+		t.Fatal("Codex hooks must be inactive without the linked checkout's .codex project layer")
+	}
+	freshness, ok := ag.(agent.HookFreshness)
+	if !ok || freshness.CheckHookConfig(t.Context()) != agent.HooksOutdated {
+		t.Fatal("root-authoritative Codex hooks should still be reported as outdated configuration")
+	}
+
+	// Fresh-setup path: interactive enable re-run deselecting Codex from a
+	// linked worktree that never had a local .codex layer. GetAgentsWithHooksInstalled
+	// would see Codex as not installed here and skip it entirely, leaving the
+	// repository-wide hooks active for every worktree.
+	var output bytes.Buffer
+	if err := uninstallDeselectedAgentHooks(t.Context(), &output, nil); err != nil {
+		t.Fatalf("uninstallDeselectedAgentHooks() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); !os.IsNotExist(err) {
+		t.Fatalf("authoritative Codex hooks still exist after deselecting from linked worktree: %v", err)
+	}
+	if !strings.Contains(output.String(), "Removed Codex hooks") {
+		t.Fatalf("deselecting Codex did not report removed hooks: %s", output.String())
+	}
+	if !strings.Contains(output.String(), "affects all linked worktrees") {
+		t.Fatalf("deselecting Codex did not report repository-wide effect: %s", output.String())
+	}
+}
+
 func setupCodexRepositoryWithLinkedWorktree(t *testing.T) {
 	t.Helper()
 	tmp := setupTestDir(t)
