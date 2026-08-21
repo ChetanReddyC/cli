@@ -473,6 +473,12 @@ type sessionGate struct {
 	depth       int
 	flockRel    func()
 	activeState *SessionState // shared state pointer for nested mutations
+	// afterSave holds post-save effects registered by nested frames, in
+	// registration order. Only the outermost frame saves, so only it can
+	// know whether those effects are owed; it drains this queue (and clears
+	// it) when it exits. Guarded by gate ownership rather than gate.mu: only
+	// the owning goroutine ever touches it.
+	afterSave []func()
 }
 
 // goroutineID extracts the runtime goroutine ID from the stack header. Used
@@ -522,66 +528,112 @@ func goroutineID() int64 {
 // All session-state mutations funnel through this helper so the hot-path
 // PostToolUse hook cannot revert fields written by lifecycle handlers
 // (TurnEnd, PostCommit, ModelUpdate) that ran between our load and our save.
+//
+// A nil return is not proof that anything was written. Callers with a side
+// effect that must follow a durable write want MutateSessionStateOnSaved.
 func MutateSessionState(ctx context.Context, sessionID string, fn func(*SessionState) error) error {
-	_, err := MutateSessionStateSaved(ctx, sessionID, fn)
-	return err
+	return MutateSessionStateOnSaved(ctx, sessionID, fn, nil)
 }
 
-// MutateSessionStateSaved is MutateSessionState plus whether the mutation was
-// actually persisted. A nil error is NOT proof of a save: ErrMutationSkip
-// reports success without writing, so callers with side effects that must only
-// follow a durable write (telemetry that would otherwise double-report a
-// re-derived event) have to distinguish the two.
+// MutateSessionStateOnSaved is MutateSessionState plus onSaved, an effect that
+// runs only once the state fn mutated has been durably written — and never
+// while the session gate is held.
 //
-// saved is true for a nested call whose fn succeeded, because the outer frame
-// flushes those mutations; if that outer frame then skips or fails, the caller
-// has acted on an unsaved change — the same exposure the plain error return
-// always had, and self-correcting for events that later re-derive.
-func MutateSessionStateSaved(ctx context.Context, sessionID string, fn func(*SessionState) error) (saved bool, err error) {
+// It exists because a nil error is not proof of a save (ErrMutationSkip reports
+// success without writing) and because *this* frame is not necessarily the one
+// that saves. Only the outermost frame loads and saves; a nested frame's
+// mutations are flushed by whoever owns that save. So a nested frame cannot
+// answer "was this persisted?" at the moment it returns — the answer arrives
+// later, from a frame further up the stack. Handing the effect to the helper
+// rather than returning a bool moves the decision to the only frame that can
+// make it: nested registrations are queued on the gate, and the outermost frame
+// runs them after its own save succeeds, discarding them if it skips or fails.
+//
+// That distinction is load-bearing for anything irreversible. Skill-invocation
+// telemetry is the motivating case: extraction re-derives from transcript
+// offset 0 on every pass and dedupes against a ledger in session state, so
+// announcing an event whose ledger entry never landed does not self-correct —
+// the next pass sees an unrecorded event and reports it again, duplicating it
+// in PostHog. Not emitting is the recoverable direction: the append is
+// re-derived and re-announced by the next pass.
+//
+// onSaved runs after the gate is released, so its I/O (settings load, detached
+// process spawn) never extends the hold time for a concurrent hook. Effects run
+// in registration order, so nested registrations precede the outermost frame's
+// own effect.
+//
+// One gap this does not close: a nested frame whose fn *errors* has already
+// mutated the shared state, and an outer frame that swallows that error still
+// saves those mutations — with no effect registered. That direction loses an
+// announcement rather than duplicating one, and is inherent to nested frames
+// sharing a state pointer.
+func MutateSessionStateOnSaved(ctx context.Context, sessionID string, fn func(*SessionState) error, onSaved func()) error {
 	if sessionID == "" {
-		return false, ErrStateNotFound
+		return ErrStateNotFound
 	}
 	gate, isOuter, release, err := acquireSessionGate(ctx, sessionID)
 	if err != nil {
-		return false, err
+		return err
 	}
-	defer release()
 
 	if !isOuter {
+		defer release()
 		// Nested call: reuse the outer's state pointer. The outer save will
 		// flush our mutations; we don't load or save here.
 		if gate.activeState == nil {
-			return false, ErrStateNotFound
+			return ErrStateNotFound
 		}
 		if err := fn(gate.activeState); err != nil {
 			if errors.Is(err, ErrMutationSkip) {
-				return false, nil
+				return nil
 			}
-			return false, err
+			return err
 		}
-		return true, nil
+		if onSaved != nil {
+			gate.afterSave = append(gate.afterSave, onSaved)
+		}
+		return nil
 	}
+
+	// Outermost frame: it owns the save, so it owns every queued effect too.
+	// One defer keeps the order explicit — clear the gate's per-frame fields,
+	// drop the lock, then run the effects outside it.
+	var effects []func()
+	defer func() {
+		gate.activeState = nil
+		gate.afterSave = nil
+		release()
+		for _, effect := range effects {
+			effect()
+		}
+	}()
 
 	state, err := LoadSessionState(ctx, sessionID)
 	if err != nil {
-		return false, fmt.Errorf("load session state: %w", err)
+		return fmt.Errorf("load session state: %w", err)
 	}
 	if state == nil {
-		return false, ErrStateNotFound
+		return ErrStateNotFound
 	}
 	gate.activeState = state
-	defer func() { gate.activeState = nil }()
 
 	if err := fn(state); err != nil {
 		if errors.Is(err, ErrMutationSkip) {
-			return false, nil
+			return nil
 		}
-		return false, err
+		return err
 	}
 	if err := SaveSessionState(ctx, state); err != nil {
-		return false, fmt.Errorf("save session state: %w", err)
+		return fmt.Errorf("save session state: %w", err)
 	}
-	return true, nil
+	// Copied out before the defer clears gate.afterSave, into a fresh slice so
+	// the queue never shares a backing array with the gate.
+	effects = make([]func(), 0, len(gate.afterSave)+1)
+	effects = append(effects, gate.afterSave...)
+	if onSaved != nil {
+		effects = append(effects, onSaved)
+	}
+	return nil
 }
 
 // acquireSessionGate takes the per-process gate (in-memory) and, on the
