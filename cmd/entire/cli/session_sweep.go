@@ -43,7 +43,8 @@ func isSweepableZombie(st *session.State, now time.Time) bool {
 	if !st.IsEnded() {
 		return st.OwnerExited()
 	}
-	if st.Phase != session.PhaseEnded || st.FullyCondensed || st.StepCount <= 0 {
+	if st.Phase != session.PhaseEnded || st.FullyCondensed ||
+		(st.StepCount <= 0 && !st.HasTaskContent()) {
 		return false
 	}
 	ref := st.EndedAt

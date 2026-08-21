@@ -113,6 +113,15 @@ func TestIsSweepableZombie(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "ended with task records but zero steps is a zombie",
+			state: session.State{
+				Phase:       session.PhaseEnded,
+				EndedAt:     &old,
+				TaskRecords: []session.TaskRecord{{ToolUseID: "task-1"}},
+			},
+			want: true,
+		},
+		{
 			name: "ended with nil EndedAt falls back to LastInteractionTime",
 			state: session.State{
 				Phase:               session.PhaseEnded,
