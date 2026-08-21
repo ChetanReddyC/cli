@@ -1006,7 +1006,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		sessionID := sess.SessionID
 		iterCtx, iterSpan := processSessionsLoop.Iteration(loopCtx)
 		var newSkillEvents []agent.SkillEvent
-		mutErr := MutateSessionState(iterCtx, sessionID, func(state *SessionState) error {
+		stateSaved, mutErr := MutateSessionStateSaved(iterCtx, sessionID, func(state *SessionState) error {
 			newSkillEvents = s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
 				head, commit, newHead, worktreePath, headTree, parentTree,
 				committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
@@ -1018,7 +1018,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 				slog.String("session_id", sessionID),
 				slog.String("error", mutErr.Error()))
 		}
-		if mutErr == nil {
+		if stateSaved {
 			EmitSkillInvocationTelemetry(iterCtx, newSkillEvents)
 		}
 		iterSpan.End()
@@ -1216,7 +1216,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 			slog.String("reserved_checkpoint_id", reservedCheckpointID.String()),
 			slog.String("commit_checkpoint_id", checkpointID.String()))
 		uncondensedActiveOnBranch[shadowBranchName] = true
-		return
+		return newSkillEvents
 	}
 
 	// Pre-resolve shadow branch ref and tree for this session.

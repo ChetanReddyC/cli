@@ -61,6 +61,21 @@ func appendNewSkillEvents(state *SessionState, candidates []agent.SkillEvent) []
 	return appended
 }
 
+// AppendNewSkillEvents records candidates into state.SkillEvents, stamping the
+// session's TurnID on events that lack one, and returns those that were not
+// already recorded. It is the single dedupe used by every path that adds skill
+// events — hook-provided (lifecycle) and transcript-extracted (condensation and
+// turn-end finalize) alike — so "already recorded" means the same thing
+// everywhere. Exactly-once telemetry rests on that agreement: two paths with
+// different notions of duplicate would let one re-report what the other
+// recorded.
+func AppendNewSkillEvents(state *SessionState, candidates []agent.SkillEvent) []agent.SkillEvent {
+	if state == nil || len(candidates) == 0 {
+		return nil
+	}
+	return appendNewSkillEvents(state, withSkillEventTurnID(candidates, state.TurnID))
+}
+
 // persistNewSkillEvents records extracted transcript skill events into session
 // state and returns both the newly appended events (for telemetry — see
 // appendNewSkillEvents for the exactly-once contract) and the full deduped
@@ -70,7 +85,7 @@ func appendNewSkillEvents(state *SessionState, candidates []agent.SkillEvent) []
 // — hooks never carry them — which is why persistence lives here rather than
 // in the lifecycle handlers.
 func persistNewSkillEvents(state *SessionState, extracted []agent.SkillEvent) (newEvents, checkpointView []agent.SkillEvent) {
-	newEvents = appendNewSkillEvents(state, withSkillEventTurnID(extracted, state.TurnID))
+	newEvents = AppendNewSkillEvents(state, extracted)
 	return newEvents, mergeSkillEvents(state.SkillEvents)
 }
 

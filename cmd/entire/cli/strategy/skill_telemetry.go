@@ -25,9 +25,20 @@ func EmitSkillInvocationTelemetry(ctx context.Context, events []agent.SkillEvent
 		return
 	}
 	s, err := settings.Load(ctx)
-	if err != nil || s.Telemetry == nil || !*s.Telemetry {
+	if err != nil || !s.IsTelemetryEnabled() {
 		return
 	}
+	emitSkillTelemetry(events, s.Enabled, versioninfo.Version)
+}
+
+// emitSkillTelemetry is the send step, separated from the gating above so tests
+// can assert what the gate lets through — and that emission happens outside the
+// session gate — without a PostHog client.
+//
+//nolint:gochecknoglobals // test seam, set and restored by in-package tests.
+var emitSkillTelemetry = trackSkillInvocations
+
+func trackSkillInvocations(events []agent.SkillEvent, isEntireEnabled bool, version string) {
 	invocations := make([]telemetry.SkillInvocation, 0, len(events))
 	for _, ev := range events {
 		invocations = append(invocations, telemetry.SkillInvocation{
@@ -37,5 +48,5 @@ func EmitSkillInvocationTelemetry(ctx context.Context, events []agent.SkillEvent
 			EventType: ev.EventType,
 		})
 	}
-	telemetry.TrackSkillInvocationsDetached(invocations, s.Enabled, versioninfo.Version)
+	telemetry.TrackSkillInvocationsDetached(invocations, isEntireEnabled, version)
 }

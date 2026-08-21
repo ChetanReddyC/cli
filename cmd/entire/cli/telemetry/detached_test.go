@@ -150,9 +150,9 @@ func TestBuildEventPayloadAgent(t *testing.T) {
 
 func TestSendEventHandlesInvalidJSON(_ *testing.T) {
 	// Should not panic with invalid JSON
-	SendEvent("invalid json")
-	SendEvent("")
-	SendEvent("{}")
+	SendEvents("invalid json")
+	SendEvents("")
+	SendEvents("{}")
 }
 
 func TestParseGitVersion(t *testing.T) {
