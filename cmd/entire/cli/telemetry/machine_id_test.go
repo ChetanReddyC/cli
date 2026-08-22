@@ -10,10 +10,18 @@ import (
 const testMachineID = "machine-abc"
 
 // withMachineIDResolver installs a resolver and clears the memoized value,
-// restoring both afterwards. Not parallel-safe: these tests mutate package
-// state, like the other seam-driven tests in this package.
+// restoring both afterwards.
+//
+// Swapping package state is only safe because a caller cannot be parallel: Go
+// resumes parallel top-level tests after every sequential one has finished, so
+// the parallel payload-builder tests in this package never overlap this window.
+// The t.Setenv call enforces that rather than documenting it — Go panics with
+// "test using t.Setenv or t.Chdir can not use t.Parallel" if anyone adds
+// t.Parallel() to a test that calls this, instead of it silently becoming a
+// data race on the globals below.
 func withMachineIDResolver(t *testing.T, fn func() (string, error)) {
 	t.Helper()
+	t.Setenv("ENTIRE_TEST_MACHINE_ID_SEAM", "1")
 	prev := machineIDResolver
 	machineIDResolver = fn
 	resetMachineIDCacheForTest()
