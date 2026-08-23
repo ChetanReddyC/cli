@@ -91,9 +91,10 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 	})
 
 	t.Run("no recorded ancestry matches nothing", func(t *testing.T) {
-		identityTestRepo(t)
+		dir := identityTestRepo(t)
 		saveIdentitySession(t, "sess-plain", func(st *SessionState) {
 			st.Owner = nil
+			st.WorktreePath = dir
 		})
 
 		s := NewManualCommitStrategy()
@@ -101,13 +102,14 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 	})
 
 	t.Run("dead process refs cannot match a recycled PID", func(t *testing.T) {
-		identityTestRepo(t)
+		dir := identityTestRepo(t)
 		saveIdentitySession(t, "sess-stale", func(st *SessionState) {
 			// Same PID as a live ancestor, wrong start fingerprint: a
 			// recycled PID.
 			owner := *selfAncestorOwner(t)
 			owner.Start += "-recycled"
 			st.Owner = &owner
+			st.WorktreePath = dir
 		})
 
 		s := NewManualCommitStrategy()
@@ -115,11 +117,24 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 	})
 
 	t.Run("imported sessions never match", func(t *testing.T) {
-		identityTestRepo(t)
+		dir := identityTestRepo(t)
 		anc := selfAncestorOwner(t)
 		saveIdentitySession(t, "sess-imported", func(st *SessionState) {
 			st.Owner = anc
 			st.Kind = session.KindImported
+			st.WorktreePath = dir
+		})
+
+		s := NewManualCommitStrategy()
+		assert.Nil(t, s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s)))
+	})
+
+	t.Run("sessions without a worktree never match", func(t *testing.T) {
+		identityTestRepo(t)
+		anc := selfAncestorOwner(t)
+		saveIdentitySession(t, "sess-unplaced", func(st *SessionState) {
+			st.Owner = anc
+			st.WorktreePath = ""
 		})
 
 		s := NewManualCommitStrategy()
@@ -131,7 +146,7 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 		// (nearer the commit) and the outer agent that spawned it. Depth must
 		// decide the winner; interaction recency is only a tiebreak within one
 		// depth — so the nearer, less recently interacting session wins.
-		identityTestRepo(t)
+		dir := identityTestRepo(t)
 		ancestry, ok := proclive.CurrentAncestry()
 		require.True(t, ok)
 		chain := ancestry.Chain()
@@ -143,9 +158,11 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 		saveIdentitySession(t, "sess-nested", func(st *SessionState) {
 			st.Owner = &nested
 			st.LastInteractionTime = &old
+			st.WorktreePath = dir
 		})
 		saveIdentitySession(t, "sess-outer", func(st *SessionState) {
 			st.Owner = &outer
+			st.WorktreePath = dir
 		})
 
 		s := NewManualCommitStrategy()
@@ -158,15 +175,17 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 	t.Run("same agent recorded by two sessions: latest interaction wins", func(t *testing.T) {
 		// A resumed agent process produces a new session ID with the same
 		// ancestry; the commit belongs to the one currently interacting.
-		identityTestRepo(t)
+		dir := identityTestRepo(t)
 		anc := selfAncestorOwner(t)
 		old := time.Now().Add(-2 * time.Hour)
 		saveIdentitySession(t, "sess-old", func(st *SessionState) {
 			st.Owner = anc
 			st.LastInteractionTime = &old
+			st.WorktreePath = dir
 		})
 		saveIdentitySession(t, "sess-new", func(st *SessionState) {
 			st.Owner = anc
+			st.WorktreePath = dir
 		})
 
 		s := NewManualCommitStrategy()

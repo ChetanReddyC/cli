@@ -89,7 +89,7 @@ func (s *ManualCommitStrategy) findSessionByCommitAncestry(ctx context.Context, 
 	var best *SessionState
 	bestDepth := -1
 	for _, state := range states {
-		if state.Kind.IsImported() || state.AdoptedIntoWorktreePath != "" || state.Owner == nil {
+		if state.WorktreePath == "" || state.Kind.IsImported() || state.AdoptedIntoWorktreePath != "" || state.Owner == nil {
 			continue
 		}
 		depth := ancestry.Depth(*state.Owner)
