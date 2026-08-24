@@ -107,7 +107,12 @@ const entireSearchSubagent = "entire-search"
 func detectSearchUsage(ag agent.Agent, transcriptData []byte) searchProbe {
 	source := searchSourceNone
 	found, supported := agent.ScanToolInvocations(ag, transcriptData, entireSearchHints, func(inv agent.ToolInvocation) bool {
-		if strings.EqualFold(strings.TrimSpace(inv.SubagentType), entireSearchSubagent) {
+		// Exact, not EqualFold: the hint prefilter that decides whether this
+		// line is parsed at all is case-sensitive bytes.Contains, so a
+		// case-insensitive matcher here would accept a spelling the prefilter
+		// already discarded — a silent false negative, which is exactly the
+		// hazard ToolInvocationScanner's doc warns callers about.
+		if strings.TrimSpace(inv.SubagentType) == entireSearchSubagent {
 			source = searchSourceSubagent
 			return true
 		}

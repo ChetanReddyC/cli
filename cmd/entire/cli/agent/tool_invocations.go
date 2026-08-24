@@ -19,13 +19,20 @@ type ToolInvocation struct {
 // calls structurally, so a caller can ask "did this session invoke X" instead
 // of substring-probing the transcript and matching every mention of X.
 //
-// Agents whose transcripts carry no tool-call view MUST NOT implement this.
-// That includes Cursor, whose transcripts contain no tool_use blocks at all
-// (see cursor.CursorAgent.ExtractModifiedFilesFromOffset), and every format
-// that simply has no walker yet. Not implementing it is the honest answer, and
-// the dispatcher below turns it into a reportable "cannot tell": callers are
-// required to distinguish that from "did not run", because a fabricated "did
-// not run" is indistinguishable from a real one in aggregate.
+// An agent with no walker here MUST NOT implement this. Not implementing it is
+// the honest answer, and the dispatcher below turns it into a reportable
+// "cannot tell": callers are required to distinguish that from "did not run",
+// because a fabricated "did not run" is indistinguishable from a real one in
+// aggregate.
+//
+// "No walker yet" is the only reason any agent is absent — do not read it as
+// "impossible". Cursor in particular shares this JSONL shape (see the
+// transcript package doc) and does record tool_use blocks; the "contains no
+// tool_use blocks" comments in cmd/entire/cli/agent/cursor date to 2026-03,
+// are pinned by no test, and are stale. What blocks a Cursor implementation is
+// narrower: its input key for a shell command is unconfirmed, so reusing
+// ToolInvocation.Command would risk the very false negative this interface
+// exists to prevent. A name-based matcher (subagent dispatch) would work today.
 type ToolInvocationScanner interface {
 	// ScanToolInvocations calls visit for each recorded tool invocation and
 	// returns true as soon as visit does, stopping the walk.

@@ -180,6 +180,17 @@ func TestSearchHintsCoverPattern(t *testing.T) {
 	if !hintedBySearchHints(entireSearchSubagent) {
 		t.Errorf("subagent name %q contains no entireSearchHints literal", entireSearchSubagent)
 	}
+	// The prefilter is case-sensitive bytes.Contains, so the subagent matcher
+	// must be case-sensitive too. A case-insensitive matcher would accept
+	// spellings the prefilter discards before the line is ever parsed.
+	for _, variant := range []string{"Entire-Search", "ENTIRE-SEARCH", "Entire-search"} {
+		if hintedBySearchHints(variant) {
+			t.Errorf("hint list unexpectedly covers %q; the case-sensitivity test below is moot", variant)
+		}
+		if strings.TrimSpace(variant) == entireSearchSubagent {
+			t.Errorf("subagent matcher accepts %q, which the case-sensitive hint prefilter would discard first", variant)
+		}
+	}
 
 	rejected := []string{
 		"grep -rn \"entire search\" cmd/",
