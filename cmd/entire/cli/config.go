@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -100,9 +101,41 @@ func ensureCommandLogging(ctx context.Context) func() {
 	return logging.EnsureInitialized(ctx)
 }
 
-// GetAgentsWithHooksInstalled returns names of agents that have hooks installed.
-func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
-	var withHooks []types.AgentName
+// agentHookState is the result of one hooks-installed sweep. Detecting is a
+// subprocess per external plugin, so a caller needing both answers takes them
+// from a single sweep rather than probing twice.
+type agentHookState struct {
+	// installed are the agents that reported hooks installed.
+	installed []types.AgentName
+	// unchecked are the external plugins that could not answer. Their hooks may
+	// or may not be on disk, which is not the same as cleanly reporting none.
+	unchecked []uncheckedAgent
+}
+
+// uncheckedAgent is a plugin that could not be asked, with the reason. The
+// reason travels with it because the sweep is the only place it exists: asking
+// again would cost another subprocess.
+type uncheckedAgent struct {
+	name types.AgentName
+	err  error
+}
+
+// names returns the unchecked agents' registry names, for display.
+func (s agentHookState) uncheckedNames() []types.AgentName {
+	names := make([]types.AgentName, 0, len(s.unchecked))
+	for _, u := range s.unchecked {
+		names = append(names, u.name)
+	}
+	return names
+}
+
+// getAgentHookState probes every hook-supporting agent exactly once, keeping a
+// plugin that could not answer distinct from one reporting no hooks.
+//
+// A binary that fails `info` is never registered, so "unchecked" only ever
+// covers a plugin that introduced itself and then failed to answer this.
+func getAgentHookState(ctx context.Context) agentHookState {
+	var state agentHookState
 	for _, name := range agent.List() {
 		ag, err := agent.Get(name)
 		if err != nil {
@@ -113,17 +146,36 @@ func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
 			continue
 		}
 		installed, err := hs.AreHooksInstalled(ctx)
-		if err != nil {
-			// The agent logged why with the path; an agent that could not tell us is
-			// not an agent with hooks to list.
-			logging.Debug(ctx, "hooks-installed check failed", "agent", string(name), "error", err.Error())
-			continue
-		}
-		if installed {
-			withHooks = append(withHooks, name)
+		switch {
+		case err == nil && installed:
+			state.installed = append(state.installed, name)
+		case err == nil:
+			// Cleanly reported no hooks.
+		case ctx.Err() != nil:
+			// The context died, not the agent. Blaming every plugin on $PATH for
+			// our own cancellation would turn one Ctrl-C into a page of diagnoses.
+			logging.Debug(ctx, "hooks-installed check abandoned: context ended",
+				"agent", string(name))
+		case external.IsExternal(ag):
+			state.unchecked = append(state.unchecked, uncheckedAgent{name: name, err: err})
+		default:
+			// A built-in that could not read its own config. It already logged the
+			// failure with the path, so this only records that a sweep saw it. Not
+			// surfaced to the user the way a plugin is: a built-in is asked to
+			// uninstall unconditionally anyway, being in-process and idempotent, so
+			// nothing is left behind for them to go clean up by hand.
+			logging.Debug(ctx, "hooks-installed check failed",
+				"agent", string(name), "error", err.Error())
 		}
 	}
-	return withHooks
+	return state
+}
+
+// GetAgentsWithHooksInstalled returns names of agents that have hooks installed.
+// An agent that could not be asked is absent; callers that must act on that
+// difference use getAgentHookState.
+func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
+	return getAgentHookState(ctx).installed
 }
 
 // InstalledAgentDisplayNames returns user-facing display names for agents with hooks installed.

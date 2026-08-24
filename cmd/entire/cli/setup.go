@@ -1091,6 +1091,7 @@ func newDisableCmd() *cobra.Command {
 	var useProjectSettings bool
 	var uninstall bool
 	var force bool
+	var strict bool
 
 	cmd := &cobra.Command{
 		Use:   "disable",
@@ -1105,11 +1106,15 @@ To completely remove Entire integrations from this repository, use --uninstall:
   - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)
   - Session state files (.git/entire-sessions/)
   - Shadow branches (entire/<hash>)
-  - Agent hooks`,
+  - Agent hooks
+
+An external agent's hooks live inside its plugin, so removing them means asking the
+plugin to do it. A plugin that fails or cannot be reached is reported and the
+uninstall still succeeds; pass --strict to fail instead.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			if uninstall {
-				return runUninstall(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), force)
+				return runUninstall(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), force, strict)
 			}
 			if err := validateSetupFlags(useLocalSettings, useProjectSettings); err != nil {
 				return err
@@ -1122,6 +1127,7 @@ To completely remove Entire integrations from this repository, use --uninstall:
 	cmd.Flags().BoolVar(&useProjectSettings, "project", false, "Update .entire/settings.json instead of .entire/settings.local.json")
 	cmd.Flags().BoolVar(&uninstall, "uninstall", false, "Completely remove Entire from this repository")
 	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt (use with --uninstall)")
+	cmd.Flags().BoolVar(&strict, "strict", false, "Fail if an external agent's hooks could not be removed (use with --uninstall)")
 
 	return cmd
 }
@@ -2367,8 +2373,12 @@ func promptVercelDeploymentDisable() (bool, error) {
 	return disableDeployments, nil
 }
 
-// runUninstall completely removes Entire from the repository.
-func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
+// runUninstall completely removes Entire from the repository. strict makes an
+// external plugin's failure fail the command; by default such a failure is
+// reported and the uninstall still succeeds, since a third-party plugin is
+// outside Entire's control and must not be able to fail Entire's own uninstall
+// unless the caller asked for that.
+func runUninstall(ctx context.Context, w, errW io.Writer, force, strict bool) error {
 	// Check if we're in a git repository
 	repoRoot, rootErr := paths.WorktreeRoot(ctx)
 	if rootErr != nil {
@@ -2396,7 +2406,10 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// version is stale but still ours, and uninstall must still offer to remove
 	// it rather than reporting that Entire is not installed here.
 	gitHooksInstalled := strategy.AnyGitHookInstalled(ctx)
-	agentsWithInstalledHooks := GetAgentsWithHooksInstalled(ctx)
+	// One sweep, threaded onwards: each external plugin costs a subprocess to ask,
+	// and the removal below must act on exactly what the summary showed.
+	hookState := getAgentHookState(ctx)
+	agentsWithInstalledHooks := hookState.installed
 	entireDirExists := checkEntireDirExists(ctx)
 
 	// Check if there's anything to uninstall
@@ -2423,6 +2436,11 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		}
 		if len(agentsWithInstalledHooks) > 0 {
 			fmt.Fprintf(w, "  - Agent hooks (%s)\n", strings.Join(agentDisplayNames(agentsWithInstalledHooks), ", "))
+		}
+		// Its own line, not folded into the one above: that line asserts hooks are
+		// installed, which for these plugins is exactly what we could not find out.
+		if len(hookState.unchecked) > 0 {
+			fmt.Fprintf(w, "  - Agent hooks that could not be checked (%s)\n", strings.Join(agentDisplayNames(hookState.uncheckedNames()), ", "))
 		}
 		fmt.Fprintln(w)
 
@@ -2460,6 +2478,13 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	fmt.Fprintln(w, "\nUninstalling Entire CLI...")
 
 	// 1. Remove agent hooks (lowest risk)
+	// Warned here rather than where the sweep classified them: the sweep runs
+	// before the confirmation above, so warning there would print ahead of the
+	// summary and warn even when the user cancels.
+	for _, u := range hookState.unchecked {
+		fmt.Fprintf(errW, "Warning: could not check whether %s hooks are installed: %v\n", agentDisplayName(u.name), u.err)
+	}
+
 	failedExternal, agentHooksErr := removeAgentHooks(ctx, w, agentsWithInstalledHooks)
 	if agentHooksErr != nil {
 		fmt.Fprintf(errW, "Warning: failed to remove agent hooks: %v\n", agentHooksErr)
@@ -2470,17 +2495,18 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// hooks are still reachable, rather than leaving the user with a warning they
 	// cannot act on. A built-in needs none of this: it is always reachable on a
 	// re-run, since its leftover hooks keep the installed set non-empty.
-	if len(failedExternal) > 0 {
-		for _, name := range failedExternal {
-			// The protocol promises every subcommand ENTIRE_REPO_ROOT,
-			// ENTIRE_PROTOCOL_VERSION and a repo-root working directory
-			// (docs/architecture/external-agent-protocol.md), so a plugin is
-			// entitled to rely on them. Printing the bare binary hands the user a
-			// command that a conforming plugin can reject.
-			fmt.Fprintf(errW, "  %s hooks are still installed. Remove them with:\n", agentDisplayName(name))
-			fmt.Fprintf(errW, "    cd %s && ENTIRE_REPO_ROOT=%s ENTIRE_PROTOCOL_VERSION=%d entire-agent-%s uninstall-hooks\n",
-				repoRoot, repoRoot, external.ProtocolVersion, name)
-		}
+	for _, name := range failedExternal {
+		fmt.Fprintf(errW, "  %s hooks are still installed. Remove them with:\n", agentDisplayName(name))
+		fmt.Fprintf(errW, "    %s\n", pluginUninstallCommand(repoRoot, name))
+	}
+	// "may": we never found out whether this plugin has hooks, and we did not ask
+	// it to remove them — asking a plugin that cannot answer to mutate state is
+	// not something to do on the user's behalf.
+	for _, u := range hookState.unchecked {
+		fmt.Fprintf(errW, "  %s hooks may still be installed. Remove them with:\n", agentDisplayName(u.name))
+		fmt.Fprintf(errW, "    %s\n", pluginUninstallCommand(repoRoot, u.name))
+	}
+	if len(failedExternal) > 0 || len(hookState.unchecked) > 0 {
 		fmt.Fprintln(errW, "  Re-running `entire disable --uninstall` will not reach these plugins once .entire/ is gone.")
 	}
 
@@ -2515,15 +2541,20 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		fmt.Fprintf(w, "  Removed %d shadow branches\n", branchesRemoved)
 	}
 
-	// Not "successfully": leftover external agent hooks are the one failure above
-	// that the user must act on, and they are unreachable from a re-run now that
-	// .entire/ is gone. Exit non-zero so a script wrapping this sees it too; the
-	// warnings are already on stderr, hence SilentError rather than the raw error.
-	// A built-in failure stays a warning with a zero exit, as it always was:
-	// re-running reaches it.
-	if len(failedExternal) > 0 {
-		fmt.Fprintln(w, "\nEntire CLI uninstalled, but some agent hooks could not be removed - see the warnings above.")
-		return NewSilentError(errors.New("some agent hooks could not be removed"))
+	// Not "successfully": external agent hooks may be left behind, and they are
+	// unreachable from a re-run now that .entire/ is gone, so the user has to act
+	// on the warnings above.
+	//
+	// Whether that fails the command is the caller's call, not the plugin's. A
+	// plugin is third-party code Entire cannot fix, so by default it does not get
+	// to fail Entire's own uninstall; --strict opts into that. A built-in failure
+	// never does, in either mode: re-running reaches it.
+	if len(failedExternal) > 0 || len(hookState.unchecked) > 0 {
+		fmt.Fprintln(w, "\nEntire CLI uninstalled, but some external agent hooks may remain - see the warnings above.")
+		if strict {
+			return NewSilentError(errors.New("some external agent hooks could not be removed"))
+		}
+		return nil
 	}
 
 	fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")
@@ -2562,6 +2593,19 @@ func checkEntireDirExists(ctx context.Context) bool {
 	return err == nil
 }
 
+// pluginUninstallCommand returns the command line a user can run by hand to
+// remove an external plugin's hooks.
+//
+// The protocol promises every subcommand ENTIRE_REPO_ROOT,
+// ENTIRE_PROTOCOL_VERSION and a repo-root working directory
+// (docs/architecture/external-agent-protocol.md), so a plugin is entitled to
+// rely on them. Printing the bare binary hands the user a command a conforming
+// plugin can reject.
+func pluginUninstallCommand(repoRoot string, name types.AgentName) string {
+	return fmt.Sprintf("cd %s && ENTIRE_REPO_ROOT=%s ENTIRE_PROTOCOL_VERSION=%d entire-agent-%s uninstall-hooks",
+		repoRoot, repoRoot, external.ProtocolVersion, name)
+}
+
 // removeAgentHooks removes hooks from all agents that support hooks. installed
 // is the set the caller already detected, reused rather than re-detected: for an
 // external agent AreHooksInstalled is a subprocess, and it is also what the
@@ -2596,11 +2640,11 @@ func removeAgentHooks(ctx context.Context, w io.Writer, installed []types.AgentN
 		// entire-agent-* binary on $PATH, not just the one the user enabled — so a
 		// plugin reporting no hooks is left alone.
 		if !wasInstalled[name] && external.IsExternal(ag) {
-			// AreHooksInstalled collapses a crashed, timed-out, or malformed probe
-			// into "not installed", so this skip can also mean "the plugin could not
-			// tell us". Nothing user-facing to say — the summary already showed the
-			// plugin as having no hooks — but leave a trace for `doctor bundle`.
-			logging.Debug(ctx, "skipping external agent hook removal: plugin reports no hooks installed",
+			// Covers both a plugin that cleanly reported no hooks and one that could
+			// not answer; the sweep told them apart and the caller reports the
+			// second kind, naming a command the user can run by hand. Either way we
+			// do not ask a plugin to mutate state it never claimed to own.
+			logging.Debug(ctx, "skipping external agent hook removal: plugin did not report hooks installed",
 				"agent", string(name))
 			continue
 		}

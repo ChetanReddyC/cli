@@ -180,7 +180,13 @@ case "$1" in
     exit 0
     ;;
   are-hooks-installed)
-    echo '{"installed": ` + installed + `}'
+    # ENTIRE_TEST_PROBE drives the two ways a plugin can fail to answer, so a test
+    # can tell "no hooks" apart from "could not say".
+    case "$ENTIRE_TEST_PROBE" in
+      fail)    echo "mock probe failure" >&2; exit 1 ;;
+      garbage) echo 'not json' ;;
+      *)       echo '{"installed": ` + installed + `}' ;;
+    esac
     ;;
   *)
     echo '{}'
@@ -1179,7 +1185,7 @@ func TestRunUninstall_Force_NothingInstalled(t *testing.T) {
 	setupTestRepo(t)
 
 	var stdout, stderr bytes.Buffer
-	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	err := runUninstall(context.Background(), &stdout, &stderr, true, false)
 	if err != nil {
 		t.Fatalf("runUninstall() error = %v", err)
 	}
@@ -1203,7 +1209,7 @@ func TestRunUninstall_Force_RemovesEntireDirectory(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	err := runUninstall(context.Background(), &stdout, &stderr, true, false)
 	if err != nil {
 		t.Fatalf("runUninstall() error = %v", err)
 	}
@@ -1236,7 +1242,7 @@ func TestRunUninstall_Force_RemovesGitHooks(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	err := runUninstall(context.Background(), &stdout, &stderr, true, false)
 	if err != nil {
 		t.Fatalf("runUninstall() error = %v", err)
 	}
@@ -1289,7 +1295,7 @@ func TestRunUninstall_RemovesExternalAgentHooks(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_EXEC_LOG", execLog)
 
 	var stdout, stderr bytes.Buffer
-	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+	if err := runUninstall(context.Background(), &stdout, &stderr, true, false); err != nil {
 		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
 	}
 
@@ -1320,7 +1326,7 @@ func TestRunUninstall_SummaryNamesExternalAgent(t *testing.T) {
 	// keeps the test from passing on an early return that never reached the
 	// summary at all.
 	var stdout, stderr bytes.Buffer
-	err := runUninstall(context.Background(), &stdout, &stderr, false)
+	err := runUninstall(context.Background(), &stdout, &stderr, false, false)
 	if err == nil {
 		t.Fatalf("expected the no-terminal confirmation guard to stop the uninstall, stdout:\n%s", stdout.String())
 	}
@@ -1351,7 +1357,7 @@ func TestRunUninstall_SkipsUnenabledExternalAgent(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_EXEC_LOG", execLog)
 
 	var stdout, stderr bytes.Buffer
-	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+	if err := runUninstall(context.Background(), &stdout, &stderr, true, false); err != nil {
 		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
 	}
 
@@ -1377,36 +1383,199 @@ func TestRunUninstall_ReportsUnremovedExternalAgentHooks(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_FAIL_UNINSTALL_HOOKS", "1")
 
 	var stdout, stderr bytes.Buffer
-	// Non-nil: a caller scripting the uninstall must see a non-zero exit when
-	// hooks were left behind, not just a warning on stderr.
-	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	// nil without --strict: a plugin is third-party code Entire cannot fix, so it
+	// does not get to fail Entire's own uninstall unless the caller asked.
+	if err := runUninstall(context.Background(), &stdout, &stderr, true, false); err != nil {
+		t.Fatalf("a plugin failure must not fail the uninstall without --strict, got error = %v\nstderr: %s", err, stderr.String())
+	}
+
+	assertLeftoverPluginReported(t, stdout.String(), stderr.String(), agentName, "hooks are still installed")
+}
+
+// TestRunUninstall_StrictFailsOnUnremovedExternalAgentHooks pins the opt-in: the
+// output is identical, only the exit code differs, so a script that wants a
+// partial uninstall to fail can ask for it.
+func TestRunUninstall_StrictFailsOnUnremovedExternalAgentHooks(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-failure-strict-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_FAIL_UNINSTALL_HOOKS", "1")
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true, true)
 	if err == nil {
-		t.Fatalf("expected an error when agent hooks could not be removed, stdout:\n%s", stdout.String())
+		t.Fatalf("expected --strict to fail when a plugin's hooks could not be removed, stdout:\n%s", stdout.String())
 	}
 	var silent *SilentError
 	if !errors.As(err, &silent) {
 		t.Errorf("expected a SilentError (warnings are already printed), got %T: %v", err, err)
 	}
 
-	errOut := stderr.String()
-	if !strings.Contains(errOut, agentName) {
-		t.Errorf("warning must name the plugin whose hooks survived, stderr:\n%s", errOut)
+	assertLeftoverPluginReported(t, stdout.String(), stderr.String(), agentName, "hooks are still installed")
+}
+
+// TestRunUninstall_UncheckableExternalAgentReported pins the plugin that cannot
+// say whether its hooks are installed. Its hooks are not removed — asking a
+// plugin that cannot answer to mutate state is not ours to do — so the run must
+// say so, name the plugin, and hand over a command the user can run. .entire/ is
+// about to go, and with it the setting that makes the plugin discoverable, so
+// this run is the only place that can be said.
+func TestRunUninstall_UncheckableExternalAgentReported(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-unprobeable-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_PROBE", "fail")
+
+	execLog := filepath.Join(t.TempDir(), "exec.log")
+	t.Setenv("ENTIRE_TEST_EXEC_LOG", execLog)
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true, false); err != nil {
+		t.Fatalf("an unprobeable plugin must not fail the uninstall without --strict, got error = %v\nstderr: %s", err, stderr.String())
 	}
-	if !strings.Contains(errOut, "entire-agent-"+agentName+" uninstall-hooks") {
-		t.Errorf("warning must say how to remove the leftover hooks, stderr:\n%s", errOut)
+
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "could not check whether") {
+		t.Errorf("stderr must say the plugin could not be checked, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "mock probe failure") {
+		t.Errorf("stderr must carry the probe's own error, got:\n%s", errOut)
+	}
+	assertLeftoverPluginReported(t, stdout.String(), errOut, agentName, "hooks may still be installed")
+
+	data, err := os.ReadFile(execLog)
+	if err != nil {
+		t.Fatalf("reading exec log: %v", err)
+	}
+	if strings.Contains(string(data), "uninstall-hooks") {
+		t.Errorf("a plugin that could not be asked must not be told to uninstall, exec log:\n%s", data)
+	}
+	// Still one question per uninstall, even when the answer never arrives.
+	if got := strings.Count(string(data), "are-hooks-installed"); got != 1 {
+		t.Errorf("plugin queried for installed hooks %d times, want 1, exec log:\n%s", got, data)
+	}
+}
+
+// TestRunUninstall_UncheckableExternalAgentGarbageJSON pins that a plugin
+// printing junk is classified the same as one that crashes. Both mean we do not
+// know, and only a clean answer means there is nothing to remove.
+func TestRunUninstall_UncheckableExternalAgentGarbageJSON(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-garbage-probe-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_PROBE", "garbage")
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true, false); err != nil {
+		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
+	}
+
+	if !strings.Contains(stderr.String(), "could not check whether") {
+		t.Errorf("malformed JSON must be reported as unchecked, not treated as no hooks, stderr:\n%s", stderr.String())
+	}
+}
+
+// TestRunUninstall_StrictFailsOnUncheckableExternalAgent pins that --strict
+// treats an unknown state as a problem too: under --strict the caller has said
+// they are not willing to leave a plugin's hooks in doubt.
+func TestRunUninstall_StrictFailsOnUncheckableExternalAgent(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-unprobeable-strict-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_PROBE", "fail")
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true, true)
+	if err == nil {
+		t.Fatalf("expected --strict to fail when a plugin could not be checked, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError, got %T: %v", err, err)
+	}
+}
+
+// TestRunUninstall_SummaryNamesUncheckableExternalAgent pins that the user
+// approving the uninstall is told the plugin's state is unknown, on its own line:
+// listing it as having hooks installed would assert the thing we could not find
+// out, and omitting it hides part of the scope they are approving.
+func TestRunUninstall_SummaryNamesUncheckableExternalAgent(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-unprobeable-summary-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_PROBE", "fail")
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, false, false); err == nil {
+		t.Fatalf("expected the no-terminal confirmation guard to stop the uninstall, stdout:\n%s", stdout.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "could not be checked") {
+		t.Fatalf("summary must list the plugin as unchecked, got:\n%s", out)
+	}
+	if !strings.Contains(out, agentName) {
+		t.Errorf("summary must name the plugin %q, got:\n%s", agentName, out)
+	}
+	if strings.Contains(out, "  - Agent hooks ("+agentName) {
+		t.Errorf("an unchecked plugin must not be listed as having hooks installed, got:\n%s", out)
+	}
+}
+
+// TestGetAgentHookState_CancelledContextIsNotAPluginFault pins that our own
+// cancellation is not reported as a plugin that could not answer. Every plugin on
+// $PATH answers over a subprocess, so one Ctrl-C would otherwise diagnose all of
+// them at once. Driven at the sweep rather than through runUninstall, which bails
+// on a dead context long before it classifies anything.
+func TestGetAgentHookState_CancelledContextIsNotAPluginFault(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-hook-state-cancelled-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	external.DiscoverAndRegister(context.Background())
+
+	// Registered under a live context, probed under a dead one: the probe fails
+	// for a reason that has nothing to do with the plugin.
+	live := getAgentHookState(context.Background())
+	if len(live.installed) == 0 {
+		t.Fatalf("plugin was not registered, so the cancelled case below would prove nothing")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	state := getAgentHookState(ctx)
+	if len(state.unchecked) != 0 {
+		t.Errorf("cancellation must not be charged to the plugin, got unchecked = %v", state.uncheckedNames())
+	}
+}
+
+// assertLeftoverPluginReported checks the shape every leftover-hooks report
+// shares: the plugin named, a runnable recovery command, the note that a re-run
+// cannot retry it, and no claim of success.
+func assertLeftoverPluginReported(t *testing.T, stdout, stderr, agentName, lead string) {
+	t.Helper()
+
+	if !strings.Contains(stderr, agentName) {
+		t.Errorf("stderr must name the plugin whose hooks may survive, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, lead) {
+		t.Errorf("stderr must say %q, got:\n%s", lead, stderr)
+	}
+	if !strings.Contains(stderr, "entire-agent-"+agentName+" uninstall-hooks") {
+		t.Errorf("stderr must say how to remove the hooks, got:\n%s", stderr)
 	}
 	// The protocol guarantees every subcommand these, so a bare invocation is a
 	// command a conforming plugin may reject — useless as the user's last resort.
 	for _, want := range []string{"ENTIRE_REPO_ROOT=", "ENTIRE_PROTOCOL_VERSION="} {
-		if !strings.Contains(errOut, want) {
-			t.Errorf("recovery command must carry %s, stderr:\n%s", want, errOut)
+		if !strings.Contains(stderr, want) {
+			t.Errorf("recovery command must carry %s, got:\n%s", want, stderr)
 		}
 	}
-	if !strings.Contains(errOut, "will not reach these plugins") {
-		t.Errorf("warning must say a re-run cannot retry the plugin, stderr:\n%s", errOut)
+	if !strings.Contains(stderr, "will not reach these plugins") {
+		t.Errorf("stderr must say a re-run cannot retry the plugin, got:\n%s", stderr)
 	}
-	if strings.Contains(stdout.String(), "uninstalled successfully") {
-		t.Errorf("uninstall must not report success while agent hooks remain, stdout:\n%s", stdout.String())
+	if strings.Contains(stdout, "uninstalled successfully") {
+		t.Errorf("uninstall must not report success while plugin hooks may remain, stdout:\n%s", stdout)
 	}
 }
 
@@ -1465,7 +1634,7 @@ func TestRunUninstall_BuiltinHooksRemovedWhenNotDetected(t *testing.T) {
 	calls := registerFakeBuiltinHookAgent(t, "fake-builtin-undetected", nil)
 
 	var stdout, stderr bytes.Buffer
-	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+	if err := runUninstall(context.Background(), &stdout, &stderr, true, false); err != nil {
 		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
 	}
 
@@ -1484,7 +1653,7 @@ func TestRunUninstall_BuiltinHookFailureStillSucceeds(t *testing.T) {
 	registerFakeBuiltinHookAgent(t, "fake-builtin-failing", errors.New("mock builtin uninstall failure"))
 
 	var stdout, stderr bytes.Buffer
-	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+	if err := runUninstall(context.Background(), &stdout, &stderr, true, false); err != nil {
 		t.Fatalf("a built-in hook failure must not fail the uninstall, got error = %v\nstderr: %s", err, stderr.String())
 	}
 
@@ -1503,7 +1672,7 @@ func TestRunUninstall_NotAGitRepo(t *testing.T) {
 	paths.ClearWorktreeRootCache()
 
 	var stdout, stderr bytes.Buffer
-	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	err := runUninstall(context.Background(), &stdout, &stderr, true, false)
 
 	// Should return an error (silent error)
 	if err == nil {
