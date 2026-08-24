@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -232,9 +233,19 @@ func prefixFileName(treePath string) string {
 // readPrefix loads the redacted prefix an entry points at, from wherever it
 // lives. sizeHint pre-sizes the buffer so the join can append in place instead of
 // copying the whole prefix a second time.
+//
+// Each branch checks the field it is about to use rather than trusting load() to
+// have rejected a record with neither set. load() does reject that, so this is
+// not a reachable path today -- but the guarantee would otherwise live 80 lines
+// away from the code depending on it, and plumbing.NewHash("") does not fail
+// loudly: it yields the zero hash and surfaces as a puzzling missing-object
+// error instead of a bad cache entry.
 func (c *redactCache) readPrefix(repo *git.Repository, entry *redactPrefixEntry, sizeHint int) ([]byte, error) {
 	if entry.RedactedFile != "" {
 		return readFileBytes(filepath.Join(c.dir, entry.RedactedFile), sizeHint)
+	}
+	if entry.RedactedBlob == "" {
+		return nil, errors.New("cache entry names neither a prefix file nor a blob")
 	}
 	return readBlobBytes(repo, plumbing.NewHash(entry.RedactedBlob), sizeHint)
 }

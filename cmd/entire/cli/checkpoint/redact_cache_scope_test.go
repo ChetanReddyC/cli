@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"context"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -218,4 +219,34 @@ func TestRedactTranscriptCached_PrefixSurvivesGC(t *testing.T) {
 	require.Equal(t, len(grown)-len(content), sawBytes,
 		"the prefix must still be reusable after git gc pruned unreachable objects")
 	requireMatchesFullRedaction(t, grown, got)
+}
+
+// TestRedactCache_EntryWithNoPayloadFallsBack covers a cache record naming
+// neither a prefix file nor a blob. load() rejects that shape, so this exercises
+// readPrefix's own guard and confirms the degradation is a full redaction rather
+// than a failed checkpoint.
+func TestRedactCache_EntryWithNoPayloadFallsBack(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
+	repo, dir := newTestRepoForCache(t)
+	cache := newRedactCache(filepath.Join(dir, ".git"))
+	require.NotNil(t, cache)
+	ctx := context.Background()
+
+	content := padPastCacheThreshold(t, transcriptLines(0, 100))
+	const treePath = "full.jsonl"
+
+	// Hand-built: storePrefix always names a payload, so it cannot express this.
+	writeCacheEntry(t, cache, treePath, redactPrefixEntry{
+		Fingerprint: redactionFingerprint(),
+		SourceBytes: len(content) / 2,
+		SourceHash:  hashBytes([]byte(content[:len(content)/2])),
+	})
+	require.Nil(t, cache.load(treePath), "load must reject an entry with no payload")
+
+	got, err := redactIncrementally(ctx, repo, cache, []byte(content), treePath, testRedactor)
+	require.NoError(t, err)
+	want, wantErr := RedactBlobBytes(ctx, []byte(content), treePath, false)
+	require.NoError(t, wantErr)
+	require.Equal(t, string(want), string(got.Redacted),
+		"a payload-less entry must degrade to a full redaction")
 }
