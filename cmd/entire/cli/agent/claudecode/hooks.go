@@ -471,6 +471,12 @@ func (c *ClaudeCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigS
 // tool-use matchers does not carry its Entire hook.
 func CheckHookConfig(ctx context.Context) HookConfigState {
 	settings, err := loadClaudeSettings(ctx)
+	// An unreadable or malformed settings file collapses to HooksAbsent
+	// deliberately. This is a coarse three-state diagnostic for `entire status`
+	// and `entire doctor`, and no caller here acts on "could not tell" —
+	// AreHooksInstalled is the API that propagates that distinction to callers
+	// which must (e.g. uninstall deciding whether hooks can be left alone).
+	// loadClaudeSettings has already logged the failure.
 	if err != nil || !hasEntireHook(settings.Hooks.Stop) {
 		return HooksAbsent
 	}

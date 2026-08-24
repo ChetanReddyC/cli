@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1546,6 +1547,31 @@ func TestGetAgentHookState_CancelledContextIsNotAPluginFault(t *testing.T) {
 	state := getAgentHookState(ctx)
 	if len(state.unchecked) != 0 {
 		t.Errorf("cancellation must not be charged to the plugin, got unchecked = %v", state.uncheckedNames())
+	}
+}
+
+// TestPluginUninstallCommand_PerOS pins the recovery command's shape on both
+// shell families. It is printed when it is the user's last chance to remove a
+// plugin's hooks, so it must run in the shell they actually have: the POSIX
+// `cd x && VAR=y bin` form is a syntax error in PowerShell, and would hand a
+// Windows user a command that cannot run.
+func TestPluginUninstallCommand_PerOS(t *testing.T) {
+	t.Parallel()
+
+	const name = types.AgentName("ext-cmd-test")
+
+	posix := pluginUninstallCommandFor("linux", "/My Repo/it's here", name)
+	wantPosix := `cd '/My Repo/it'\''s here' && ENTIRE_REPO_ROOT='/My Repo/it'\''s here' ` +
+		fmt.Sprintf("ENTIRE_PROTOCOL_VERSION=%d entire-agent-%s uninstall-hooks", external.ProtocolVersion, name)
+	if posix != wantPosix {
+		t.Errorf("posix command =\n%s\nwant\n%s", posix, wantPosix)
+	}
+
+	win := pluginUninstallCommandFor("windows", `C:\My Repo\it's here`, name)
+	wantWin := `cd 'C:\My Repo\it''s here'; $env:ENTIRE_REPO_ROOT = 'C:\My Repo\it''s here'; ` +
+		fmt.Sprintf("$env:ENTIRE_PROTOCOL_VERSION = '%d'; entire-agent-%s uninstall-hooks", external.ProtocolVersion, name)
+	if win != wantWin {
+		t.Errorf("windows command =\n%s\nwant\n%s", win, wantWin)
 	}
 }
 

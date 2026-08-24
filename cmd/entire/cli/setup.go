@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -1589,11 +1590,16 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 		return fmt.Errorf("agent %s does not support hooks", name)
 	}
 
-	// An agent that could not tell us is not an agent with nothing installed, so
-	// go ahead and ask it to uninstall: this path targets one agent the user
-	// named, so there is no unrelated plugin to avoid poking.
+	// Fail rather than uninstall blind: this path targets one agent the user
+	// named, so they can fix what broke the check (an unreadable or malformed
+	// config file — a missing one cleanly reports "not installed") and re-run.
 	installed, err := hookAgent.AreHooksInstalled(ctx)
-	if err == nil && !installed {
+	if err != nil {
+		logging.Debug(ctx, "hooks-installed check failed, not removing",
+			"agent", name, "error", err)
+		return fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err)
+	}
+	if !installed {
 		fmt.Fprintf(w, "%s hooks are not installed.\n", ag.Type())
 		return nil
 	}
@@ -2605,12 +2611,39 @@ func checkEntireDirExists(ctx context.Context) bool {
 // rely on them. Printing the bare binary hands the user a command a conforming
 // plugin can reject.
 func pluginUninstallCommand(repoRoot string, name types.AgentName) string {
+	return pluginUninstallCommandFor(runtime.GOOS, repoRoot, name)
+}
+
+// pluginUninstallCommandFor is pluginUninstallCommand with the OS injected, so
+// tests can pin both shapes from any platform.
+//
+// The line must be pasteable into the shell the user actually has: the POSIX
+// `cd x && VAR=y bin` form is a syntax error in PowerShell and sets no
+// environment in cmd.exe, so on Windows it would hand the user a recovery
+// command that cannot run — and this command is printed precisely when it is
+// the user's last chance to act. PowerShell is the shape to print there: it is
+// the default shell on modern Windows, and a cmd.exe user can still read the
+// intent off it, while the reverse (cmd.exe's `set VAR=y & bin`) leaks trailing
+// spaces into values and is wrong in PowerShell too.
+func pluginUninstallCommandFor(goos, repoRoot string, name types.AgentName) string {
+	if goos == "windows" {
+		root := powerShellQuote(repoRoot)
+		return fmt.Sprintf("cd %s; $env:ENTIRE_REPO_ROOT = %s; $env:ENTIRE_PROTOCOL_VERSION = '%d'; entire-agent-%s uninstall-hooks",
+			root, root, external.ProtocolVersion, name)
+	}
 	// Quoted because this is a line the user pastes into a shell, and a repo path
 	// with a space in it is ordinary: unquoted, `cd /My Repo && ...` runs cd
 	// against the wrong argument and the command silently does nothing useful.
 	root := shellQuote(repoRoot)
 	return fmt.Sprintf("cd %s && ENTIRE_REPO_ROOT=%s ENTIRE_PROTOCOL_VERSION=%d entire-agent-%s uninstall-hooks",
 		root, root, external.ProtocolVersion, name)
+}
+
+// powerShellQuote wraps a string in PowerShell single quotes, where the only
+// escape is doubling an embedded single quote. Single quotes, not double:
+// PowerShell expands $ and ` inside double quotes, and a path is data.
+func powerShellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 // removeAgentHooks removes hooks from all agents that support hooks. installed
