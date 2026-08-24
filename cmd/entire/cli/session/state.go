@@ -356,6 +356,17 @@ type State struct {
 	// truncation, which would break exactly-once.
 	SkillEvents []agent.SkillEvent `json:"skill_events,omitempty"`
 
+	// CommitCondensedSignalCheckpointID is the checkpoint ID of the last
+	// cli_commit_condensed telemetry signal this session snapshotted, the
+	// durable half of that signal's at-most-once contract. A `git commit
+	// --amend` re-runs PostCommit with the SAME trailer checkpoint ID (an
+	// ACTIVE session re-condenses unconditionally), so without this ledger one
+	// logical commit is counted twice in both halves of the miss-rate ratio.
+	// Persisted by the same state save that gates the emit, so a failed save
+	// retries cleanly; a crash between save and emit loses the row, which is
+	// the signal's accepted best-effort posture.
+	CommitCondensedSignalCheckpointID string `json:"commit_condensed_signal_checkpoint_id,omitempty"`
+
 	// Hook-provided session metrics (for agents like Cursor that report via hooks)
 	SessionDurationMs int64 `json:"session_duration_ms,omitempty"`
 	SessionTurnCount  int   `json:"session_turn_count,omitempty"`

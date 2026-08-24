@@ -42,6 +42,11 @@ const (
 `
 	fixtureUnrelatedBash = `{"type":"assistant","uuid":"a9","message":{"content":[{"type":"tool_use","id":"t7","name":"Bash","input":{"command":"entire status"}}]}}
 `
+	// A non-assistant envelope whose message decodes into tool_use-shaped
+	// content. Only assistant envelopes carry live tool calls; the walker must
+	// apply the same gate as the package's other tool_use consumers.
+	fixtureNonAssistantToolUse = `{"type":"summary","uuid":"s1","message":{"content":[{"type":"tool_use","id":"tx","name":"Bash","input":{"command":"entire search foo"}}]}}
+`
 )
 
 func TestDetectSearchUsage_ClaudeCode(t *testing.T) {
@@ -74,6 +79,7 @@ func TestDetectSearchUsage_ClaudeCode(t *testing.T) {
 		{"injected investigate prompt", fixtureInvestigatePrompt, searchProbe{used: false, source: searchSourceNone}},
 
 		{"unrelated entire command", fixtureUnrelatedBash, searchProbe{used: false, source: searchSourceNone}},
+		{"tool_use outside an assistant envelope", fixtureNonAssistantToolUse, searchProbe{used: false, source: searchSourceNone}},
 		{"phrase absent", `{"type":"assistant","uuid":"a0","message":{"content":[]}}`, searchProbe{used: false, source: searchSourceNone}},
 
 		// Not "none": seeing nothing because there is nothing to see is a
@@ -296,6 +302,17 @@ func hasFile(files map[string]struct{}, name string) bool {
 	return ok
 }
 
+// probeOrFail runs priorAICommitFiles and fails the test if the probe itself
+// could not run — these tests assert the measured result, not measurability.
+func probeOrFail(t *testing.T, repoRoot, commit string) map[string]struct{} {
+	t.Helper()
+	files, ok := priorAICommitFiles(t.Context(), repoRoot, commit)
+	if !ok {
+		t.Fatal("priorAICommitFiles reported the probe could not run")
+	}
+	return files
+}
+
 func TestPriorAICommitFiles(t *testing.T) {
 	t.Parallel()
 
@@ -319,7 +336,7 @@ func TestPriorAICommitFiles(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "head.txt")
 	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
 
-	files := priorAICommitFiles(t.Context(), tmpDir, "HEAD")
+	files := probeOrFail(t, tmpDir, "HEAD")
 
 	if !hasFile(files, "ai.txt") {
 		t.Error("ai.txt was touched by a prior checkpoint commit; want present")
@@ -330,8 +347,8 @@ func TestPriorAICommitFiles(t *testing.T) {
 	if hasFile(files, "head.txt") {
 		t.Error("head.txt was only touched by the just-created HEAD commit; want absent")
 	}
-	if got := priorAICommitFiles(t.Context(), t.TempDir(), "HEAD"); got != nil {
-		t.Errorf("not a git repository; want best-effort nil, got %v", got)
+	if files, ok := priorAICommitFiles(t.Context(), t.TempDir(), "HEAD"); ok {
+		t.Errorf("not a git repository; the probe must report itself unmeasured, got ok=true with %v", files)
 	}
 }
 
@@ -375,7 +392,7 @@ func TestPriorAICommitFiles_AnchorsOnExplicitCommit(t *testing.T) {
 	t.Setenv("GIT_DIR", filepath.Join(otherRepo, ".git"))
 	t.Setenv("GIT_WORK_TREE", otherRepo)
 
-	files := priorAICommitFiles(t.Context(), tmpDir, reported)
+	files := probeOrFail(t, tmpDir, reported)
 	if !hasFile(files, "ai.txt") {
 		t.Error("ai.txt precedes the reported commit and carries a trailer; want present")
 	}
@@ -406,7 +423,7 @@ func TestPriorAICommitFiles_NonASCIIPath(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "head.txt")
 	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
 
-	if !hasFile(priorAICommitFiles(t.Context(), tmpDir, "HEAD"), "café.go") {
+	if !hasFile(probeOrFail(t, tmpDir, "HEAD"), "café.go") {
 		t.Error("café.go was touched by a prior checkpoint commit; want present")
 	}
 }
@@ -435,7 +452,7 @@ func TestPriorAICommitFiles_ControlCharsInBody(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "head.txt")
 	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
 
-	if !hasFile(priorAICommitFiles(t.Context(), tmpDir, "HEAD"), "hostile.txt") {
+	if !hasFile(probeOrFail(t, tmpDir, "HEAD"), "hostile.txt") {
 		t.Error("a commit body containing \\x1e/\\x1f must not hide its checkpoint trailer")
 	}
 }
@@ -463,7 +480,7 @@ func TestPriorAICommitFiles_EmptyMessageCommit(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "head.txt")
 	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
 
-	files := priorAICommitFiles(t.Context(), tmpDir, "HEAD")
+	files := probeOrFail(t, tmpDir, "HEAD")
 	if !hasFile(files, "ai.txt") {
 		t.Error("an empty-message commit must not mis-frame the records after it")
 	}
@@ -503,10 +520,86 @@ func TestPriorAICommitFiles_MergeCommitContributesNothing(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "head.txt")
 	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
 
-	if hasFile(priorAICommitFiles(t.Context(), tmpDir, "HEAD"), "side.txt") {
+	if hasFile(probeOrFail(t, tmpDir, "HEAD"), "side.txt") {
 		t.Error("a merge commit must contribute no files: its content is already " +
 			"attributed to the commits it brings in, and first-parent diffs would " +
 			"inflate prior_ai_history")
+	}
+}
+
+// TestCommitCondensedEmitter_ProbeFailureOmitsPriorAIHistory pins the
+// unmeasured half of prior_ai_history: when the git-log probe cannot run,
+// the payload omits the property (nil) instead of fabricating a measured
+// false — the same treatment used_search gets, applied to the other half of
+// the same ratio. A commit that landed no files, by contrast, is a measured
+// false and never even probes.
+func TestCommitCondensedEmitter_ProbeFailureOmitsPriorAIHistory(t *testing.T) {
+	writeTelemetrySettings(t, "true")
+
+	var got []telemetry.CommitCondensedSignal
+	restore := emitCommitCondensed
+	emitCommitCondensed = func(sig telemetry.CommitCondensedSignal, _ bool, _ string) { got = append(got, sig) }
+	t.Cleanup(func() { emitCommitCondensed = restore })
+
+	probeCalls := 0
+	e := newCommitCondensedEmitter(t.TempDir(), "HEAD")
+	e.probeFn = func(context.Context, string, string) (map[string]struct{}, bool) {
+		probeCalls++
+		return nil, false // the probe itself failed
+	}
+
+	e.emit(t.Context(), &commitCondensedSignal{
+		agentType:    agent.AgentTypeClaudeCode,
+		searchProbe:  searchProbe{used: false, source: searchSourceNone},
+		filesTouched: []string{"a.go"},
+	})
+	e.emit(t.Context(), &commitCondensedSignal{
+		agentType:   agent.AgentTypeClaudeCode,
+		searchProbe: searchProbe{used: false, source: searchSourceNone},
+		// No files: measured false, no probe needed.
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("sent %d events, want 2 — a failed probe withholds the property, not the event", len(got))
+	}
+	if got[0].PriorAIHistory != nil {
+		t.Errorf("PriorAIHistory = %v, want nil when the probe could not run", *got[0].PriorAIHistory)
+	}
+	if got[1].PriorAIHistory == nil || *got[1].PriorAIHistory {
+		t.Errorf("PriorAIHistory = %v, want measured false for a commit that landed no files", got[1].PriorAIHistory)
+	}
+	if probeCalls != 1 {
+		t.Errorf("probe ran %d times, want 1 — the failure is memoized and the no-files session never probes", probeCalls)
+	}
+}
+
+// TestNewCommitCondensedSignal_DedupesAmendRecondensation pins the at-most-once
+// ledger: `git commit --amend` re-runs PostCommit with the same trailer
+// checkpoint ID and an ACTIVE session re-condenses unconditionally, so without
+// the ledger one logical commit is emitted (and counted) twice.
+func TestNewCommitCondensedSignal_DedupesAmendRecondensation(t *testing.T) {
+	t.Parallel()
+
+	state := &SessionState{AgentType: agent.AgentTypeClaudeCode}
+	committed := map[string]struct{}{"a.go": {}}
+	result := &CondenseResult{
+		CheckpointID: id.MustCheckpointID("abcdef123456"),
+		FilesTouched: []string{"a.go"},
+	}
+
+	if sig := newCommitCondensedSignal(state, result, committed); sig == nil {
+		t.Fatal("first condensation of a checkpoint must produce a signal")
+	}
+	if sig := newCommitCondensedSignal(state, result, committed); sig != nil {
+		t.Error("re-condensing the same checkpoint (amend) must not produce a second signal")
+	}
+
+	next := &CondenseResult{
+		CheckpointID: id.MustCheckpointID("fedcba654321"),
+		FilesTouched: []string{"a.go"},
+	}
+	if sig := newCommitCondensedSignal(state, next, committed); sig == nil {
+		t.Error("a new checkpoint ID is a new commit and must produce a signal")
 	}
 }
 
@@ -545,9 +638,9 @@ func TestCommitCondensedEmitter_ProbesAndGatesOnce(t *testing.T) {
 	t.Cleanup(func() { emitCommitCondensed = restore })
 
 	e := newCommitCondensedEmitter(t.TempDir(), "HEAD")
-	e.probeFn = func(context.Context, string, string) map[string]struct{} {
+	e.probeFn = func(context.Context, string, string) (map[string]struct{}, bool) {
 		probeCalls++
-		return map[string]struct{}{"shared.go": {}}
+		return map[string]struct{}{"shared.go": {}}, true
 	}
 
 	for _, files := range [][]string{{"shared.go"}, {"other.go"}, {"shared.go", "other.go"}} {
@@ -573,9 +666,9 @@ func TestCommitCondensedEmitter_NilSignalCostsNothing(t *testing.T) {
 
 	probeCalls := 0
 	e := newCommitCondensedEmitter(t.TempDir(), "HEAD")
-	e.probeFn = func(context.Context, string, string) map[string]struct{} {
+	e.probeFn = func(context.Context, string, string) (map[string]struct{}, bool) {
 		probeCalls++
-		return nil
+		return nil, true
 	}
 	e.emit(t.Context(), nil)
 
@@ -607,9 +700,9 @@ func TestCommitCondensedEmitter_OptedOutNeverProbes(t *testing.T) {
 			t.Cleanup(func() { emitCommitCondensed = restore })
 
 			e := newCommitCondensedEmitter(t.TempDir(), "HEAD")
-			e.probeFn = func(context.Context, string, string) map[string]struct{} {
+			e.probeFn = func(context.Context, string, string) (map[string]struct{}, bool) {
 				probeCalls++
-				return nil
+				return nil, true
 			}
 			e.emit(t.Context(), &commitCondensedSignal{
 				agentType:    agent.AgentTypeClaudeCode,
@@ -637,7 +730,7 @@ func TestCommitCondensedEmitter_OmitsUsedSearchWhenUnsupported(t *testing.T) {
 	t.Cleanup(func() { emitCommitCondensed = restore })
 
 	e := newCommitCondensedEmitter(t.TempDir(), "HEAD")
-	e.probeFn = func(context.Context, string, string) map[string]struct{} { return nil }
+	e.probeFn = func(context.Context, string, string) (map[string]struct{}, bool) { return nil, true }
 	e.emit(t.Context(), &commitCondensedSignal{
 		agentType:    agent.AgentTypeClaudeCode,
 		searchProbe:  searchProbe{used: false, source: searchSourceUnsupported},
@@ -703,7 +796,7 @@ func TestCommitCondensedEmitter_ZeroProbeOmitsUsedSearch(t *testing.T) {
 	t.Cleanup(func() { emitCommitCondensed = restore })
 
 	e := newCommitCondensedEmitter(t.TempDir(), "HEAD")
-	e.probeFn = func(context.Context, string, string) map[string]struct{} { return nil }
+	e.probeFn = func(context.Context, string, string) (map[string]struct{}, bool) { return nil, true }
 	// searchProbe left at its zero value, as a no-transcript condensation
 	// produced before the probe was made unconditional.
 	e.emit(t.Context(), &commitCondensedSignal{

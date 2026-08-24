@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -327,8 +328,13 @@ func detectSearchUsage(ag agent.Agent, transcriptData []byte) searchProbe {
 // commit), and hooks inherit git's exported GIT_DIR/GIT_WORK_TREE, which
 // override -C's repo selection — gitEnvWithoutRepoOverrides scrubs those, same
 // as this package's other `git -C` call site. Paths match git log --name-only
-// output, i.e. the same form as SessionState.FilesTouched. Best-effort: any
-// failure yields nil, read as "no prior history".
+// output, i.e. the same form as SessionState.FilesTouched.
+//
+// ok=false means the probe COULD NOT run (git unavailable, cancelled ctx, a
+// log invocation that errors) — the caller must treat that as unmeasured, not
+// as "no prior history": a fabricated false here deflates the very miss rate
+// the event exists to measure, the same conflation the used_search tri-state
+// prevents. ok=true with a nil set is the measured "no prior history".
 //
 // A set rather than a predicate because the answer is commit-scoped and
 // identical for every session in the commit — only the intersection differs —
@@ -345,7 +351,7 @@ func detectSearchUsage(ag agent.Agent, transcriptData []byte) searchProbe {
 // the miss rate. A merge's content is already attributed to the individual
 // trailer-carrying commits it brings in, which sit in this window on their own
 // account. Squash merges are single-parent, so their files do appear.
-func priorAICommitFiles(ctx context.Context, repoRoot, commit string) map[string]struct{} {
+func priorAICommitFiles(ctx context.Context, repoRoot, commit string) (result map[string]struct{}, ok bool) {
 	// Each record starts with an empty field: -z NUL-terminates the format
 	// output, and %x00 prefixes it, so splitting the whole output on NUL yields
 	// ["", "<hash>\n<body>", "\n<file>", "<file>", …] per commit. A commit
@@ -361,7 +367,7 @@ func priorAICommitFiles(ctx context.Context, repoRoot, commit string) map[string
 	cmd.Env = gitEnvWithoutRepoOverrides()
 	out, err := cmd.Output()
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	var files map[string]struct{}
 	fields := strings.Split(string(out), "\x00")
@@ -396,7 +402,7 @@ func priorAICommitFiles(ctx context.Context, repoRoot, commit string) map[string
 			files[name] = struct{}{}
 		}
 	}
-	return files
+	return files, true
 }
 
 // commitCondensedSignal captures, while the session gate is held, the few
@@ -439,6 +445,18 @@ type commitCondensedSignal struct {
 func newCommitCondensedSignal(state *SessionState, result *CondenseResult, committedFiles map[string]struct{}) *commitCondensedSignal {
 	if result == nil || result.Skipped || state == nil {
 		return nil
+	}
+	// At-most-once per checkpoint: an amend re-condenses the same trailer
+	// checkpoint ID, and emitting again would count one logical commit twice.
+	// The ledger write rides the session-state save that already gates the
+	// emit. Guarded on a real ID so unit fixtures with a zero result don't
+	// dedupe against the field's zero value.
+	if result.CheckpointID != id.EmptyCheckpointID {
+		ckpt := result.CheckpointID.String()
+		if state.CommitCondensedSignalCheckpointID == ckpt {
+			return nil
+		}
+		state.CommitCondensedSignalCheckpointID = ckpt
 	}
 	files := make([]string, 0, len(result.FilesTouched))
 	for _, f := range result.FilesTouched {
@@ -488,10 +506,14 @@ type commitCondensedEmitter struct {
 
 	probed     bool
 	priorFiles map[string]struct{}
+	// probeOK records whether the memoized probe run actually measured
+	// anything; false makes every session's prior_ai_history unmeasured
+	// (omitted) rather than a fabricated false.
+	probeOK bool
 
 	// probeFn is a test seam, like emitSkillTelemetry, so tests can count probe
 	// invocations without spawning git.
-	probeFn func(ctx context.Context, repoRoot, commit string) map[string]struct{}
+	probeFn func(ctx context.Context, repoRoot, commit string) (map[string]struct{}, bool)
 }
 
 // newCommitCondensedEmitter returns an emitter for one commit. repoRoot is the
@@ -577,21 +599,27 @@ func (e *commitCondensedEmitter) allowed(ctx context.Context) (*settings.EntireS
 }
 
 // priorAITouched intersects one session's committed files against the commit's
-// prior-history set, running the git-log scan at most once.
-func (e *commitCondensedEmitter) priorAITouched(ctx context.Context, files []string) bool {
+// prior-history set, running the git-log scan at most once. Nil means the
+// probe could not run and the payload must omit the property; a commit that
+// landed no files is a measured false without probing at all.
+func (e *commitCondensedEmitter) priorAITouched(ctx context.Context, files []string) *bool {
+	measured := func(v bool) *bool { return &v }
 	if len(files) == 0 {
-		return false
+		return measured(false)
 	}
 	if !e.probed {
 		e.probed = true
-		e.priorFiles = e.probeFn(ctx, e.repoRoot, e.commit)
+		e.priorFiles, e.probeOK = e.probeFn(ctx, e.repoRoot, e.commit)
+	}
+	if !e.probeOK {
+		return nil
 	}
 	for _, f := range files {
 		if _, hit := e.priorFiles[f]; hit {
-			return true
+			return measured(true)
 		}
 	}
-	return false
+	return measured(false)
 }
 
 // emitCommitCondensed is the send step, separated from the gating above so

@@ -73,6 +73,14 @@ func scanLineInvocations(line []byte, visit func(agent.ToolInvocation) bool) boo
 	if err := json.Unmarshal(line, &parsed); err != nil || len(parsed.Message) == 0 {
 		return false
 	}
+	// Only assistant envelopes carry live tool calls — the same gate every
+	// other tool_use consumer in this package applies (ExtractModifiedFiles,
+	// ExtractSkillEvents, ExtractAllModifiedFiles). Without it, a non-assistant
+	// envelope whose message happens to decode into tool_use-shaped content
+	// (replayed/sidechain or summary lines) would count as a real invocation.
+	if parsed.Type != envelopeTypeAssistant {
+		return false
+	}
 	var msg assistantMessage
 	if err := json.Unmarshal(parsed.Message, &msg); err != nil {
 		return false

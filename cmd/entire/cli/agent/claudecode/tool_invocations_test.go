@@ -127,3 +127,17 @@ func TestScanToolInvocations_EmptyTranscript(t *testing.T) {
 		t.Errorf("got %d invocations from an empty transcript, want 0", len(got))
 	}
 }
+
+// TestScanToolInvocations_SkipsNonAssistantEnvelopes pins the envelope gate:
+// only assistant envelopes carry live tool calls, matching every other
+// tool_use consumer in this package. A non-assistant envelope whose message
+// decodes into tool_use-shaped content must not be visited.
+func TestScanToolInvocations_SkipsNonAssistantEnvelopes(t *testing.T) {
+	t.Parallel()
+
+	data := `{"type":"summary","uuid":"s1","message":{"content":[{"type":"tool_use","id":"tx","name":"Bash","input":{"command":"entire search foo"}}]}}
+`
+	if got := collectInvocations(t, data, nil); len(got) != 0 {
+		t.Errorf("got %d invocations from a non-assistant envelope, want 0: %+v", len(got), got)
+	}
+}

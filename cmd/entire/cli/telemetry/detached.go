@@ -356,8 +356,13 @@ type CommitCondensedSignal struct {
 	// "none", "command", or "subagent". Always present.
 	UsedSearchSource string
 	// PriorAIHistory reports whether any committed file was touched by a
-	// recent AI checkpoint commit before this one.
-	PriorAIHistory bool
+	// recent AI checkpoint commit before this one. Nil means the git-log probe
+	// could not run (git unavailable, cancelled ctx, shallow-clone failure) and
+	// the property is then OMITTED from the payload rather than sent as false —
+	// same rationale as UsedSearch: a fabricated "no prior history" deflates
+	// the very miss rate this event exists to measure. A commit that landed no
+	// files is a measured false, not an omission.
+	PriorAIHistory *bool
 	// FilesCommitted is the number of files this checkpoint touched.
 	FilesCommitted int
 }
@@ -381,16 +386,19 @@ func BuildCommitCondensedPayload(sig CommitCondensedSignal, isEntireEnabled bool
 	properties := map[string]any{
 		"agent":              agentName,
 		"used_search_source": sig.UsedSearchSource,
-		"prior_ai_history":   sig.PriorAIHistory,
 		"files_committed":    sig.FilesCommitted,
 		"isEntireEnabled":    isEntireEnabled,
 		"cli_version":        version,
 		"os":                 runtime.GOOS,
 		"arch":               runtime.GOARCH,
 	}
-	// Omitted, not false, when unmeasurable — see UsedSearch's doc comment.
+	// Omitted, not false, when unmeasurable — see the doc comments on
+	// UsedSearch and PriorAIHistory.
 	if sig.UsedSearch != nil {
 		properties["used_search"] = *sig.UsedSearch
+	}
+	if sig.PriorAIHistory != nil {
+		properties["prior_ai_history"] = *sig.PriorAIHistory
 	}
 
 	return &EventPayload{
