@@ -1639,7 +1639,9 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 // the rare record-bearing session that already failed the freshness bound, so
 // the common path pays nothing. Errors fail open toward stamping.
 func (s *ManualCommitStrategy) staleRecordIsOnlyContent(ctx context.Context, repo *git.Repository, state *SessionState, stagedFiles []string) bool {
-	if !state.HasTaskContent() || idleWithTaskContent(state, time.Now()) {
+	if !state.HasTaskContent() ||
+		(state.Phase.IsActive() && isRecentInteraction(state.LastInteractionTime)) ||
+		idleWithTaskContent(state, time.Now()) {
 		return false
 	}
 	withoutRecords := *state
