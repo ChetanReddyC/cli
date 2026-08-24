@@ -12,5 +12,12 @@ golangci-lint config verify
 if [ "$CI" = "true" ]; then
   echo "skipped because CI=true"
 else
-  golangci-lint run --timeout=30m --fix ./...
+  # Deliberately no --fix: this must be read-only, like the CI path. Rewriting source belongs to
+  # `mise run fmt`. CLAUDE.md tells contributors to run this before every commit and every push, so
+  # a lint that edits files turns "verify my tree" into "mutate my tree" — and --fix is
+  # all-or-nothing (golangci-lint has no per-linter fix exclusion), which includes nolintlint's
+  # fixer deleting //nolint directives it judges unnecessary. That has stripped the
+  # //nolint:staticcheck directives in cmd/entire/cli/agent/architecture_test.go, leaving an
+  # unrelated file dirty and the next run failing on SA1019.
+  golangci-lint run --timeout=30m ./...
 fi
