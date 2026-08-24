@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"sync"
 	"testing"
-
-	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
 
 // uaRecorder is the terminal RoundTripper in a wrapped chain: it records the
@@ -78,14 +76,44 @@ func TestWrapTransport_StampsUserAgent(t *testing.T) {
 func TestWrapTransport_NilNextUsesDefaultTransport(t *testing.T) {
 	t.Parallel()
 
-	wrapped, ok := WrapTransport(nil).(*httpclient.UserAgentTransport)
+	wrapped, ok := WrapTransport(nil).(userAgentTransport)
 	if !ok {
-		t.Fatalf("WrapTransport(nil) = %T, want *httpclient.UserAgentTransport", WrapTransport(nil))
+		t.Fatalf("WrapTransport(nil) = %T, want userAgentTransport", WrapTransport(nil))
 	}
-	if wrapped.Next != http.DefaultTransport {
-		t.Fatalf("Next = %v, want http.DefaultTransport", wrapped.Next)
+	if wrapped.next != http.DefaultTransport {
+		t.Fatalf("next = %v, want http.DefaultTransport", wrapped.next)
 	}
-	if wrapped.UA != UserAgent() {
-		t.Fatalf("UA = %q, want %q", wrapped.UA, UserAgent())
+}
+
+// The version is not known at package-initialization time: main() calls Load()
+// to recover it from build info. A transport built before that — a package-level
+// client like pluginHTTPClient — must still send the resolved version, so the
+// User-Agent has to be read per request rather than captured at construction.
+//
+// Not parallel: it swaps the package-level Version. Go runs sequential top-level
+// tests to completion before parallel ones resume, so the parallel tests above
+// never observe the swap.
+func TestWrapTransport_ResolvesUserAgentPerRequest(t *testing.T) {
+	rec := &uaRecorder{}
+	// Built first, while Version is still the pre-Load default.
+	rt := WrapTransport(rec)
+
+	original := Version
+	t.Cleanup(func() { Version = original })
+	Version = "9.9.9"
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://entire.io/api/v1/x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	const want = "entire-cli/9.9.9"
+	if got := rec.snapshot(); len(got) != 1 || got[0] != want {
+		t.Fatalf("User-Agent sent = %v, want [%s] — the transport captured the version at construction", got, want)
 	}
 }

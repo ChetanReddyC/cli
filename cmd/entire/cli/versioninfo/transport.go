@@ -19,11 +19,28 @@ import (
 // the chain rather than on top: a transport above it may synthesize requests of
 // its own and send them straight to its base, bypassing anything wrapped
 // outside it. Stamping at the base catches every request that actually leaves
-// the process. (httpclient.UserAgentTransport clones before mutating, so
-// wrapping never disturbs the caller's request.)
+// the process.
+//
+// The User-Agent is resolved per request rather than captured here, because
+// construction can happen before the version is known: main() calls Load() to
+// recover it from the binary's build info, and any client built during package
+// initialization — pluginHTTPClient is one — would otherwise pin
+// "entire-cli/dev" for the life of the process on every build without ldflags
+// (`go install ...@<version>`). Binding late makes construction order
+// irrelevant.
 func WrapTransport(next http.RoundTripper) http.RoundTripper {
 	if next == nil {
 		next = http.DefaultTransport
 	}
-	return &httpclient.UserAgentTransport{Next: next, UA: UserAgent()}
+	return userAgentTransport{next: next}
+}
+
+// userAgentTransport supplies the User-Agent later than construction and leaves
+// the stamping itself to httpclient.UserAgentTransport, so the
+// clone-before-mutate contract lives in exactly one place.
+type userAgentTransport struct{ next http.RoundTripper }
+
+func (t userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	//nolint:wrapcheck // thin passthrough; the wrapped transport owns the error semantics.
+	return (&httpclient.UserAgentTransport{Next: t.next, UA: UserAgent()}).RoundTrip(req)
 }
