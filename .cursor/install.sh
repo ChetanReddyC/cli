@@ -67,9 +67,18 @@ log "Building the entire CLI"
 go build -o entire ./cmd/entire/
 ./entire version
 
-# 6. Put `entire` on PATH and wire Entire's git hooks so this repo's committed
-#    hooks fire while an agent works here (Entire dogfoods itself on this repo).
-log "Wiring entire onto PATH and installing git hooks"
-bash "${REPO_ROOT}/.cursor/wire-entire-hooks.sh" || true
+# 6. Put `entire` on PATH. This repo dogfoods Entire: it commits agent hook
+#    configs (.cursor/hooks.json, .claude/settings.json, ...) that invoke the
+#    bare `entire` command and no-op when it is not found. Making the built
+#    binary discoverable is all the environment needs — Entire installs its own
+#    git hooks on the first turn-start hook (strategy.EnsureSetup reinstalls them
+#    when absent). Prefer /usr/local/bin (on the standard PATH hooks run with);
+#    fall back to ~/.local/bin when sudo is unavailable.
+log "Putting entire on PATH"
+if ! sudo -n ln -sf "${REPO_ROOT}/entire" /usr/local/bin/entire 2>/dev/null; then
+  mkdir -p "${HOME}/.local/bin"
+  ln -sf "${REPO_ROOT}/entire" "${HOME}/.local/bin/entire"
+fi
+log "entire on PATH: $(command -v entire || echo MISSING)"
 
 log "Environment ready."
