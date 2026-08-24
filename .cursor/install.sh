@@ -11,26 +11,30 @@ cd "${REPO_ROOT}"
 
 log() { printf '\n\033[1m[install]\033[0m %s\n' "$*"; }
 
-# 1. Ensure git >= 2.45. The test suite creates a reftable repository with
-#    `git init --ref-format=reftable` (ref-format was stabilised in git 2.45),
-#    and Ubuntu 24.04 ships 2.43. Upgrade from the git-core PPA when needed.
+# 1. Ensure git supports the reftable ref-format. The test suite creates a
+#    reftable repository with `git init --ref-format=reftable`, and Ubuntu 24.04
+#    ships git 2.43 (ref-format was stabilised in 2.45). Probe the actual
+#    feature rather than parsing the version string (packaged/backported builds
+#    have unreliable version strings), and upgrade from the git-core PPA when it
+#    is missing (or when git itself is absent).
 git_supports_reftable() {
-  local v major minor
-  v="$(git --version | awk '{print $3}')"
-  major="${v%%.*}"
-  minor="$(printf '%s' "$v" | cut -d. -f2)"
-  [ "${major}" -gt 2 ] || { [ "${major}" -eq 2 ] && [ "${minor}" -ge 45 ]; }
+  command -v git >/dev/null 2>&1 || return 1
+  local probe ok=1
+  probe="$(mktemp -d)"
+  git init -q --ref-format=reftable "${probe}" >/dev/null 2>&1 && ok=0
+  rm -rf "${probe}"
+  return "${ok}"
 }
 
 if ! git_supports_reftable; then
-  log "Upgrading git (need >= 2.45 for reftable support; have $(git --version | awk '{print $3}'))"
+  log "Installing/upgrading git for reftable support (have $(git --version 2>/dev/null | awk '{print $3}' || echo none))"
   sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends software-properties-common
   sudo add-apt-repository -y ppa:git-core/ppa
   sudo apt-get update -qq
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade git
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git
 fi
-log "git $(git --version | awk '{print $3}')"
+log "git $(git --version | awk '{print $3}') (reftable supported)"
 
 # 2. Ensure mise (task runner + toolchain manager) is installed and on PATH.
 if ! command -v mise >/dev/null 2>&1; then
