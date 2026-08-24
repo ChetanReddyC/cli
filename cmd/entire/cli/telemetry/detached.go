@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/denisbrodbeck/machineid"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/posthog/posthog-go"
 	"github.com/spf13/cobra"
@@ -49,7 +48,7 @@ func BuildEventPayload(cmd *cobra.Command, agent string, isEntireEnabled bool, v
 	}
 
 	// Get machine ID for distinct_id
-	machineID, err := machineid.ProtectedID("entire-cli")
+	machineID, err := telemetryMachineID()
 	if err != nil {
 		return nil
 	}
@@ -192,7 +191,7 @@ func BuildPluginEventPayload(pluginName string, isEntireEnabled bool, version st
 		return nil
 	}
 
-	machineID, err := machineid.ProtectedID("entire-cli")
+	machineID, err := telemetryMachineID()
 	if err != nil {
 		return nil
 	}
@@ -257,7 +256,7 @@ func BuildSkillEventPayload(inv SkillInvocation, isEntireEnabled bool, version s
 		return nil
 	}
 
-	machineID, err := machineid.ProtectedID("entire-cli")
+	machineID, err := telemetryMachineID()
 	if err != nil {
 		return nil
 	}
