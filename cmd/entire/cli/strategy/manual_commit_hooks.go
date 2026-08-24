@@ -700,12 +700,15 @@ func (h *postCommitActionHandler) parentCommitHash() string {
 
 func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 	logCtx := logging.WithComponent(h.ctx, "checkpoint")
-	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime)
+	hasTaskContent := idleWithTaskContent(state, time.Now())
+	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, hasTaskContent)
 
 	logging.Debug(logCtx, "post-commit: HandleCondense decision",
 		slog.String("session_id", state.SessionID),
 		slog.String("phase", string(state.Phase)),
 		slog.Bool("has_new", h.hasNew),
+		slog.Bool("idle_with_task_content", hasTaskContent),
+		slog.Int("task_records", len(state.TaskRecords)),
 		slog.Bool("should_condense", shouldCondense),
 		slog.String("shadow_branch", h.shadowBranchName),
 	)
@@ -728,7 +731,7 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 
 func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.State) error {
 	logCtx := logging.WithComponent(h.ctx, "checkpoint")
-	shouldCondense := len(state.FilesTouched) > 0 && h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime)
+	shouldCondense := len(state.FilesTouched) > 0 && h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, idleWithTaskContent(state, time.Now()))
 
 	logging.Debug(logCtx, "post-commit: HandleCondenseIfFilesTouched decision",
 		slog.String("session_id", state.SessionID),
@@ -756,32 +759,25 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 }
 
 // shouldCondenseWithOverlapCheck returns true if the session should be condensed
-// into this commit. Active sessions with recent interaction condense unless they
-// have no tracked files and another session claims the committed files (read-only
-// gate). Stale ACTIVE and IDLE/ENDED sessions require file overlap evidence
-// between tracked files and committed files.
-func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time) bool {
+// into this commit. Two shapes skip the overlap check: an ACTIVE session with
+// recent interaction, and an IDLE session with a fresh task record. Both are
+// still subject to the read-only gate — a session with no tracked files while
+// another session claims the committed files is somebody else's commit. Every
+// other session (a stale ACTIVE one, an IDLE one with no fresh record, an ENDED
+// one) must show file-overlap evidence between its tracked files and the
+// committed files.
+func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time, hasTaskContent bool) bool {
 	if !h.hasNew {
 		return false
 	}
-	// ACTIVE sessions with recent interaction: skip the overlap check.
-	// PrepareCommitMsg already validated this commit is session-related
-	// (added trailer). The overlap check is only meaningful when we need
-	// heuristic evidence that a commit was related to the session.
-	//
-	// Exception: when another session's tracked files overlap with the
-	// committed files, skip this ACTIVE session if it has no tracked files
-	// itself. This prevents read-only sessions (e.g., codex exec from tools
-	// like summarize) from being condensed when a different session's commit
-	// triggers PostCommit. When no other session claims the committed files,
-	// the ACTIVE session is assumed to own the commit.
-	//
-	// We check LastInteractionTime to avoid condensing stale ACTIVE sessions
-	// (agent killed without Stop hook) into every subsequent commit. A stale
-	// session has no recent interaction and falls through to the overlap check.
-	if isActive && isRecentInteraction(lastInteraction) {
+	// PrepareCommitMsg already vetted the trailer for these two shapes, and an
+	// in-flight record has no files yet, so overlap is unsatisfiable for it.
+	// LastInteractionTime keeps a stale ACTIVE session (agent killed without a
+	// Stop hook) from condensing into every subsequent commit.
+	if (isActive && isRecentInteraction(lastInteraction)) || hasTaskContent {
 		if h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 {
-			logging.Debug(h.ctx, "post-commit: skipping read-only ACTIVE session (no tracked files, other sessions claim committed files)",
+			logging.Debug(logging.WithComponent(h.ctx, "checkpoint"), "post-commit: skipping read-only session (no tracked files, other sessions claim committed files)",
+				slog.Bool("is_active", isActive),
 				slog.Int("sessions_with_committed_files", h.sessionsWithCommittedFiles),
 			)
 			return false
@@ -862,6 +858,34 @@ const activeSessionInteractionThreshold = 24 * time.Hour
 // activeSessionInteractionThreshold of now.
 func isRecentInteraction(lastInteraction *time.Time) bool {
 	return lastInteraction != nil && time.Since(*lastInteraction) < activeSessionInteractionThreshold
+}
+
+// idleWithTaskContent reports whether state is an IDLE session with a
+// recently-started task record — in flight OR completed-unmaterialized (the
+// HasTaskContent shapes) — the second shape trusted to link and condense
+// commits without overlap evidence. ENDED is excluded because an ENDED
+// session's records belong to its own final condensation, not to this commit.
+// Bounded per record's StartedAt: records persist until condensation
+// materializes them, so a stale (>24h) record must not make every later no-TTY
+// commit a trailer candidate forever. 24h matches
+// activeSessionInteractionThreshold's generosity.
+//
+// Shared by tryAgentCommitFastPath's eligibility check,
+// filterSessionsWithNewContent's trailer gate, and
+// shouldCondenseWithOverlapCheck's overlap-check bypass so the trigger and
+// the condensation trust can never drift apart into two different rules.
+func idleWithTaskContent(state *SessionState, now time.Time) bool {
+	if state.Phase != session.PhaseIdle {
+		return false
+	}
+	for _, task := range state.TaskRecords {
+		// StartedAt, not CompletedAt: the bound must cap how long an in-flight
+		// record confers trust, and an in-flight record has no CompletedAt.
+		if now.Sub(task.StartedAt) < activeSessionInteractionThreshold {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *postCommitActionHandler) HandleDiscardIfNoFiles(state *session.State) error {
@@ -1556,8 +1580,13 @@ func truncateHash(h string) string {
 	return h
 }
 
-// filterSessionsWithNewContent returns sessions that have new transcript content
-// beyond what was already condensed.
+// filterSessionsWithNewContent returns the sessions this commit may claim a
+// trailer for: those with new content beyond what was already condensed, minus
+// those whose only new content is a task record too stale (or in the wrong
+// phase) for idleWithTaskContent. Such a record still condenses — PostCommit
+// reaches it through sessionHasNewContent, so its transcript-so-far is never
+// stranded — but it must not mint an Entire-Checkpoint the commit's own
+// condensation then declines to write.
 // Computes the staged files list once and reuses it across all sessions to avoid
 // redundant `git diff --cached` calls (previously called up to 3 times per session).
 func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context, repo *git.Repository, sessions []*SessionState) []*SessionState {
@@ -1598,13 +1627,38 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 				slog.String("phase", string(state.Phase)),
 				slog.Int("files_touched", len(state.FilesTouched)),
 			)
+			continue
 		}
-		if hasNew {
-			result = append(result, state)
+		if s.staleRecordIsOnlyContent(ctx, repo, state, stagedFiles) {
+			logging.Debug(logCtx, "filterSessionsWithNewContent: session's only content is a stale task record, not stamping a trailer",
+				slog.String("session_id", state.SessionID),
+				slog.String("phase", string(state.Phase)),
+				slog.Int("task_records", len(state.TaskRecords)),
+			)
+			continue
 		}
+		result = append(result, state)
 	}
 
 	return result
+}
+
+// staleRecordIsOnlyContent reports whether the sole reason state has new
+// content is a task record idleWithTaskContent declines. The re-check runs
+// against a copy with the records removed, so a session that also grew a
+// transcript, tracked files, or steps is never excluded; it is reached only for
+// the rare record-bearing session that already failed the freshness bound, so
+// the common path pays nothing. Errors fail open toward stamping.
+func (s *ManualCommitStrategy) staleRecordIsOnlyContent(ctx context.Context, repo *git.Repository, state *SessionState, stagedFiles []string) bool {
+	if !state.HasTaskContent() ||
+		(state.Phase.IsActive() && isRecentInteraction(state.LastInteractionTime)) ||
+		idleWithTaskContent(state, time.Now()) {
+		return false
+	}
+	withoutRecords := *state
+	withoutRecords.TaskRecords = nil
+	hasOther, err := s.sessionHasNewContent(ctx, repo, &withoutRecords, contentCheckOpts{stagedFiles: stagedFiles})
+	return err == nil && !hasOther
 }
 
 // contentCheckOpts holds pre-computed values for sessionHasNewContent to avoid
@@ -2087,12 +2141,16 @@ func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, se
 // Returns true if the fast path was taken (trailer added or attempt made),
 // false if the caller should continue with normal content detection.
 //
-// The fast path activates when an ACTIVE session exists and either:
+// The fast path activates when an eligible session exists and either:
 //   - No TTY is available (agent subprocess, CI), or
 //   - commit_linking="always" (user opted into auto-linking — needed because
 //     some agents like Gemini subagents commit mid-turn from processes that
 //     have /dev/tty but can't respond to prompts, and content detection fails
 //     since the shadow branch doesn't exist yet).
+//
+// A session is eligible when it is ACTIVE, or IDLE with a fresh task record
+// (a background subagent committing between the parent's turns; the widened
+// no-TTY trust window is an accepted trade-off — see PR #2034).
 func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commitMsgFile string, sessions []*SessionState, source string) bool {
 	noTTY := !interactive.CanPromptInteractively()
 	skipContentDetection := noTTY
@@ -2105,13 +2163,17 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		return false
 	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
-	activeSessions := 0
-	emptyActiveSessions := 0
+	eligibleSessions := 0
+	emptyEligibleSessions := 0
+	now := time.Now()
 	for _, state := range sessions {
-		if !state.Phase.IsActive() {
+		// ACTIVE, or IDLE with a fresh task record whose content the commit's
+		// own condensation materializes (see idleWithTaskContent).
+		eligible := state.Phase.IsActive() || idleWithTaskContent(state, now)
+		if !eligible {
 			continue
 		}
-		activeSessions++
+		eligibleSessions++
 		// Skip sessions that have no condensable content: no transcript path,
 		// no tracked files, no SaveStep checkpoints, and no task records. These
 		// would produce a Skipped result in CondenseSession, leaving the
@@ -2120,7 +2182,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		// (which checks extracted data, not raw state). Keep aligned.
 		if state.TranscriptPath == "" && len(state.FilesTouched) == 0 &&
 			state.StepCount == 0 && !state.HasTaskContent() {
-			emptyActiveSessions++
+			emptyEligibleSessions++
 			logging.Debug(logCtx, "prepare-commit-msg: fast path skipping empty session",
 				slog.String("session_id", state.SessionID),
 				slog.String("agent_type", string(state.AgentType)),
@@ -2130,37 +2192,39 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		_ = s.addTrailerForAgentCommit(logCtx, commitMsgFile, state, source) //nolint:errcheck // always returns nil; kept for signature stability
 		return true
 	}
-	// Log why fast path didn't fire — collect session phases for diagnostics.
+	// Log why fast path didn't fire — task_records spans ALL sessions so
+	// "records present but ineligible" is distinguishable from "no records".
 	phases := make([]string, 0, len(sessions))
+	totalTaskRecords := 0
 	for _, state := range sessions {
 		phases = append(phases, string(state.Phase))
+		totalTaskRecords += len(state.TaskRecords)
 	}
-	message := "prepare-commit-msg: fast path found no ACTIVE sessions"
-	if activeSessions > 0 && emptyActiveSessions == activeSessions {
-		message = "prepare-commit-msg: fast path skipped all ACTIVE sessions as empty"
+	message := "prepare-commit-msg: fast path found no ACTIVE or idle-with-task-record sessions"
+	if eligibleSessions > 0 && emptyEligibleSessions == eligibleSessions {
+		message = "prepare-commit-msg: fast path skipped all eligible sessions as empty"
 	}
 	logging.Debug(logCtx, message,
 		slog.Bool("no_tty", noTTY),
 		slog.Int("sessions", len(sessions)),
-		slog.Int("active_sessions", activeSessions),
-		slog.Int("empty_active_sessions", emptyActiveSessions),
+		slog.Int("eligible_sessions", eligibleSessions),
+		slog.Int("empty_eligible_sessions", emptyEligibleSessions),
+		slog.Int("task_records", totalTaskRecords),
 		slog.Any("session_phases", phases),
 	)
 	return false
 }
 
-// addTrailerForAgentCommit handles the fast path when an agent is committing
-// (ACTIVE session + no TTY). It resolves a checkpoint ID and adds the trailer
-// directly, bypassing content detection and interactive prompts.
+// addTrailerForAgentCommit handles the fast path for an eligible agent session.
+// The caller has already gated on no TTY or commit_linking="always" and selected
+// an ACTIVE session or an IDLE session with a fresh task record.
 //
-// The ID is resolved from this one ACTIVE session, deliberately NOT from every
-// session in the worktree the way PrepareCommitMsg's slow path does. Widening it
-// would let a stale reservation held by some other, already-ended session become
-// this commit's checkpoint ID, merging a live session's work into a checkpoint
-// reserved for an unrelated transcript range. The reserved session loses nothing
-// by being left out: ENDED + GitCommit carries ActionCondenseIfFilesTouched, so
-// PostCommit does not condense a no-files ENDED session under any ID, and
-// `entire doctor` is its retry path.
+// Resolve the checkpoint ID from only that selected session, deliberately not
+// from every session in the worktree as PrepareCommitMsg's slow path does. A
+// stale reservation held by some other, already-ended session must not become
+// this commit's checkpoint ID and merge unrelated transcript ranges. The ended
+// session loses nothing: without touched files PostCommit does not condense it,
+// and `entire doctor` remains its retry path.
 func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error { //nolint:unparam // kept for signature stability
 	cpID, err := checkpointIDForSessions(logCtx, []*SessionState{state})
 	if err != nil {
