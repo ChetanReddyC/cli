@@ -1583,7 +1583,11 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 		return fmt.Errorf("agent %s does not support hooks", name)
 	}
 
-	if !hookAgent.AreHooksInstalled(ctx) {
+	// An agent that could not tell us is not an agent with nothing installed, so
+	// go ahead and ask it to uninstall: this path targets one agent the user
+	// named, so there is no unrelated plugin to avoid poking.
+	installed, err := hookAgent.AreHooksInstalled(ctx)
+	if err == nil && !installed {
 		fmt.Fprintf(w, "%s hooks are not installed.\n", ag.Type())
 		return nil
 	}

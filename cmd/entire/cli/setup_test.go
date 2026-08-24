@@ -1426,7 +1426,7 @@ func (f *fakeBuiltinHookAgent) Type() types.AgentType { return types.AgentType(f
 
 // AreHooksInstalled reports false: these tests are about what happens to a
 // built-in the installed-hooks sweep did not pick up.
-func (f *fakeBuiltinHookAgent) AreHooksInstalled(context.Context) bool { return false }
+func (f *fakeBuiltinHookAgent) AreHooksInstalled(context.Context) (bool, error) { return false, nil }
 
 func (f *fakeBuiltinHookAgent) UninstallHooks(context.Context) error {
 	*f.uninstallCalls++
@@ -2516,7 +2516,8 @@ func checkClaudeCodeHooksInstalled() bool {
 	if !ok {
 		return false
 	}
-	return hookAgent.AreHooksInstalled(context.Background())
+	installed, err := hookAgent.AreHooksInstalled(context.Background())
+	return err == nil && installed
 }
 
 // checkGeminiCLIHooksInstalled checks if Gemini CLI hooks are installed.
@@ -2529,7 +2530,8 @@ func checkGeminiCLIHooksInstalled() bool {
 	if !ok {
 		return false
 	}
-	return hookAgent.AreHooksInstalled(context.Background())
+	installed, err := hookAgent.AreHooksInstalled(context.Background())
+	return err == nil && installed
 }
 
 func TestUninstallDeselectedAgentHooks(t *testing.T) {

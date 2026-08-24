@@ -120,7 +120,7 @@ func TestAgentHookInstallation(t *testing.T) {
 		}
 
 		// Verify hooks are installed
-		if !hookAgent.AreHooksInstalled(context.Background()) {
+		if !hooksInstalledNow(t, hookAgent) {
 			t.Error("AreHooksInstalled() = false after InstallHooks()")
 		}
 
@@ -475,7 +475,7 @@ func testGeminiCLIInstallsAllHooks(t *testing.T) {
 	}
 
 	// Verify hooks are installed
-	if !hookAgent.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, hookAgent) {
 		t.Error("AreHooksInstalled() = false after InstallHooks()")
 	}
 
@@ -855,7 +855,7 @@ func testFactoryAIDroidInstallsAllHooks(t *testing.T) {
 	}
 
 	// Verify hooks are installed
-	if !hookAgent.AreHooksInstalled(ctx) {
+	if !hooksInstalledNow(t, hookAgent) {
 		t.Error("AreHooksInstalled() = false after InstallHooks()")
 	}
 
@@ -1213,7 +1213,7 @@ func TestOpenCodeHookInstallation(t *testing.T) {
 		}
 
 		// Verify hooks are installed
-		if !hookAgent.AreHooksInstalled(context.Background()) {
+		if !hooksInstalledNow(t, hookAgent) {
 			t.Error("AreHooksInstalled() = false after InstallHooks()")
 		}
 
@@ -1376,4 +1376,20 @@ func TestOpenCodeHelperMethods(t *testing.T) {
 			t.Error("IsPreview() = false, want true")
 		}
 	})
+}
+
+// hooksInstalledNow reports whether the agent's hooks are installed, failing the
+// test if it could not tell. Built-in agents read a local config file where
+// absent means absent, so an error here is a bug, not a state to tolerate.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
 }

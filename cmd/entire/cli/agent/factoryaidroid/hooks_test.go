@@ -63,7 +63,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	assertFactoryHookExists(t, settings.Hooks.PreCompact, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-compact"), "PreCompact")
 
 	// Verify AreHooksInstalled returns true
-	if !agent.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, agent) {
 		t.Error("AreHooksInstalled() should return true after install")
 	}
 }
@@ -456,7 +456,7 @@ func TestUninstallHooks(t *testing.T) {
 	}
 
 	// Verify hooks are installed
-	if !agent.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, agent) {
 		t.Error("hooks should be installed before uninstall")
 	}
 
@@ -467,7 +467,7 @@ func TestUninstallHooks(t *testing.T) {
 	}
 
 	// Verify hooks are removed
-	if agent.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, agent) {
 		t.Error("hooks should not be installed after uninstall")
 	}
 }
@@ -720,4 +720,20 @@ func assertFactoryHookExists(t *testing.T, matchers []FactoryHookMatcher, matche
 		}
 	}
 	t.Errorf("%s was not found (matcher=%q, command=%q)", description, matcher, command)
+}
+
+// hooksInstalledNow reports whether the agent's hooks are installed, failing the
+// test if it could not tell. Built-in agents read a local config file where
+// absent means absent, so an error here is a bug, not a state to tolerate.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
 }

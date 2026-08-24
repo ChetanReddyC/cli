@@ -242,7 +242,9 @@ func TestUninstallHooks(t *testing.T) {
 	err = ag.UninstallHooks(context.Background())
 	require.NoError(t, err)
 
-	require.False(t, ag.AreHooksInstalled(context.Background()))
+	installed, hooksErr := ag.AreHooksInstalled(context.Background())
+	require.NoError(t, hooksErr)
+	require.False(t, installed)
 }
 
 func TestUninstallHooks_PreservesUserHookContainingEntireSubstring(t *testing.T) {
@@ -282,7 +284,9 @@ func TestAreHooksInstalled_NoFile(t *testing.T) {
 	setupTestEnv(t)
 
 	ag := &CodexAgent{}
-	require.False(t, ag.AreHooksInstalled(context.Background()))
+	installed, hooksErr := ag.AreHooksInstalled(context.Background())
+	require.NoError(t, hooksErr)
+	require.False(t, installed)
 }
 
 func TestAreHooksInstalled_WithHooks(t *testing.T) {
@@ -292,7 +296,9 @@ func TestAreHooksInstalled_WithHooks(t *testing.T) {
 	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
-	require.True(t, ag.AreHooksInstalled(context.Background()))
+	installed, hooksErr := ag.AreHooksInstalled(context.Background())
+	require.NoError(t, hooksErr)
+	require.True(t, installed)
 }
 
 func TestAreHooksInstalled_PartialHooks(t *testing.T) {
@@ -314,7 +320,9 @@ func TestAreHooksInstalled_PartialHooks(t *testing.T) {
 	}`), 0o600))
 
 	ag := &CodexAgent{}
-	require.False(t, ag.AreHooksInstalled(context.Background()))
+	installed, hooksErr := ag.AreHooksInstalled(context.Background())
+	require.NoError(t, hooksErr)
+	require.False(t, installed)
 }
 
 // TestAreHooksInstalled_PreSessionEndInstall — a user who enabled Codex before
@@ -337,7 +345,9 @@ func TestAreHooksInstalled_PreSessionEndInstall(t *testing.T) {
 	}`), 0o600))
 
 	ag := &CodexAgent{}
-	require.True(t, ag.AreHooksInstalled(context.Background()))
+	installed, hooksErr := ag.AreHooksInstalled(context.Background())
+	require.NoError(t, hooksErr)
+	require.True(t, installed)
 	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, MissingEntireHooks(tempDir))
 }
 

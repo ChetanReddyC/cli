@@ -3,12 +3,14 @@ package cursor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -270,20 +272,31 @@ func (c *CursorAgent) UninstallHooks(ctx context.Context) error {
 }
 
 // AreHooksInstalled checks if Entire hooks are installed.
-func (c *CursorAgent) AreHooksInstalled(ctx context.Context) bool {
+//
+// A missing config file is an answer, not a failure: that file is where the
+// state lives, so its absence means no hooks. Anything that stops us reading the
+// answer — an unreadable file, malformed config — is returned as an error, since
+// "we could not tell" and "there are none" are different things to a caller
+// deciding whether hooks can be left alone.
+func (c *CursorAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		worktreeRoot = "."
 	}
 	hooksPath := filepath.Join(worktreeRoot, ".cursor", HooksFileName)
 	data, err := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		logging.Warn(ctx, "cursor: failed to read hooks file", "path", hooksPath, "err", err)
+		return false, fmt.Errorf("read %s: %w", hooksPath, err)
 	}
 
 	var hooksFile CursorHooksFile
 	if err := json.Unmarshal(data, &hooksFile); err != nil {
-		return false
+		logging.Warn(ctx, "cursor: failed to parse hooks file", "path", hooksPath, "err", err)
+		return false, fmt.Errorf("parse hook config: %w", err)
 	}
 
 	return hasEntireHook(hooksFile.Hooks.SessionStart) ||
@@ -292,7 +305,7 @@ func (c *CursorAgent) AreHooksInstalled(ctx context.Context) bool {
 		hasEntireHook(hooksFile.Hooks.Stop) ||
 		hasEntireHook(hooksFile.Hooks.PreCompact) ||
 		hasEntireHook(hooksFile.Hooks.SubagentStart) ||
-		hasEntireHook(hooksFile.Hooks.SubagentStop)
+		hasEntireHook(hooksFile.Hooks.SubagentStop), nil
 }
 
 // GetSupportedHooks returns the hook types Cursor supports.

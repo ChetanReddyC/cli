@@ -190,7 +190,7 @@ func TestAreHooksInstalled_NotInstalled(t *testing.T) {
 	t.Chdir(tempDir)
 
 	ag := &CursorAgent{}
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("AreHooksInstalled() = true, want false (no hooks.json)")
 	}
 }
@@ -206,7 +206,7 @@ func TestAreHooksInstalled_AfterInstall(t *testing.T) {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
-	if !ag.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, ag) {
 		t.Error("AreHooksInstalled() = false, want true")
 	}
 }
@@ -222,7 +222,7 @@ func TestUninstallHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
-	if !ag.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, ag) {
 		t.Fatal("hooks should be installed before uninstall")
 	}
 
@@ -232,7 +232,7 @@ func TestUninstallHooks(t *testing.T) {
 		t.Fatalf("UninstallHooks() error = %v", err)
 	}
 
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("AreHooksInstalled() = true after uninstall, want false")
 	}
 }
@@ -478,7 +478,7 @@ func TestUninstallHooks_PreservesUnknownFields(t *testing.T) {
 	}
 
 	// Verify Entire hooks were actually removed
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("Entire hooks should be removed after uninstall")
 	}
 }
@@ -585,4 +585,20 @@ func TestCommittedDogfoodHooksIsCurrent(t *testing.T) {
 		t.Chdir(dir)
 		return (&CursorAgent{}).InstallHooks(context.Background(), false)
 	})
+}
+
+// hooksInstalledNow reports whether the agent's hooks are installed, failing the
+// test if it could not tell. Built-in agents read a local config file where
+// absent means absent, so an error here is a bug, not a state to tolerate.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
 }

@@ -102,17 +102,28 @@ func ensureCommandLogging(ctx context.Context) func() {
 
 // GetAgentsWithHooksInstalled returns names of agents that have hooks installed.
 func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
-	var installed []types.AgentName
+	var withHooks []types.AgentName
 	for _, name := range agent.List() {
 		ag, err := agent.Get(name)
 		if err != nil {
 			continue
 		}
-		if hs, ok := agent.AsHookSupport(ag); ok && hs.AreHooksInstalled(ctx) {
-			installed = append(installed, name)
+		hs, ok := agent.AsHookSupport(ag)
+		if !ok {
+			continue
+		}
+		installed, err := hs.AreHooksInstalled(ctx)
+		if err != nil {
+			// The agent logged why with the path; an agent that could not tell us is
+			// not an agent with hooks to list.
+			logging.Debug(ctx, "hooks-installed check failed", "agent", string(name), "error", err.Error())
+			continue
+		}
+		if installed {
+			withHooks = append(withHooks, name)
 		}
 	}
-	return installed
+	return withHooks
 }
 
 // InstalledAgentDisplayNames returns user-facing display names for agents with hooks installed.

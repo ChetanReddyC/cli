@@ -373,7 +373,7 @@ func TestUninstallHooks(t *testing.T) {
 	}
 
 	// Verify hooks are installed
-	if !agent.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, agent) {
 		t.Error("hooks should be installed before uninstall")
 	}
 
@@ -384,7 +384,7 @@ func TestUninstallHooks(t *testing.T) {
 	}
 
 	// Verify hooks are removed
-	if agent.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, agent) {
 		t.Error("hooks should not be installed after uninstall")
 	}
 }
@@ -447,7 +447,7 @@ func TestAreHooksInstalled(t *testing.T) {
 	agent := &GeminiCLIAgent{}
 
 	// Should be false when no settings file
-	if agent.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, agent) {
 		t.Error("AreHooksInstalled() should be false when no settings file")
 	}
 
@@ -458,7 +458,7 @@ func TestAreHooksInstalled(t *testing.T) {
 	}
 
 	// Should be true after installation
-	if !agent.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, agent) {
 		t.Error("AreHooksInstalled() should be true after installation")
 	}
 }
@@ -736,4 +736,20 @@ func TestCommittedDogfoodSettingsIsCurrent(t *testing.T) {
 		t.Chdir(dir)
 		return (&GeminiCLIAgent{}).InstallHooks(context.Background(), false)
 	})
+}
+
+// hooksInstalledNow reports whether the agent's hooks are installed, failing the
+// test if it could not tell. Built-in agents read a local config file where
+// absent means absent, so an error here is a bug, not a state to tolerate.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
 }

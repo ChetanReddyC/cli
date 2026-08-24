@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -221,7 +223,13 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 // a release adds an event — every existing install predates the addition. Drift
 // against today's set is MissingEntireHooks' job, which `entire doctor` reports
 // with the fix (`entire enable`).
-func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
+//
+// A missing config file is an answer, not a failure: that file is where the
+// state lives, so its absence means no hooks. Anything that stops us reading the
+// answer — an unreadable file, malformed config — is returned as an error, since
+// "we could not tell" and "there are none" are different things to a caller
+// deciding whether hooks can be left alone.
+func (c *CodexAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		repoRoot = "."
@@ -229,18 +237,24 @@ func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 
 	hooksPath := filepath.Join(repoRoot, ".codex", HooksFileName)
 	data, err := os.ReadFile(hooksPath) //nolint:gosec // path constructed from repo root
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		logging.Warn(ctx, "codex: failed to read hooks file", "path", hooksPath, "err", err)
+		return false, fmt.Errorf("read %s: %w", hooksPath, err)
 	}
 
 	var topLevel map[string]json.RawMessage
 	if err := json.Unmarshal(data, &topLevel); err != nil {
-		return false
+		logging.Warn(ctx, "codex: failed to parse hooks file", "path", hooksPath, "err", err)
+		return false, fmt.Errorf("parse hook config: %w", err)
 	}
 	var rawHooks map[string]json.RawMessage
 	if hooksRaw, ok := topLevel["hooks"]; ok {
 		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-			return false
+			logging.Warn(ctx, "codex: failed to parse hooks object", "path", hooksPath, "err", err)
+			return false, fmt.Errorf("parse hook config: %w", err)
 		}
 	}
 
@@ -250,13 +264,14 @@ func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 		}
 		var groups []MatcherGroup
 		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
-			return false
+			logging.Warn(ctx, "codex: failed to parse hook event", "path", hooksPath, "event", h.event, "err", err)
+			return false, fmt.Errorf("parse hook config: %w", err)
 		}
 		if !hasEntireHook(groups) {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 // --- Helpers ---
