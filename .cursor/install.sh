@@ -67,4 +67,9 @@ log "Building the entire CLI"
 go build -o entire ./cmd/entire/
 ./entire version
 
+# 6. Put `entire` on PATH and wire Entire's git hooks so this repo's committed
+#    hooks fire while an agent works here (Entire dogfoods itself on this repo).
+log "Wiring entire onto PATH and installing git hooks"
+bash "${REPO_ROOT}/.cursor/wire-entire-hooks.sh" || true
+
 log "Environment ready."
