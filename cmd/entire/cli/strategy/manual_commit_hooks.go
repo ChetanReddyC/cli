@@ -2816,13 +2816,13 @@ func precomputeTranscriptBlobsForFinalize(ctx context.Context, repo *git.Reposit
 }
 
 // redactFinalizedTranscript redacts the finalized full-session transcript,
-// reusing the prefix redacted for the previous checkpoint and redacting only what
-// was appended. Before that reuse this path re-redacted the whole session on every
-// Stop, which on a 65MB Codex rollout exceeded Codex's 30s hook timeout outright
-// and left the finalize rewrite incomplete.
-//
-// CommittedScope matches condensation deliberately: both redact sanitized,
-// image-externalized bytes for the same session, so they warm each other's prefix.
+// delegating to redactSessionTranscript so finalize and post-commit condensation
+// share one pipeline. That sharing is load-bearing, not tidiness: both store the
+// same sanitized, image-externalized bytes for the same session under the same
+// prefix-cache key, so a divergence between them would splice a prefix produced
+// by one pipeline onto a suffix produced by the other. Going through the same
+// function -- including its injectable redactSessionJSONLBytes seam -- makes that
+// impossible rather than merely unlikely.
 //
 // ok=false means abandon this finalize pass, and is returned only for a degraded
 // scanner -- the caller must keep TurnCheckpointIDs so the next hook process
@@ -2832,30 +2832,24 @@ func precomputeTranscriptBlobsForFinalize(ctx context.Context, repo *git.Reposit
 func redactFinalizedTranscript(
 	logCtx context.Context,
 	repo *git.Repository,
-	state *SessionState,
+	sessionID string,
 	fullTranscript []byte,
 ) (transcript redact.RedactedBytes, ok bool) {
-	redactCtx, redactSpan := perf.Start(logCtx, "redact_transcript")
-	redacted, err := checkpoint.RedactTranscriptIncremental(
-		redactCtx, repo, checkpoint.CommittedScope, state.SessionID, fullTranscript,
-		func(_ context.Context, b []byte) (redact.RedactedBytes, error) {
-			return redact.JSONLBytes(b)
-		})
-	redactSpan.End()
+	redacted, _, err := redactSessionTranscript(logCtx, repo, sessionID, fullTranscript)
 	if err == nil {
 		return redacted, true
 	}
 
 	if errors.Is(err, redact.ErrScannerDegraded) {
 		logging.Warn(logCtx, "finalize: transcript redaction degraded, skipping",
-			slog.String("session_id", state.SessionID),
+			slog.String("session_id", sessionID),
 			slog.String("error", err.Error()),
 		)
 		return redact.RedactedBytes{}, false
 	}
 
 	logging.Warn(logCtx, "finalize: transcript redaction failed, dropping transcript",
-		slog.String("session_id", state.SessionID),
+		slog.String("session_id", sessionID),
 		slog.String("error", err.Error()),
 	)
 	return redact.RedactedBytes{}, true
@@ -3008,7 +3002,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// prior condensation stored rather than letting an empty set clear them.
 	_, sidecarCapable := agent.AsSidecarImageProvider(ag)
 
-	redactedTranscript, redactOK := redactFinalizedTranscript(logCtx, repo, state, fullTranscript)
+	redactedTranscript, redactOK := redactFinalizedTranscript(logCtx, repo, state.SessionID, fullTranscript)
 	if !redactOK {
 		return 1
 	}

@@ -13,7 +13,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/require"
@@ -73,7 +72,7 @@ func writeAndRedact(t *testing.T, repo *git.Repository, cache *redactCache, dir,
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 	hash, _, err := createRedactedBlobFromFile(context.Background(), repo, cache, path, name)
 	require.NoError(t, err)
-	got, err := readBlobBytes(repo, hash)
+	got, err := readBlobBytes(repo, hash, 0)
 	require.NoError(t, err)
 	return got
 }
@@ -203,17 +202,23 @@ func TestIncrementalRedaction_SkippedUnlessLargeSessionTranscript(t *testing.T) 
 		"chunked transcript parts must not qualify")
 	require.True(t, incrementalRedactionCandidate([]byte(big), ".entire/metadata/s1/full.jsonl"))
 
+	// A nil cache disables reuse but must still return a correct full redaction:
+	// the whole-content fallback lives inside redactIncrementally so both callers
+	// cannot spell it differently.
 	noCacheResult, noCacheErr := redactIncrementally(ctx, repo, nil, []byte(big), "full.jsonl", testRedactor)
 	require.NoError(t, noCacheErr)
-	require.Nil(t, noCacheResult.Redacted,
-		"a nil cache must disable the incremental path")
+	require.False(t, noCacheResult.StorePrefix, "a nil cache must not record a prefix")
+	want, wantErr := RedactBlobBytes(ctx, []byte(big), "full.jsonl", false)
+	require.NoError(t, wantErr)
+	require.Equal(t, string(want), string(noCacheResult.Redacted),
+		"a nil cache must still redact the whole content")
 }
 
-// testRedactor is the production redactor for this file's direct
-// redactIncrementally calls: the same pipeline RedactBlobBytes uses for a
-// .jsonl blob, so cached prefixes and freshly redacted suffixes agree.
-func testRedactor(_ context.Context, b []byte) ([]byte, error) {
-	out, err := redact.JSONLBytes(b)
+// testRedactor adapts jsonlRedactor to redactIncrementally's []byte signature.
+// Same pipeline RedactBlobBytes uses for a .jsonl blob, so cached prefixes and
+// freshly redacted suffixes agree.
+func testRedactor(ctx context.Context, b []byte) ([]byte, error) {
+	out, err := jsonlRedactor(ctx, b)
 	if err != nil {
 		return nil, err
 	}

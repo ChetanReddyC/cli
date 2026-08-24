@@ -2,9 +2,10 @@ package checkpoint
 
 import (
 	"context"
-	"strings"
+	"os/exec"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/redact"
 
 	"github.com/stretchr/testify/require"
@@ -15,11 +16,33 @@ func jsonlRedactor(_ context.Context, b []byte) (redact.RedactedBytes, error) {
 	return redact.JSONLBytes(b)
 }
 
-// TestRedactTranscriptIncremental_MatchesFullRedaction is the correctness core
+// countingRedactor is jsonlRedactor plus a tally of the bytes it was handed,
+// which is how these tests tell reuse from a silent full redaction.
+func countingRedactor(saw *int) func(context.Context, []byte) (redact.RedactedBytes, error) {
+	return func(ctx context.Context, b []byte) (redact.RedactedBytes, error) {
+		*saw += len(b)
+		return jsonlRedactor(ctx, b)
+	}
+}
+
+// failingRedactor stands in for a degraded scanner.
+func failingRedactor(context.Context, []byte) (redact.RedactedBytes, error) {
+	return redact.RedactedBytes{}, redact.ErrScannerDegraded
+}
+
+// requireMatchesFullRedaction pins the property the whole cache rests on.
+func requireMatchesFullRedaction(t *testing.T, content string, got redact.RedactedBytes, msgAndArgs ...any) {
+	t.Helper()
+	want, err := redact.JSONLBytes([]byte(content))
+	require.NoError(t, err)
+	require.Equal(t, string(want.Bytes()), string(got.Bytes()), msgAndArgs...)
+}
+
+// TestRedactTranscriptCached_MatchesFullRedaction is the correctness core
 // for the in-memory paths (condensation and the Stop finalize rewrite): growing a
 // transcript across checkpoints must produce exactly what one whole-transcript
 // pass produces.
-func TestRedactTranscriptIncremental_MatchesFullRedaction(t *testing.T) {
+func TestRedactTranscriptCached_MatchesFullRedaction(t *testing.T) {
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 	const session = "sess-abc"
@@ -30,27 +53,25 @@ func TestRedactTranscriptIncremental_MatchesFullRedaction(t *testing.T) {
 		if round > 0 {
 			content += transcriptLines(round*10_000, 50)
 		}
-		got, err := RedactTranscriptIncremental(
-			ctx, repo, CommittedScope, session, []byte(content), jsonlRedactor)
+		got, err := RedactTranscriptCached(
+			ctx, repo, session, []byte(content), jsonlRedactor)
 		require.NoError(t, err)
 
-		want, wantErr := redact.JSONLBytes([]byte(content))
-		require.NoError(t, wantErr)
-		require.Equal(t, string(want.Bytes()), string(got.Bytes()),
+		requireMatchesFullRedaction(t, content, got,
 			"round %d: incremental output must equal a whole-transcript redaction", round)
 	}
 }
 
-// TestRedactTranscriptIncremental_ActuallyReusesPrefix proves the fast path is
+// TestRedactTranscriptCached_ActuallyReusesPrefix proves the fast path is
 // engaged rather than silently falling back — otherwise the test above would
 // pass just as happily with the cache doing nothing.
-func TestRedactTranscriptIncremental_ActuallyReusesPrefix(t *testing.T) {
+func TestRedactTranscriptCached_ActuallyReusesPrefix(t *testing.T) {
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 	const session = "sess-reuse"
 
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
-	_, err := RedactTranscriptIncremental(ctx, repo, CommittedScope, session, []byte(content), jsonlRedactor)
+	_, err := RedactTranscriptCached(ctx, repo, session, []byte(content), jsonlRedactor)
 	require.NoError(t, err)
 
 	// Second round: count the bytes the redactor is handed. With reuse it sees
@@ -59,78 +80,40 @@ func TestRedactTranscriptIncremental_ActuallyReusesPrefix(t *testing.T) {
 	grown := content + appended
 
 	var sawBytes int
-	counting := func(_ context.Context, b []byte) (redact.RedactedBytes, error) {
-		sawBytes += len(b)
-		return redact.JSONLBytes(b)
-	}
-	got, err := RedactTranscriptIncremental(ctx, repo, CommittedScope, session, []byte(grown), counting)
+	counting := countingRedactor(&sawBytes)
+	got, err := RedactTranscriptCached(ctx, repo, session, []byte(grown), counting)
 	require.NoError(t, err)
 
 	require.Equal(t, len(appended), sawBytes,
 		"only the appended suffix should be redacted, not the whole %d-byte transcript", len(grown))
 
-	want, wantErr := redact.JSONLBytes([]byte(grown))
-	require.NoError(t, wantErr)
-	require.Equal(t, string(want.Bytes()), string(got.Bytes()))
+	requireMatchesFullRedaction(t, grown, got)
 }
 
-// TestRedactTranscriptIncremental_ScopesAreIsolated pins the namespacing. The
-// shadow write stores sanitized bytes while condensation stores sanitized and
-// image-externalized ones, so a prefix cached under one scope must never be
-// offered to the other.
-func TestRedactTranscriptIncremental_ScopesAreIsolated(t *testing.T) {
-	repo, _ := newTestRepoForCache(t)
-	ctx := context.Background()
-	const session = "sess-scope"
-
-	content := padPastCacheThreshold(t, transcriptLines(0, 100))
-	_, err := RedactTranscriptIncremental(ctx, repo, CommittedScope, session, []byte(content), jsonlRedactor)
-	require.NoError(t, err)
-
-	// A different scope, same session and content: must redact in full.
-	grown := content + transcriptLines(70_000, 30)
-	var sawBytes int
-	counting := func(_ context.Context, b []byte) (redact.RedactedBytes, error) {
-		sawBytes += len(b)
-		return redact.JSONLBytes(b)
-	}
-	_, err = RedactTranscriptIncremental(ctx, repo, ShadowScope, session, []byte(grown), counting)
-	require.NoError(t, err)
-	require.Equal(t, len(grown), sawBytes,
-		"a prefix cached under CommittedScope must not be reused for ShadowScope")
-
-	require.NotEqual(t, transcriptCacheKey(CommittedScope, session), transcriptCacheKey(ShadowScope, session))
-}
-
-// TestRedactTranscriptIncremental_SessionsAreIsolated: two concurrent sessions in
+// TestRedactTranscriptCached_SessionsAreIsolated: two concurrent sessions in
 // one worktree must not share a prefix.
-func TestRedactTranscriptIncremental_SessionsAreIsolated(t *testing.T) {
+func TestRedactTranscriptCached_SessionsAreIsolated(t *testing.T) {
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 
 	contentA := padPastCacheThreshold(t, transcriptLines(0, 100))
-	_, err := RedactTranscriptIncremental(ctx, repo, CommittedScope, "sess-A", []byte(contentA), jsonlRedactor)
+	_, err := RedactTranscriptCached(ctx, repo, "sess-A", []byte(contentA), jsonlRedactor)
 	require.NoError(t, err)
 
 	contentB := padPastCacheThreshold(t, transcriptLines(500_000, 100))
 	var sawBytes int
-	counting := func(_ context.Context, b []byte) (redact.RedactedBytes, error) {
-		sawBytes += len(b)
-		return redact.JSONLBytes(b)
-	}
-	got, err := RedactTranscriptIncremental(ctx, repo, CommittedScope, "sess-B", []byte(contentB), counting)
+	counting := countingRedactor(&sawBytes)
+	got, err := RedactTranscriptCached(ctx, repo, "sess-B", []byte(contentB), counting)
 	require.NoError(t, err)
 	require.Equal(t, len(contentB), sawBytes, "session B must not reuse session A's prefix")
 
-	want, wantErr := redact.JSONLBytes([]byte(contentB))
-	require.NoError(t, wantErr)
-	require.Equal(t, string(want.Bytes()), string(got.Bytes()))
+	requireMatchesFullRedaction(t, contentB, got)
 }
 
-// TestRedactTranscriptIncremental_OptsOutWithoutRepoOrSession covers the callers
+// TestRedactTranscriptCached_OptsOutWithoutRepoOrSession covers the callers
 // that deliberately decline caching (the per-subagent transcript passes a nil
 // repo). Output must still be correct.
-func TestRedactTranscriptIncremental_OptsOutWithoutRepoOrSession(t *testing.T) {
+func TestRedactTranscriptCached_OptsOutWithoutRepoOrSession(t *testing.T) {
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
@@ -138,75 +121,93 @@ func TestRedactTranscriptIncremental_OptsOutWithoutRepoOrSession(t *testing.T) {
 	require.NoError(t, wantErr)
 
 	t.Run("nil repo", func(t *testing.T) {
-		got, err := RedactTranscriptIncremental(ctx, nil, CommittedScope, "s1", []byte(content), jsonlRedactor)
+		got, err := RedactTranscriptCached(ctx, nil, "s1", []byte(content), jsonlRedactor)
 		require.NoError(t, err)
 		require.Equal(t, string(want.Bytes()), string(got.Bytes()))
 	})
 
 	t.Run("empty session", func(t *testing.T) {
-		got, err := RedactTranscriptIncremental(ctx, repo, CommittedScope, "", []byte(content), jsonlRedactor)
+		got, err := RedactTranscriptCached(ctx, repo, "", []byte(content), jsonlRedactor)
 		require.NoError(t, err)
 		require.Equal(t, string(want.Bytes()), string(got.Bytes()))
 	})
 }
 
-// TestRedactTranscriptIncremental_RedactorErrorPropagates: a degraded scanner
+// TestRedactTranscriptCached_RedactorErrorPropagates: a degraded scanner
 // must fail the write rather than store under-scanned content.
-func TestRedactTranscriptIncremental_RedactorErrorPropagates(t *testing.T) {
+func TestRedactTranscriptCached_RedactorErrorPropagates(t *testing.T) {
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
 
-	failing := func(context.Context, []byte) (redact.RedactedBytes, error) {
-		return redact.RedactedBytes{}, redact.ErrScannerDegraded
-	}
-	_, err := RedactTranscriptIncremental(ctx, repo, CommittedScope, "sess-err", []byte(content), failing)
+	_, err := RedactTranscriptCached(ctx, repo, "sess-err", []byte(content), failingRedactor)
 	require.ErrorIs(t, err, redact.ErrScannerDegraded)
 }
 
-// TestRedactTranscriptIncremental_SuffixErrorPropagates is the same guarantee on
+// TestRedactTranscriptCached_SuffixErrorPropagates is the same guarantee on
 // the reuse path: a failure redacting the appended lines must not silently ship
 // the reused prefix alone.
-func TestRedactTranscriptIncremental_SuffixErrorPropagates(t *testing.T) {
+func TestRedactTranscriptCached_SuffixErrorPropagates(t *testing.T) {
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 	const session = "sess-suffix"
 
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
-	_, err := RedactTranscriptIncremental(ctx, repo, CommittedScope, session, []byte(content), jsonlRedactor)
+	_, err := RedactTranscriptCached(ctx, repo, session, []byte(content), jsonlRedactor)
 	require.NoError(t, err)
 
 	grown := content + transcriptLines(80_000, 10)
-	failing := func(context.Context, []byte) (redact.RedactedBytes, error) {
-		return redact.RedactedBytes{}, redact.ErrScannerDegraded
-	}
-	_, err = RedactTranscriptIncremental(ctx, repo, CommittedScope, session, []byte(grown), failing)
+	_, err = RedactTranscriptCached(ctx, repo, session, []byte(grown), failingRedactor)
 	require.ErrorIs(t, err, redact.ErrScannerDegraded)
 }
 
-// TestRedactTranscriptIncremental_SingleJSONValueNotSpliced guards the OpenCode
+// TestRedactTranscriptCached_SingleJSONValueNotSpliced guards the OpenCode
 // shape: a single JSON object has no line structure, so splicing it would drop
 // out of field-aware redaction into raw entropy detection over a fragment.
-func TestRedactTranscriptIncremental_SingleJSONValueNotSpliced(t *testing.T) {
+func TestRedactTranscriptCached_SingleJSONValueNotSpliced(t *testing.T) {
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 
-	var b strings.Builder
-	b.WriteString(`{"info":{"id":"x"},"messages":[`)
-	for i := 0; b.Len() < redactCacheMinBytes+1024; i++ {
-		if i > 0 {
-			b.WriteString(",")
-		}
-		b.WriteString(`{"text":"token sk-live-abcdefghijklmnopqrstuv"}`)
-	}
-	b.WriteString("]}\n")
-	content := b.String()
+	content := openCodeExport(t, redactCacheMinBytes+1024)
 
-	_, err := RedactTranscriptIncremental(ctx, repo, CommittedScope, "sess-oc", []byte(content), jsonlRedactor)
+	_, err := RedactTranscriptCached(ctx, repo, "sess-oc", []byte(content), jsonlRedactor)
 	require.NoError(t, err)
 
 	cache := repoRedactCache(ctx, repo)
 	require.NotNil(t, cache)
-	require.Nil(t, cache.load(transcriptCacheKey(CommittedScope, "sess-oc")),
+	require.Nil(t, cache.load(transcriptCacheKey("sess-oc")),
 		"a single JSON value must never be cached for splicing")
+}
+
+// TestRedactTranscriptCached_PrefixSurvivesGC pins why the in-memory prefix is a
+// file rather than a git blob. A whole-transcript blob matches no chunk the store
+// writes (it chunks at agent.MaxChunkSize), so it stays unreachable and `git gc`
+// prunes it -- silently reverting every later checkpoint to a full redaction.
+func TestRedactTranscriptCached_PrefixSurvivesGC(t *testing.T) {
+	repo, dir := newTestRepoForCache(t)
+	ctx := context.Background()
+	const session = "sess-gc"
+
+	content := padPastCacheThreshold(t, transcriptLines(0, 100))
+	_, err := RedactTranscriptCached(ctx, repo, session, []byte(content), jsonlRedactor)
+	require.NoError(t, err)
+
+	gc := exec.CommandContext(ctx, "git", "gc", "--prune=all", "--quiet")
+	gc.Dir = dir
+	out, gcErr := gc.CombinedOutput()
+	require.NoError(t, gcErr, "git gc failed: %s", out)
+
+	// Reopen: gc rewrote the object store underneath the cached handle.
+	reopened, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+
+	grown := content + transcriptLines(90_000, 40)
+	var sawBytes int
+	counting := countingRedactor(&sawBytes)
+	got, err := RedactTranscriptCached(ctx, reopened, session, []byte(grown), counting)
+	require.NoError(t, err)
+
+	require.Equal(t, len(grown)-len(content), sawBytes,
+		"the prefix must still be reusable after git gc pruned unreachable objects")
+	requireMatchesFullRedaction(t, grown, got)
 }

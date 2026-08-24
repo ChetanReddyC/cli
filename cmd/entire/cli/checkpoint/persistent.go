@@ -2551,12 +2551,6 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, cache
 	if err != nil {
 		return plumbing.ZeroHash, 0, err
 	}
-	if result.Redacted == nil {
-		result.Redacted, err = RedactBlobBytes(ctx, content, treePath, false)
-		if err != nil {
-			return plumbing.ZeroHash, 0, err
-		}
-	}
 
 	hash, err := CreateBlobFromContent(repo, result.Redacted)
 	if err != nil {
