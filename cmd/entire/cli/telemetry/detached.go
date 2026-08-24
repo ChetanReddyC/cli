@@ -332,11 +332,14 @@ func TrackSkillInvocationsDetached(invocations []SkillInvocation, isEntireEnable
 // paths, prompts, or transcript content.
 //
 // A commit is part of the event's identity, not an incidental trigger, which is
-// why it is named for one. Every property is commit-scoped: FilesCommitted
-// counts that commit's files, and PriorAIHistory asks whether commits *before*
-// this one already touched them. The condensation paths that run without a
-// commit (doctor repair, session-end leftovers) deliberately emit nothing —
-// see newCommitCondensedSignal for why folding them in would corrupt the
+// why it is named for one. FilesCommitted and PriorAIHistory are commit-scoped:
+// the former counts that commit's files, the latter asks whether commits
+// *before* this one already touched them. UsedSearch is deliberately
+// SESSION-scoped — the metric asks whether the session EVER consulted search
+// before landing this commit, so one search early in a session rightly covers
+// its later commits. The condensation paths that run without a commit (doctor
+// repair, session-end leftovers) deliberately emit nothing — see
+// newCommitCondensedSignal for why folding them in would corrupt the
 // denominator rather than complete it.
 type CommitCondensedSignal struct {
 	// Agent is the session-owning agent's registry key (e.g. "claude-code"),

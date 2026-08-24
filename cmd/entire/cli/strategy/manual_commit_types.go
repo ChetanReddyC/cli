@@ -88,5 +88,9 @@ type ExtractedSessionData struct {
 	// durable ledger, and the per-hook cost of carrying it, is
 	// session.SessionState.SkillEvents; see its size note.
 	SkillEvents []agent.SkillEvent
-	SearchProbe searchProbe // `entire search` usage; see detectSearchUsage
+	// SearchProbe is `entire search` usage; see detectSearchUsage. Not set by
+	// the extractors: CondenseSession assigns it exactly once, gated on
+	// condenseOpts.searchProbeAllowed, so every result path carries the same
+	// value and ungated paths never pay the scan.
+	SearchProbe searchProbe
 }

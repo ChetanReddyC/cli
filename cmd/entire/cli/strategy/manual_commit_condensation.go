@@ -116,6 +116,16 @@ type condenseOpts struct {
 	// and updateCombinedAttributionForCheckpoint writing attribution under the
 	// same non-existent ID.
 	reconcileInterrupted bool
+
+	// searchProbeAllowed gates the telemetry-only search-usage transcript scan
+	// (detectSearchUsage). nil or false means don't scan: the probe then stays
+	// its zero value, which the payload layer refuses to present as a
+	// measurement (searchProbe.measured). Only PostCommit — the sole path that
+	// emits the commit-condensed signal — passes a gate; the doctor and
+	// session-end condensation paths never scan because nothing would read the
+	// result. The gate is memoized per commit by commitCondensedEmitter, so the
+	// settings load behind it runs at most once per PostCommit.
+	searchProbeAllowed func() bool
 }
 
 // redactSessionJSONLBytes runs the regex-only redaction pipeline (the
@@ -584,6 +594,18 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return skipped, nil
 	}
 
+	// Telemetry-only search probe, computed exactly once for every result this
+	// function can return (the recovery result below included) so no
+	// construction site can ship the zero value by omission — the fabricated
+	// negative searchProbe.measured exists to catch. Gated: the scan is a
+	// full-transcript pass, and only the PostCommit path, with telemetry
+	// enabled, has a reader for it. detectSearchUsage maps a nil agent or
+	// empty transcript to unsupported, which is the honest answer for the
+	// no-transcript extraction branch.
+	if o.searchProbeAllowed != nil && o.searchProbeAllowed() {
+		sessionData.SearchProbe = detectSearchUsage(ag, sessionData.Transcript)
+	}
+
 	// Capture agent sidecar images (e.g. Cursor's SQLite store) after the skip
 	// check, so the sqlite3 shell-out is avoided when the checkpoint is discarded.
 	extractedAssets = append(extractedAssets, sidecarSessionImages(ctx, logCtx, ag, state)...)
@@ -951,11 +973,6 @@ func (s *ManualCommitStrategy) extractOrCreateSessionData(ctx context.Context, r
 		)
 		return &ExtractedSessionData{
 			FilesTouched: state.FilesTouched,
-			// There is no transcript to look at, and this session can still
-			// condense on FilesTouched or task records alone, so the probe must
-			// say so explicitly. Leaving the zero value here shipped
-			// used_search=false with a blank source.
-			SearchProbe: searchProbe{source: searchSourceUnsupported},
 		}, nil
 	}
 }
@@ -1453,11 +1470,6 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
-	// Unconditional: detectSearchUsage maps an empty transcript to unsupported,
-	// which is the honest answer. Gating it on len(Transcript) > 0 instead left
-	// the zero value ("" source) on every no-transcript condensation, which the
-	// payload then read as a measured false.
-	data.SearchProbe = detectSearchUsage(ag, data.Transcript)
 
 	return data, nil
 }
@@ -1504,11 +1516,6 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
-	// Unconditional: detectSearchUsage maps an empty transcript to unsupported,
-	// which is the honest answer. Gating it on len(Transcript) > 0 instead left
-	// the zero value ("" source) on every no-transcript condensation, which the
-	// payload then read as a measured false.
-	data.SearchProbe = detectSearchUsage(ag, data.Transcript)
 
 	return data, nil
 }

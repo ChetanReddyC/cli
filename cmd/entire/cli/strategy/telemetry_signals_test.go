@@ -3,6 +3,7 @@ package strategy
 import (
 	"bytes"
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -123,8 +124,10 @@ func TestDetectSearchUsage_MixedTranscriptFindsTheInvocation(t *testing.T) {
 // contain a real invocation: reporting used=false with source=none would be a
 // fabricated data point indistinguishable in aggregate from a real miss.
 //
-// Cursor is not merely unimplemented — its transcripts carry no tool_use blocks
-// at all, so it can never be probed this way.
+// These agents are unprobeable because no ToolInvocationScanner walker exists
+// for them yet — not because one is impossible. Cursor in particular shares
+// the tool_use JSONL shape and could implement one; see the interface doc in
+// agent/tool_invocations.go for what blocks it.
 func TestDetectSearchUsage_UnprobeableAgentsReportUnsupported(t *testing.T) {
 	t.Parallel()
 
@@ -167,18 +170,19 @@ func TestSearchHintsCoverPattern(t *testing.T) {
 		"/usr/local/bin/entire search foo",
 		"echo hi; entire search foo",
 		"$(entire search foo)",
+		`entire search "two words"`,
 	}
 	for _, cmd := range accepted {
-		if !entireSearchCommandPattern.MatchString(cmd) {
-			t.Errorf("entireSearchCommandPattern must accept %q", cmd)
+		if !commandInvokesEntireSearch(cmd) {
+			t.Errorf("commandInvokesEntireSearch must accept %q", cmd)
 			continue
 		}
 		if !hintedBySearchHints(cmd) {
 			t.Errorf("accepted command %q contains no entireSearchHints literal; the scanner would never parse its line", cmd)
 		}
 	}
-	if !hintedBySearchHints(entireSearchSubagent) {
-		t.Errorf("subagent name %q contains no entireSearchHints literal", entireSearchSubagent)
+	if !hintedBySearchHints(EntireSearchSubagentName) {
+		t.Errorf("subagent name %q contains no entireSearchHints literal", EntireSearchSubagentName)
 	}
 	// The prefilter is case-sensitive bytes.Contains, so the subagent matcher
 	// must be case-sensitive too. A case-insensitive matcher would accept
@@ -187,7 +191,7 @@ func TestSearchHintsCoverPattern(t *testing.T) {
 		if hintedBySearchHints(variant) {
 			t.Errorf("hint list unexpectedly covers %q; the case-sensitivity test below is moot", variant)
 		}
-		if strings.TrimSpace(variant) == entireSearchSubagent {
+		if strings.TrimSpace(variant) == EntireSearchSubagentName {
 			t.Errorf("subagent matcher accepts %q, which the case-sensitive hint prefilter would discard first", variant)
 		}
 	}
@@ -197,11 +201,35 @@ func TestSearchHintsCoverPattern(t *testing.T) {
 		"git commit -m \"mention entire search here\"",
 		"entire status",
 		"entire searchfoo",
+		// Separators inside quoted arguments are text, not command
+		// boundaries. Each of these matched before sanitization was added —
+		// the quote-blind regex read the `;`/`|`/newline inside the argument
+		// as a boundary and the phrase after it as a command.
+		`git commit -m "wip; entire search notes"`,
+		`rg "foo|entire search bar" .`,
+		"echo \"a\nentire search b\"",
+		`git commit -m 'wip; entire search notes'`,
+		// A heredoc body is data — this is an agent WRITING the search skill
+		// (whose body contains the command at line start) via cat, the
+		// scaffolded-artifact false-positive class review measured.
+		"cat > .claude/agents/entire-search.md <<'EOF'\nentire search --json \"x\"\nEOF",
+		"cat > notes.md <<DOC\nentire search --json\nDOC\necho done",
 	}
 	for _, cmd := range rejected {
-		if entireSearchCommandPattern.MatchString(cmd) {
-			t.Errorf("entireSearchCommandPattern must reject %q", cmd)
+		if commandInvokesEntireSearch(cmd) {
+			t.Errorf("commandInvokesEntireSearch must reject %q", cmd)
 		}
+	}
+
+	// The sanitizer must not eat commands AFTER a heredoc: the body ends at
+	// its delimiter line, and what follows is live shell again.
+	if !commandInvokesEntireSearch("cat > notes.md <<DOC\nsome text\nDOC\nentire search foo") {
+		t.Error("commandInvokesEntireSearch must accept an invocation on the line after a heredoc body ends")
+	}
+	// Arithmetic << must not be misread as a heredoc opener that swallows the
+	// rest of the command.
+	if !commandInvokesEntireSearch("echo $((1<<2))\nentire search foo") {
+		t.Error("commandInvokesEntireSearch must accept an invocation after arithmetic <<")
 	}
 }
 
@@ -221,12 +249,43 @@ func TestNewCommitCondensedSignal_CarriesSearchProbe(t *testing.T) {
 	sig := newCommitCondensedSignal(
 		&SessionState{AgentType: agent.AgentTypeClaudeCode},
 		&CondenseResult{SearchProbe: probe, FilesTouched: []string{"a.go"}},
+		map[string]struct{}{"a.go": {}},
 	)
 	if sig == nil {
 		t.Fatal("newCommitCondensedSignal returned nil")
 	}
 	if sig.searchProbe != probe {
 		t.Errorf("searchProbe = %+v, want %+v", sig.searchProbe, probe)
+	}
+	if len(sig.filesTouched) != 1 || sig.filesTouched[0] != "a.go" {
+		t.Errorf("filesTouched = %v, want [a.go]", sig.filesTouched)
+	}
+}
+
+// TestNewCommitCondensedSignal_ScopesFilesToCommit pins the payload's
+// commit-scoping against the one upstream path that deliberately does not
+// narrow: filterFilesTouched leaves the session's whole FilesTouched list when
+// the commit changed no files (--allow-empty, or file detection failing).
+// files_committed and the prior_ai_history intersection must never count files
+// the commit did not land.
+func TestNewCommitCondensedSignal_ScopesFilesToCommit(t *testing.T) {
+	t.Parallel()
+
+	state := &SessionState{AgentType: agent.AgentTypeClaudeCode}
+	result := &CondenseResult{FilesTouched: []string{"a.go", "b.go", "c.go"}}
+
+	if sig := newCommitCondensedSignal(state, result, nil); sig == nil {
+		t.Fatal("newCommitCondensedSignal returned nil")
+	} else if len(sig.filesTouched) != 0 {
+		t.Errorf("empty commit: filesTouched = %v, want none — the commit landed no files", sig.filesTouched)
+	}
+
+	sig := newCommitCondensedSignal(state, result, map[string]struct{}{"b.go": {}, "unrelated.go": {}})
+	if sig == nil {
+		t.Fatal("newCommitCondensedSignal returned nil")
+	}
+	if len(sig.filesTouched) != 1 || sig.filesTouched[0] != "b.go" {
+		t.Errorf("filesTouched = %v, want [b.go]", sig.filesTouched)
 	}
 }
 
@@ -260,7 +319,7 @@ func TestPriorAICommitFiles(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "head.txt")
 	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
 
-	files := priorAICommitFiles(t.Context(), tmpDir)
+	files := priorAICommitFiles(t.Context(), tmpDir, "HEAD")
 
 	if !hasFile(files, "ai.txt") {
 		t.Error("ai.txt was touched by a prior checkpoint commit; want present")
@@ -271,8 +330,60 @@ func TestPriorAICommitFiles(t *testing.T) {
 	if hasFile(files, "head.txt") {
 		t.Error("head.txt was only touched by the just-created HEAD commit; want absent")
 	}
-	if got := priorAICommitFiles(t.Context(), t.TempDir()); got != nil {
+	if got := priorAICommitFiles(t.Context(), t.TempDir(), "HEAD"); got != nil {
 		t.Errorf("not a git repository; want best-effort nil, got %v", got)
+	}
+}
+
+// TestPriorAICommitFiles_AnchorsOnExplicitCommit pins the two properties that
+// keep the probe describing the commit PostCommit is reporting on rather than
+// whatever the process environment says HEAD is:
+//   - the walk starts at the explicit hash, so a HEAD that moved between the
+//     commit and the (post-gate) probe changes nothing;
+//   - GIT_DIR/GIT_WORK_TREE exported to hooks are scrubbed, so -C selects the
+//     repo — an inherited GIT_DIR would override it and walk another repo.
+func TestPriorAICommitFiles_AnchorsOnExplicitCommit(t *testing.T) {
+	// t.Setenv forbids t.Parallel.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+
+	testutil.WriteFile(t, tmpDir, "ai.txt", "ai content")
+	testutil.GitAdd(t, tmpDir, "ai.txt")
+	cpID := id.MustCheckpointID("abcdef123456")
+	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("ai change", cpID))
+
+	// The commit being reported on.
+	testutil.WriteFile(t, tmpDir, "reported.txt", "reported")
+	testutil.GitAdd(t, tmpDir, "reported.txt")
+	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("reported change", cpID))
+	reported := strings.TrimSpace(testutil.RunGit(t, tmpDir, "rev-parse", "HEAD"))
+
+	// HEAD moves on before the probe runs (it fires after the session gate
+	// releases): a later checkpoint commit that must count neither itself nor
+	// shift --skip=1 onto the wrong commit.
+	testutil.WriteFile(t, tmpDir, "later.txt", "later")
+	testutil.GitAdd(t, tmpDir, "later.txt")
+	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("later change", cpID))
+
+	// A hook environment pointing git somewhere else entirely; the scrub must
+	// keep -C authoritative.
+	otherRepo := t.TempDir()
+	testutil.InitRepo(t, otherRepo)
+	testutil.WriteFile(t, otherRepo, "other.txt", "other")
+	testutil.GitAdd(t, otherRepo, "other.txt")
+	testutil.GitCommit(t, otherRepo, "other")
+	t.Setenv("GIT_DIR", filepath.Join(otherRepo, ".git"))
+	t.Setenv("GIT_WORK_TREE", otherRepo)
+
+	files := priorAICommitFiles(t.Context(), tmpDir, reported)
+	if !hasFile(files, "ai.txt") {
+		t.Error("ai.txt precedes the reported commit and carries a trailer; want present")
+	}
+	if hasFile(files, "reported.txt") {
+		t.Error("the reported commit is not its own prior history; want absent")
+	}
+	if hasFile(files, "later.txt") {
+		t.Error("a commit made after the reported one (HEAD moved on) must not count; want absent")
 	}
 }
 
@@ -295,7 +406,7 @@ func TestPriorAICommitFiles_NonASCIIPath(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "head.txt")
 	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
 
-	if !hasFile(priorAICommitFiles(t.Context(), tmpDir), "café.go") {
+	if !hasFile(priorAICommitFiles(t.Context(), tmpDir, "HEAD"), "café.go") {
 		t.Error("café.go was touched by a prior checkpoint commit; want present")
 	}
 }
@@ -324,7 +435,7 @@ func TestPriorAICommitFiles_ControlCharsInBody(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "head.txt")
 	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
 
-	if !hasFile(priorAICommitFiles(t.Context(), tmpDir), "hostile.txt") {
+	if !hasFile(priorAICommitFiles(t.Context(), tmpDir, "HEAD"), "hostile.txt") {
 		t.Error("a commit body containing \\x1e/\\x1f must not hide its checkpoint trailer")
 	}
 }
@@ -352,7 +463,7 @@ func TestPriorAICommitFiles_EmptyMessageCommit(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "head.txt")
 	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
 
-	files := priorAICommitFiles(t.Context(), tmpDir)
+	files := priorAICommitFiles(t.Context(), tmpDir, "HEAD")
 	if !hasFile(files, "ai.txt") {
 		t.Error("an empty-message commit must not mis-frame the records after it")
 	}
@@ -392,10 +503,35 @@ func TestPriorAICommitFiles_MergeCommitContributesNothing(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "head.txt")
 	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
 
-	if hasFile(priorAICommitFiles(t.Context(), tmpDir), "side.txt") {
+	if hasFile(priorAICommitFiles(t.Context(), tmpDir, "HEAD"), "side.txt") {
 		t.Error("a merge commit must contribute no files: its content is already " +
 			"attributed to the commits it brings in, and first-parent diffs would " +
 			"inflate prior_ai_history")
+	}
+}
+
+// TestCommitCondensedEmitter_SearchProbeGate pins the gate condensation
+// consults before scanning a transcript: open only when telemetry is opted in,
+// closed for disabled settings and for a nil emitter (the ungated condensation
+// paths). This is what keeps the full-transcript search probe off every path
+// whose result would be discarded.
+func TestCommitCondensedEmitter_SearchProbeGate(t *testing.T) {
+	writeTelemetrySettings(t, "true")
+	e := newCommitCondensedEmitter(t.TempDir(), "HEAD")
+	if !e.searchProbeAllowed(t.Context()) {
+		t.Error("gate must open when telemetry is enabled")
+	}
+}
+
+func TestCommitCondensedEmitter_SearchProbeGateClosed(t *testing.T) {
+	writeTelemetrySettings(t, "false")
+	e := newCommitCondensedEmitter(t.TempDir(), "HEAD")
+	if e.searchProbeAllowed(t.Context()) {
+		t.Error("gate must stay closed when telemetry is disabled")
+	}
+	var nilEmitter *commitCondensedEmitter
+	if nilEmitter.searchProbeAllowed(t.Context()) {
+		t.Error("a nil emitter must report the gate closed")
 	}
 }
 
@@ -408,8 +544,8 @@ func TestCommitCondensedEmitter_ProbesAndGatesOnce(t *testing.T) {
 	emitCommitCondensed = func(telemetry.CommitCondensedSignal, bool, string) { sends++ }
 	t.Cleanup(func() { emitCommitCondensed = restore })
 
-	e := newCommitCondensedEmitter(t.TempDir())
-	e.probeFn = func(context.Context, string) map[string]struct{} {
+	e := newCommitCondensedEmitter(t.TempDir(), "HEAD")
+	e.probeFn = func(context.Context, string, string) map[string]struct{} {
 		probeCalls++
 		return map[string]struct{}{"shared.go": {}}
 	}
@@ -436,8 +572,8 @@ func TestCommitCondensedEmitter_NilSignalCostsNothing(t *testing.T) {
 	t.Parallel()
 
 	probeCalls := 0
-	e := newCommitCondensedEmitter(t.TempDir())
-	e.probeFn = func(context.Context, string) map[string]struct{} {
+	e := newCommitCondensedEmitter(t.TempDir(), "HEAD")
+	e.probeFn = func(context.Context, string, string) map[string]struct{} {
 		probeCalls++
 		return nil
 	}
@@ -470,8 +606,8 @@ func TestCommitCondensedEmitter_OptedOutNeverProbes(t *testing.T) {
 			emitCommitCondensed = func(telemetry.CommitCondensedSignal, bool, string) { sends++ }
 			t.Cleanup(func() { emitCommitCondensed = restore })
 
-			e := newCommitCondensedEmitter(t.TempDir())
-			e.probeFn = func(context.Context, string) map[string]struct{} {
+			e := newCommitCondensedEmitter(t.TempDir(), "HEAD")
+			e.probeFn = func(context.Context, string, string) map[string]struct{} {
 				probeCalls++
 				return nil
 			}
@@ -500,8 +636,8 @@ func TestCommitCondensedEmitter_OmitsUsedSearchWhenUnsupported(t *testing.T) {
 	emitCommitCondensed = func(sig telemetry.CommitCondensedSignal, _ bool, _ string) { got = sig }
 	t.Cleanup(func() { emitCommitCondensed = restore })
 
-	e := newCommitCondensedEmitter(t.TempDir())
-	e.probeFn = func(context.Context, string) map[string]struct{} { return nil }
+	e := newCommitCondensedEmitter(t.TempDir(), "HEAD")
+	e.probeFn = func(context.Context, string, string) map[string]struct{} { return nil }
 	e.emit(t.Context(), &commitCondensedSignal{
 		agentType:    agent.AgentTypeClaudeCode,
 		searchProbe:  searchProbe{used: false, source: searchSourceUnsupported},
@@ -566,8 +702,8 @@ func TestCommitCondensedEmitter_ZeroProbeOmitsUsedSearch(t *testing.T) {
 	emitCommitCondensed = func(sig telemetry.CommitCondensedSignal, _ bool, _ string) { got = sig }
 	t.Cleanup(func() { emitCommitCondensed = restore })
 
-	e := newCommitCondensedEmitter(t.TempDir())
-	e.probeFn = func(context.Context, string) map[string]struct{} { return nil }
+	e := newCommitCondensedEmitter(t.TempDir(), "HEAD")
+	e.probeFn = func(context.Context, string, string) map[string]struct{} { return nil }
 	// searchProbe left at its zero value, as a no-transcript condensation
 	// produced before the probe was made unconditional.
 	e.emit(t.Context(), &commitCondensedSignal{

@@ -694,6 +694,20 @@ type postCommitActionHandler struct {
 	// by condensation; emitted by the PostCommit loop after the session's
 	// MutateSessionState saves.
 	condensedSignal *commitCondensedSignal
+	// condensedTelemetry is the commit-scoped emitter; the handler passes its
+	// memoized gate into condensation so the search-usage transcript scan is
+	// skipped entirely when telemetry is opted out or not opted in.
+	condensedTelemetry *commitCondensedEmitter
+}
+
+// searchProbeGate adapts the emitter's memoized telemetry gate to the
+// condenseOpts shape; nil when no emitter was wired (defensive — PostCommit
+// always wires one), which condensation reads as "don't scan".
+func (h *postCommitActionHandler) searchProbeGate() func() bool {
+	if h.condensedTelemetry == nil {
+		return nil
+	}
+	return func() bool { return h.condensedTelemetry.searchProbeAllowed(h.ctx) }
 }
 
 // parentCommitHash returns the first parent's hash as a string, or empty for initial commits.
@@ -721,13 +735,14 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 
 	if shouldCondense {
 		h.condensed, h.newSkillEvents, h.condensedSignal = h.s.condenseAndUpdateState(h.ctx, h.repo, h.checkpointID, state, h.head, h.shadowBranchName, h.shadowBranchesToDelete, h.committedFileSet, condenseOpts{
-			shadowRef:        h.shadowRef,
-			headTree:         h.headTree,
-			parentTree:       h.parentTree,
-			repoDir:          h.repoDir,
-			parentCommitHash: h.parentCommitHash(),
-			headCommitHash:   h.newHead,
-			allAgentFiles:    h.allAgentFiles,
+			shadowRef:          h.shadowRef,
+			headTree:           h.headTree,
+			parentTree:         h.parentTree,
+			repoDir:            h.repoDir,
+			parentCommitHash:   h.parentCommitHash(),
+			headCommitHash:     h.newHead,
+			allAgentFiles:      h.allAgentFiles,
+			searchProbeAllowed: h.searchProbeGate(),
 		})
 	} else {
 		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead, h.repoDir)
@@ -750,13 +765,14 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 
 	if shouldCondense {
 		h.condensed, h.newSkillEvents, h.condensedSignal = h.s.condenseAndUpdateState(h.ctx, h.repo, h.checkpointID, state, h.head, h.shadowBranchName, h.shadowBranchesToDelete, h.committedFileSet, condenseOpts{
-			shadowRef:        h.shadowRef,
-			headTree:         h.headTree,
-			parentTree:       h.parentTree,
-			repoDir:          h.repoDir,
-			parentCommitHash: h.parentCommitHash(),
-			headCommitHash:   h.newHead,
-			allAgentFiles:    h.allAgentFiles,
+			shadowRef:          h.shadowRef,
+			headTree:           h.headTree,
+			parentTree:         h.parentTree,
+			repoDir:            h.repoDir,
+			parentCommitHash:   h.parentCommitHash(),
+			headCommitHash:     h.newHead,
+			allAgentFiles:      h.allAgentFiles,
+			searchProbeAllowed: h.searchProbeGate(),
 		})
 	} else {
 		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead, h.repoDir)
@@ -1032,8 +1048,10 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 
 	// One emitter per commit: the prior-history git-log scan and the settings
 	// load are commit-scoped, not session-scoped. Nothing resolves until a
-	// session actually emits, so a commit that condenses nothing costs nothing.
-	condensedTelemetry := newCommitCondensedEmitter(worktreePath)
+	// session actually condenses, so a commit that condenses nothing costs
+	// nothing. newHead pins the probe to this commit — HEAD may have moved by
+	// the time it runs.
+	condensedTelemetry := newCommitCondensedEmitter(worktreePath, newHead)
 
 	loopCtx, processSessionsLoop := perf.StartLoop(ctx, "process_sessions")
 	for _, sess := range sessions {
@@ -1048,7 +1066,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 			newSkillEvents, condensedSignal = s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
 				head, commit, newHead, worktreePath, headTree, parentTree,
 				committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
-				sessionsWithCommittedFiles)
+				sessionsWithCommittedFiles, condensedTelemetry)
 			return nil
 		})
 		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
@@ -1229,6 +1247,26 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 // MUST be called from inside MutateSessionState. Mutations to state are persisted
 // by the caller's outer save — calling this function standalone silently loses
 // every field change (StepCount, FilesTouched, CheckpointTranscriptStart, …).
+// resolveShadowRefAndTree pre-resolves a session's shadow branch ref and tree.
+// These are read 4+ times across sessionHasNewContent, filesOverlapWithContent,
+// CondenseSession, filesWithRemainingAgentChanges, and
+// calculateSessionAttributions. Both are nil when the branch does not exist.
+func resolveShadowRefAndTree(ctx context.Context, repo *git.Repository, shadowBranchName string) (*plumbing.Reference, *object.Tree) {
+	_, span := perf.Start(ctx, "resolve_shadow_branch")
+	defer span.End()
+	var shadowRef *plumbing.Reference
+	var shadowTree *object.Tree
+	if ref, refErr := repo.Reference(plumbing.NewBranchReferenceName(shadowBranchName), true); refErr == nil {
+		shadowRef = ref
+		if sc, scErr := repo.CommitObject(ref.Hash()); scErr == nil {
+			if st, stErr := sc.Tree(); stErr == nil {
+				shadowTree = st
+			}
+		}
+	}
+	return shadowRef, shadowTree
+}
+
 func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	ctx context.Context,
 	repo *git.Repository,
@@ -1245,6 +1283,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	uncondensedActiveOnBranch map[string]bool,
 	allAgentFiles map[string]struct{},
 	sessionsWithCommittedFiles int,
+	condensedTelemetry *commitCondensedEmitter,
 ) (newSkillEvents []agent.SkillEvent, condensedSignal *commitCondensedSignal) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
@@ -1258,21 +1297,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		return newSkillEvents, condensedSignal
 	}
 
-	// Pre-resolve shadow branch ref and tree for this session.
-	// These are read 4+ times across sessionHasNewContent, filesOverlapWithContent,
-	// CondenseSession, filesWithRemainingAgentChanges, and calculateSessionAttributions.
-	_, resolveShadowBranchSpan := perf.Start(ctx, "resolve_shadow_branch")
-	var shadowRef *plumbing.Reference
-	var shadowTree *object.Tree
-	if ref, refErr := repo.Reference(plumbing.NewBranchReferenceName(shadowBranchName), true); refErr == nil {
-		shadowRef = ref
-		if sc, scErr := repo.CommitObject(ref.Hash()); scErr == nil {
-			if st, stErr := sc.Tree(); stErr == nil {
-				shadowTree = st
-			}
-		}
-	}
-	resolveShadowBranchSpan.End()
+	shadowRef, shadowTree := resolveShadowRefAndTree(ctx, repo, shadowBranchName)
 
 	// Check for new content (needed for TransitionContext and condensation).
 	// Fail-open: if content check errors, assume new content exists so we
@@ -1346,6 +1371,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		shadowTree:                 shadowTree,
 		allAgentFiles:              allAgentFiles,
 		sessionsWithCommittedFiles: sessionsWithCommittedFiles,
+		condensedTelemetry:         condensedTelemetry,
 	}
 
 	if err := TransitionAndLog(ctx, state, session.EventGitCommit, *transitionCtx, handler); err != nil {
@@ -1480,7 +1506,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	// commit is still a commit — the transcript was condensed and the trailer
 	// stamped — so the payload describes something real, and skipping it would
 	// under-count exactly the cross-worktree sessions.
-	condensedSignal = newCommitCondensedSignal(state, result)
+	condensedSignal = newCommitCondensedSignal(state, result, committedFiles)
 
 	// Guest-linked commit (identity-matched from a sibling worktree): the
 	// transcript is condensed and the trailer stamped, but every mutation of

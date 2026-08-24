@@ -87,7 +87,7 @@ const (
 var entireSearchHints = [][]byte{
 	[]byte("entire search"),
 	[]byte("entire checkpoint search"),
-	[]byte("entire-search"),
+	[]byte(EntireSearchSubagentName),
 }
 
 // entireSearchCommandPattern matches `entire search` / `entire checkpoint
@@ -99,17 +99,179 @@ var entireSearchHints = [][]byte{
 // phrase sits inside an argument rather than at a command boundary —
 // `grep -rn "entire search" cmd/`, `git commit -m "... entire search ..."`.
 //
+// The regex itself is quote-blind, so it MUST only ever see commands that have
+// been through sanitizeShellCommandForMatching: without that, a separator
+// inside a quoted argument reads as a command boundary and the phrase after it
+// as a command — `git commit -m "wip; entire search notes"`,
+// `rg "foo|entire search bar" .`, and a heredoc writing the search skill's own
+// body all matched. detectSearchUsage is the only caller and applies it.
+//
 // Known residual false negatives, and they are the safer direction: `xargs
 // entire search`, `for f in …; do entire search; done` reached through a loop
-// variable, and anything behind a wrapper script. They report `none`, so the
-// missed-opportunity rate reads as an upper bound.
+// variable, an invocation inside backticks or a quoted `$(…)` (the sanitizer
+// strips quoted spans whole), and anything behind a wrapper script. They report
+// `none`, so the missed-opportunity rate reads as an upper bound.
 //
 //nolint:gochecknoglobals // compiled once, read-only.
 var entireSearchCommandPattern = regexp.MustCompile(
 	`(?:^|[;&|(\n])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]*/)?entire (?:checkpoint )?search(?:\s|$)`)
 
-// entireSearchSubagent is the subagent name setup_search_skill.go scaffolds
-// into .claude/agents/entire-search.md (and the Codex/Gemini equivalents).
+// commandInvokesEntireSearch is THE command matcher: sanitize, then match.
+// detectSearchUsage and the pinning tests both go through it so the sanitizer
+// cannot be bypassed on one side and not the other.
+func commandInvokesEntireSearch(cmd string) bool {
+	return entireSearchCommandPattern.MatchString(sanitizeShellCommandForMatching(cmd))
+}
+
+// sanitizeShellCommandForMatching prepares a raw shell command for
+// entireSearchCommandPattern by blanking the spans whose content must not be
+// read as shell structure: single-quoted strings, double-quoted strings, and
+// heredoc bodies. Each blanked span becomes a single NUL byte — NUL is in
+// neither the pattern's separator class nor any of its literals, so a
+// replacement can neither fabricate a command boundary nor join two fragments
+// into a phrase that was never contiguous in the input. Every non-NUL byte of
+// the output is copied verbatim, in order, from the input, which is what keeps
+// the hint-prefilter contract intact: any match found in the sanitized text
+// exists literally in the raw command.
+//
+// This is a matcher aid, not a shell parser. It understands just enough —
+// backslash escapes outside quotes, `\"` inside double quotes, `<<`/`<<-`
+// heredocs with optionally quoted delimiters (which must start with a letter
+// or underscore, so `$((1<<2))` is not misread as one) — to kill the
+// false-positive classes review actually measured. Where it errs, it errs
+// toward blanking too much, which is a false NEGATIVE for the probe: the safer
+// direction, per entireSearchCommandPattern's doc.
+func sanitizeShellCommandForMatching(cmd string) string {
+	var b strings.Builder
+	b.Grow(len(cmd))
+	var pendingHeredocs []string
+	for i := 0; i < len(cmd); {
+		switch c := cmd[i]; c {
+		case '\\':
+			// An escaped character is literal text; copy the pair so the
+			// escaped byte can't be read as a quote or separator opener.
+			b.WriteByte(c)
+			if i+1 < len(cmd) {
+				b.WriteByte(cmd[i+1])
+				i += 2
+			} else {
+				i++
+			}
+		case '\'':
+			if end := strings.IndexByte(cmd[i+1:], '\''); end >= 0 {
+				i += end + 2
+			} else {
+				i = len(cmd) // unterminated: blank to end
+			}
+			b.WriteByte(0)
+		case '"':
+			j := i + 1
+			for j < len(cmd) && cmd[j] != '"' {
+				if cmd[j] == '\\' {
+					j++ // skip the escaped byte too
+				}
+				j++
+			}
+			if j < len(cmd) {
+				i = j + 1
+			} else {
+				i = len(cmd) // unterminated: blank to end
+			}
+			b.WriteByte(0)
+		case '<':
+			if delim, next, ok := parseHeredocStart(cmd, i); ok {
+				pendingHeredocs = append(pendingHeredocs, delim)
+				b.WriteString(cmd[i:next])
+				i = next
+			} else {
+				b.WriteByte(c)
+				i++
+			}
+		case '\n':
+			b.WriteByte(c)
+			i++
+			// The lines that follow are heredoc bodies, not commands. Blank
+			// each pending body through its delimiter line, keeping a newline
+			// in its place so a real command on the line AFTER the body still
+			// sits on a command boundary.
+			for _, delim := range pendingHeredocs {
+				i = skipHeredocBody(cmd, i, delim)
+				b.WriteByte(0)
+				b.WriteByte('\n')
+			}
+			pendingHeredocs = pendingHeredocs[:0]
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return b.String()
+}
+
+// parseHeredocStart reports whether cmd[i:] opens a heredoc (`<<` or `<<-`,
+// not the `<<<` here-string), returning the delimiter word and the offset just
+// past it. The delimiter must start with a letter or underscore so arithmetic
+// like `$((1<<2))` is not misread as a heredoc.
+func parseHeredocStart(cmd string, i int) (delim string, next int, ok bool) {
+	if i+1 >= len(cmd) || cmd[i+1] != '<' || (i+2 < len(cmd) && cmd[i+2] == '<') {
+		return "", 0, false
+	}
+	j := i + 2
+	if j < len(cmd) && cmd[j] == '-' {
+		j++
+	}
+	for j < len(cmd) && (cmd[j] == ' ' || cmd[j] == '\t') {
+		j++
+	}
+	var quote byte
+	if j < len(cmd) && (cmd[j] == '\'' || cmd[j] == '"') {
+		quote = cmd[j]
+		j++
+	}
+	start := j
+	for j < len(cmd) && (isShellWordByte(cmd[j]) || (j > start && cmd[j] >= '0' && cmd[j] <= '9')) {
+		j++
+	}
+	delim = cmd[start:j]
+	if delim == "" || !isShellWordByte(delim[0]) {
+		return "", 0, false
+	}
+	if quote != 0 && j < len(cmd) && cmd[j] == quote {
+		j++
+	}
+	return delim, j, true
+}
+
+func isShellWordByte(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// skipHeredocBody returns the offset just past the line matching delim
+// (tolerating the leading tabs `<<-` allows), or len(cmd) when the body is
+// unterminated.
+func skipHeredocBody(cmd string, i int, delim string) int {
+	for i < len(cmd) {
+		line := cmd[i:]
+		next := len(cmd)
+		if eol := strings.IndexByte(line, '\n'); eol >= 0 {
+			line = line[:eol]
+			next = i + eol + 1
+		}
+		i = next
+		if strings.TrimLeft(line, "\t") == delim {
+			return i
+		}
+	}
+	return i
+}
+
+// EntireSearchSubagentName is the subagent name setup_search_skill.go (package
+// cli) scaffolds into .claude/agents/entire-search.md (and the Codex/Gemini
+// equivalents). Exported so the installer and its tests pin their scaffolded
+// paths and template bodies against the value this probe matches — strategy
+// cannot import cli, so the constant lives here and cli reaches down. Renaming
+// the scaffolded subagent without updating this constant silently makes the
+// probe report "did not search" for every session that adopted the feature.
 //
 // Matching the dispatch is not a nicety, it is the primary path. A session that
 // consults search the way Entire ships it dispatches this subagent, and the
@@ -117,7 +279,7 @@ var entireSearchCommandPattern = regexp.MustCompile(
 // file that condensation never reads. Match only shell commands and the probe
 // reports "did not search" for exactly the sessions that adopted the feature —
 // a false negative aimed at the users we most want to count.
-const entireSearchSubagent = "entire-search"
+const EntireSearchSubagentName = "entire-search"
 
 // detectSearchUsage reports whether the session consulted Entire's history
 // search, and how it knows.
@@ -140,11 +302,11 @@ func detectSearchUsage(ag agent.Agent, transcriptData []byte) searchProbe {
 		// case-insensitive matcher here would accept a spelling the prefilter
 		// already discarded — a silent false negative, which is exactly the
 		// hazard ToolInvocationScanner's doc warns callers about.
-		if strings.TrimSpace(inv.SubagentType) == entireSearchSubagent {
+		if strings.TrimSpace(inv.SubagentType) == EntireSearchSubagentName {
 			source = searchSourceSubagent
 			return true
 		}
-		if inv.Command != "" && entireSearchCommandPattern.MatchString(inv.Command) {
+		if inv.Command != "" && commandInvokesEntireSearch(inv.Command) {
 			source = searchSourceCommand
 			return true
 		}
@@ -157,11 +319,16 @@ func detectSearchUsage(ag agent.Agent, transcriptData []byte) searchProbe {
 }
 
 // priorAICommitFiles returns the repo-root-relative paths touched by recent
-// commits carrying an Entire checkpoint trailer, excluding the commit that was
-// just created (--skip=1 — the commit being reported on is not its own prior
-// history). Paths match git log --name-only output, i.e. the same form as
-// SessionState.FilesTouched. Best-effort: any failure yields nil, read as "no
-// prior history".
+// commits carrying an Entire checkpoint trailer, walking history from commit —
+// the commit being reported on — and excluding that commit itself (--skip=1: it
+// is not its own prior history). Anchoring on the explicit hash rather than
+// ambient HEAD matters twice over: the probe runs after the session gate
+// releases, so HEAD may have moved (a chained hook amending, a concurrent
+// commit), and hooks inherit git's exported GIT_DIR/GIT_WORK_TREE, which
+// override -C's repo selection — gitEnvWithoutRepoOverrides scrubs those, same
+// as this package's other `git -C` call site. Paths match git log --name-only
+// output, i.e. the same form as SessionState.FilesTouched. Best-effort: any
+// failure yields nil, read as "no prior history".
 //
 // A set rather than a predicate because the answer is commit-scoped and
 // identical for every session in the commit — only the intersection differs —
@@ -178,7 +345,7 @@ func detectSearchUsage(ag agent.Agent, transcriptData []byte) searchProbe {
 // the miss rate. A merge's content is already attributed to the individual
 // trailer-carrying commits it brings in, which sit in this window on their own
 // account. Squash merges are single-parent, so their files do appear.
-func priorAICommitFiles(ctx context.Context, repoRoot string) map[string]struct{} {
+func priorAICommitFiles(ctx context.Context, repoRoot, commit string) map[string]struct{} {
 	// Each record starts with an empty field: -z NUL-terminates the format
 	// output, and %x00 prefixes it, so splitting the whole output on NUL yields
 	// ["", "<hash>\n<body>", "\n<file>", "<file>", …] per commit. A commit
@@ -188,9 +355,11 @@ func priorAICommitFiles(ctx context.Context, repoRoot string) map[string]struct{
 	// a real trailer. %H guarantees the post-marker field is non-empty, so an
 	// empty-message commit cannot produce two adjacent markers and mis-frame
 	// the next record.
-	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "log", "-z",
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "log", "-z",
 		"--skip=1", "-n", strconv.Itoa(priorAICheckpointsLookback),
-		"--name-only", "--format=%x00%H%n%B").Output()
+		"--name-only", "--format=%x00%H%n%B", commit)
+	cmd.Env = gitEnvWithoutRepoOverrides()
+	out, err := cmd.Output()
 	if err != nil {
 		return nil
 	}
@@ -244,9 +413,16 @@ type commitCondensedSignal struct {
 
 // newCommitCondensedSignal snapshots the signal inputs for a successful
 // condensation, or nil when there is nothing to report. Cheap and I/O-free by
-// design — it is the only part of this signal that runs under the session
-// gate. FilesTouched is copied because the caller mutates state after
-// condensing.
+// design — it and the gated search probe are the only parts of this signal
+// that run under the session gate.
+//
+// filesTouched is re-intersected against committedFiles rather than trusting
+// result.FilesTouched: filterFilesTouched deliberately leaves the session's
+// list whole when the commit changed no files (--allow-empty, or file
+// detection failing upstream), which is correct for checkpoint metadata but
+// would make files_committed count files the commit never landed — and
+// prior_ai_history intersect on them. The intersection is also what copies the
+// slice out from under the caller's later state mutations.
 //
 // Commit-scoped by construction: the sole caller is condenseAndUpdateState,
 // reached only from postCommitProcessSessionLocked. That is a scoping decision,
@@ -260,12 +436,16 @@ type commitCondensedSignal struct {
 // genuine misses, inflating the denominator instead of completing it. Covering
 // them means a trigger discriminator plus nullable commit-scoped fields — a
 // change to what the metric means, not a bug fix.
-func newCommitCondensedSignal(state *SessionState, result *CondenseResult) *commitCondensedSignal {
+func newCommitCondensedSignal(state *SessionState, result *CondenseResult, committedFiles map[string]struct{}) *commitCondensedSignal {
 	if result == nil || result.Skipped || state == nil {
 		return nil
 	}
-	files := make([]string, len(result.FilesTouched))
-	copy(files, result.FilesTouched)
+	files := make([]string, 0, len(result.FilesTouched))
+	for _, f := range result.FilesTouched {
+		if _, ok := committedFiles[f]; ok {
+			files = append(files, f)
+		}
+	}
 	return &commitCondensedSignal{
 		agentType:    state.AgentType,
 		searchProbe:  result.SearchProbe,
@@ -284,15 +464,21 @@ func newCommitCondensedSignal(state *SessionState, result *CondenseResult) *comm
 // commit — only the per-session intersection differs — so paying it per session
 // was paying for spawns, not work.
 //
-// Everything resolves on FIRST USE, and the order in emit is the promise: a
-// commit where no session condenses runs neither settings.Load nor git log, and
-// an opted-out user never reaches the probe. Laziness comes from where emit is
-// called, not from this type — do not front-run the gate by resolving anything
-// in the constructor.
+// Everything resolves on FIRST USE: a commit where no session condenses runs
+// neither settings.Load nor git log, and an opted-out user never reaches the
+// probe. The gate has two resolution points sharing one memo — searchProbeAllowed,
+// called during condensation so a closed gate skips the transcript scan
+// entirely, and emit, for the send decision — so whichever runs first pays the
+// single settings load. Do not front-run the gate by resolving anything in the
+// constructor.
 //
 // Not safe for concurrent use: PostCommit's session loop is sequential.
 type commitCondensedEmitter struct {
 	repoRoot string
+	// commit is the hash of the commit PostCommit is reporting on; the
+	// prior-history probe walks from it explicitly rather than from ambient
+	// HEAD. See priorAICommitFiles.
+	commit string
 
 	gateResolved bool
 	// settings is non-nil only when the gate is open; s.Enabled is needed at
@@ -305,14 +491,28 @@ type commitCondensedEmitter struct {
 
 	// probeFn is a test seam, like emitSkillTelemetry, so tests can count probe
 	// invocations without spawning git.
-	probeFn func(ctx context.Context, repoRoot string) map[string]struct{}
+	probeFn func(ctx context.Context, repoRoot, commit string) map[string]struct{}
 }
 
 // newCommitCondensedEmitter returns an emitter for one commit. repoRoot is the
 // worktree root PostCommit already resolved, which is what the per-session emit
-// used to recompute.
-func newCommitCondensedEmitter(repoRoot string) *commitCondensedEmitter {
-	return &commitCondensedEmitter{repoRoot: repoRoot, probeFn: priorAICommitFiles}
+// used to recompute; commit is the hash of the commit being reported on.
+func newCommitCondensedEmitter(repoRoot, commit string) *commitCondensedEmitter {
+	return &commitCondensedEmitter{repoRoot: repoRoot, commit: commit, probeFn: priorAICommitFiles}
+}
+
+// searchProbeAllowed reports whether the search-usage transcript scan should
+// run at all, resolving the same memoized gate emit uses. Condensation calls
+// this (through condenseOpts.searchProbeAllowed) BEFORE scanning, so an
+// opted-out or not-opted-in user never pays a full-transcript pass for a
+// payload that would be dropped at emit — and the two non-emitting condensation
+// paths (doctor repair, session-end leftovers), which pass no gate, never scan.
+func (e *commitCondensedEmitter) searchProbeAllowed(ctx context.Context) bool {
+	if e == nil || telemetry.IsEnvOptedOut() {
+		return false
+	}
+	_, ok := e.allowed(ctx)
+	return ok
 }
 
 // emit sends the content-free adoption signal for one condensed checkpoint: did
@@ -384,7 +584,7 @@ func (e *commitCondensedEmitter) priorAITouched(ctx context.Context, files []str
 	}
 	if !e.probed {
 		e.probed = true
-		e.priorFiles = e.probeFn(ctx, e.repoRoot)
+		e.priorFiles = e.probeFn(ctx, e.repoRoot, e.commit)
 	}
 	for _, f := range files {
 		if _, hit := e.priorFiles[f]; hit {
