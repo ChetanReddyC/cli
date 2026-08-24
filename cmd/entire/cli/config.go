@@ -107,17 +107,34 @@ func ensureCommandLogging(ctx context.Context) func() {
 type agentHookState struct {
 	// installed are the agents that reported hooks installed.
 	installed []types.AgentName
-	// unchecked are the external plugins that could not answer. Their hooks may
-	// or may not be on disk, which is not the same as cleanly reporting none.
+	// unchecked are the agents that could not answer. Their hooks may or may not
+	// be on disk, which is not the same as cleanly reporting none.
 	unchecked []uncheckedAgent
 }
 
-// uncheckedAgent is a plugin that could not be asked, with the reason. The
+// uncheckedAgent is an agent that could not be asked, with the reason. The
 // reason travels with it because the sweep is the only place it exists: asking
-// again would cost another subprocess.
+// an external plugin again would cost another subprocess.
 type uncheckedAgent struct {
 	name types.AgentName
 	err  error
+	// external distinguishes the two remedies. A plugin owns its own hooks, so
+	// only its binary can remove them and the user may have to run it by hand; a
+	// built-in's hooks are removed in-process regardless of what its check said.
+	external bool
+}
+
+// uncheckedExternal returns the plugins among the unchecked ones. Only they can
+// leave hooks behind: a built-in is asked to uninstall regardless of what its
+// check said, so nothing survives for the user to clean up by hand.
+func (s agentHookState) uncheckedExternal() []uncheckedAgent {
+	var plugins []uncheckedAgent
+	for _, u := range s.unchecked {
+		if u.external {
+			plugins = append(plugins, u)
+		}
+	}
+	return plugins
 }
 
 // names returns the unchecked agents' registry names, for display.
@@ -156,16 +173,15 @@ func getAgentHookState(ctx context.Context) agentHookState {
 			// our own cancellation would turn one Ctrl-C into a page of diagnoses.
 			logging.Debug(ctx, "hooks-installed check abandoned: context ended",
 				"agent", string(name))
-		case external.IsExternal(ag):
-			state.unchecked = append(state.unchecked, uncheckedAgent{name: name, err: err})
 		default:
-			// A built-in that could not read its own config. It already logged the
-			// failure with the path, so this only records that a sweep saw it. Not
-			// surfaced to the user the way a plugin is: a built-in is asked to
-			// uninstall unconditionally anyway, being in-process and idempotent, so
-			// nothing is left behind for them to go clean up by hand.
-			logging.Debug(ctx, "hooks-installed check failed",
-				"agent", string(name), "error", err.Error())
+			// Built-in or plugin: if we have a reason, the caller can say so. A
+			// broken .cursor/hooks.json is as worth reporting as a plugin that
+			// crashed — what differs is the remedy, not whether to mention it.
+			state.unchecked = append(state.unchecked, uncheckedAgent{
+				name:     name,
+				err:      err,
+				external: external.IsExternal(ag),
+			})
 		}
 	}
 	return state

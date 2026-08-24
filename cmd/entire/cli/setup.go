@@ -2501,12 +2501,15 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force, strict bool) er
 	}
 	// "may": we never found out whether this plugin has hooks, and we did not ask
 	// it to remove them — asking a plugin that cannot answer to mutate state is
-	// not something to do on the user's behalf.
-	for _, u := range hookState.unchecked {
+	// not something to do on the user's behalf. Only plugins appear here: a
+	// built-in we could not check still had its hooks removed in-process below,
+	// so there is nothing for the user to go run.
+	uncheckedPlugins := hookState.uncheckedExternal()
+	for _, u := range uncheckedPlugins {
 		fmt.Fprintf(errW, "  %s hooks may still be installed. Remove them with:\n", agentDisplayName(u.name))
 		fmt.Fprintf(errW, "    %s\n", pluginUninstallCommand(repoRoot, u.name))
 	}
-	if len(failedExternal) > 0 || len(hookState.unchecked) > 0 {
+	if len(failedExternal) > 0 || len(uncheckedPlugins) > 0 {
 		fmt.Fprintln(errW, "  Re-running `entire disable --uninstall` will not reach these plugins once .entire/ is gone.")
 	}
 
@@ -2549,7 +2552,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force, strict bool) er
 	// plugin is third-party code Entire cannot fix, so by default it does not get
 	// to fail Entire's own uninstall; --strict opts into that. A built-in failure
 	// never does, in either mode: re-running reaches it.
-	if len(failedExternal) > 0 || len(hookState.unchecked) > 0 {
+	if len(failedExternal) > 0 || len(uncheckedPlugins) > 0 {
 		fmt.Fprintln(w, "\nEntire CLI uninstalled, but some external agent hooks may remain - see the warnings above.")
 		if strict {
 			return NewSilentError(errors.New("some external agent hooks could not be removed"))
@@ -2602,8 +2605,12 @@ func checkEntireDirExists(ctx context.Context) bool {
 // rely on them. Printing the bare binary hands the user a command a conforming
 // plugin can reject.
 func pluginUninstallCommand(repoRoot string, name types.AgentName) string {
+	// Quoted because this is a line the user pastes into a shell, and a repo path
+	// with a space in it is ordinary: unquoted, `cd /My Repo && ...` runs cd
+	// against the wrong argument and the command silently does nothing useful.
+	root := shellQuote(repoRoot)
 	return fmt.Sprintf("cd %s && ENTIRE_REPO_ROOT=%s ENTIRE_PROTOCOL_VERSION=%d entire-agent-%s uninstall-hooks",
-		repoRoot, repoRoot, external.ProtocolVersion, name)
+		root, root, external.ProtocolVersion, name)
 }
 
 // removeAgentHooks removes hooks from all agents that support hooks. installed

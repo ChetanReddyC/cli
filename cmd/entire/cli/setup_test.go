@@ -1588,14 +1588,18 @@ type fakeBuiltinHookAgent struct {
 	name           types.AgentName
 	uninstallCalls *int
 	uninstallErr   error
+	checkErr       error
 }
 
 func (f *fakeBuiltinHookAgent) Name() types.AgentName { return f.name }
 func (f *fakeBuiltinHookAgent) Type() types.AgentType { return types.AgentType(f.name) }
 
-// AreHooksInstalled reports false: these tests are about what happens to a
+// AreHooksInstalled reports false, or checkErr when the test is about a built-in
+// that could not read its own config: these tests are about what happens to a
 // built-in the installed-hooks sweep did not pick up.
-func (f *fakeBuiltinHookAgent) AreHooksInstalled(context.Context) (bool, error) { return false, nil }
+func (f *fakeBuiltinHookAgent) AreHooksInstalled(context.Context) (bool, error) {
+	return false, f.checkErr
+}
 
 func (f *fakeBuiltinHookAgent) UninstallHooks(context.Context) error {
 	*f.uninstallCalls++
@@ -1605,6 +1609,11 @@ func (f *fakeBuiltinHookAgent) UninstallHooks(context.Context) error {
 // registerFakeBuiltinHookAgent registers a built-in hook-supporting agent whose
 // hooks report as not installed, and returns its UninstallHooks call count.
 func registerFakeBuiltinHookAgent(t *testing.T, name types.AgentName, uninstallErr error) *int {
+	t.Helper()
+	return registerFakeBuiltinHookAgentEx(t, name, uninstallErr, nil)
+}
+
+func registerFakeBuiltinHookAgentEx(t *testing.T, name types.AgentName, uninstallErr, checkErr error) *int {
 	t.Helper()
 
 	setupTestRepo(t)
@@ -1618,6 +1627,7 @@ func registerFakeBuiltinHookAgent(t *testing.T, name types.AgentName, uninstallE
 			name:           name,
 			uninstallCalls: &calls,
 			uninstallErr:   uninstallErr,
+			checkErr:       checkErr,
 		}
 	})
 	return &calls
@@ -1662,6 +1672,39 @@ func TestRunUninstall_BuiltinHookFailureStillSucceeds(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "uninstalled successfully") {
 		t.Errorf("expected the uninstall to still report success, got:\n%s", stdout.String())
+	}
+}
+
+// TestRunUninstall_UncheckableBuiltinIsReportedNotBlamed pins both halves for a
+// built-in that could not read its own config, e.g. a malformed hooks.json. The
+// reason is worth telling the user — we have it — but the remedy is not a plugin
+// command and not a failed command: its hooks were removed in-process anyway, so
+// nothing survives for the user to go clean up, even under --strict.
+func TestRunUninstall_UncheckableBuiltinIsReportedNotBlamed(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	const agentName types.AgentName = "fake-builtin-unreadable"
+	calls := registerFakeBuiltinHookAgentEx(t, agentName, nil, errors.New("parse hooks.json: unexpected end of input"))
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true, true); err != nil {
+		t.Fatalf("a built-in that could not be checked must not fail the uninstall, even with --strict: %v\nstderr: %s", err, stderr.String())
+	}
+
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "could not check whether") || !strings.Contains(errOut, "parse hooks.json") {
+		t.Errorf("the reason must be reported, stderr:\n%s", errOut)
+	}
+	if strings.Contains(errOut, "entire-agent-"+string(agentName)) {
+		t.Errorf("a built-in must not be handed a plugin command, stderr:\n%s", errOut)
+	}
+	if strings.Contains(errOut, "may still be installed") {
+		t.Errorf("a built-in's hooks were removed, so nothing may still be installed, stderr:\n%s", errOut)
+	}
+	if *calls == 0 {
+		t.Error("a built-in must still be asked to uninstall when its check failed")
+	}
+	if !strings.Contains(stdout.String(), "uninstalled successfully") {
+		t.Errorf("nothing was left behind, so the uninstall succeeded, stdout:\n%s", stdout.String())
 	}
 }
 
@@ -4328,4 +4371,24 @@ func TestRunEnableInteractive_FirstRunDefaultsToGitRefs(t *testing.T) {
 			t.Errorf("Checkpoints = %+v, want none added on a pre-existing setup", cfg)
 		}
 	})
+}
+
+// TestPluginUninstallCommand_QuotesRepoRoot pins that the recovery command
+// survives an ordinary repo path. A space is the common case; the metacharacters
+// matter because this line is meant to be pasted into a shell, where an
+// unquoted path silently runs `cd` against the wrong argument.
+func TestPluginUninstallCommand_QuotesRepoRoot(t *testing.T) {
+	t.Parallel()
+
+	got := pluginUninstallCommand("/Users/me/My Repo", "flaky")
+	if !strings.Contains(got, "cd '/Users/me/My Repo'") {
+		t.Errorf("repo root must be quoted for the shell, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ENTIRE_REPO_ROOT='/Users/me/My Repo'") {
+		t.Errorf("env value must be quoted too, got:\n%s", got)
+	}
+	// A single quote in a path terminates the quoting unless escaped.
+	if got := pluginUninstallCommand("/tmp/it's", "flaky"); !strings.Contains(got, `'/tmp/it'\''s'`) {
+		t.Errorf("a single quote in the path must be escaped, got:\n%s", got)
+	}
 }
