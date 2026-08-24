@@ -2,12 +2,15 @@ package strategy
 
 import (
 	"bytes"
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
@@ -216,7 +219,14 @@ func TestNewCommitCondensedSignal_CarriesSearchProbe(t *testing.T) {
 	}
 }
 
-func TestPriorAICommitTouchedFiles(t *testing.T) {
+// hasFile is the intersection the emitter performs per session, spelled out so
+// the set-returning probe can be asserted directly.
+func hasFile(files map[string]struct{}, name string) bool {
+	_, ok := files[name]
+	return ok
+}
+
+func TestPriorAICommitFiles(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -239,26 +249,23 @@ func TestPriorAICommitTouchedFiles(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "head.txt")
 	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
 
-	ctx := t.Context()
+	files := priorAICommitFiles(t.Context(), tmpDir)
 
-	if !priorAICommitTouchedFiles(ctx, tmpDir, []string{"ai.txt"}) {
-		t.Error("ai.txt was touched by a prior checkpoint commit; want true")
+	if !hasFile(files, "ai.txt") {
+		t.Error("ai.txt was touched by a prior checkpoint commit; want present")
 	}
-	if priorAICommitTouchedFiles(ctx, tmpDir, []string{"human.txt"}) {
-		t.Error("human.txt was only touched by a human commit; want false")
+	if hasFile(files, "human.txt") {
+		t.Error("human.txt was only touched by a human commit; want absent")
 	}
-	if priorAICommitTouchedFiles(ctx, tmpDir, []string{"head.txt"}) {
-		t.Error("head.txt was only touched by the just-created HEAD commit; want false")
+	if hasFile(files, "head.txt") {
+		t.Error("head.txt was only touched by the just-created HEAD commit; want absent")
 	}
-	if priorAICommitTouchedFiles(ctx, tmpDir, nil) {
-		t.Error("no committed files; want false")
-	}
-	if priorAICommitTouchedFiles(ctx, t.TempDir(), []string{"ai.txt"}) {
-		t.Error("not a git repository; want best-effort false")
+	if got := priorAICommitFiles(t.Context(), t.TempDir()); got != nil {
+		t.Errorf("not a git repository; want best-effort nil, got %v", got)
 	}
 }
 
-func TestPriorAICommitTouchedFiles_NonASCIIPath(t *testing.T) {
+func TestPriorAICommitFiles_NonASCIIPath(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -277,7 +284,223 @@ func TestPriorAICommitTouchedFiles_NonASCIIPath(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "head.txt")
 	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
 
-	if !priorAICommitTouchedFiles(t.Context(), tmpDir, []string{"café.go"}) {
-		t.Error("café.go was touched by a prior checkpoint commit; want true")
+	if !hasFile(priorAICommitFiles(t.Context(), tmpDir), "café.go") {
+		t.Error("café.go was touched by a prior checkpoint commit; want present")
+	}
+}
+
+// TestPriorAICommitFiles_ControlCharsInBody is the regression test for the
+// %x1e/%x1f framing: those delimiters came out of the raw %B, so either
+// character in a commit body split a record early and dropped the real
+// Entire-Checkpoint trailer with it — making prior_ai_history read false and
+// suppressing a genuine miss. The NUL-anchored framing cannot be broken by
+// message content, because a commit message cannot contain NUL.
+func TestPriorAICommitFiles_ControlCharsInBody(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+
+	testutil.WriteFile(t, tmpDir, "hostile.txt", "content")
+	testutil.GitAdd(t, tmpDir, "hostile.txt")
+	cpID := id.MustCheckpointID("abcdef123456")
+	// Both delimiters, plus a trailer-lookalike line placed before the real
+	// trailer, so an early split would look plausible rather than empty.
+	body := "subject\n\nbody with \x1e and \x1f inside\nEntire-Checkpoint: not-an-id\n"
+	testutil.GitCommit(t, tmpDir, body+"\n"+trailers.FormatCheckpoint("", cpID))
+
+	testutil.WriteFile(t, tmpDir, "head.txt", "head content")
+	testutil.GitAdd(t, tmpDir, "head.txt")
+	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
+
+	if !hasFile(priorAICommitFiles(t.Context(), tmpDir), "hostile.txt") {
+		t.Error("a commit body containing \\x1e/\\x1f must not hide its checkpoint trailer")
+	}
+}
+
+// TestPriorAICommitFiles_EmptyMessageCommit pins why the format carries %H: an
+// empty body would otherwise put two adjacent empty fields in the output and
+// mis-frame the following record.
+func TestPriorAICommitFiles_EmptyMessageCommit(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+
+	testutil.WriteFile(t, tmpDir, "ai.txt", "ai content")
+	testutil.GitAdd(t, tmpDir, "ai.txt")
+	cpID := id.MustCheckpointID("abcdef123456")
+	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("ai change", cpID))
+
+	// An empty-message commit between the checkpoint commit and HEAD.
+	testutil.WriteFile(t, tmpDir, "empty.txt", "empty")
+	testutil.GitAdd(t, tmpDir, "empty.txt")
+	testutil.GitCommit(t, tmpDir, "")
+
+	testutil.WriteFile(t, tmpDir, "head.txt", "head content")
+	testutil.GitAdd(t, tmpDir, "head.txt")
+	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
+
+	files := priorAICommitFiles(t.Context(), tmpDir)
+	if !hasFile(files, "ai.txt") {
+		t.Error("an empty-message commit must not mis-frame the records after it")
+	}
+	if hasFile(files, "empty.txt") {
+		t.Error("the empty-message commit carries no trailer; want absent")
+	}
+}
+
+// TestPriorAICommitFiles_MergeCommitContributesNothing pins the deliberate
+// decision documented on priorAICommitFiles, so a future "fix" has to argue
+// with a test rather than silently inflate prior_ai_history.
+func TestPriorAICommitFiles_MergeCommitContributesNothing(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "base.txt", "base")
+	testutil.GitAdd(t, tmpDir, "base.txt")
+	testutil.GitCommit(t, tmpDir, "base")
+
+	branch := testutil.RunGit(t, tmpDir, "rev-parse", "--abbrev-ref", "HEAD")
+	branch = strings.TrimSpace(branch)
+
+	testutil.RunGit(t, tmpDir, "checkout", "-b", "side")
+	testutil.WriteFile(t, tmpDir, "side.txt", "side")
+	testutil.GitAdd(t, tmpDir, "side.txt")
+	testutil.GitCommit(t, tmpDir, "side change")
+
+	testutil.RunGit(t, tmpDir, "checkout", branch)
+	cpID := id.MustCheckpointID("abcdef123456")
+	// A merge commit carrying a checkpoint trailer — the shape 51 of the last
+	// 300 merges on main have.
+	testutil.RunGit(t, tmpDir, "merge", "--no-ff", "-m",
+		trailers.FormatCheckpoint("merge side", cpID), "side")
+
+	testutil.WriteFile(t, tmpDir, "head.txt", "head")
+	testutil.GitAdd(t, tmpDir, "head.txt")
+	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("head change", cpID))
+
+	if hasFile(priorAICommitFiles(t.Context(), tmpDir), "side.txt") {
+		t.Error("a merge commit must contribute no files: its content is already " +
+			"attributed to the commits it brings in, and first-parent diffs would " +
+			"inflate prior_ai_history")
+	}
+}
+
+func TestCommitCondensedEmitter_ProbesAndGatesOnce(t *testing.T) {
+	writeTelemetrySettings(t, "true")
+
+	probeCalls := 0
+	sends := 0
+	restore := emitCommitCondensed
+	emitCommitCondensed = func(telemetry.CommitCondensedSignal, bool, string) { sends++ }
+	t.Cleanup(func() { emitCommitCondensed = restore })
+
+	e := newCommitCondensedEmitter(t.TempDir())
+	e.probeFn = func(context.Context, string) map[string]struct{} {
+		probeCalls++
+		return map[string]struct{}{"shared.go": {}}
+	}
+
+	for _, files := range [][]string{{"shared.go"}, {"other.go"}, {"shared.go", "other.go"}} {
+		e.emit(t.Context(), &commitCondensedSignal{
+			agentType:    agent.AgentTypeClaudeCode,
+			searchProbe:  searchProbe{used: true, source: searchSourceCommand},
+			filesTouched: files,
+		})
+	}
+
+	if probeCalls != 1 {
+		t.Errorf("probe ran %d times across 3 sessions, want 1 — the scan is commit-scoped", probeCalls)
+	}
+	if sends != 3 {
+		t.Errorf("sent %d events, want 3", sends)
+	}
+}
+
+// TestCommitCondensedEmitter_NilSignalCostsNothing pins the laziness that makes
+// a commit which condenses nothing free: no settings read, no subprocess.
+func TestCommitCondensedEmitter_NilSignalCostsNothing(t *testing.T) {
+	t.Parallel()
+
+	probeCalls := 0
+	e := newCommitCondensedEmitter(t.TempDir())
+	e.probeFn = func(context.Context, string) map[string]struct{} {
+		probeCalls++
+		return nil
+	}
+	e.emit(t.Context(), nil)
+
+	if probeCalls != 0 {
+		t.Errorf("probe ran %d times for a nil signal, want 0", probeCalls)
+	}
+	if e.gateResolved {
+		t.Error("a nil signal must not resolve the telemetry gate")
+	}
+}
+
+// TestCommitCondensedEmitter_OptedOutNeverProbes keeps the doc comment's
+// promise: the gate runs in front of the probe, so an opted-out user never pays
+// for the git-log scan.
+func TestCommitCondensedEmitter_OptedOutNeverProbes(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		telemetry string
+	}{
+		{"explicit opt-out", "false"},
+		{"key absent (telemetry is opt-in)", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			writeTelemetrySettings(t, tt.telemetry)
+
+			probeCalls, sends := 0, 0
+			restore := emitCommitCondensed
+			emitCommitCondensed = func(telemetry.CommitCondensedSignal, bool, string) { sends++ }
+			t.Cleanup(func() { emitCommitCondensed = restore })
+
+			e := newCommitCondensedEmitter(t.TempDir())
+			e.probeFn = func(context.Context, string) map[string]struct{} {
+				probeCalls++
+				return nil
+			}
+			e.emit(t.Context(), &commitCondensedSignal{
+				agentType:    agent.AgentTypeClaudeCode,
+				filesTouched: []string{"a.go"},
+			})
+
+			if probeCalls != 0 {
+				t.Errorf("probe ran %d times while opted out, want 0", probeCalls)
+			}
+			if sends != 0 {
+				t.Errorf("sent %d events while opted out, want 0", sends)
+			}
+		})
+	}
+}
+
+// TestCommitCondensedEmitter_OmitsUsedSearchWhenUnsupported pins the mapping
+// from the probe's tri-state onto the payload's nullable field.
+func TestCommitCondensedEmitter_OmitsUsedSearchWhenUnsupported(t *testing.T) {
+	writeTelemetrySettings(t, "true")
+
+	var got telemetry.CommitCondensedSignal
+	restore := emitCommitCondensed
+	emitCommitCondensed = func(sig telemetry.CommitCondensedSignal, _ bool, _ string) { got = sig }
+	t.Cleanup(func() { emitCommitCondensed = restore })
+
+	e := newCommitCondensedEmitter(t.TempDir())
+	e.probeFn = func(context.Context, string) map[string]struct{} { return nil }
+	e.emit(t.Context(), &commitCondensedSignal{
+		agentType:    agent.AgentTypeClaudeCode,
+		searchProbe:  searchProbe{used: false, source: searchSourceUnsupported},
+		filesTouched: []string{"a.go"},
+	})
+
+	if got.UsedSearch != nil {
+		t.Errorf("UsedSearch = %v, want nil so the property is omitted", *got.UsedSearch)
+	}
+	if got.UsedSearchSource != searchSourceUnsupported {
+		t.Errorf("UsedSearchSource = %q, want %q", got.UsedSearchSource, searchSourceUnsupported)
 	}
 }

@@ -1030,6 +1030,11 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		}
 	}
 
+	// One emitter per commit: the prior-history git-log scan and the settings
+	// load are commit-scoped, not session-scoped. Nothing resolves until a
+	// session actually emits, so a commit that condenses nothing costs nothing.
+	condensedTelemetry := newCommitCondensedEmitter(worktreePath)
+
 	loopCtx, processSessionsLoop := perf.StartLoop(ctx, "process_sessions")
 	for _, sess := range sessions {
 		if sess.FullyCondensed && sess.Phase == session.PhaseEnded {
@@ -1053,7 +1058,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		}
 		if stateSaved {
 			EmitSkillInvocationTelemetry(iterCtx, newSkillEvents)
-			emitCommitCondensedTelemetry(iterCtx, condensedSignal)
+			condensedTelemetry.emit(iterCtx, condensedSignal)
 		}
 		iterSpan.End()
 	}

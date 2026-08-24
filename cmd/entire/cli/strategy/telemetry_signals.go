@@ -9,7 +9,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -124,59 +123,86 @@ func detectSearchUsage(ag agent.Agent, transcriptData []byte) searchProbe {
 	return searchProbe{used: found, source: source}
 }
 
-// priorAICommitTouchedFiles reports whether any of files was touched by a
-// recent commit carrying an Entire checkpoint trailer, excluding the commit
-// that was just created (--skip=1). files must be repo-root-relative, matching
-// git log --name-only output. Best-effort: any failure reports false.
+// priorAICommitFiles returns the repo-root-relative paths touched by recent
+// commits carrying an Entire checkpoint trailer, excluding the commit that was
+// just created (--skip=1 — the commit being reported on is not its own prior
+// history). Paths match git log --name-only output, i.e. the same form as
+// SessionState.FilesTouched. Best-effort: any failure yields nil, read as "no
+// prior history".
+//
+// A set rather than a predicate because the answer is commit-scoped and
+// identical for every session in the commit — only the intersection differs —
+// which is what lets commitCondensedEmitter run the subprocess once.
 //
 // -z keeps names unquoted and NUL-terminated, so non-ASCII paths (which git
 // would otherwise emit quoted, e.g. "caf\303\251.go") still match their
 // FilesTouched form, and names containing newlines survive parsing.
-func priorAICommitTouchedFiles(ctx context.Context, repoRoot string, files []string) bool {
-	if len(files) == 0 {
-		return false
-	}
-	// \x1e separates commits; \x1f separates each commit's message from the
-	// --name-only file list git appends after the format block.
+//
+// Merge commits contribute nothing, and that is deliberate rather than a gap.
+// --name-only emits no names for a merge, and the obvious fix
+// (--diff-merges=first-parent) would make a "Merge origin/main into X" commit
+// attribute every file it merged in, inflating prior_ai_history and therefore
+// the miss rate. A merge's content is already attributed to the individual
+// trailer-carrying commits it brings in, which sit in this window on their own
+// account. Squash merges are single-parent, so their files do appear.
+func priorAICommitFiles(ctx context.Context, repoRoot string) map[string]struct{} {
+	// Each record starts with an empty field: -z NUL-terminates the format
+	// output, and %x00 prefixes it, so splitting the whole output on NUL yields
+	// ["", "<hash>\n<body>", "\n<file>", "<file>", …] per commit. A commit
+	// message cannot contain NUL, so the record marker rests on nothing about
+	// message content — the defect in the %x1e/%x1f framing this replaces,
+	// where either control character in a body split a record early and dropped
+	// a real trailer. %H guarantees the post-marker field is non-empty, so an
+	// empty-message commit cannot produce two adjacent markers and mis-frame
+	// the next record.
 	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "log", "-z",
 		"--skip=1", "-n", strconv.Itoa(priorAICheckpointsLookback),
-		"--name-only", "--format=%x1e%B%x1f").Output()
+		"--name-only", "--format=%x00%H%n%B").Output()
 	if err != nil {
-		return false
+		return nil
 	}
-	fileSet := make(map[string]struct{}, len(files))
-	for _, f := range files {
-		fileSet[f] = struct{}{}
-	}
-	for _, record := range strings.Split(string(out), "\x1e") {
-		message, fileList, found := strings.Cut(record, "\x1f")
-		if !found {
-			continue
+	var files map[string]struct{}
+	fields := strings.Split(string(out), "\x00")
+	for i := 0; i < len(fields); i++ {
+		if fields[i] != "" {
+			continue // not a record marker; consumed below
 		}
-		if _, isCheckpoint := trailers.ParseCheckpoint(message); !isCheckpoint {
-			continue
+		i++
+		if i >= len(fields) {
+			break
 		}
-		for _, name := range strings.Split(fileList, "\x00") {
-			// The diff section still opens with the newline separating it
-			// from the format block; strip it from the segment carrying it.
-			name = strings.TrimPrefix(name, "\n")
+		isCheckpoint := false
+		if _, ok := trailers.ParseCheckpoint(fields[i]); ok {
+			isCheckpoint = true
+		}
+		// Consume this record's file list, whether or not we want it, so the
+		// outer loop resumes on the next marker rather than mid-record.
+		for i+1 < len(fields) && fields[i+1] != "" {
+			i++
+			if !isCheckpoint {
+				continue
+			}
+			// The diff section opens with the newline separating it from the
+			// format block; strip it from the segment carrying it.
+			name := strings.TrimPrefix(fields[i], "\n")
 			if name == "" {
 				continue
 			}
-			if _, hit := fileSet[name]; hit {
-				return true
+			if files == nil {
+				files = make(map[string]struct{})
 			}
+			files[name] = struct{}{}
 		}
 	}
-	return false
+	return files
 }
 
 // commitCondensedSignal captures, while the session gate is held, the few
 // state/result fields the condensed-checkpoint signal needs. Everything
 // expensive — the env/settings gates, the git-log density probe, machine-ID
 // lookup, and the detached-process spawn — runs later in
-// emitCommitCondensedTelemetry, after MutateSessionState has released the
-// gate, matching the skill-event telemetry pattern.
+// commitCondensedEmitter.emit, after MutateSessionState has released the gate,
+// matching the skill-event telemetry pattern.
 type commitCondensedSignal struct {
 	agentType    types.AgentType
 	searchProbe  searchProbe
@@ -214,32 +240,69 @@ func newCommitCondensedSignal(state *SessionState, result *CondenseResult) *comm
 	}
 }
 
-// emitCommitCondensedTelemetry sends the content-free adoption signal for
-// one condensed checkpoint: did the session consult search, and did the files
-// it committed already carry AI checkpoint history? Together these give the
-// "sessions that edited history-dense files without searching" denominator
-// that raw command counts cannot.
+// commitCondensedEmitter emits the cli_commit_condensed signal for each session
+// of one commit, memoizing everything that is commit-scoped rather than
+// session-scoped: the telemetry gate (settings load) and the git-log scan of
+// prior AI checkpoint history.
 //
-// Gated on both the env opt-out and the opt-in telemetry setting before any
-// work happens — an opted-out user never pays for the git-log density probe —
-// and best-effort throughout: the PostHog call happens in a detached child and
-// never blocks the hook. Call it AFTER the surrounding MutateSessionState
-// returns, never inside its closure.
-func emitCommitCondensedTelemetry(ctx context.Context, sig *commitCondensedSignal) {
-	if sig == nil {
+// The scan was per session, and its cost is almost entirely process spawn:
+// measured 13.8ms p50, flat across a 60x range of output size, against 8.7ms
+// for `git --version` alone. Its output is identical for every session in the
+// commit — only the per-session intersection differs — so paying it per session
+// was paying for spawns, not work.
+//
+// Everything resolves on FIRST USE, and the order in emit is the promise: a
+// commit where no session condenses runs neither settings.Load nor git log, and
+// an opted-out user never reaches the probe. Laziness comes from where emit is
+// called, not from this type — do not front-run the gate by resolving anything
+// in the constructor.
+//
+// Not safe for concurrent use: PostCommit's session loop is sequential.
+type commitCondensedEmitter struct {
+	repoRoot string
+
+	gateResolved bool
+	// settings is non-nil only when the gate is open; s.Enabled is needed at
+	// send time, which is why the loaded value is retained rather than reduced
+	// to a bool.
+	settings *settings.EntireSettings
+
+	probed     bool
+	priorFiles map[string]struct{}
+
+	// probeFn is a test seam, like emitSkillTelemetry, so tests can count probe
+	// invocations without spawning git.
+	probeFn func(ctx context.Context, repoRoot string) map[string]struct{}
+}
+
+// newCommitCondensedEmitter returns an emitter for one commit. repoRoot is the
+// worktree root PostCommit already resolved, which is what the per-session emit
+// used to recompute.
+func newCommitCondensedEmitter(repoRoot string) *commitCondensedEmitter {
+	return &commitCondensedEmitter{repoRoot: repoRoot, probeFn: priorAICommitFiles}
+}
+
+// emit sends the content-free adoption signal for one condensed checkpoint: did
+// the session consult search, and did the files it committed already carry AI
+// checkpoint history? Together these give the "commits that landed AI-dense
+// files without consulting search" ratio that raw command counts cannot.
+//
+// Gated on the env opt-out and then the opt-in telemetry setting before any
+// probe work, and best-effort throughout: the PostHog call happens in a
+// detached child and never blocks the hook. Call it AFTER the surrounding
+// MutateSessionState returns, never inside its closure.
+func (e *commitCondensedEmitter) emit(ctx context.Context, sig *commitCondensedSignal) {
+	if e == nil || sig == nil {
 		return
 	}
 	if telemetry.IsEnvOptedOut() {
 		return
 	}
-	s, err := settings.Load(ctx)
-	if err != nil || s.Telemetry == nil || !*s.Telemetry {
+	s, ok := e.allowed(ctx)
+	if !ok {
 		return
 	}
-	priorAIHistory := false
-	if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil {
-		priorAIHistory = priorAICommitTouchedFiles(ctx, root, sig.filesTouched)
-	}
+	priorAIHistory := e.priorAITouched(ctx, sig.filesTouched)
 	// Report the registry key ("claude-code"), not the display name stored in
 	// state.AgentType ("Claude Code"), so the agent property lines up with the
 	// skill and command events. Unknown agent types fall back to the stored
@@ -257,7 +320,7 @@ func emitCommitCondensedTelemetry(ctx context.Context, sig *commitCondensedSigna
 		used := sig.searchProbe.used
 		usedSearch = &used
 	}
-	telemetry.TrackCommitCondensedDetached(telemetry.CommitCondensedSignal{
+	emitCommitCondensed(telemetry.CommitCondensedSignal{
 		Agent:            agentName,
 		UsedSearch:       usedSearch,
 		UsedSearchSource: sig.searchProbe.source,
@@ -265,3 +328,41 @@ func emitCommitCondensedTelemetry(ctx context.Context, sig *commitCondensedSigna
 		FilesCommitted:   len(sig.filesTouched),
 	}, s.Enabled, versioninfo.Version)
 }
+
+// allowed resolves the opt-in telemetry gate at most once per commit.
+//
+// IsTelemetryEnabled is #2023's helper, extracted precisely to stop the
+// hand-rolled `s.Telemetry == nil || !*s.Telemetry` being copied a fourth time.
+func (e *commitCondensedEmitter) allowed(ctx context.Context) (*settings.EntireSettings, bool) {
+	if !e.gateResolved {
+		e.gateResolved = true
+		if s, err := settings.Load(ctx); err == nil && s.IsTelemetryEnabled() {
+			e.settings = s
+		}
+	}
+	return e.settings, e.settings != nil
+}
+
+// priorAITouched intersects one session's committed files against the commit's
+// prior-history set, running the git-log scan at most once.
+func (e *commitCondensedEmitter) priorAITouched(ctx context.Context, files []string) bool {
+	if len(files) == 0 {
+		return false
+	}
+	if !e.probed {
+		e.probed = true
+		e.priorFiles = e.probeFn(ctx, e.repoRoot)
+	}
+	for _, f := range files {
+		if _, hit := e.priorFiles[f]; hit {
+			return true
+		}
+	}
+	return false
+}
+
+// emitCommitCondensed is the send step, separated from the gating above so
+// tests can assert what the gate lets through without a PostHog client.
+//
+//nolint:gochecknoglobals // test seam, set and restored by in-package tests.
+var emitCommitCondensed = telemetry.TrackCommitCondensedDetached
