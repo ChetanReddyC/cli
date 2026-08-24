@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -535,6 +536,34 @@ func MutateSessionState(ctx context.Context, sessionID string, fn func(*SessionS
 	return MutateSessionStateOnSaved(ctx, sessionID, fn, nil)
 }
 
+// runPostSaveEffect runs one post-save effect, containing a panic to that
+// effect rather than letting it escape.
+//
+// Two things make propagating wrong here, and neither is about the effect being
+// likely to panic. The effects are best-effort telemetry — a settings read and a
+// detached spawn — and they run from the outermost frame's defer, so an escaping
+// panic both skips every effect queued behind it and unwinds out of
+// MutateSessionStateOnSaved into callers that do not recover (PostCommit),
+// killing a git hook mid-commit over a signal that is fail-open everywhere else.
+// Note the asymmetry this closes: a panic in the mutation function is already
+// handled deliberately (the queue is discarded, and the gate is released first
+// so it stays usable), so the effects were the one path where the same
+// discipline was not applied.
+//
+// The panic is logged rather than swallowed. It is a bug wherever it comes from,
+// and .entire/logs is where the next person looks for it; a silent recover would
+// trade a crash for an invisible failure.
+func runPostSaveEffect(ctx context.Context, effect func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Error(ctx, "post-save effect panicked",
+				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())))
+		}
+	}()
+	effect()
+}
+
 // MutateSessionStateOnSaved is MutateSessionState plus onSaved, an effect that
 // runs only once the state fn mutated has been durably written — and never
 // while the session gate is held.
@@ -604,7 +633,7 @@ func MutateSessionStateOnSaved(ctx context.Context, sessionID string, fn func(*S
 		gate.afterSave = nil
 		release()
 		for _, effect := range effects {
-			effect()
+			runPostSaveEffect(ctx, effect)
 		}
 	}()
 

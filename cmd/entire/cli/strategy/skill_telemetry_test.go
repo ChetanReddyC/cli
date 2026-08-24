@@ -146,6 +146,10 @@ func TestEmitSkillInvocationTelemetry_RunsOutsideTheSessionGate(t *testing.T) {
 // The "emit only after a durable save" contract: a skipped mutation runs no
 // post-save effect, so callers never announce events the next extraction pass
 // will re-derive.
+// nestedPrompt is the marker a nested frame writes, so a test can tell whether
+// the outer frame flushed the nested mutation to disk.
+const nestedPrompt = "written-by-nested"
+
 func TestMutateSessionStateOnSaved_SkipRunsNoEffect(t *testing.T) {
 	writeTelemetrySettings(t, "true")
 
@@ -197,7 +201,7 @@ func TestMutateSessionStateOnSaved_NestedEffectHeldForTheOuterFrame(t *testing.T
 			var effects []string
 			err := MutateSessionStateOnSaved(t.Context(), sessionID, func(_ *SessionState) error {
 				nestedErr := MutateSessionStateOnSaved(t.Context(), sessionID, func(nested *SessionState) error {
-					nested.LastPrompt = "written-by-nested"
+					nested.LastPrompt = nestedPrompt
 					return nil
 				}, func() { effects = append(effects, "nested") })
 				require.NoError(t, nestedErr)
@@ -215,10 +219,10 @@ func TestMutateSessionStateOnSaved_NestedEffectHeldForTheOuterFrame(t *testing.T
 			reloaded, loadErr := LoadSessionState(t.Context(), sessionID)
 			require.NoError(t, loadErr)
 			if tt.outerResult == nil {
-				require.Equal(t, "written-by-nested", reloaded.LastPrompt,
+				require.Equal(t, nestedPrompt, reloaded.LastPrompt,
 					"the outer save must flush the nested mutation")
 			} else {
-				require.NotEqual(t, "written-by-nested", reloaded.LastPrompt,
+				require.NotEqual(t, nestedPrompt, reloaded.LastPrompt,
 					"no save happened, so the nested mutation must not be on disk")
 			}
 		})
@@ -243,7 +247,7 @@ func TestMutateSessionStateOnSaved_PanicDiscardsQueuedEffects(t *testing.T) {
 		MutateSessionStateOnSaved(t.Context(), sessionID, func(_ *SessionState) error {
 			require.NoError(t, MutateSessionStateOnSaved(t.Context(), sessionID,
 				func(nested *SessionState) error {
-					nested.LastPrompt = "written-by-nested"
+					nested.LastPrompt = nestedPrompt
 					return nil
 				},
 				func() { effects++ },
@@ -255,7 +259,7 @@ func TestMutateSessionStateOnSaved_PanicDiscardsQueuedEffects(t *testing.T) {
 
 	reloaded, err := LoadSessionState(t.Context(), sessionID)
 	require.NoError(t, err)
-	require.NotEqual(t, "written-by-nested", reloaded.LastPrompt,
+	require.NotEqual(t, nestedPrompt, reloaded.LastPrompt,
 		"the panic aborted the save, so nothing may be on disk")
 
 	// The gate must be free (release runs before the effects would have) and
@@ -290,4 +294,46 @@ func TestMutateSessionStateOnSaved_NestedEffectDoesNotLeakToTheNextFrame(t *test
 		return nil
 	}, nil))
 	require.Equal(t, 1, nestedRuns, "a later frame re-ran an effect it did not own")
+}
+
+// A panicking effect must not take the effects queued behind it down with it,
+// and must not escape into callers that do not recover — PostCommit would die
+// mid-commit over best-effort telemetry. The panic in the MUTATION function is
+// already covered above; this is the same discipline applied to the effects,
+// which is where it was missing.
+func TestMutateSessionStateOnSaved_PanickingEffectDoesNotSkipTheRest(t *testing.T) {
+	writeTelemetrySettings(t, "true")
+
+	sessionID := "sess-effect-panic"
+	require.NoError(t, (&ManualCommitStrategy{}).InitializeSession(
+		t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", ""))
+
+	var effects []string
+	err := MutateSessionStateOnSaved(t.Context(), sessionID, func(_ *SessionState) error {
+		nestedErr := MutateSessionStateOnSaved(t.Context(), sessionID, func(nested *SessionState) error {
+			nested.LastPrompt = nestedPrompt
+			return nil
+		}, func() {
+			effects = append(effects, "nested")
+			panic("effect boom")
+		})
+		require.NoError(t, nestedErr)
+		return nil
+	}, func() { effects = append(effects, "outer") })
+
+	require.NoError(t, err, "an effect's panic must not surface as the mutation's error")
+	require.Equal(t, []string{"nested", "outer"}, effects,
+		"the outer effect must still run after the nested one panicked")
+
+	// The save itself happened before any effect ran, so the panic must not
+	// have cost the mutation.
+	reloaded, loadErr := LoadSessionState(t.Context(), sessionID)
+	require.NoError(t, loadErr)
+	require.Equal(t, nestedPrompt, reloaded.LastPrompt)
+
+	// The gate must still be usable: release() runs before the effects.
+	require.NoError(t, MutateSessionStateOnSaved(t.Context(), sessionID, func(state *SessionState) error {
+		state.LastPrompt = "after-panic"
+		return nil
+	}, func() {}))
 }
