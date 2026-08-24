@@ -403,10 +403,12 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		return nil
 	}
 
-	// Find all active sessions for this worktree
-	// We match by worktree (not BaseCommit) because the user may have made
-	// intermediate commits without entering new prompts, causing HEAD to diverge
-	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
+	// Union of worktree matching and identity matching (the committing
+	// process's ancestry) — see findSessionsForCommitLinking; neither
+	// suppresses the other. We match by worktree (not BaseCommit) because
+	// the user may have made intermediate commits without entering new
+	// prompts, causing HEAD to diverge
+	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
 	if err != nil || len(sessions) == 0 {
 		findSessionsSpan.RecordError(err)
 		findSessionsSpan.End()
@@ -724,7 +726,7 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 			allAgentFiles:    h.allAgentFiles,
 		})
 	} else {
-		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead)
+		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead, h.repoDir)
 	}
 	return nil
 }
@@ -753,7 +755,7 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 			allAgentFiles:    h.allAgentFiles,
 		})
 	} else {
-		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead)
+		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead, h.repoDir)
 	}
 	return nil
 }
@@ -894,7 +896,7 @@ func (h *postCommitActionHandler) HandleDiscardIfNoFiles(state *session.State) e
 			slog.String("session_id", state.SessionID),
 		)
 	}
-	h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead)
+	h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead, h.repoDir)
 	return nil
 }
 
@@ -952,8 +954,10 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		return nil
 	}
 
-	// Find all active sessions for this worktree
-	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
+	// Union of worktree and identity matching — must resolve the same way
+	// PrepareCommitMsg did, or the stamped trailer and the condensed session
+	// diverge (a dangling trailer).
+	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
 	findSessionsSpan.RecordError(err)
 	findSessionsSpan.End()
 
@@ -1353,8 +1357,12 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	// commit across two `git commit` invocations, each gets a 1:1 checkpoint.
 	// Uses content-aware comparison: if user did `git add -p` and committed
 	// partial changes, the file still has remaining agent changes to carry forward.
+	// Guest-linked sessions are excluded: remaining-files would diff the home
+	// worktree's shadow tree against THIS worktree's commit, and carry-forward
+	// reads file content from THIS worktree — both would rewrite the home
+	// worktree's shadow state with foreign data (see condenseAndUpdateState).
 	_, carryForwardSpan := perf.Start(ctx, "carry_forward_files")
-	if handler.condensed {
+	if handler.condensed && isSessionHomeWorktree(repoDir, state) {
 		remainingFiles := filesWithRemainingAgentChanges(ctx, repo, shadowBranchName, commit, filesTouchedBefore, committedFileSet, overlapOpts{
 			headTree:   headTree,
 			shadowTree: shadowTree,
@@ -1432,10 +1440,10 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	shadowBranchName string,
 	shadowBranchesToDelete map[string]struct{},
 	committedFiles map[string]struct{},
-	opts ...condenseOpts,
+	opts condenseOpts,
 ) (condensed bool, newSkillEvents []agent.SkillEvent) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
-	result, err := s.CondenseSession(ctx, repo, checkpointID, state, committedFiles, opts...)
+	result, err := s.CondenseSession(ctx, repo, checkpointID, state, committedFiles, opts)
 	if err != nil {
 		logging.Warn(logCtx, "condensation failed",
 			slog.String("session_id", state.SessionID),
@@ -1450,6 +1458,36 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 			slog.String("checkpoint_id", checkpointID.String()),
 		)
 		return false, nil
+	}
+
+	// Guest-linked commit (identity-matched from a sibling worktree): the
+	// transcript is condensed and the trailer stamped, but every mutation of
+	// worktree-coupled state below is skipped. The session's BaseCommit
+	// tracks the HEAD of ITS worktree, which this commit did not move —
+	// rewriting it would orphan the shadow branch (keyed by BaseCommit +
+	// WorktreeID). The shadow branch itself must survive too: deleting it
+	// (or letting the caller rebuild it via carry-forward, which reads file
+	// CONTENT from the current — wrong — worktree) would replace the home
+	// worktree's in-flight state with the committing worktree's files.
+	isHome := isSessionHomeWorktree(opts.repoDir, state)
+	if !isHome {
+		state.LastCheckpointID = result.CheckpointID
+		state.LastCheckpointCommitHash = head.Hash().String()
+		pendingStepCount := state.StepCount
+		resetCheckpointWindow(state)
+		// The checkpoint window was consumed, but the home worktree's shadow
+		// content was not. Keep its existing SaveStep count as the ownership
+		// pin used by cleanup and doctor until a home commit consumes it.
+		state.StepCount = pendingStepCount
+		state.CheckpointTranscriptStart = result.TotalTranscriptLines
+		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
+		logging.Info(logCtx, "session guest-condensed from a sibling worktree; shadow state untouched",
+			slog.String("strategy", "manual-commit"),
+			slog.String("session_id", state.SessionID),
+			slog.String("checkpoint_id", result.CheckpointID.String()),
+			slog.String("home_worktree", state.WorktreePath),
+		)
+		return true, result.NewSkillEvents
 	}
 
 	// Track this shadow branch for cleanup
@@ -1493,7 +1531,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 // Only updates ACTIVE sessions. IDLE/ENDED sessions should NOT have their
 // BaseCommit updated, as this would cause them to be incorrectly associated
 // with a new shadow branch and potentially condensed on future commits.
-func (s *ManualCommitStrategy) updateBaseCommitIfChanged(ctx context.Context, state *SessionState, newHead string) {
+func (s *ManualCommitStrategy) updateBaseCommitIfChanged(ctx context.Context, state *SessionState, newHead, worktreePath string) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	// Only update ACTIVE sessions. IDLE/ENDED sessions are kept around for
 	// LastCheckpointID reuse and should not be advanced to HEAD.
@@ -1502,6 +1540,12 @@ func (s *ManualCommitStrategy) updateBaseCommitIfChanged(ctx context.Context, st
 			slog.String("session_id", state.SessionID),
 			slog.String("phase", string(state.Phase)),
 		)
+		return
+	}
+	// Guest-linked sessions (identity-matched from a sibling worktree) keep
+	// their BaseCommit on their home worktree's HEAD — see
+	// condenseAndUpdateState for the shadow-branch rationale.
+	if !isSessionHomeWorktree(worktreePath, state) {
 		return
 	}
 	if state.BaseCommit != newHead {
