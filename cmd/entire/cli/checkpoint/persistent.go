@@ -2544,7 +2544,10 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, cache
 	// Large append-only transcripts reuse the prefix redacted for the previous
 	// checkpoint and redact only what was appended; see redact_cache.go. Output is
 	// identical to redacting the whole file.
-	result, err := redactIncrementally(ctx, repo, cache, content, treePath)
+	result, err := redactIncrementally(ctx, repo, cache, content, treePath,
+		func(ctx context.Context, b []byte) ([]byte, error) {
+			return RedactBlobBytes(ctx, b, treePath, false)
+		})
 	if err != nil {
 		return plumbing.ZeroHash, 0, err
 	}

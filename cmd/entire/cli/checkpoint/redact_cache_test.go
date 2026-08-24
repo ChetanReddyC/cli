@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/require"
@@ -202,10 +203,21 @@ func TestIncrementalRedaction_SkippedUnlessLargeSessionTranscript(t *testing.T) 
 		"chunked transcript parts must not qualify")
 	require.True(t, incrementalRedactionCandidate([]byte(big), ".entire/metadata/s1/full.jsonl"))
 
-	noCacheResult, noCacheErr := redactIncrementally(ctx, repo, nil, []byte(big), "full.jsonl")
+	noCacheResult, noCacheErr := redactIncrementally(ctx, repo, nil, []byte(big), "full.jsonl", testRedactor)
 	require.NoError(t, noCacheErr)
 	require.Nil(t, noCacheResult.Redacted,
 		"a nil cache must disable the incremental path")
+}
+
+// testRedactor is the production redactor for this file's direct
+// redactIncrementally calls: the same pipeline RedactBlobBytes uses for a
+// .jsonl blob, so cached prefixes and freshly redacted suffixes agree.
+func testRedactor(_ context.Context, b []byte) ([]byte, error) {
+	out, err := redact.JSONLBytes(b)
+	if err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 // TestRedactCache_IgnoresCorruptEntry proves a damaged cache file degrades to a

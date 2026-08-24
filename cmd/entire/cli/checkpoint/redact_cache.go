@@ -43,12 +43,20 @@ import (
 // transcript, a compaction, changed custom rules, a CLI upgrade -- falls back to
 // redacting everything.
 //
-// Scope: this covers the shadow-branch metadata write only. Condensation
-// (strategy/manual_commit_condensation.go) and the Stop finalize rewrite
-// (strategy/manual_commit_hooks.go) still redact whole transcripts; they inherit
-// the sharding in redact.JSONLContent but not the prefix reuse. Single-JSON-value
-// transcripts (OpenCode export) get neither, since they have no line structure to
-// split on.
+// Scope: all three whole-transcript paths reuse prefixes -- the shadow-branch
+// metadata write, post-commit condensation
+// (strategy/manual_commit_condensation.go), and the Stop finalize rewrite
+// (strategy/manual_commit_hooks.go). The latter two arrive here through
+// RedactTranscriptIncremental. Single-JSON-value transcripts (OpenCode export)
+// still get only the sharding in redact.JSONLContent, since they have no line
+// structure to split on.
+//
+// The three paths do NOT all redact the same bytes, which is why entries are
+// namespaced by TranscriptScope: the shadow write stores a sanitized transcript,
+// while condensation and finalize store a sanitized *and* image-externalized one
+// (see prepareTranscriptForStorage). Sharing one key across those would be safe --
+// the prefix hash check rejects a mismatch -- but it would miss on every
+// checkpoint, so each scope gets its own namespace and its own hit rate.
 
 const (
 	// RedactCacheDirName sits in the git common dir, NOT under .entire/, because
@@ -202,6 +210,12 @@ func incrementalRedactionCandidate(content []byte, treePath string) bool {
 		redact.IsLineDelimited(content)
 }
 
+// transcriptRedactor redacts a whole byte range. The same function redacts the
+// appended suffix and, on a cache miss, the whole content -- passing one redactor
+// for both is what makes it impossible to splice a prefix produced by one
+// pipeline onto a suffix produced by another.
+type transcriptRedactor func(ctx context.Context, content []byte) ([]byte, error)
+
 // redactIncrementally redacts content, reusing a previously redacted prefix when
 // one is available and still valid.
 func redactIncrementally(
@@ -210,6 +224,7 @@ func redactIncrementally(
 	cache *redactCache,
 	content []byte,
 	treePath string,
+	redactor transcriptRedactor,
 ) (redactResult, error) {
 	if cache == nil || !incrementalRedactionCandidate(content, treePath) {
 		return redactResult{}, nil
@@ -268,7 +283,7 @@ func redactIncrementally(
 	suffix := content[entry.SourceBytes:]
 	// A degraded scanner must not be spliced onto the reused prefix: fail the
 	// write instead of persisting an under-scanned suffix.
-	redactedSuffix, err := RedactBlobBytes(ctx, suffix, treePath, false)
+	redactedSuffix, err := redactor(ctx, suffix)
 	if err != nil {
 		return redactResult{}, err
 	}
@@ -308,4 +323,92 @@ func readBlobBytes(repo *git.Repository, hash plumbing.Hash) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read blob %s: %w", hash, err)
 	}
 	return out, nil
+}
+
+// TranscriptScope namespaces prefix-cache entries by the preprocessing a
+// transcript went through before reaching redaction. Two scopes never share an
+// entry, because their byte streams differ (see the file header).
+type TranscriptScope string
+
+const (
+	// ShadowScope is the shadow-branch metadata write: sanitized, not
+	// image-externalized.
+	ShadowScope TranscriptScope = "shadow"
+	// CommittedScope is post-commit condensation and the Stop finalize rewrite:
+	// sanitized and image-externalized. Both store the same bytes for the same
+	// session, so they share a namespace and warm each other's prefix.
+	CommittedScope TranscriptScope = "committed"
+)
+
+// transcriptCacheKey is the cache key for one session's transcript within a
+// scope. It ends in paths.TranscriptFileName because
+// incrementalRedactionCandidate gates on that basename, and it carries the
+// session ID so concurrent sessions in one worktree never share an entry.
+func transcriptCacheKey(scope TranscriptScope, sessionID string) string {
+	return string(scope) + "/" + sessionID + "/" + paths.TranscriptFileName
+}
+
+// RedactTranscriptIncremental redacts a whole session transcript, reusing the
+// prefix redacted for the previous checkpoint when it is still valid and
+// recording this result for the next one. Output is byte-identical to redacting
+// content in one pass; see the file header for why splicing is sound.
+//
+// This is the entry point for the paths that hold a transcript in memory rather
+// than walking a file (condensation and the Stop finalize rewrite). Those paths
+// re-redacted the full transcript on every checkpoint, which is what made a Stop
+// hook on a 65MB Codex rollout exceed Codex's 30s hook timeout outright rather
+// than merely run slow.
+//
+// redactor supplies the pipeline, and is used both for the appended suffix and
+// for the whole content on a miss, so the two can never diverge. Everything here
+// is best-effort: an unresolvable git dir, an unreadable cached blob, or a
+// rewritten prefix all fall back to redacting everything, and only a redactor
+// error propagates.
+func RedactTranscriptIncremental(
+	ctx context.Context,
+	repo *git.Repository,
+	scope TranscriptScope,
+	sessionID string,
+	content []byte,
+	redactor func(ctx context.Context, content []byte) (redact.RedactedBytes, error),
+) (redact.RedactedBytes, error) {
+	full := func(ctx context.Context, b []byte) ([]byte, error) {
+		out, err := redactor(ctx, b)
+		if err != nil {
+			return nil, err
+		}
+		return out.Bytes(), nil
+	}
+
+	// A missing session ID would collide every session onto one key, so decline
+	// caching rather than risk cross-session reuse. The hash check would reject
+	// the mismatch anyway; this just avoids the pointless churn.
+	if repo == nil || sessionID == "" {
+		return redactor(ctx, content)
+	}
+
+	treePath := transcriptCacheKey(scope, sessionID)
+	cache := repoRedactCache(ctx, repo)
+
+	result, err := redactIncrementally(ctx, repo, cache, content, treePath, full)
+	if err != nil {
+		return redact.RedactedBytes{}, err
+	}
+	if result.Redacted == nil {
+		redacted, redErr := redactor(ctx, content)
+		if redErr != nil {
+			return redact.RedactedBytes{}, redErr
+		}
+		result.Redacted = redacted.Bytes()
+	}
+
+	if result.StorePrefix {
+		// The blob is written for the cache's benefit; the checkpoint store writes
+		// the same bytes again, and git dedups it to the same object.
+		if blob, blobErr := CreateBlobFromContent(repo, result.Redacted); blobErr == nil {
+			cache.storePrefix(ctx, treePath, result.SourceHash, len(content), blob)
+		}
+	}
+
+	return redact.AlreadyRedacted(result.Redacted), nil
 }
