@@ -342,9 +342,16 @@ type CommitCondensedSignal struct {
 	// Agent is the session-owning agent's registry key (e.g. "claude-code"),
 	// matching the agent property on skill and command events.
 	Agent string
-	// UsedSearch reports whether the session's transcript shows an
-	// `entire search` invocation.
-	UsedSearch bool
+	// UsedSearch reports whether the session invoked `entire search`. Nil means
+	// the question was not answerable for this agent's transcript format, and
+	// the property is then OMITTED from the payload rather than sent as false —
+	// so a consumer filtering on `used_search = false` excludes unknowns instead
+	// of silently counting them as "did not search". UsedSearchSource always
+	// says which case this is.
+	UsedSearch *bool
+	// UsedSearchSource records how UsedSearch was determined: "unsupported",
+	// "none", "command", or "subagent". Always present.
+	UsedSearchSource string
 	// PriorAIHistory reports whether any committed file was touched by a
 	// recent AI checkpoint commit before this one.
 	PriorAIHistory bool
@@ -369,14 +376,18 @@ func BuildCommitCondensedPayload(sig CommitCondensedSignal, isEntireEnabled bool
 	}
 
 	properties := map[string]any{
-		"agent":            agentName,
-		"used_search":      sig.UsedSearch,
-		"prior_ai_history": sig.PriorAIHistory,
-		"files_committed":  sig.FilesCommitted,
-		"isEntireEnabled":  isEntireEnabled,
-		"cli_version":      version,
-		"os":               runtime.GOOS,
-		"arch":             runtime.GOARCH,
+		"agent":              agentName,
+		"used_search_source": sig.UsedSearchSource,
+		"prior_ai_history":   sig.PriorAIHistory,
+		"files_committed":    sig.FilesCommitted,
+		"isEntireEnabled":    isEntireEnabled,
+		"cli_version":        version,
+		"os":                 runtime.GOOS,
+		"arch":               runtime.GOARCH,
+	}
+	// Omitted, not false, when unmeasurable — see UsedSearch's doc comment.
+	if sig.UsedSearch != nil {
+		properties["used_search"] = *sig.UsedSearch
 	}
 
 	return &EventPayload{

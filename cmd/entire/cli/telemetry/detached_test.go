@@ -259,11 +259,13 @@ func TestBuildSkillEventPayload_UnlistedSkillNameIsNotSent(t *testing.T) {
 
 func TestBuildCommitCondensedPayload(t *testing.T) {
 	t.Parallel()
+	usedSearch := true
 	payload := BuildCommitCondensedPayload(CommitCondensedSignal{
-		Agent:          testAgentName,
-		UsedSearch:     true,
-		PriorAIHistory: true,
-		FilesCommitted: 4,
+		Agent:            testAgentName,
+		UsedSearch:       &usedSearch,
+		UsedSearchSource: "command",
+		PriorAIHistory:   true,
+		FilesCommitted:   4,
 	}, true, "1.2.3")
 	if payload == nil {
 		t.Fatal("BuildCommitCondensedPayload returned nil")
@@ -278,6 +280,9 @@ func TestBuildCommitCondensedPayload(t *testing.T) {
 	if got := payload.Properties["used_search"]; got != true {
 		t.Errorf("used_search property = %v, want true", got)
 	}
+	if got := payload.Properties["used_search_source"]; got != "command" {
+		t.Errorf("used_search_source property = %v, want %q", got, "command")
+	}
 	if got := payload.Properties["prior_ai_history"]; got != true {
 		t.Errorf("prior_ai_history property = %v, want true", got)
 	}
@@ -290,5 +295,34 @@ func TestBuildCommitCondensedPayload(t *testing.T) {
 		if _, ok := payload.Properties[forbidden]; ok {
 			t.Errorf("checkpoint payload must not include %q", forbidden)
 		}
+	}
+}
+
+// TestBuildCommitCondensedPayload_UnmeasurableOmitsUsedSearch pins the shape
+// that keeps the missed-opportunity ratio honest: when the probe could not run,
+// used_search is ABSENT rather than false, so a consumer filtering on
+// `used_search = false` excludes those rows instead of counting them as "did
+// not search". A missing PostHog property is not false.
+func TestBuildCommitCondensedPayload_UnmeasurableOmitsUsedSearch(t *testing.T) {
+	t.Parallel()
+	payload := BuildCommitCondensedPayload(CommitCondensedSignal{
+		Agent:            testAgentName,
+		UsedSearch:       nil,
+		UsedSearchSource: "unsupported",
+		PriorAIHistory:   true,
+		FilesCommitted:   2,
+	}, true, "1.2.3")
+	if payload == nil {
+		t.Fatal("BuildCommitCondensedPayload returned nil")
+		return
+	}
+	if _, ok := payload.Properties["used_search"]; ok {
+		t.Errorf("used_search must be absent when unmeasurable, got %v", payload.Properties["used_search"])
+	}
+	if got := payload.Properties["used_search_source"]; got != "unsupported" {
+		t.Errorf("used_search_source property = %v, want %q", got, "unsupported")
+	}
+	if got := payload.Properties["prior_ai_history"]; got != true {
+		t.Errorf("prior_ai_history property = %v, want true", got)
 	}
 }

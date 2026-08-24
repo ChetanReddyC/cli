@@ -210,3 +210,17 @@ func TestCursorAgent_ExtractModifiedFilesFromOffset_EmptyPath(t *testing.T) {
 		t.Errorf("ExtractModifiedFilesFromOffset() pos = %d, want 0", pos)
 	}
 }
+
+// TestCursorAgent_MustNotImplementToolInvocationScanner pins the reason Cursor
+// is permanently outside the tool-invocation probe rather than merely
+// unimplemented: its transcripts contain no tool_use blocks at all (see
+// ExtractModifiedFilesFromOffset), so a walker cannot be written. Implementing
+// the interface would report "did not run" for every Cursor session, which is
+// indistinguishable in aggregate from a real negative.
+func TestCursorAgent_MustNotImplementToolInvocationScanner(t *testing.T) {
+	t.Parallel()
+	if _, ok := agent.AsToolInvocationScanner(&CursorAgent{}); ok {
+		t.Fatal("CursorAgent must not implement ToolInvocationScanner: Cursor transcripts contain " +
+			"no tool_use blocks, so every answer would be a fabricated negative")
+	}
+}

@@ -53,7 +53,11 @@ type CondenseResult struct {
 	Prompts              []string // User prompts from the condensed session
 	TotalTranscriptLines int      // Total transcript units after this condensation (JSONL line count or message count by agent format)
 	Skipped              bool     // True if condensation was skipped (no transcript or files to condense)
-	UsedSearch           bool     // True if the session transcript shows an `entire search` invocation (telemetry signal)
+
+	// SearchProbe records whether the session invoked Entire's history search
+	// and how that was determined. Telemetry only; see detectSearchUsage for why
+	// "could not tell" is a distinct state from "did not search".
+	SearchProbe searchProbe
 
 	// TranscriptSizeBaseline is the byte size to record as
 	// SessionState.CheckpointTranscriptSize. It must be measured on the SANITIZED,
@@ -81,4 +85,5 @@ type ExtractedSessionData struct {
 	FilesTouched        []string
 	TokenUsage          *agent.TokenUsage  // Token usage calculated from transcript (since CheckpointTranscriptStart)
 	SkillEvents         []agent.SkillEvent // Skill events detected from transcript data
+	SearchProbe         searchProbe        // `entire search` usage; see detectSearchUsage
 }

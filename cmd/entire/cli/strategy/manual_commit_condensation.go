@@ -649,7 +649,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TotalTranscriptLines:   sessionData.FullTranscriptLines,
 		TranscriptSizeBaseline: transcriptSizeBaseline,
 		NewSkillEvents:         newSkillEvents,
-		UsedSearch:             transcriptMentionsEntireSearch(sessionData.Transcript),
+		SearchProbe:            sessionData.SearchProbe,
 	}, nil
 }
 
@@ -1447,6 +1447,7 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 		// see withSubagentTokensFrom.
 		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
+		data.SearchProbe = detectSearchUsage(ag, data.Transcript)
 	}
 
 	return data, nil
@@ -1493,6 +1494,7 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 		// withSubagentTokensFrom could be closed by reading them.
 		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
+		data.SearchProbe = detectSearchUsage(ag, data.Transcript)
 	}
 
 	return data, nil
