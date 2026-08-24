@@ -43,6 +43,7 @@ func requireMatchesFullRedaction(t *testing.T, content string, got redact.Redact
 // transcript across checkpoints must produce exactly what one whole-transcript
 // pass produces.
 func TestRedactTranscriptCached_MatchesFullRedaction(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 	const session = "sess-abc"
@@ -66,6 +67,7 @@ func TestRedactTranscriptCached_MatchesFullRedaction(t *testing.T) {
 // engaged rather than silently falling back — otherwise the test above would
 // pass just as happily with the cache doing nothing.
 func TestRedactTranscriptCached_ActuallyReusesPrefix(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 	const session = "sess-reuse"
@@ -93,6 +95,7 @@ func TestRedactTranscriptCached_ActuallyReusesPrefix(t *testing.T) {
 // TestRedactTranscriptCached_SessionsAreIsolated: two concurrent sessions in
 // one worktree must not share a prefix.
 func TestRedactTranscriptCached_SessionsAreIsolated(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 
@@ -114,6 +117,7 @@ func TestRedactTranscriptCached_SessionsAreIsolated(t *testing.T) {
 // that deliberately decline caching (the per-subagent transcript passes a nil
 // repo). Output must still be correct.
 func TestRedactTranscriptCached_OptsOutWithoutRepoOrSession(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
@@ -136,6 +140,7 @@ func TestRedactTranscriptCached_OptsOutWithoutRepoOrSession(t *testing.T) {
 // TestRedactTranscriptCached_RedactorErrorPropagates: a degraded scanner
 // must fail the write rather than store under-scanned content.
 func TestRedactTranscriptCached_RedactorErrorPropagates(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
@@ -148,6 +153,7 @@ func TestRedactTranscriptCached_RedactorErrorPropagates(t *testing.T) {
 // the reuse path: a failure redacting the appended lines must not silently ship
 // the reused prefix alone.
 func TestRedactTranscriptCached_SuffixErrorPropagates(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 	const session = "sess-suffix"
@@ -165,6 +171,7 @@ func TestRedactTranscriptCached_SuffixErrorPropagates(t *testing.T) {
 // shape: a single JSON object has no line structure, so splicing it would drop
 // out of field-aware redaction into raw entropy detection over a fragment.
 func TestRedactTranscriptCached_SingleJSONValueNotSpliced(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, _ := newTestRepoForCache(t)
 	ctx := context.Background()
 
@@ -184,6 +191,7 @@ func TestRedactTranscriptCached_SingleJSONValueNotSpliced(t *testing.T) {
 // writes (it chunks at agent.MaxChunkSize), so it stays unreachable and `git gc`
 // prunes it -- silently reverting every later checkpoint to a full redaction.
 func TestRedactTranscriptCached_PrefixSurvivesGC(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, dir := newTestRepoForCache(t)
 	ctx := context.Background()
 	const session = "sess-gc"

@@ -67,11 +67,16 @@ const (
 	// is rebuilt on the next checkpoint, so the whole directory is safe to delete
 	// at any time.
 	RedactCacheDirName = "entire-redact-cache"
-
-	// redactCacheMinBytes is the file size below which incremental reuse is not
-	// worth its bookkeeping; a small file redacts in milliseconds.
-	redactCacheMinBytes = 1 << 20 // 1MiB
 )
+
+// redactCacheMinBytes is the file size below which incremental reuse is not
+// worth its bookkeeping; a small file redacts in milliseconds.
+//
+// A var rather than a const so tests can lower it: every test of this cache
+// otherwise has to build and redact a megabyte of realistic content, and
+// redaction is the expensive part -- the suite cost minutes under -race and
+// timed out CI. Production never assigns to it.
+var redactCacheMinBytes = 1 << 20 // 1MiB
 
 // redactPrefixEntry is the persisted record of one file's already-redacted
 // prefix. Written atomically; a missing, unreadable, or stale entry simply means
