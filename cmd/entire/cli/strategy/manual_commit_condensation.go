@@ -951,6 +951,11 @@ func (s *ManualCommitStrategy) extractOrCreateSessionData(ctx context.Context, r
 		)
 		return &ExtractedSessionData{
 			FilesTouched: state.FilesTouched,
+			// There is no transcript to look at, and this session can still
+			// condense on FilesTouched or task records alone, so the probe must
+			// say so explicitly. Leaving the zero value here shipped
+			// used_search=false with a blank source.
+			SearchProbe: searchProbe{source: searchSourceUnsupported},
 		}, nil
 	}
 }
@@ -1447,8 +1452,12 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 		// see withSubagentTokensFrom.
 		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
-		data.SearchProbe = detectSearchUsage(ag, data.Transcript)
 	}
+	// Unconditional: detectSearchUsage maps an empty transcript to unsupported,
+	// which is the honest answer. Gating it on len(Transcript) > 0 instead left
+	// the zero value ("" source) on every no-transcript condensation, which the
+	// payload then read as a measured false.
+	data.SearchProbe = detectSearchUsage(ag, data.Transcript)
 
 	return data, nil
 }
@@ -1494,8 +1503,12 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 		// withSubagentTokensFrom could be closed by reading them.
 		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
-		data.SearchProbe = detectSearchUsage(ag, data.Transcript)
 	}
+	// Unconditional: detectSearchUsage maps an empty transcript to unsupported,
+	// which is the honest answer. Gating it on len(Transcript) > 0 instead left
+	// the zero value ("" source) on every no-transcript condensation, which the
+	// payload then read as a measured false.
+	data.SearchProbe = detectSearchUsage(ag, data.Transcript)
 
 	return data, nil
 }

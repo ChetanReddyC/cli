@@ -31,6 +31,34 @@ type searchProbe struct {
 	source string
 }
 
+// measured reports whether used is a real measurement rather than "we could not
+// look".
+//
+// Deliberately an allowlist over the known-measured sources, not `source !=
+// searchSourceUnsupported`. The zero value of searchProbe has source "", which a
+// denylist admits — so any path that condenses without ever running the probe
+// would ship used_search=false with a blank label: the fabricated negative this
+// whole tri-state exists to prevent, wearing no label to reveal itself. An
+// allowlist makes forgetting to set the probe fail safe instead.
+func (p searchProbe) measured() bool {
+	switch p.source {
+	case searchSourceNone, searchSourceCommand, searchSourceSubagent:
+		return true
+	default:
+		return false
+	}
+}
+
+// label is the value sent as used_search_source. It maps the zero value onto
+// unsupported so the property honours its documented contract of always being
+// one of the four named sources.
+func (p searchProbe) label() string {
+	if p.source == "" {
+		return searchSourceUnsupported
+	}
+	return p.source
+}
+
 // Sources for searchProbe.source. Low cardinality on purpose — this is a
 // PostHog property, and a new probe method should get a new label rather than
 // being folded into an existing one.
@@ -321,14 +349,14 @@ func (e *commitCondensedEmitter) emit(ctx context.Context, sig *commitCondensedS
 	// filter excludes those rows instead of counting them as "did not search" —
 	// a missing PostHog property is not false.
 	var usedSearch *bool
-	if sig.searchProbe.source != searchSourceUnsupported {
+	if sig.searchProbe.measured() {
 		used := sig.searchProbe.used
 		usedSearch = &used
 	}
 	emitCommitCondensed(telemetry.CommitCondensedSignal{
 		Agent:            agentName,
 		UsedSearch:       usedSearch,
-		UsedSearchSource: sig.searchProbe.source,
+		UsedSearchSource: sig.searchProbe.label(),
 		PriorAIHistory:   priorAIHistory,
 		FilesCommitted:   len(sig.filesTouched),
 	}, s.Enabled, versioninfo.Version)

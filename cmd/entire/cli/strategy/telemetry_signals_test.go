@@ -515,3 +515,70 @@ func TestCommitCondensedEmitter_OmitsUsedSearchWhenUnsupported(t *testing.T) {
 		t.Errorf("UsedSearchSource = %q, want %q", got.UsedSearchSource, searchSourceUnsupported)
 	}
 }
+
+// TestSearchProbe_ZeroValueIsNotAMeasurement is the regression test for the
+// fabricated negative: a probe that was never run must never present itself as
+// a measured "did not search", and must still carry one of the four documented
+// source labels.
+func TestSearchProbe_ZeroValueIsNotAMeasurement(t *testing.T) {
+	t.Parallel()
+
+	var zero searchProbe
+	if zero.measured() {
+		t.Error("the zero-value probe reports itself as measured; used_search would ship a fabricated false")
+	}
+	if zero.label() != searchSourceUnsupported {
+		t.Errorf("zero-value label = %q, want %q — used_search_source must always be one of the four sources",
+			zero.label(), searchSourceUnsupported)
+	}
+
+	// An unrecognised source is treated the same way. measured() is an
+	// allowlist precisely so a future source added without updating it fails
+	// safe rather than leaking a measured false.
+	unknown := searchProbe{used: true, source: "some-future-source"}
+	if unknown.measured() {
+		t.Error("an unrecognised source reports as measured; measured() must be an allowlist")
+	}
+
+	for _, p := range []searchProbe{
+		{source: searchSourceNone},
+		{used: true, source: searchSourceCommand},
+		{used: true, source: searchSourceSubagent},
+	} {
+		if !p.measured() {
+			t.Errorf("source %q must count as measured", p.source)
+		}
+		if p.label() != p.source {
+			t.Errorf("label() = %q, want %q", p.label(), p.source)
+		}
+	}
+}
+
+// TestCommitCondensedEmitter_ZeroProbeOmitsUsedSearch covers the path the
+// finding named: a session with no readable transcript still condenses on
+// FilesTouched or task records alone, so the signal it carries must not read as
+// a measured negative.
+func TestCommitCondensedEmitter_ZeroProbeOmitsUsedSearch(t *testing.T) {
+	writeTelemetrySettings(t, "true")
+
+	var got telemetry.CommitCondensedSignal
+	restore := emitCommitCondensed
+	emitCommitCondensed = func(sig telemetry.CommitCondensedSignal, _ bool, _ string) { got = sig }
+	t.Cleanup(func() { emitCommitCondensed = restore })
+
+	e := newCommitCondensedEmitter(t.TempDir())
+	e.probeFn = func(context.Context, string) map[string]struct{} { return nil }
+	// searchProbe left at its zero value, as a no-transcript condensation
+	// produced before the probe was made unconditional.
+	e.emit(t.Context(), &commitCondensedSignal{
+		agentType:    agent.AgentTypeClaudeCode,
+		filesTouched: []string{"a.go"},
+	})
+
+	if got.UsedSearch != nil {
+		t.Errorf("UsedSearch = %v, want nil so the property is omitted rather than a fabricated false", *got.UsedSearch)
+	}
+	if got.UsedSearchSource != searchSourceUnsupported {
+		t.Errorf("UsedSearchSource = %q, want %q — never the empty string", got.UsedSearchSource, searchSourceUnsupported)
+	}
+}
