@@ -485,6 +485,24 @@ func TestUninstallHooks_NoSettingsFile(t *testing.T) {
 	}
 }
 
+// TestUninstallHooks_UnreadableSettingsErrors pins the absent-vs-unreadable
+// split: an absent settings file means nothing to uninstall, but a read error
+// must surface instead of reporting success with hooks still on disk. The
+// settings path is created as a directory so os.ReadFile fails with a
+// non-ErrNotExist error on every platform.
+func TestUninstallHooks_UnreadableSettingsErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	if err := os.MkdirAll(filepath.Join(tempDir, ".factory", FactorySettingsFileName), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	if err := (&FactoryAIDroidAgent{}).UninstallHooks(context.Background()); err == nil {
+		t.Fatal("UninstallHooks() = nil for unreadable settings, want error")
+	}
+}
+
 func TestUninstallHooks_PreservesUserHooks(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)

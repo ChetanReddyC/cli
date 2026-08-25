@@ -124,17 +124,19 @@ type uncheckedAgent struct {
 	external bool
 }
 
-// uncheckedExternal returns the plugins among the unchecked ones. Only they can
-// leave hooks behind: a built-in is asked to uninstall regardless of what its
-// check said, so nothing survives for the user to clean up by hand.
-func (s agentHookState) uncheckedExternal() []uncheckedAgent {
-	var plugins []uncheckedAgent
+// uncheckedInternal returns the built-ins among the unchecked ones. Their
+// removal is attempted in-process regardless, but the check and the removal
+// read the same config file, so a failed check usually means the removal
+// failed on the same unreadable file — a caller must not report a success it
+// could not verify.
+func (s agentHookState) uncheckedInternal() []uncheckedAgent {
+	var builtins []uncheckedAgent
 	for _, u := range s.unchecked {
-		if u.external {
-			plugins = append(plugins, u)
+		if !u.external {
+			builtins = append(builtins, u)
 		}
 	}
-	return plugins
+	return builtins
 }
 
 // names returns the unchecked agents' registry names, for display.
@@ -164,7 +166,7 @@ func getAgentHookState(ctx context.Context) agentHookState {
 		}
 		installed, err := hs.AreHooksInstalled(ctx)
 		switch {
-		case err == nil && installed:
+		case installed:
 			state.installed = append(state.installed, name)
 		case err == nil:
 			// Cleanly reported no hooks.

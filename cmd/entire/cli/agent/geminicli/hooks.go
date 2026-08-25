@@ -310,7 +310,12 @@ func (g *GeminiCLIAgent) UninstallHooks(ctx context.Context) error {
 	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
-		return nil //nolint:nilerr // No settings file means nothing to uninstall
+		// An absent file means nothing to uninstall; an unreadable one does not.
+		// Collapsing both leaves hooks on disk while reporting success.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", settingsPath, err)
 	}
 
 	var rawSettings map[string]json.RawMessage

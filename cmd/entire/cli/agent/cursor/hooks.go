@@ -201,7 +201,12 @@ func (c *CursorAgent) UninstallHooks(ctx context.Context) error {
 	hooksPath := filepath.Join(worktreeRoot, ".cursor", HooksFileName)
 	data, err := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
-		return nil //nolint:nilerr // No hooks file means nothing to uninstall
+		// An absent file means nothing to uninstall; an unreadable one does not.
+		// Collapsing both leaves hooks on disk while reporting success.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", hooksPath, err)
 	}
 
 	var rawFile map[string]json.RawMessage

@@ -250,6 +250,24 @@ func TestUninstallHooks_NoHooksFile(t *testing.T) {
 	}
 }
 
+// TestUninstallHooks_UnreadableHooksFileErrors pins the absent-vs-unreadable
+// split: an absent hooks file means nothing to uninstall, but a read error
+// must surface instead of reporting success with hooks still on disk. The
+// hooks path is created as a directory so os.ReadFile fails with a
+// non-ErrNotExist error on every platform.
+func TestUninstallHooks_UnreadableHooksFileErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	if err := os.MkdirAll(filepath.Join(tempDir, ".cursor", HooksFileName), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	if err := (&CursorAgent{}).UninstallHooks(context.Background()); err == nil {
+		t.Fatal("UninstallHooks() = nil for unreadable hooks file, want error")
+	}
+}
+
 func TestInstallHooks_ForceReinstall(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)

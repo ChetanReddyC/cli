@@ -168,7 +168,12 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	hooksPath := filepath.Join(repoRoot, ".codex", HooksFileName)
 	data, err := os.ReadFile(hooksPath) //nolint:gosec // path constructed from repo root
 	if err != nil {
-		return nil //nolint:nilerr // No hooks.json means nothing to uninstall
+		// An absent file means nothing to uninstall; an unreadable one does not.
+		// Collapsing both leaves hooks on disk while reporting success.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", hooksPath, err)
 	}
 
 	var topLevel map[string]json.RawMessage

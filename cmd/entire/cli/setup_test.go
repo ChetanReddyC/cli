@@ -1612,6 +1612,7 @@ type fakeBuiltinHookAgent struct {
 	*vogon.Agent
 
 	name           types.AgentName
+	installed      bool
 	uninstallCalls *int
 	uninstallErr   error
 	checkErr       error
@@ -1620,11 +1621,12 @@ type fakeBuiltinHookAgent struct {
 func (f *fakeBuiltinHookAgent) Name() types.AgentName { return f.name }
 func (f *fakeBuiltinHookAgent) Type() types.AgentType { return types.AgentType(f.name) }
 
-// AreHooksInstalled reports false, or checkErr when the test is about a built-in
-// that could not read its own config: these tests are about what happens to a
-// built-in the installed-hooks sweep did not pick up.
+// AreHooksInstalled reports the configured answer: installed for tests about a
+// detected built-in whose removal then fails, checkErr for tests about a
+// built-in that could not read its own config, and a plain false for tests
+// about a built-in the installed-hooks sweep did not pick up.
 func (f *fakeBuiltinHookAgent) AreHooksInstalled(context.Context) (bool, error) {
-	return false, f.checkErr
+	return f.installed, f.checkErr
 }
 
 func (f *fakeBuiltinHookAgent) UninstallHooks(context.Context) error {
@@ -1636,10 +1638,10 @@ func (f *fakeBuiltinHookAgent) UninstallHooks(context.Context) error {
 // hooks report as not installed, and returns its UninstallHooks call count.
 func registerFakeBuiltinHookAgent(t *testing.T, name types.AgentName, uninstallErr error) *int {
 	t.Helper()
-	return registerFakeBuiltinHookAgentEx(t, name, uninstallErr, nil)
+	return registerFakeBuiltinHookAgentEx(t, name, false, uninstallErr, nil)
 }
 
-func registerFakeBuiltinHookAgentEx(t *testing.T, name types.AgentName, uninstallErr, checkErr error) *int {
+func registerFakeBuiltinHookAgentEx(t *testing.T, name types.AgentName, installed bool, uninstallErr, checkErr error) *int {
 	t.Helper()
 
 	setupTestRepo(t)
@@ -1651,6 +1653,7 @@ func registerFakeBuiltinHookAgentEx(t *testing.T, name types.AgentName, uninstal
 		return &fakeBuiltinHookAgent{
 			Agent:          &vogon.Agent{},
 			name:           name,
+			installed:      installed,
 			uninstallCalls: &calls,
 			uninstallErr:   uninstallErr,
 			checkErr:       checkErr,
@@ -1659,13 +1662,12 @@ func registerFakeBuiltinHookAgentEx(t *testing.T, name types.AgentName, uninstal
 	return &calls
 }
 
-// TestRunUninstall_BuiltinHooksRemovedWhenNotDetected pins the asymmetry between
-// built-in and external agents. A built-in's UninstallHooks is in-process and
-// idempotent, and its hook config can be partial or stale in a way
-// AreHooksInstalled does not recognize as installed, so it is called regardless.
-// Only external plugins — where the call is a mutating subprocess against a
-// binary discovery found on $PATH — are skipped on a clean "no hooks".
-func TestRunUninstall_BuiltinHooksRemovedWhenNotDetected(t *testing.T) {
+// TestRunUninstall_BuiltinNotDetectedIsLeftAlone pins that uninstall acts on
+// exactly the sweep's answer: an agent that cleanly reported no hooks is in
+// neither the installed nor the unchecked set, so its UninstallHooks is never
+// called — the removal worklist is what the confirmation summary showed, not
+// the whole registry.
+func TestRunUninstall_BuiltinNotDetectedIsLeftAlone(t *testing.T) {
 	// Cannot use t.Parallel: mutates cwd and the agent registry.
 	calls := registerFakeBuiltinHookAgent(t, "fake-builtin-undetected", nil)
 
@@ -1674,46 +1676,65 @@ func TestRunUninstall_BuiltinHooksRemovedWhenNotDetected(t *testing.T) {
 		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
 	}
 
-	if *calls == 0 {
-		t.Errorf("a built-in agent absent from the installed set must still have UninstallHooks called, stdout:\n%s", stdout.String())
+	if *calls != 0 {
+		t.Errorf("a built-in that cleanly reported no hooks must not have UninstallHooks called, stdout:\n%s", stdout.String())
 	}
 }
 
-// TestRunUninstall_BuiltinHookFailureStillSucceeds pins that a built-in failure
-// keeps the pre-existing contract: a warning and a zero exit. The non-zero exit
-// is reserved for external plugins, which a re-run cannot reach once .entire/ —
-// and with it the setting gating discovery — is gone. A built-in is always
-// reachable: its leftover hooks keep the installed set non-empty.
-func TestRunUninstall_BuiltinHookFailureStillSucceeds(t *testing.T) {
+// TestRunUninstall_BuiltinHookFailureFailsTheCommand pins that a built-in whose
+// removal failed fails the uninstall even without --strict. A built-in is
+// Entire's own code: its removal failing means the uninstall did not do its
+// job, and "uninstalled successfully" would assert the opposite of the warning
+// just printed. Only external plugins — third-party code Entire cannot fix —
+// get the strict-gated treatment.
+func TestRunUninstall_BuiltinHookFailureFailsTheCommand(t *testing.T) {
 	// Cannot use t.Parallel: mutates cwd and the agent registry.
-	registerFakeBuiltinHookAgent(t, "fake-builtin-failing", errors.New("mock builtin uninstall failure"))
+	const agentName types.AgentName = "fake-builtin-failing"
+	registerFakeBuiltinHookAgentEx(t, agentName, true, errors.New("mock builtin uninstall failure"), nil)
 
 	var stdout, stderr bytes.Buffer
-	if err := runUninstall(context.Background(), &stdout, &stderr, true, false); err != nil {
-		t.Fatalf("a built-in hook failure must not fail the uninstall, got error = %v\nstderr: %s", err, stderr.String())
+	err := runUninstall(context.Background(), &stdout, &stderr, true, false)
+	if err == nil {
+		t.Fatalf("a built-in hook removal failure must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError (the message is already printed), got %T: %v", err, err)
 	}
 
-	if !strings.Contains(stderr.String(), "Warning: failed to remove agent hooks") {
-		t.Errorf("expected the failure to be warned about on stderr, got:\n%s", stderr.String())
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "Warning: failed to remove agent hooks") || !strings.Contains(errOut, string(agentName)) {
+		t.Errorf("the failure must be warned about on stderr, naming the agent, got:\n%s", errOut)
 	}
-	if !strings.Contains(stdout.String(), "uninstalled successfully") {
-		t.Errorf("expected the uninstall to still report success, got:\n%s", stdout.String())
+
+	out := stdout.String()
+	if strings.Contains(out, "uninstalled successfully") {
+		t.Errorf("uninstall must not report success when a built-in's hooks were not removed, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
 	}
 }
 
-// TestRunUninstall_UncheckableBuiltinIsReportedNotBlamed pins both halves for a
-// built-in that could not read its own config, e.g. a malformed hooks.json. The
-// reason is worth telling the user — we have it — but the remedy is not a plugin
-// command and not a failed command: its hooks were removed in-process anyway, so
-// nothing survives for the user to go clean up, even under --strict.
-func TestRunUninstall_UncheckableBuiltinIsReportedNotBlamed(t *testing.T) {
+// TestRunUninstall_UncheckableBuiltinFailsTheCommand pins the built-in that
+// could not read its own config, e.g. a malformed or unreadable hooks.json.
+// The reason is reported, no removal is attempted (an unverifiable check means
+// the removal would read the same broken file), and no plugin command is
+// offered — but the command must not report success, and the exit code has to
+// say so even without --strict.
+func TestRunUninstall_UncheckableBuiltinFailsTheCommand(t *testing.T) {
 	// Cannot use t.Parallel: mutates cwd and the agent registry.
 	const agentName types.AgentName = "fake-builtin-unreadable"
-	calls := registerFakeBuiltinHookAgentEx(t, agentName, nil, errors.New("parse hooks.json: unexpected end of input"))
+	calls := registerFakeBuiltinHookAgentEx(t, agentName, false, nil, errors.New("parse hooks.json: unexpected end of input"))
 
 	var stdout, stderr bytes.Buffer
-	if err := runUninstall(context.Background(), &stdout, &stderr, true, true); err != nil {
-		t.Fatalf("a built-in that could not be checked must not fail the uninstall, even with --strict: %v\nstderr: %s", err, stderr.String())
+	err := runUninstall(context.Background(), &stdout, &stderr, true, false)
+	if err == nil {
+		t.Fatalf("an unchecked built-in must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError (the message is already printed), got %T: %v", err, err)
 	}
 
 	errOut := stderr.String()
@@ -1723,14 +1744,49 @@ func TestRunUninstall_UncheckableBuiltinIsReportedNotBlamed(t *testing.T) {
 	if strings.Contains(errOut, "entire-agent-"+string(agentName)) {
 		t.Errorf("a built-in must not be handed a plugin command, stderr:\n%s", errOut)
 	}
-	if strings.Contains(errOut, "may still be installed") {
-		t.Errorf("a built-in's hooks were removed, so nothing may still be installed, stderr:\n%s", errOut)
+	if !strings.Contains(errOut, "may or may not remain") || !strings.Contains(errOut, string(agentName)) {
+		t.Errorf("the warning must name the unverified agent, stderr:\n%s", errOut)
 	}
-	if *calls == 0 {
-		t.Error("a built-in must still be asked to uninstall when its check failed")
+	if *calls != 0 {
+		t.Error("a built-in whose check failed must not be asked to uninstall")
 	}
-	if !strings.Contains(stdout.String(), "uninstalled successfully") {
-		t.Errorf("nothing was left behind, so the uninstall succeeded, stdout:\n%s", stdout.String())
+
+	out := stdout.String()
+	if strings.Contains(out, "uninstalled successfully") {
+		t.Errorf("uninstall must not report success while a built-in's hooks are unverified, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
+	}
+}
+
+// TestRunUninstall_UncheckedBuiltinAloneIsNotNotInstalled pins the second run
+// of the unreadable-config repro: everything else already removed, the only
+// trace left is a built-in whose config cannot be read. "Not installed" would
+// assert the one thing the failed check makes unknowable, and would return
+// before the warning that surfaces the reason.
+func TestRunUninstall_UncheckedBuiltinAloneIsNotNotInstalled(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	const agentName types.AgentName = "fake-builtin-unreadable-only"
+	registerFakeBuiltinHookAgentEx(t, agentName, false, nil, errors.New("read settings.json: permission denied"))
+	// The helper writes .entire/settings.json; remove it so the unchecked
+	// built-in is the only thing left, as after a first partial uninstall.
+	if err := os.RemoveAll(paths.EntireDir); err != nil {
+		t.Fatalf("removing .entire: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true, false)
+	if err == nil {
+		t.Fatalf("an unchecked built-in as the only leftover must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "not installed in this repository") {
+		t.Errorf("must not claim Entire is not installed when a built-in could not be checked, stdout:\n%s", out)
+	}
+	if !strings.Contains(stderr.String(), "permission denied") {
+		t.Errorf("the unreadable-config reason must reach the user, stderr:\n%s", stderr.String())
 	}
 }
 

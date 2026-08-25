@@ -286,7 +286,14 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
-		return nil //nolint:nilerr // No settings file means nothing to uninstall
+		// Same split AreHooksInstalled makes: an absent file is an answer, an
+		// unreadable one is not. Collapsing both to "nothing to uninstall" leaves
+		// the hooks on disk and reports success, which is what uninstall is
+		// supposed to stop doing.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", settingsPath, err)
 	}
 
 	var rawSettings map[string]json.RawMessage
