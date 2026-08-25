@@ -35,9 +35,9 @@ Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` conf
 
 Codex 0.149.0 does not necessarily load the hooks file owned by the checkout in
 which it runs. A pinned, no-model `codex app-server` integration test starts in
-a conventional linked worktree, calls `hooks/list`, and observes the primary
-checkout's hook command and `sourcePath`; a distinct linked-worktree-only hook
-is absent.
+a conventional linked worktree and calls `hooks/list` twice. Without a local
+`.codex` project layer it observes no project hooks; after creating an empty
+local layer it observes the primary checkout's hook command and `sourcePath`.
 
 Entire deliberately separates that read behavior from write ownership:
 
@@ -87,14 +87,15 @@ read-only warning. Entire never computes or copies Codex trust hashes.
 
 `TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout` runs against
 exactly `@openai/codex@0.149.0`. It creates a repository and conventional linked
-worktree with distinct hook markers, starts `codex app-server` in the linked
-worktree with an isolated `CODEX_HOME`, then sends `initialize`, `initialized`,
-and `hooks/list` JSONL messages over stdio. The test makes no model request and
-needs no OpenAI credentials. It requires the primary marker and primary
-`sourcePath`, rejects the linked-only marker, and requires empty `warnings` and
-`errors`. Local integration runs skip when the exact binary is unavailable; CI
-installs the pinned version and sets `ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER=1`,
-so absence or version drift fails instead of skipping.
+worktree, starts `codex app-server` in the linked worktree with an isolated
+`CODEX_HOME`, then sends `initialize`, `initialized`, and `hooks/list` JSONL
+messages over stdio. With no local `.codex` layer it requires an empty hook
+list; after creating an empty local layer it requires the primary marker and
+primary `sourcePath`. Both responses must have empty `warnings` and `errors`.
+The test makes no model request and needs no OpenAI credentials. Local
+integration runs skip when the exact binary is unavailable; CI installs the
+pinned version and sets `ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER=1`, so absence or
+version drift fails instead of skipping.
 
 **hooks.json structure:**
 ```json

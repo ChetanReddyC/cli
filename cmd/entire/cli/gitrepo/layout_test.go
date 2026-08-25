@@ -62,6 +62,25 @@ func TestResolveGitLayout_ClassifiesSupportedStructures(t *testing.T) {
 		require.Equal(t, canonicalLayoutPath(t, containerRoot), layout.MainWorktreeRoot)
 	})
 
+	t.Run("bare repository named .git", func(t *testing.T) {
+		t.Parallel()
+		tmp := t.TempDir()
+		seedRoot := filepath.Join(tmp, "seed")
+		storageRoot := filepath.Join(tmp, "storage")
+		bareRoot := filepath.Join(storageRoot, ".git")
+		worktreeRoot := filepath.Join(tmp, "feature")
+		initLayoutRepo(t, seedRoot)
+		require.NoError(t, os.MkdirAll(storageRoot, 0o750))
+		runLayoutGit(t, tmp, "clone", "--bare", seedRoot, bareRoot)
+		runLayoutGitArgs(t, tmp, "--git-dir", bareRoot, "worktree", "add", "-b", "feature", worktreeRoot)
+
+		layout, err := gitrepo.ResolveGitLayoutAt(worktreeRoot)
+		require.NoError(t, err)
+		require.Equal(t, gitrepo.GitLayoutBareWorktree, layout.Kind)
+		require.Equal(t, canonicalLayoutPath(t, bareRoot), layout.CommonDir)
+		require.Empty(t, layout.MainWorktreeRoot)
+	})
+
 	t.Run("ordinary and linked submodule", func(t *testing.T) {
 		t.Parallel()
 		tmp := t.TempDir()

@@ -34,7 +34,6 @@ func TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout(t *testing.T)
 	env.InitRepo()
 
 	const primaryMarker = "primary-checkout-hook-marker"
-	const linkedMarker = "linked-worktree-hook-marker"
 	env.WriteFile("README.md", "# Test Repository")
 	env.WriteFile(filepath.Join(".codex", codex.HooksFileName), codexHookFixture(primaryMarker))
 	env.GitAdd("README.md", filepath.Join(".codex", codex.HooksFileName))
@@ -46,7 +45,17 @@ func TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout(t *testing.T)
 	}
 	linkedDir := filepath.Join(linkedParent, "linked")
 	testutil.RunGit(t, env.RepoDir, "worktree", "add", "-b", "codex-hooks-test", linkedDir)
-	testutil.WriteFile(t, linkedDir, filepath.Join(".codex", codex.HooksFileName), codexHookFixture(linkedMarker))
+	require.NoError(t, os.RemoveAll(filepath.Join(linkedDir, ".codex")))
+
+	withoutProjectLayer := listCodexHooks(t, codexPath, linkedDir)
+	require.Len(t, withoutProjectLayer.Data, 1)
+	withoutProjectLayerEntry := withoutProjectLayer.Data[0]
+	require.Equal(t, linkedDir, withoutProjectLayerEntry.CWD)
+	require.Empty(t, withoutProjectLayerEntry.Warnings)
+	require.Empty(t, withoutProjectLayerEntry.Errors)
+	require.Empty(t, withoutProjectLayerEntry.Hooks)
+
+	require.NoError(t, os.Mkdir(filepath.Join(linkedDir, ".codex"), 0o750))
 
 	result := listCodexHooks(t, codexPath, linkedDir)
 	require.Len(t, result.Data, 1)
@@ -63,7 +72,6 @@ func TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout(t *testing.T)
 			foundPrimary = true
 			require.Equal(t, primaryHooksPath, hook.SourcePath)
 		}
-		require.NotEqual(t, linkedMarker, hook.Command)
 	}
 	require.True(t, foundPrimary, "hooks/list did not return the primary checkout hook")
 }

@@ -41,8 +41,8 @@ type HookDiscovery struct {
 	worktreeRoot    string
 }
 
-// ProjectLayerExists reports whether the current checkout has the local
-// .codex directory Codex needs to construct its project config layer.
+// ProjectLayerExists reports whether the current checkout has a valid local
+// .codex directory Codex can use to construct its project config layer.
 func (d HookDiscovery) ProjectLayerExists() bool {
 	return d.worktreeRoot != "" && projectLayerExists(filepath.Join(d.worktreeRoot, ".codex"))
 }
@@ -56,10 +56,6 @@ type UnresolvedHookDiscoveryError struct {
 func (e *UnresolvedHookDiscoveryError) Error() string {
 	return "Codex hook discovery is unresolved: " + e.Reason
 }
-
-// HookInstallationSkipped marks this permanent safety refusal as non-fatal to
-// setup for other selected agents.
-func (e *UnresolvedHookDiscoveryError) HookInstallationSkipped() {}
 
 // ResolveHookDiscovery performs read-only discovery of the hook file Codex is
 // expected to load for the current checkout.
@@ -94,7 +90,7 @@ func hookDiscoveryFromLayout(layout gitrepo.GitLayout) HookDiscovery {
 		discovery.RepositoryWide = true
 	case gitrepo.GitLayoutSubmodule, gitrepo.GitLayoutSeparateGitDir:
 	case gitrepo.GitLayoutBareWorktree:
-		return unresolvedHookDiscoveryAt(layout.WorktreeRoot, "Codex behavior for .bare/worktrees layouts is not pinned")
+		return unresolvedHookDiscoveryAt(layout.WorktreeRoot, "Codex behavior for bare-worktree layouts is not pinned")
 	case gitrepo.GitLayoutLinkedSubmodule:
 		return unresolvedHookDiscoveryAt(layout.WorktreeRoot, "Codex behavior for linked submodules is not pinned")
 	case gitrepo.GitLayoutUnresolved:
@@ -121,16 +117,15 @@ func unresolvedHookDiscoveryAt(worktreeRoot, reason string) HookDiscovery {
 	}
 }
 
-// WorktreeProjectLayerExists reports whether the current checkout has a local
-// .codex project directory.
+// WorktreeProjectLayerExists reports whether the current checkout has a valid
+// local .codex project directory.
 func WorktreeProjectLayerExists(ctx context.Context) bool {
 	hooks, err := ResolveWorktreeHooksPath(ctx)
 	return err == nil && projectLayerExists(filepath.Dir(hooks.Path()))
 }
 
 func projectLayerExists(projectDir string) bool {
-	info, err := os.Stat(projectDir)
-	return err == nil && info.IsDir()
+	return validateExistingProjectDir(projectDir) == nil
 }
 
 func resolveWorktreeRoot(ctx context.Context) (string, error) {

@@ -101,6 +101,69 @@ func TestInspectHookDiagnostics_MissingCurrentWorktreeProjectLayer(t *testing.T)
 	require.Equal(t, HookFileAbsent, diagnostics.Worktree.State)
 }
 
+func TestInspectHookDiagnostics_InvalidCurrentWorktreeWithHealthyDiscovery(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		arrange        func(t *testing.T, mainRoot, linkedRoot string)
+		wantError      string
+		wantValidLayer bool
+	}{
+		"redirected project directory": {
+			arrange: func(t *testing.T, mainRoot, linkedRoot string) {
+				if runtime.GOOS == testWindowsOS {
+					t.Skip("directory symlinks require privileges on Windows")
+				}
+				require.NoError(t, os.Symlink(filepath.Join(mainRoot, ".codex"), filepath.Join(linkedRoot, ".codex")))
+			},
+			wantError: "redirected directory",
+		},
+		"non-directory project path": {
+			arrange: func(t *testing.T, _, linkedRoot string) {
+				require.NoError(t, os.WriteFile(filepath.Join(linkedRoot, ".codex"), []byte("not a directory"), 0o600))
+			},
+			wantError: "not a directory",
+		},
+		"symlinked hooks file": {
+			arrange: func(t *testing.T, mainRoot, linkedRoot string) {
+				if runtime.GOOS == testWindowsOS {
+					t.Skip("file symlinks require privileges on Windows")
+				}
+				require.NoError(t, os.Mkdir(filepath.Join(linkedRoot, ".codex"), 0o750))
+				require.NoError(t, os.Symlink(
+					filepath.Join(mainRoot, ".codex", HooksFileName),
+					filepath.Join(linkedRoot, ".codex", HooksFileName),
+				))
+			},
+			wantError:      "not a regular file",
+			wantValidLayer: true,
+		},
+		"oversized hooks file": {
+			arrange: func(t *testing.T, _, linkedRoot string) {
+				writeDiagnosticHooks(t, linkedRoot, strings.Repeat("x", maxHooksFileBytes+1))
+			},
+			wantError:      "exceeds 1048576 bytes",
+			wantValidLayer: true,
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			mainRoot, linkedRoot := setupDiagnosticLinkedWorktree(t)
+			writeDiagnosticHooks(t, mainRoot, diagnosticEntireHooksJSON)
+			tt.arrange(t, mainRoot, linkedRoot)
+
+			diagnostics := inspectHookDiagnosticsAt(context.Background(), linkedRoot)
+
+			require.Equal(t, HookFileEntire, diagnostics.Discovered.State)
+			require.Equal(t, HookFileInvalid, diagnostics.Worktree.State)
+			require.ErrorContains(t, diagnostics.Worktree.Err, tt.wantError)
+			require.Equal(t, tt.wantValidLayer, diagnostics.Discovery.ProjectLayerExists())
+		})
+	}
+}
+
 func setupDiagnosticLinkedWorktree(t *testing.T) (string, string) {
 	t.Helper()
 	tmp := t.TempDir()

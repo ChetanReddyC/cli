@@ -1,8 +1,7 @@
 # Codex Hooks in Linked Worktrees
 
-Status: implemented design for [PR #2052](https://github.com/entireio/cli/pull/2052),
-with full-suite verification intentionally deferred to implementation-order
-item 9.
+Status: implemented design for [PR #2052](https://github.com/entireio/cli/pull/2052).
+Full verification must be rerun after follow-up changes.
 
 This document defines how Entire resolves, inspects, installs, and removes Codex
 hooks when the current checkout is a linked Git worktree. It incorporates the
@@ -456,12 +455,13 @@ no model request and needs no OpenAI credentials.
 The test:
 
 1. Create a normal repository and a conventional linked worktree.
-2. Put distinct hook commands in the primary and linked hook files.
-3. Start `codex app-server` with an isolated `CODEX_HOME` and the linked
+2. Put a distinct hook command in the primary checkout's hook file.
+3. Remove the linked checkout's local `.codex` layer.
+4. Start `codex app-server` with an isolated `CODEX_HOME` and the linked
    worktree as its working directory.
-4. Send `initialize` with test client metadata.
-5. Send the `initialized` notification.
-6. Send:
+5. Send `initialize` with test client metadata.
+6. Send the `initialized` notification.
+7. Send:
 
    ```json
    {
@@ -471,10 +471,12 @@ The test:
    }
    ```
 
-7. Read JSONL messages until response ID `2` arrives.
-8. Assert that the primary hook marker and primary `sourcePath` are present.
-9. Assert that the linked-only marker is absent.
-10. Assert that `warnings` and `errors` are empty.
+8. Read JSONL messages until response ID `2` arrives and assert that no project
+   hooks are returned.
+9. Create an empty `.codex` directory in the linked checkout and repeat the
+   app-server request.
+10. Assert that the primary hook marker and primary `sourcePath` are present.
+11. Assert that `warnings` and `errors` are empty in both states.
 
 The test must use a context timeout, isolate all configuration, and avoid
 `os.Chdir` so it can call `t.Parallel()`.

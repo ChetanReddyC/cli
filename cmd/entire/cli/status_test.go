@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -1927,6 +1928,52 @@ func TestRunStatusJSON_CodexLinkedWorktreeHooksReportInactiveDiscovery(t *testin
 	}
 	if result.CodexHooks.DiscoveredPath != resolvedHooksPath(t, repoRoot) {
 		t.Fatalf("discovered_path = %q", result.CodexHooks.DiscoveredPath)
+	}
+}
+
+func TestRunStatusJSON_CodexInvalidWorktreePrecedesDiscovery(t *testing.T) {
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("directory symlinks require privileges on Windows")
+	}
+
+	for _, test := range []struct {
+		name       string
+		discovered string
+	}{
+		{name: "healthy discovered hooks", discovered: canonicalCodexHooksJSON()},
+		{name: "invalid discovered hooks", discovered: "{"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tmp, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
+			writeCodexHooksForDiagnosticTest(t, repoRoot, test.discovered)
+			if err := os.Symlink(filepath.Join(repoRoot, ".codex"), filepath.Join(linkedRoot, ".codex")); err != nil {
+				t.Fatalf("create redirected project layer: %v", err)
+			}
+			t.Chdir(linkedRoot)
+			t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+			writeSettings(t, testSettingsEnabled)
+
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
+			var result statusJSON
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if result.CodexHooks == nil {
+				t.Fatal("expected codex_hooks diagnostic")
+			}
+			if result.CodexHooks.State != codexHookStateInvalidWorktree {
+				t.Fatalf("codex_hooks.state = %q, want %q", result.CodexHooks.State, codexHookStateInvalidWorktree)
+			}
+			if result.CodexHooks.WorktreePath != resolvedHooksPath(t, linkedRoot) {
+				t.Fatalf("worktree_path = %q", result.CodexHooks.WorktreePath)
+			}
+			if !strings.Contains(result.CodexHooks.Error, "redirected directory") {
+				t.Fatalf("codex_hooks.error = %q", result.CodexHooks.Error)
+			}
+		})
 	}
 }
 

@@ -45,6 +45,23 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 		require.Contains(t, out, "Entire will not modify it from this worktree")
 	})
 
+	t.Run("invalid current-worktree file", func(t *testing.T) {
+		t.Parallel()
+		var output bytes.Buffer
+		writeCodexInvalidWorktreeWarning(
+			&output,
+			"/repo-feature/.codex/hooks.json",
+			errors.New("repository .codex path is a redirected directory"),
+		)
+
+		out := output.String()
+		require.Contains(t, out, "INVALID CURRENT-WORKTREE CONFIGURATION")
+		require.Contains(t, out, "/repo-feature/.codex/hooks.json")
+		require.Contains(t, out, "redirected directory")
+		require.Contains(t, out, "run `entire enable --force`")
+		require.Contains(t, out, "will not follow redirected paths")
+	})
+
 	t.Run("missing project layer", func(t *testing.T) {
 		t.Parallel()
 		var output bytes.Buffer
@@ -84,6 +101,11 @@ func TestCodexStatusWarningBehavior(t *testing.T) {
 			want:  "discovered hooks are invalid",
 		},
 		{
+			name:  "invalid current worktree",
+			issue: &codexHookIssue{State: codexHookStateInvalidWorktree},
+			want:  "Current-worktree Codex hooks are invalid",
+		},
+		{
 			name:  "project layer",
 			issue: &codexHookIssue{State: codexHookStateProjectLayerMissing},
 			want:  "project layer missing",
@@ -109,6 +131,9 @@ func TestCodexSessionStartWarningsStayConcise(t *testing.T) {
 	mismatch := codexSessionStartWarning(&codexHookIssue{State: codexHookStateInactiveWorktreePath})
 	require.Equal(t, "Entire hooks in this worktree are not active; Codex discovers another checkout. Run 'entire doctor'.", mismatch)
 	require.NotContains(t, mismatch, "/repo-main")
+
+	invalidWorktree := codexSessionStartWarning(&codexHookIssue{State: codexHookStateInvalidWorktree})
+	require.Equal(t, "This worktree's Codex hooks configuration is invalid. Run 'entire doctor'.", invalidWorktree)
 
 	trust := codexSessionStartWarning(&codexHookIssue{
 		State:            codexHookStateTrustReview,

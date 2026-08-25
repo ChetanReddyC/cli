@@ -70,7 +70,7 @@ func TestResolveHookDiscovery_UnpinnedLayoutsAreUnresolved(t *testing.T) {
 		discovery := resolveHookDiscovery(featureRoot)
 		require.Equal(t, HookDiscoveryUnresolved, discovery.State)
 		require.Empty(t, discovery.DiscoveredHooks.Path())
-		require.ErrorContains(t, discovery.Diagnostic, ".bare/worktrees")
+		require.ErrorContains(t, discovery.Diagnostic, "bare-worktree layouts")
 	})
 
 	t.Run("linked submodule", func(t *testing.T) {

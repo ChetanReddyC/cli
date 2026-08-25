@@ -1,6 +1,7 @@
 package gitrepo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	gitconfig "github.com/go-git/go-git/v6/config"
 )
 
 // GitLayoutKind identifies how a checkout relates to its Git metadata.
@@ -161,6 +163,14 @@ func resolveGitLayout(worktreeRoot string) (GitLayout, error) {
 		if filepath.Base(layout.CommonDir) != gitDir {
 			return layout, fmt.Errorf("linked worktree common directory %q is not named .git", layout.CommonDir)
 		}
+		bare, err := commonGitDirIsBare(layout.CommonDir)
+		if err != nil {
+			return layout, err
+		}
+		if bare {
+			layout.Kind = GitLayoutBareWorktree
+			return layout, nil
+		}
 		layout.MainWorktreeRoot = filepath.Dir(layout.CommonDir)
 		if !rootOwnsGitDir(layout.MainWorktreeRoot, layout.CommonDir) {
 			return layout, fmt.Errorf("linked worktree root %q does not own common Git directory %q", layout.MainWorktreeRoot, layout.CommonDir)
@@ -188,6 +198,18 @@ func resolveGitLayout(worktreeRoot string) (GitLayout, error) {
 		return layout, nil
 	}
 	return layout, fmt.Errorf("unrecognized Git layout marker %d", parsed.Layout)
+}
+
+func commonGitDirIsBare(commonDir string) (bool, error) {
+	data, err := readGitConfigFile(filepath.Join(commonDir, "config"))
+	if err != nil {
+		return false, fmt.Errorf("read common Git config: %w", err)
+	}
+	config, err := gitconfig.ReadConfig(bytes.NewReader(data))
+	if err != nil {
+		return false, fmt.Errorf("parse common Git config: %w", err)
+	}
+	return config.Core.IsBare, nil
 }
 
 func validateLinkedLayout(layout GitLayout, hasCommonDir bool) error {

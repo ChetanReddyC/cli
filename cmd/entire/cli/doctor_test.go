@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -767,6 +768,13 @@ func canonicalCodexHooksJSON() string {
 	}}`
 }
 
+func writeCodexHooksForDiagnosticTest(t *testing.T, root, contents string) {
+	t.Helper()
+	projectDir := filepath.Join(root, ".codex")
+	require.NoError(t, os.MkdirAll(projectDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, codex.HooksFileName), []byte(contents), 0o600))
+}
+
 // TestCheckCodexHookTrust_OKWhenAllTrusted prints "✓ Codex hook trust: OK"
 // when every event declared in hooks.json has a matching state entry.
 func TestCheckCodexHookTrust_OKWhenAllTrusted(t *testing.T) {
@@ -887,6 +895,38 @@ func TestCheckCodexHookTrust_LinkedWorktreeReportsInactiveCurrentWorktreeFile(t 
 	require.NotContains(t, out, "migrate")
 	require.Contains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
 	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
+}
+
+func TestCheckCodexHookTrust_InvalidWorktreePrecedesDiscoveredHooks(t *testing.T) {
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("directory symlinks require privileges on Windows")
+	}
+
+	for _, test := range []struct {
+		name       string
+		discovered string
+	}{
+		{name: "healthy discovered hooks", discovered: canonicalCodexHooksJSON()},
+		{name: "invalid discovered hooks", discovered: "{"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tmp, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
+			writeCodexHooksForDiagnosticTest(t, repoRoot, test.discovered)
+			require.NoError(t, os.Symlink(filepath.Join(repoRoot, ".codex"), filepath.Join(linkedRoot, ".codex")))
+			t.Chdir(linkedRoot)
+			t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+			cmd, stdout := newTestCmd(t)
+			checkCodexHookTrust(cmd)
+			out := stdout.String()
+			require.Contains(t, out, "Codex hooks: INVALID CURRENT-WORKTREE CONFIGURATION")
+			require.Contains(t, out, resolvedHooksPath(t, linkedRoot))
+			require.Contains(t, out, "redirected directory")
+			require.NotContains(t, out, "INVALID DISCOVERED CONFIGURATION")
+			require.NotContains(t, out, "✓ Codex hooks: INSTALLED")
+			require.NotContains(t, out, "Codex hook trust: REVIEW NEEDED")
+		})
+	}
 }
 
 func TestCheckCodexHookTrust_SecondWorktreeLocalCopyRemainsLocal(t *testing.T) {

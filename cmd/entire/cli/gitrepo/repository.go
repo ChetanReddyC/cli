@@ -21,7 +21,8 @@ import (
 
 const (
 	gitDir                  = ".git"
-	maxGitMetadataFileBytes = 64 * 1024
+	maxGitMetadataFileBytes = int64(64 * 1024)
+	maxGitConfigFileBytes   = int64(1024 * 1024)
 )
 
 // sharedObjectCache is one process-wide object cache. go-git uses the cache
@@ -204,44 +205,52 @@ func resolveCommonGitPath(dotGitPath string) (string, error) {
 }
 
 func readGitMetadataFile(path string) ([]byte, error) {
+	return readStableGitFile(path, maxGitMetadataFileBytes, "Git metadata", "git metadata")
+}
+
+func readGitConfigFile(path string) ([]byte, error) {
+	return readStableGitFile(path, maxGitConfigFileBytes, "Git config", "git config")
+}
+
+func readStableGitFile(path string, maxBytes int64, title, noun string) ([]byte, error) {
 	before, err := os.Lstat(path)
 	if err != nil {
-		return nil, fmt.Errorf("inspect Git metadata file %q: %w", path, err)
+		return nil, fmt.Errorf("inspect %s file %q: %w", title, path, err)
 	}
 	if !before.Mode().IsRegular() {
-		return nil, fmt.Errorf("git metadata path %q is not a regular file", path)
+		return nil, fmt.Errorf("%s path %q is not a regular file", noun, path)
 	}
-	if before.Size() > maxGitMetadataFileBytes {
-		return nil, fmt.Errorf("git metadata file %q exceeds %d bytes", path, maxGitMetadataFileBytes)
+	if before.Size() > maxBytes {
+		return nil, fmt.Errorf("%s file %q exceeds %d bytes", noun, path, maxBytes)
 	}
 
 	file, err := os.Open(path) //nolint:gosec // Callers derive paths from the current repository's Git metadata.
 	if err != nil {
-		return nil, fmt.Errorf("open Git metadata file %q: %w", path, err)
+		return nil, fmt.Errorf("open %s file %q: %w", title, path, err)
 	}
 	defer func() { _ = file.Close() }()
 
 	opened, err := file.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("inspect opened Git metadata file %q: %w", path, err)
+		return nil, fmt.Errorf("inspect opened %s file %q: %w", title, path, err)
 	}
 	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-		return nil, fmt.Errorf("git metadata file %q changed while opening", path)
+		return nil, fmt.Errorf("%s file %q changed while opening", noun, path)
 	}
-	data, err := io.ReadAll(io.LimitReader(file, maxGitMetadataFileBytes+1))
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read Git metadata file %q: %w", path, err)
+		return nil, fmt.Errorf("read %s file %q: %w", title, path, err)
 	}
-	if len(data) > maxGitMetadataFileBytes {
-		return nil, fmt.Errorf("git metadata file %q exceeds %d bytes", path, maxGitMetadataFileBytes)
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%s file %q exceeds %d bytes", noun, path, maxBytes)
 	}
 
 	after, err := os.Lstat(path)
 	if err != nil {
-		return nil, fmt.Errorf("reinspect Git metadata file %q: %w", path, err)
+		return nil, fmt.Errorf("reinspect %s file %q: %w", title, path, err)
 	}
 	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
-		return nil, fmt.Errorf("git metadata file %q changed while reading", path)
+		return nil, fmt.Errorf("%s file %q changed while reading", noun, path)
 	}
 	return data, nil
 }

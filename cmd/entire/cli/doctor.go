@@ -742,6 +742,10 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 	worktreePath := diagnostics.WorktreeHooks.Path()
 	discoveredPath := discovery.DiscoveredHooks.Path()
 	inspection := diagnostics.Discovered
+	if diagnostics.PathsDiffer() && diagnostics.Worktree.State == codex.HookFileInvalid {
+		writeCodexInvalidWorktreeWarning(w, worktreePath, diagnostics.Worktree.Err)
+		return
+	}
 	if inspection.State == codex.HookFileInvalid {
 		writeCodexInvalidDiscoveredWarning(w, discoveredPath, inspection.Err)
 		return
@@ -822,6 +826,16 @@ func writeCodexInactiveWorktreeWarning(w io.Writer, worktreePath, discoveredPath
 	fmt.Fprintln(w, "  Codex currently discovers:")
 	fmt.Fprintf(w, "    %s\n", discoveredPath)
 	writeCodexPrimaryCheckoutRemedy(w)
+}
+
+func writeCodexInvalidWorktreeWarning(w io.Writer, worktreePath string, err error) {
+	fmt.Fprintln(w, "Codex hooks: INVALID CURRENT-WORKTREE CONFIGURATION")
+	if worktreePath != "" {
+		fmt.Fprintf(w, "  Current-worktree hooks: %s\n", worktreePath)
+	}
+	fmt.Fprintf(w, "  Error: %v\n", err)
+	fmt.Fprintln(w, "  Fix the current-worktree .codex path or hooks.json file, then run `entire enable --force`.")
+	fmt.Fprintln(w, "  Entire will not follow redirected paths or overwrite an invalid file.")
 }
 
 func writeCodexInvalidDiscoveredWarning(w io.Writer, discoveredPath string, err error) {

@@ -10,6 +10,7 @@ import (
 
 const (
 	codexHookStateInactiveWorktreePath      = "inactive_in_worktree"
+	codexHookStateInvalidWorktree           = "invalid_worktree"
 	codexHookStateInvalidDiscovered         = "invalid_discovered"
 	codexHookStateProjectLayerMissing       = "project_layer_missing"
 	codexHookStateDiscoveryUnresolved       = "discovery_unresolved"
@@ -54,6 +55,13 @@ func codexHookIssueFromDiagnostics(diagnostics codex.HookDiagnostics) *codexHook
 		return issue
 	}
 
+	if diagnostics.PathsDiffer() && diagnostics.Worktree.State == codex.HookFileInvalid {
+		issue.State = codexHookStateInvalidWorktree
+		if diagnostics.Worktree.Err != nil {
+			issue.Error = diagnostics.Worktree.Err.Error()
+		}
+		return issue
+	}
 	if diagnostics.Discovered.State == codex.HookFileInvalid {
 		issue.State = codexHookStateInvalidDiscovered
 		if diagnostics.Discovered.Err != nil {
@@ -99,6 +107,8 @@ func codexStatusWarning(issue *codexHookIssue) string {
 	switch issue.State {
 	case codexHookStateInactiveWorktreePath:
 		return "Codex hooks are not active in this worktree · run 'entire doctor'"
+	case codexHookStateInvalidWorktree:
+		return "Current-worktree Codex hooks are invalid · run 'entire doctor'"
 	case codexHookStateInvalidDiscovered:
 		return "Codex-discovered hooks are invalid · run 'entire doctor'"
 	case codexHookStateProjectLayerMissing:
@@ -123,6 +133,8 @@ func codexSessionStartWarning(issue *codexHookIssue) string {
 	switch issue.State {
 	case codexHookStateInactiveWorktreePath:
 		return "Entire hooks in this worktree are not active; Codex discovers another checkout. Run 'entire doctor'."
+	case codexHookStateInvalidWorktree:
+		return "This worktree's Codex hooks configuration is invalid. Run 'entire doctor'."
 	case codexHookStateInvalidDiscovered:
 		return "Codex-discovered hooks are invalid. Run 'entire doctor'."
 	case codexHookStateProjectLayerMissing:
