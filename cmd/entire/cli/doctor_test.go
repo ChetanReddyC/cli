@@ -716,9 +716,12 @@ func TestCheckCodexHookTrust_MalformedAuthorityReportsInvalid(t *testing.T) {
 
 	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
-	require.Contains(t, stdout.String(), "Codex hooks: INVALID")
-	require.NotContains(t, stdout.String(), "✓ Codex hooks: INSTALLED")
-	require.NotContains(t, stdout.String(), "Codex hook trust:")
+	out := stdout.String()
+	require.Contains(t, out, "Codex hooks: INVALID DISCOVERED CONFIGURATION")
+	require.Contains(t, out, resolvedHooksPath(t, dir))
+	require.Contains(t, out, "unexpected end of JSON input")
+	require.NotContains(t, out, "✓ Codex hooks: INSTALLED")
+	require.NotContains(t, out, "Codex hook trust:")
 	require.NotContains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
 
@@ -866,8 +869,8 @@ func TestCheckCodexHookTrust_UnknownWhenApprovalRecordsUnreadable(t *testing.T) 
 	require.Contains(t, stdout.String(), "review their active state")
 }
 
-func TestCheckCodexHookTrust_LinkedWorktreeReportsLegacyFile(t *testing.T) {
-	tmp, _, linkedRoot := setupLinkedRepoForDoctorTest(t)
+func TestCheckCodexHookTrust_LinkedWorktreeReportsInactiveCurrentWorktreeFile(t *testing.T) {
+	tmp, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(linkedRoot, ".codex"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(linkedRoot, ".codex", "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
 	t.Chdir(linkedRoot)
@@ -875,13 +878,18 @@ func TestCheckCodexHookTrust_LinkedWorktreeReportsLegacyFile(t *testing.T) {
 
 	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
-	require.Contains(t, stdout.String(), "Codex hooks: MISPLACED")
-	require.Contains(t, stdout.String(), "current Codex ignores")
-	require.NotContains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
+	out := stdout.String()
+	require.Contains(t, out, "Codex hooks: NOT ACTIVE IN THIS WORKTREE")
+	require.Contains(t, out, resolvedHooksPath(t, linkedRoot))
+	require.Contains(t, out, resolvedHooksPath(t, repoRoot))
+	require.Contains(t, out, "Commit .codex/hooks.json and apply that commit to the primary checkout")
+	require.Contains(t, out, "run `entire enable` from the primary checkout")
+	require.NotContains(t, out, "migrate")
+	require.Contains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
 	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
 
-func TestCheckCodexHookTrust_SecondWorktreeMigration(t *testing.T) {
+func TestCheckCodexHookTrust_SecondWorktreeLocalCopyRemainsLocal(t *testing.T) {
 	tmp, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
 	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
 	ag := &codex.CodexAgent{}
@@ -899,12 +907,13 @@ func TestCheckCodexHookTrust_SecondWorktreeMigration(t *testing.T) {
 
 	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
-	require.Contains(t, stdout.String(), "Codex hooks: LEGACY COPY FOUND")
+	require.Contains(t, stdout.String(), "Codex hooks: CURRENT-WORKTREE FILE NOT DISCOVERED")
+	require.NotContains(t, stdout.String(), "remove")
 
 	count, err = ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
-	require.Zero(t, count)
-	require.NoFileExists(t, legacyPath)
+	require.Positive(t, count)
+	require.FileExists(t, legacyPath)
 	require.Equal(t, agent.HooksCurrent, ag.CheckHookConfig(context.Background()))
 }
 
@@ -937,15 +946,16 @@ func TestCheckCodexHookTrust_LinkedWorktreeReportsMissingProjectLayer(t *testing
 
 	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
-	require.Contains(t, stdout.String(), "Codex hooks: PROJECT LAYER MISSING")
+	out := stdout.String()
+	require.Contains(t, out, "Codex hooks: PROJECT LAYER MISSING")
+	require.Contains(t, out, filepath.Dir(resolvedHooksPath(t, linkedRoot))+" (missing)")
+	require.Contains(t, out, resolvedHooksPath(t, repoRoot))
+	require.Contains(t, out, "will not copy or rewrite hooks in the other checkout")
 	require.NotContains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
-	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
+	require.NotContains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
 
-// A linked submodule worktree fails Codex's ownership proof, so its
-// worktree-local hooks file is the authoritative one and doctor treats it as
-// a regular installation.
-func TestCheckCodexHookTrust_LinkedSubmoduleUsesWorktreeLocalHooks(t *testing.T) {
+func TestCheckCodexHookTrust_LinkedSubmoduleReportsUnresolved(t *testing.T) {
 	linkedSubmoduleRoot := setupLinkedSubmoduleForDoctorTest(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(linkedSubmoduleRoot, ".codex"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(linkedSubmoduleRoot, ".codex", "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
@@ -953,9 +963,10 @@ func TestCheckCodexHookTrust_LinkedSubmoduleUsesWorktreeLocalHooks(t *testing.T)
 
 	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
-	require.NotContains(t, stdout.String(), "UNSUPPORTED HOOK LOCATION")
-	require.NotContains(t, stdout.String(), "MISPLACED")
+	require.Contains(t, stdout.String(), "Codex hooks: UNRESOLVED")
+	require.Contains(t, stdout.String(), "linked submodules")
 	require.Contains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
+	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
 
 func TestCheckCodexHookTrust_CodexHomeCollisionReportsUnsupported(t *testing.T) {
@@ -968,12 +979,13 @@ func TestCheckCodexHookTrust_CodexHomeCollisionReportsUnsupported(t *testing.T) 
 
 	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
-	require.Contains(t, stdout.String(), "UNSUPPORTED HOOK LOCATION")
-	require.Contains(t, stdout.String(), "will not write there")
+	require.Contains(t, stdout.String(), "Codex hooks: UNRESOLVED")
+	require.Contains(t, stdout.String(), "user-wide")
+	require.Contains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
 	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
 
-func TestSetupAgentHooks_SkipsUnsupportedCodexLocation(t *testing.T) {
+func TestSetupAgentHooks_UsesCurrentCheckoutWhenCodexDiscoveryIsUnresolved(t *testing.T) {
 	_, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".codex"), 0o750))
 	t.Chdir(linkedRoot)
@@ -982,12 +994,10 @@ func TestSetupAgentHooks_SkipsUnsupportedCodexLocation(t *testing.T) {
 
 	result, err := setupAgentHooks(context.Background(), ag, false)
 	require.NoError(t, err)
-	require.Error(t, result.skipped)
-
-	var output bytes.Buffer
-	require.True(t, writeHookSetupSkipped(&output, ag, result))
-	require.Contains(t, output.String(), "Skipped Codex hooks")
-	require.Contains(t, output.String(), "not supported for derived hook root")
+	require.NoError(t, result.skipped)
+	require.Equal(t, 7, result.installed)
+	require.FileExists(t, filepath.Join(linkedRoot, ".codex", "hooks.json"))
+	require.NoFileExists(t, filepath.Join(repoRoot, ".codex", "hooks.json"))
 }
 
 func TestCheckCodexHookTrust_ResolverFailureIsReported(t *testing.T) {
@@ -998,8 +1008,7 @@ func TestCheckCodexHookTrust_ResolverFailureIsReported(t *testing.T) {
 	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
 	require.Contains(t, stdout.String(), "Codex hooks: UNRESOLVED")
-	require.Contains(t, stdout.String(), "hooks.json")
-	require.Contains(t, stdout.String(), "resolves to a directory")
+	require.Contains(t, stdout.String(), "Git layout could not be resolved")
 }
 
 func setupLinkedRepoForDoctorTest(t *testing.T) (tmp, repoRoot, linkedRoot string) {

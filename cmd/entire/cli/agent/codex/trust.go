@@ -2,7 +2,6 @@ package codex
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -10,8 +9,8 @@ import (
 	"strings"
 )
 
-// HookTrustGaps returns the snake_case event labels declared in Codex's
-// authoritative hooks.json that don't have a matching approval entry in the
+// HookTrustGaps returns the snake_case event labels declared in the hooks.json
+// Codex discovers that don't have a matching approval entry in the
 // user's Codex config.toml. Matching parses the full
 // `<hooks.json>:<event>:<group>:<handler>` key, accepts any valid indexes, and
 // compares canonicalized hook paths.
@@ -45,16 +44,27 @@ type HookTrustInspection struct {
 // contains approval records for them. Known is false when config.toml cannot be
 // read, so callers do not mistake an unavailable trust check for active hooks.
 func InspectHookTrust(ctx context.Context) HookTrustInspection {
-	location, err := ResolveHookLocation(ctx)
-	if err != nil || !location.ProjectLayerExists() {
+	discovery := ResolveHookDiscovery(ctx)
+	if discovery.State != HookDiscoveryResolved || !discovery.ProjectLayerExists() {
 		return HookTrustInspection{}
 	}
-	return inspectHookTrust(location.HooksPath)
+	inspection := inspectDiscoveredHookConfig(ctx, discovery.DiscoveredHooks)
+	if inspection.State != HookFileEntire {
+		return HookTrustInspection{}
+	}
+	return inspectHookTrustForDeclared(discovery.DiscoveredHooks.Path(), inspection.Declared)
 }
 
 func inspectHookTrust(hooksJSONPath string) HookTrustInspection {
 	declared, ok := declaredCodexEvents(hooksJSONPath)
 	if !ok || len(declared) == 0 {
+		return HookTrustInspection{}
+	}
+	return inspectHookTrustForDeclared(hooksJSONPath, declared)
+}
+
+func inspectHookTrustForDeclared(hooksJSONPath string, declared []string) HookTrustInspection {
+	if len(declared) == 0 {
 		return HookTrustInspection{}
 	}
 	inspection := HookTrustInspection{Declared: declared}
@@ -93,63 +103,47 @@ func codexConfigPath() string {
 // whether the read+parse succeeded — false on missing/malformed file so
 // callers can stay silent rather than mid-flow noise.
 func declaredCodexEvents(hooksJSONPath string) ([]string, bool) {
-	data, err := os.ReadFile(hooksJSONPath) //nolint:gosec // path constructed from caller-controlled repo root
-	if err != nil {
+	document, err := readHooksDocument(hooksJSONPath)
+	if err != nil || !document.exists {
 		return nil, false
 	}
-	var file HooksFile
-	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, false
-	}
+	events, err := declaredCodexEventsFromDocument(document)
+	return events, err == nil
+}
+
+func declaredCodexEventsFromDocument(document *hooksDocument) ([]string, error) {
 	var events []string
-	add := func(label string, groups []MatcherGroup) {
+	add := func(event, label string) error {
+		var groups []MatcherGroup
+		if err := parseHookType(document.rawHooks, event, &groups); err != nil {
+			return err
+		}
 		for _, g := range groups {
 			if len(g.Hooks) > 0 {
 				events = append(events, label)
-				return
+				break
 			}
 		}
+		return nil
 	}
-	add("session_start", file.Hooks.SessionStart)
-	add("session_end", file.Hooks.SessionEnd)
-	add("user_prompt_submit", file.Hooks.UserPromptSubmit)
-	add("stop", file.Hooks.Stop)
-	add("pre_tool_use", file.Hooks.PreToolUse)
-	add("post_tool_use", file.Hooks.PostToolUse)
-	add("subagent_start", file.Hooks.SubagentStart)
-	add("subagent_stop", file.Hooks.SubagentStop)
-	return events, true
-}
-
-// HasLegacyEntireHooks reports whether this linked checkout still has an
-// Entire-managed hook in the obsolete worktree-local file.
-func HasLegacyEntireHooks(ctx context.Context) bool {
-	location, err := ResolveHookLocation(ctx)
-	if err != nil || location.LegacyHooksPath == "" {
-		return false
-	}
-	return hasEntireHooksAtPath(location.LegacyHooksPath)
-}
-
-// HasWorktreeLocalEntireHooks reports whether the current checkout has an
-// Entire-managed Codex hook without assuming that location is authoritative.
-func HasWorktreeLocalEntireHooks(ctx context.Context) bool {
-	path, err := worktreeLocalHooksPath(ctx)
-	return err == nil && hasEntireHooksAtPath(path)
-}
-
-func hasEntireHooksAtPath(path string) bool {
-	document, err := readHooksDocument(path)
-	if err != nil || !document.exists {
-		return false
-	}
-	for _, raw := range document.rawHooks {
-		var groups []MatcherGroup
-		if json.Unmarshal(raw, &groups) == nil && hasEntireHook(groups) {
-			return true
+	for _, event := range []struct {
+		name  string
+		label string
+	}{
+		{name: "SessionStart", label: "session_start"},
+		{name: "SessionEnd", label: "session_end"},
+		{name: "UserPromptSubmit", label: "user_prompt_submit"},
+		{name: "Stop", label: "stop"},
+		{name: "PreToolUse", label: "pre_tool_use"},
+		{name: "PostToolUse", label: "post_tool_use"},
+		{name: "SubagentStart", label: "subagent_start"},
+		{name: "SubagentStop", label: "subagent_stop"},
+	} {
+		if err := add(event.name, event.label); err != nil {
+			return nil, err
 		}
 	}
-	return false
+	return events, nil
 }
 
 // codexTrustStateHeaderRegex matches `[hooks.state."<key>"]` headers in

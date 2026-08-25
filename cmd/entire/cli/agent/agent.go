@@ -168,14 +168,6 @@ type HookInstallationSkipError interface {
 	HookInstallationSkipped()
 }
 
-// RepositorySharedHooks is implemented when an agent can report the hook file
-// shared by every linked worktree of the repository.
-type RepositorySharedHooks interface {
-	Agent
-
-	RepositorySharedHooksPath(ctx context.Context) (string, bool)
-}
-
 // FileWatcher is implemented by agents that use file-based detection.
 // Agents like Aider that don't support hooks can use file watching
 // to detect session activity.

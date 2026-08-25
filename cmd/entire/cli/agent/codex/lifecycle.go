@@ -13,12 +13,11 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ agent.HookSupport           = (*CodexAgent)(nil)
-	_ agent.HookFreshness         = (*CodexAgent)(nil)
-	_ agent.RepositorySharedHooks = (*CodexAgent)(nil)
-	_ agent.HookResponseWriter    = (*CodexAgent)(nil)
-	_ agent.ContextInjector       = (*CodexAgent)(nil)
-	_ agent.SessionEndBudgeter    = (*CodexAgent)(nil)
+	_ agent.HookSupport        = (*CodexAgent)(nil)
+	_ agent.HookFreshness      = (*CodexAgent)(nil)
+	_ agent.HookResponseWriter = (*CodexAgent)(nil)
+	_ agent.ContextInjector    = (*CodexAgent)(nil)
+	_ agent.SessionEndBudgeter = (*CodexAgent)(nil)
 )
 
 // WriteHookResponse outputs a JSON hook response to stdout.

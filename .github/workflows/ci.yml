@@ -31,8 +31,11 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - name: Install pinned Codex CLI
+        run: npm install --global @openai/codex@0.149.0
       - name: Integration Tests
         env:
+          ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER: "1"
           GO_TEST_PARALLEL: "16"
         run: mise run test:ci:integration:shard -- ${{ matrix.shard }}
 

@@ -109,5 +109,9 @@ func addUserHookWithLock(ctx context.Context, lockPath, hooksPath, command strin
 		return err
 	}
 	marshalHookType(document.rawHooks, "Stop", addHook(groups, command, defaultHookTimeoutSec))
-	return writeHooksDocument(hooksPath, document)
+	worktreeHooks, err := resolveWorktreeHooksPath(filepath.Dir(filepath.Dir(hooksPath)))
+	if err != nil {
+		return err
+	}
+	return writeHooksDocument(worktreeHooks, document)
 }

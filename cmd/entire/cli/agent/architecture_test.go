@@ -44,6 +44,7 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 	// Packages within the repo that agents ARE allowed to import.
 	allowedPrefixes := []string{
 		repoPrefix + "agent",      // agent contract + sub-packages
+		repoPrefix + "gitrepo",    // repository layout utilities
 		repoPrefix + "logging",    // logging utilities
 		repoPrefix + "paths",      // path utilities
 		repoPrefix + "jsonutil",   // JSON utilities

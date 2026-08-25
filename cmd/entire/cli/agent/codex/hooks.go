@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +18,8 @@ import (
 
 // HooksFileName is the hooks config file used by Codex.
 const HooksFileName = "hooks.json"
+
+const maxHooksFileBytes = 1 << 20
 
 // defaultHookTimeoutSec is the timeout Entire configures for Codex hooks that
 // run between turns, where Codex allows up to its standard 600s.
@@ -67,28 +70,22 @@ var managedHooks = []managedHook{
 	{event: "SubagentStop", label: "subagent_stop", verb: HookNameSubagentStop, timeout: defaultHookTimeoutSec, wrap: agent.WrapProductionSilentHookCommandForOS},
 }
 
-// InstallHooks installs Entire hooks in Codex's repository-authoritative
-// .codex/hooks.json.
+// InstallHooks installs Entire hooks in the current checkout's .codex/hooks.json.
 func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	location, err := ResolveHookLocation(ctx)
+	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
 	if err != nil {
 		return 0, err
 	}
-	if err := os.MkdirAll(filepath.Dir(location.HooksPath), 0o750); err != nil {
-		return 0, fmt.Errorf("create authoritative .codex directory: %w", err)
+	if err := ensureWorktreeProjectDir(worktreeHooks); err != nil {
+		return 0, fmt.Errorf("create worktree .codex directory: %w", err)
 	}
-	if location.LegacyHooksPath != "" {
-		if err := os.MkdirAll(filepath.Dir(location.LegacyHooksPath), 0o750); err != nil {
-			return 0, fmt.Errorf("create linked-worktree .codex project layer: %w", err)
-		}
-	}
-	release, err := acquireHooksLock(ctx, location.LockPath)
+	release, err := acquireHooksLock(ctx, worktreeHooks.Path()+".lock")
 	if err != nil {
 		return 0, fmt.Errorf("lock Codex hooks file: %w", err)
 	}
 	defer release()
 
-	destination, err := readHooksDocument(location.HooksPath)
+	destination, err := readWorktreeHooksDocument(worktreeHooks)
 	if err != nil {
 		return 0, err
 	}
@@ -98,12 +95,9 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 		return 0, err
 	}
 	if count > 0 {
-		if err := writeHooksDocument(location.HooksPath, destination); err != nil {
+		if err := writeHooksDocument(worktreeHooks, destination); err != nil {
 			return 0, err
 		}
-	}
-	if err := cleanLegacyHooks(location.LegacyHooksPath); err != nil {
-		return count, fmt.Errorf("authoritative Codex hooks are installed, but legacy cleanup failed: %w", err)
 	}
 
 	// No .codex/config.toml is written: hooks are enabled by default in
@@ -114,67 +108,42 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 	return count, nil
 }
 
-// UninstallHooks removes Entire hooks from the authoritative and obsolete
-// worktree-local Codex files.
+// UninstallHooks removes Entire hooks from the current checkout only.
 func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
-	location, err := ResolveHookLocation(ctx)
+	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
 	if err != nil {
-		var unsupported *UnsupportedHookLocationError
-		if errors.As(err, &unsupported) {
-			return uninstallHooksFiles(ctx, unsupported.Location.LockPath, unsupported.Location.LegacyHooksPath)
-		}
 		return err
 	}
-	return uninstallHooksFiles(ctx, location.LockPath, location.HooksPath, location.LegacyHooksPath)
+	return uninstallWorktreeHooksFile(ctx, worktreeHooks)
 }
 
-func uninstallHooksFiles(ctx context.Context, lockPath string, hooksPaths ...string) error {
-	hasFile := false
-	for _, hooksPath := range hooksPaths {
-		if hooksPath == "" {
-			continue
-		}
-		_, err := os.Stat(hooksPath)
-		if err == nil {
-			hasFile = true
-			continue
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("stat %s: %w", hooksPath, err)
-		}
+func uninstallWorktreeHooksFile(ctx context.Context, worktreeHooks WorktreeHooksPath) error {
+	hasFile, err := worktreeHooksMayExist(worktreeHooks)
+	if err != nil {
+		return err
 	}
 	if !hasFile {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o750); err != nil {
-		return fmt.Errorf("create Codex hooks lock directory: %w", err)
-	}
-	release, err := acquireHooksLock(ctx, lockPath)
+	release, err := acquireHooksLock(ctx, worktreeHooks.Path()+".lock")
 	if err != nil {
 		return fmt.Errorf("lock Codex hooks file: %w", err)
 	}
 	defer release()
 
-	for _, hooksPath := range hooksPaths {
-		if hooksPath == "" {
-			continue
-		}
-		document, readErr := readHooksDocument(hooksPath)
-		if readErr != nil {
-			return readErr
-		}
-		if !document.exists {
-			continue
-		}
-		changed, removeErr := removeEntireHooksFromDocument(document)
-		if removeErr != nil {
-			return removeErr
-		}
-		if changed {
-			if writeErr := writeHooksDocument(hooksPath, document); writeErr != nil {
-				return writeErr
-			}
-		}
+	document, err := readWorktreeHooksDocument(worktreeHooks)
+	if err != nil {
+		return err
+	}
+	if !document.exists {
+		return nil
+	}
+	changed, err := removeEntireHooksFromDocument(document)
+	if err != nil {
+		return err
+	}
+	if changed {
+		return writeHooksDocument(worktreeHooks, document)
 	}
 	return nil
 }
@@ -189,47 +158,34 @@ func uninstallHooksFiles(ctx context.Context, lockPath string, hooksPaths ...str
 // against today's set is part of hook-config inspection, which `entire doctor`
 // reports with the fix (`entire enable`).
 func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
-	location, err := ResolveHookLocation(ctx)
-	if err != nil || !location.ProjectLayerExists() {
+	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
+	if err != nil {
 		return false
 	}
-	inspection := inspectHookConfigAt(ctx, location.HooksPath)
+	inspection := inspectWorktreeHookConfig(ctx, worktreeHooks)
 	return inspection.State == HookFileEntire && inspection.CoreInstalled
 }
 
-// CheckHookConfig reports whether Codex's authoritative hook configuration is
-// absent, current, or needs installation/migration.
+// CheckHookConfig reports whether the current checkout's Codex hook
+// configuration is absent, current, or needs installation.
 func (c *CodexAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
-	location, err := ResolveHookLocation(ctx)
+	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
 	if err != nil {
-		var unsupported *UnsupportedHookLocationError
-		if errors.As(err, &unsupported) && unsupported.Location.LegacyHooksPath != "" && HasWorktreeLocalEntireHooks(ctx) {
-			return agent.HooksOutdated
-		}
 		return agent.HooksAbsent
 	}
-	inspection := inspectHookConfigAt(ctx, location.HooksPath)
+	inspection := inspectWorktreeHookConfig(ctx, worktreeHooks)
 	switch inspection.State {
 	case HookFileInvalid:
 		return agent.HooksAbsent
 	case HookFileEntire:
-		if inspection.Current && location.ProjectLayerExists() && !HasLegacyEntireHooks(ctx) {
+		if inspection.Current {
 			return agent.HooksCurrent
 		}
 		return agent.HooksOutdated
 	case HookFileAbsent, HookFileUserOnly:
-		if HasLegacyEntireHooks(ctx) {
-			return agent.HooksOutdated
-		}
 		return agent.HooksAbsent
 	}
 	return agent.HooksAbsent
-}
-
-// RepositorySharedHooksPath returns the shared file changed by a hook mutation.
-func (c *CodexAgent) RepositorySharedHooksPath(ctx context.Context) (string, bool) {
-	location, err := ResolveHookLocation(ctx)
-	return location.HooksPath, err == nil && location.RepositoryWide
 }
 
 type managedHookSpec struct {
@@ -256,6 +212,7 @@ const (
 type HookConfigInspection struct {
 	State         HookFileState
 	Missing       []string
+	Declared      []string
 	Current       bool
 	CoreInstalled bool
 	Err           error
@@ -284,13 +241,37 @@ func managedHookSpecs(ctx context.Context) []managedHookSpec {
 	return specs
 }
 
-// InspectHookConfig resolves and parses Codex's authoritative hooks file.
+// InspectHookConfig resolves and parses the hooks file Codex discovers.
 func InspectHookConfig(ctx context.Context) HookConfigInspection {
-	location, err := ResolveHookLocation(ctx)
+	discovery := ResolveHookDiscovery(ctx)
+	if discovery.State != HookDiscoveryResolved {
+		return HookConfigInspection{State: HookFileInvalid, Err: discovery.Diagnostic}
+	}
+	return inspectDiscoveredHookConfig(ctx, discovery.DiscoveredHooks)
+}
+
+func inspectWorktreeHookConfig(ctx context.Context, hooks WorktreeHooksPath) HookConfigInspection {
+	projectDir, err := validateWorktreeHookTarget(hooks)
 	if err != nil {
 		return HookConfigInspection{State: HookFileInvalid, Err: err}
 	}
-	return inspectHookConfigAt(ctx, location.HooksPath)
+	if err := validateExistingProjectDir(projectDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return HookConfigInspection{State: HookFileAbsent}
+		}
+		return HookConfigInspection{State: HookFileInvalid, Err: err}
+	}
+	return inspectHookConfigAt(ctx, hooks.Path())
+}
+
+func inspectDiscoveredHookConfig(ctx context.Context, hooks DiscoveredHooksPath) HookConfigInspection {
+	if err := validateDiscoveredHookTarget(hooks); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return HookConfigInspection{State: HookFileAbsent}
+		}
+		return HookConfigInspection{State: HookFileInvalid, Err: err}
+	}
+	return inspectHookConfigAt(ctx, hooks.Path())
 }
 
 func inspectHookConfigAt(ctx context.Context, path string) HookConfigInspection {
@@ -306,6 +287,10 @@ func inspectHookConfigAt(ctx context.Context, path string) HookConfigInspection 
 		State:         HookFileUserOnly,
 		Current:       true,
 		CoreInstalled: true,
+	}
+	inspection.Declared, err = declaredCodexEventsFromDocument(document)
+	if err != nil {
+		return HookConfigInspection{State: HookFileInvalid, Err: err}
 	}
 	for _, spec := range managedHookSpecs(ctx) {
 		var groups []MatcherGroup
@@ -338,23 +323,67 @@ func readHooksDocument(path string) (*hooksDocument, error) {
 		topLevel: make(map[string]json.RawMessage),
 		rawHooks: make(map[string]json.RawMessage),
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // path comes from the validated Codex hook resolver.
+	root, err := os.OpenRoot(filepath.Dir(path))
 	if errors.Is(err, os.ErrNotExist) {
 		return document, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("open Codex project directory for %q: %w", path, err)
+	}
+	defer root.Close()
+
+	name := filepath.Base(path)
+	before, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return document, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect Codex hooks file %q: %w", path, err)
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("codex hooks path %q is not a regular file", path)
+	}
+	if before.Size() > maxHooksFileBytes {
+		return nil, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
+	}
+
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, fmt.Errorf("open Codex hooks file %q: %w", path, err)
+	}
+	defer file.Close()
+
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect opened Codex hooks file %q: %w", path, err)
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return nil, fmt.Errorf("codex hooks file %q changed while opening", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxHooksFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read Codex hooks file %q: %w", path, err)
+	}
+	if len(data) > maxHooksFileBytes {
+		return nil, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
+	}
+	after, err := root.Lstat(name)
+	if err != nil {
+		return nil, fmt.Errorf("reinspect Codex hooks file %q: %w", path, err)
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return nil, fmt.Errorf("codex hooks file %q changed while reading", path)
 	}
 	document.exists = true
 	if err := json.Unmarshal(data, &document.topLevel); err != nil {
-		return nil, fmt.Errorf("failed to parse existing hooks.json: %w", err)
+		return nil, fmt.Errorf("failed to parse existing hooks.json %q: %w", path, err)
 	}
 	if document.topLevel == nil {
 		document.topLevel = make(map[string]json.RawMessage)
 	}
 	if hooksRaw, ok := document.topLevel["hooks"]; ok {
 		if err := json.Unmarshal(hooksRaw, &document.rawHooks); err != nil {
-			return nil, fmt.Errorf("failed to parse hooks in hooks.json: %w", err)
+			return nil, fmt.Errorf("failed to parse hooks in hooks.json %q: %w", path, err)
 		}
 	}
 	if document.rawHooks == nil {
@@ -382,30 +411,6 @@ func installManagedHooks(ctx context.Context, document *hooksDocument, force boo
 	return count, nil
 }
 
-func cleanLegacyHooks(path string) error {
-	if path == "" {
-		return nil
-	}
-	document, err := readHooksDocument(path)
-	if err != nil {
-		return fmt.Errorf("read worktree-local hooks: %w", err)
-	}
-	if !document.exists {
-		return nil
-	}
-	changed, err := removeEntireHooksFromDocument(document)
-	if err != nil {
-		return fmt.Errorf("remove Entire hooks from worktree-local config: %w", err)
-	}
-	if !changed {
-		return nil
-	}
-	if err := writeHooksDocument(path, document); err != nil {
-		return fmt.Errorf("write worktree-local hooks: %w", err)
-	}
-	return nil
-}
-
 func removeEntireHooksFromDocument(document *hooksDocument) (bool, error) {
 	managedEvents := make(map[string]struct{})
 	for _, hook := range managedHooks {
@@ -430,11 +435,15 @@ func removeEntireHooksFromDocument(document *hooksDocument) (bool, error) {
 	return changed, nil
 }
 
-func writeHooksDocument(path string, document *hooksDocument) error {
-	destination, err := resolveHookDestination(path)
+func readWorktreeHooksDocument(worktreeHooks WorktreeHooksPath) (*hooksDocument, error) {
+	destination, err := resolveHookDestination(worktreeHooks)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	return readHooksDocument(destination.path)
+}
+
+func writeHooksDocument(worktreeHooks WorktreeHooksPath, document *hooksDocument) error {
 	if len(document.rawHooks) > 0 {
 		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(document.rawHooks)
 		if err != nil {
@@ -444,20 +453,31 @@ func writeHooksDocument(path string, document *hooksDocument) error {
 	} else {
 		delete(document.topLevel, "hooks")
 	}
-	if len(document.topLevel) == 0 && !destination.fileSymlink {
+	if len(document.topLevel) == 0 {
+		destination, err := resolveHookDestination(worktreeHooks)
+		if err != nil {
+			return err
+		}
+		if !destination.exists {
+			return nil
+		}
 		if err := os.Remove(destination.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove empty hooks.json: %w", err)
 		}
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(destination.path), 0o750); err != nil {
+	if err := ensureWorktreeProjectDir(worktreeHooks); err != nil {
 		return fmt.Errorf("create .codex directory: %w", err)
 	}
 	output, err := jsonutil.MarshalIndentWithNewline(document.topLevel, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal hooks.json: %w", err)
 	}
-	if err := jsonutil.WriteFileAtomic(destination.path, output, 0o600); err != nil {
+	destination, err := resolveHookDestination(worktreeHooks)
+	if err != nil {
+		return err
+	}
+	if err := jsonutil.WriteFileAtomic(destination.path, output, destination.mode); err != nil {
 		return fmt.Errorf("failed to write hooks.json: %w", err)
 	}
 	document.exists = true

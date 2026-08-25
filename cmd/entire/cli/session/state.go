@@ -6,15 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -996,72 +995,24 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 	return states, nil
 }
 
-// gitCommonDirCache caches the git common dir to avoid repeated subprocess calls.
-// Keyed by working directory to handle directory changes (same pattern as paths.WorktreeRoot).
-var (
-	gitCommonDirMu       sync.RWMutex
-	gitCommonDirCache    string
-	gitCommonDirCacheDir string
-)
-
 // ClearGitCommonDirCache clears the cached git common dir.
 // Useful for testing when changing directories.
 func ClearGitCommonDirCache() {
-	gitCommonDirMu.Lock()
-	gitCommonDirCache = ""
-	gitCommonDirCacheDir = ""
-	gitCommonDirMu.Unlock()
+	gitrepo.ClearGitLayoutCache()
 }
 
 // GetGitCommonDir returns the .git common directory for the current working
 // directory. In a regular checkout this is .git/; in a worktree, it's the
-// main repo's .git/ (not .git/worktrees/<name>/). Result is cached per
-// working directory. This is a public wrapper around the package-internal
-// helper for callers outside this package.
+// main repo's .git/ (not .git/worktrees/<name>/). Resolution and memoization
+// are shared with other Git-layout consumers.
 func GetGitCommonDir(ctx context.Context) (string, error) {
 	return getGitCommonDir(ctx)
 }
 
-// getGitCommonDir returns the path to the shared git directory.
-// In a regular checkout, this is .git/
-// In a worktree, this is the main repo's .git/ (not .git/worktrees/<name>/)
-// The result is cached per working directory.
 func getGitCommonDir(ctx context.Context) (string, error) {
-	cwd, err := os.Getwd() //nolint:forbidigo // used for cache key, not git-relative paths
+	layout, err := gitrepo.ResolveGitLayout(ctx)
 	if err != nil {
-		cwd = ""
+		return "", fmt.Errorf("resolve Git layout: %w", err)
 	}
-
-	// Check cache with read lock first
-	gitCommonDirMu.RLock()
-	if gitCommonDirCache != "" && gitCommonDirCacheDir == cwd {
-		cached := gitCommonDirCache
-		gitCommonDirMu.RUnlock()
-		return cached, nil
-	}
-	gitCommonDirMu.RUnlock()
-
-	// Cache miss — resolve via git subprocess
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
-	cmd.Dir = "."
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get git common dir: %w", err)
-	}
-
-	commonDir := strings.TrimSpace(string(output))
-
-	// git rev-parse --git-common-dir returns relative paths from the working directory,
-	// so we need to make it absolute if it isn't already
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(".", commonDir)
-	}
-	commonDir = filepath.Clean(commonDir)
-
-	gitCommonDirMu.Lock()
-	gitCommonDirCache = commonDir
-	gitCommonDirCacheDir = cwd
-	gitCommonDirMu.Unlock()
-
-	return commonDir, nil
+	return layout.CommonDir, nil
 }

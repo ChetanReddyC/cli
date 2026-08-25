@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"time"
 
 	"charm.land/huh/v2"
@@ -689,6 +690,9 @@ func checkHookDrift(cmd *cobra.Command) {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	for _, name := range GetAgentsWithHooksInstalled(ctx) {
+		if name == agent.AgentNameCodex {
+			continue
+		}
 		ag, err := agent.Get(name)
 		if err != nil {
 			continue
@@ -712,72 +716,86 @@ func checkHookDrift(cmd *cobra.Command) {
 	}
 }
 
-// checkCodexHookTrust reports whether Codex can discover the authoritative
+// checkCodexHookTrust reports whether Codex can discover its effective
 // hooks file, whether its Entire-managed event set is current, and whether the
 // local Codex config has approval records for every declared hook. All checks
 // are structural; Entire never computes or copies Codex trust hashes.
 func checkCodexHookTrust(cmd *cobra.Command) {
-	location, err := codex.ResolveHookLocation(cmd.Context())
-	if err != nil {
-		if !codex.WorktreeProjectLayerExists(cmd.Context()) && !codex.HasWorktreeLocalEntireHooks(cmd.Context()) {
+	diagnostics := codex.InspectHookDiagnostics(cmd.Context())
+	discovery := diagnostics.Discovery
+	w := cmd.OutOrStdout()
+	if discovery.State != codex.HookDiscoveryResolved {
+		if diagnostics.Worktree.State != codex.HookFileEntire &&
+			diagnostics.Worktree.State != codex.HookFileInvalid &&
+			!discovery.ProjectLayerExists() {
 			return
 		}
-		w := cmd.OutOrStdout()
-		var unsupported *codex.UnsupportedHookLocationError
-		if errors.As(err, &unsupported) {
-			fmt.Fprintln(w, "Codex hooks: UNSUPPORTED HOOK LOCATION")
-			fmt.Fprintf(w, "  Current Codex derives this checkout's shared hook root as %s.\n", unsupported.HookRoot)
-			if unsupported.Location.LegacyHooksPath != "" {
-				fmt.Fprintln(w, "  Entire will not write there. Remove ignored local hooks with `entire agent remove codex`.")
-			} else {
-				fmt.Fprintln(w, "  Entire will not install or remove hooks at this user-wide location.")
-			}
-		} else {
-			fmt.Fprintln(w, "Codex hooks: UNRESOLVED")
-			fmt.Fprintf(w, "  Entire could not resolve Codex's authoritative hooks file: %v\n", err)
-			fmt.Fprintln(w, "  Fix the repository metadata before installing or removing Codex hooks.")
+		fmt.Fprintln(w, "Codex hooks: UNRESOLVED")
+		if diagnostics.WorktreeHooks.Path() != "" {
+			fmt.Fprintf(w, "  Current-worktree hooks: %s\n", diagnostics.WorktreeHooks.Path())
 		}
+		fmt.Fprintf(w, "  Entire could not resolve the hooks file Codex discovers: %v\n", discovery.Diagnostic)
+		fmt.Fprintln(w, "  Inspect the Git layout manually; Entire will not guess or write to another checkout.")
 		return
-	}
-	legacy := codex.HasLegacyEntireHooks(cmd.Context())
-	inspection := codex.InspectHookConfig(cmd.Context())
-	w := cmd.OutOrStdout()
-	switch inspection.State {
-	case codex.HookFileAbsent, codex.HookFileUserOnly:
-		if legacy {
-			fmt.Fprintln(w, "Codex hooks: MISPLACED")
-			fmt.Fprintln(w, "  Entire hooks exist only in this linked checkout's worktree-local .codex/hooks.json,")
-			fmt.Fprintln(w, "  which current Codex ignores. Run `entire enable` to migrate them to the shared repository hook file.")
-		}
-		return
-	case codex.HookFileInvalid:
-		fmt.Fprintln(w, "Codex hooks: INVALID")
-		fmt.Fprintf(w, "  The authoritative .codex/hooks.json cannot be inspected: %v\n", inspection.Err)
-		fmt.Fprintln(w, "  Fix or restore the file before running `entire enable`.")
-		return
-	case codex.HookFileEntire:
 	}
 
-	if !location.ProjectLayerExists() {
-		fmt.Fprintln(w, "Codex hooks: PROJECT LAYER MISSING")
-		fmt.Fprintln(w, "  The authoritative hooks file exists, but this linked checkout has no .codex directory,")
-		fmt.Fprintln(w, "  so current Codex does not discover it. Run `entire enable` from this checkout.")
+	worktreePath := diagnostics.WorktreeHooks.Path()
+	discoveredPath := discovery.DiscoveredHooks.Path()
+	inspection := diagnostics.Discovered
+	if inspection.State == codex.HookFileInvalid {
+		writeCodexInvalidDiscoveredWarning(w, discoveredPath, inspection.Err)
+		return
+	}
+
+	if diagnostics.PathsDiffer() && diagnostics.Worktree.State == codex.HookFileEntire {
+		if inspection.State != codex.HookFileEntire {
+			writeCodexInactiveWorktreeWarning(w, worktreePath, discoveredPath)
+			return
+		}
+
+		fmt.Fprintln(w, "Codex hooks: CURRENT-WORKTREE FILE NOT DISCOVERED")
+		fmt.Fprintf(w, "  Current-worktree hooks: %s\n", worktreePath)
+		fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
+		fmt.Fprintln(w, "  Codex is active from the discovered file; changes to this worktree's file do not affect it.")
+		writeCodexPrimaryCheckoutRemedy(w)
+	}
+
+	switch inspection.State {
+	case codex.HookFileAbsent, codex.HookFileUserOnly:
+		return
+	case codex.HookFileEntire:
+	case codex.HookFileInvalid:
+		return
+	}
+
+	if !discovery.ProjectLayerExists() {
+		writeCodexMissingProjectLayerWarning(w, filepath.Dir(worktreePath), discoveredPath)
 		return
 	}
 	missing := inspection.Missing
-	trust := codex.InspectHookTrust(cmd.Context())
+	trust := diagnostics.Trust
 
-	if len(missing) == 0 {
+	if inspection.CoreInstalled {
 		fmt.Fprintln(w, "✓ Codex hooks: INSTALLED")
+		fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
 	}
 
-	if len(missing) > 0 {
+	if !inspection.Current {
 		fmt.Fprintln(w, "Codex hooks: OUT OF DATE")
-		fmt.Fprintf(w, "  %d hook(s) the CLI installs today aren't declared in .codex/hooks.json:\n", len(missing))
-		for _, ev := range missing {
-			fmt.Fprintf(w, "    - %s\n", ev)
+		fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
+		if len(missing) > 0 {
+			fmt.Fprintf(w, "  %d hook(s) the CLI installs today aren't declared there:\n", len(missing))
+			for _, ev := range missing {
+				fmt.Fprintf(w, "    - %s\n", ev)
+			}
+		} else {
+			fmt.Fprintln(w, "  Entire-managed commands or timeouts there do not match this CLI.")
 		}
-		fmt.Fprintln(w, "  Run `entire enable` to refresh the hooks file.")
+		if diagnostics.PathsDiffer() {
+			writeCodexPrimaryCheckoutRemedy(w)
+		} else {
+			fmt.Fprintln(w, "  Run `entire enable --force` from this worktree to refresh it.")
+		}
 	}
 
 	switch {
@@ -787,7 +805,7 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 		fmt.Fprintln(w, "  Open /hooks inside Codex to review their active state.")
 	case len(trust.Gaps) > 0:
 		fmt.Fprintln(w, "Codex hook trust: REVIEW NEEDED")
-		fmt.Fprintf(w, "  %d installed hook(s) have no approval record at the authoritative path:\n", len(trust.Gaps))
+		fmt.Fprintf(w, "  %d installed hook(s) have no approval record at the Codex-discovered path:\n", len(trust.Gaps))
 		for _, ev := range trust.Gaps {
 			fmt.Fprintf(w, "    - %s\n", ev)
 		}
@@ -795,11 +813,36 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 	case len(trust.Declared) > 0:
 		fmt.Fprintln(w, "✓ Codex hook approval records: PRESENT")
 	}
+}
 
-	if legacy {
-		fmt.Fprintln(w, "Codex hooks: LEGACY COPY FOUND")
-		fmt.Fprintln(w, "  Run `entire enable` to remove only Entire-managed entries from this checkout's ignored legacy file.")
-	}
+func writeCodexInactiveWorktreeWarning(w io.Writer, worktreePath, discoveredPath string) {
+	fmt.Fprintln(w, "Codex hooks: NOT ACTIVE IN THIS WORKTREE")
+	fmt.Fprintln(w, "  Entire hooks are configured at the current-worktree path:")
+	fmt.Fprintf(w, "    %s\n", worktreePath)
+	fmt.Fprintln(w, "  Codex currently discovers:")
+	fmt.Fprintf(w, "    %s\n", discoveredPath)
+	writeCodexPrimaryCheckoutRemedy(w)
+}
+
+func writeCodexInvalidDiscoveredWarning(w io.Writer, discoveredPath string, err error) {
+	fmt.Fprintln(w, "Codex hooks: INVALID DISCOVERED CONFIGURATION")
+	fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
+	fmt.Fprintf(w, "  Error: %v\n", err)
+	fmt.Fprintln(w, "  Fix the discovered file in its owning checkout; Entire will not modify it from this worktree.")
+}
+
+func writeCodexMissingProjectLayerWarning(w io.Writer, projectLayerPath, discoveredPath string) {
+	fmt.Fprintln(w, "Codex hooks: PROJECT LAYER MISSING")
+	fmt.Fprintf(w, "  Current-worktree project layer: %s (missing)\n", projectLayerPath)
+	fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
+	fmt.Fprintln(w, "  Current Codex needs the local .codex project layer before it loads the discovered file.")
+	fmt.Fprintln(w, "  Run `entire enable` from this worktree to create the local layer;")
+	fmt.Fprintln(w, "  it will not copy or rewrite hooks in the other checkout.")
+}
+
+func writeCodexPrimaryCheckoutRemedy(w io.Writer) {
+	fmt.Fprintln(w, "  Commit .codex/hooks.json and apply that commit to the primary checkout,")
+	fmt.Fprintln(w, "  or run `entire enable` from the primary checkout.")
 }
 
 // canDeleteShadowBranch checks if a shadow branch can be safely deleted.

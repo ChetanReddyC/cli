@@ -426,7 +426,7 @@ func selectAllAgents(available []string) ([]string, error) {
 // hookAgentOptions builds selector options for every registered agent that
 // supports hooks and isn't test-only (e.g. the Vogon canary), preselecting
 // the names in selected.
-func hookAgentOptions(ctx context.Context, selected map[types.AgentName]struct{}) []huh.Option[string] {
+func hookAgentOptions(_ context.Context, selected map[types.AgentName]struct{}) []huh.Option[string] {
 	agentNames := agent.List()
 	options := make([]huh.Option[string], 0, len(agentNames))
 	for _, name := range agentNames {
@@ -440,11 +440,7 @@ func hookAgentOptions(ctx context.Context, selected map[types.AgentName]struct{}
 		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
 			continue
 		}
-		label := string(ag.Type())
-		if path, shared := repositorySharedHooksPath(ctx, ag); shared {
-			label = fmt.Sprintf("%s — repository-wide hooks: %s (affects all linked worktrees)", label, path)
-		}
-		opt := huh.NewOption(label, string(name))
+		opt := huh.NewOption(string(ag.Type()), string(name))
 		if _, ok := selected[name]; ok {
 			opt = opt.Selected(true)
 		}
@@ -622,7 +618,6 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 				"agent", string(ag.Name()))
 			continue
 		}
-		writeSharedHooksRemovalNote(ctx, w, ag)
 		if err := hookAgent.UninstallHooks(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err))
 		} else {
@@ -1599,7 +1594,6 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 		return nil
 	}
 
-	writeSharedHooksRemovalNote(ctx, w, ag)
 	if err := hookAgent.UninstallHooks(ctx); err != nil {
 		return fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err)
 	}
@@ -1630,11 +1624,6 @@ func checkDisabledGuard(ctx context.Context, w io.Writer) bool {
 // uninstallDeselectedAgentHooks removes hooks for agents that were previously
 // installed but are not in the selected list. This handles the case where a user
 // re-runs `entire enable` and deselects an agent.
-//
-// Seeds from removableAgentHookNames, not GetAgentsWithHooksInstalled: a linked
-// worktree with repository-wide (e.g. Codex) hooks but no local project layer
-// reports those hooks as Outdated rather than Installed, and deselecting the
-// agent there must still remove the root-authoritative configuration.
 func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAgents []agent.Agent) error {
 	installedNames := removableAgentHookNames(ctx)
 	if len(installedNames) == 0 {
@@ -1659,7 +1648,6 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 		if !ok {
 			continue
 		}
-		writeSharedHooksRemovalNote(ctx, w, ag)
 		if err := hookAgent.UninstallHooks(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to uninstall %s hooks: %w", ag.Type(), err))
 		} else {
@@ -1694,7 +1682,6 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (hook
 }
 
 func setupSelectedAgentHooks(ctx context.Context, w io.Writer, ag agent.Agent, forceHooks bool) (bool, error) {
-	writeSharedHooksNote(ctx, w, ag)
 	result, err := setupAgentHooks(ctx, ag, forceHooks)
 	if err != nil {
 		return false, err
@@ -1735,26 +1722,6 @@ func hooksPresentOrOutdated(ctx context.Context, hookAgent agent.HookSupport, ag
 	}
 	freshness, ok := ag.(agent.HookFreshness)
 	return ok && freshness.CheckHookConfig(ctx) == agent.HooksOutdated
-}
-
-func repositorySharedHooksPath(ctx context.Context, ag agent.Agent) (string, bool) {
-	shared, ok := ag.(agent.RepositorySharedHooks)
-	if !ok {
-		return "", false
-	}
-	return shared.RepositorySharedHooksPath(ctx)
-}
-
-func writeSharedHooksNote(ctx context.Context, w io.Writer, ag agent.Agent) {
-	if path, sharedAcrossWorktrees := repositorySharedHooksPath(ctx, ag); sharedAcrossWorktrees {
-		fmt.Fprintf(w, "  %s hooks use the repository-wide configuration at %s; this affects all linked worktrees.\n", ag.Type(), path)
-	}
-}
-
-func writeSharedHooksRemovalNote(ctx context.Context, w io.Writer, ag agent.Agent) {
-	if path, sharedAcrossWorktrees := repositorySharedHooksPath(ctx, ag); sharedAcrossWorktrees {
-		fmt.Fprintf(w, "  Removing %s hooks from the repository-wide configuration at %s affects all linked worktrees.\n", ag.Type(), path)
-	}
 }
 
 // promptAgentSelection shows the interactive multi-select agent picker and
@@ -1963,7 +1930,6 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	fmt.Fprintf(w, "  Agent: %s\n", ag.Type())
 
 	// Install agent hooks (agent hooks don't depend on settings)
-	writeSharedHooksNote(ctx, w, ag)
 	hookSetup, err := setupAgentHooks(ctx, ag, opts.ForceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
@@ -2625,9 +2591,6 @@ func removeAgentHooks(ctx context.Context, w io.Writer) error {
 			continue
 		}
 		wasInstalled := hooksPresentOrOutdated(ctx, hs, ag)
-		if wasInstalled {
-			writeSharedHooksRemovalNote(ctx, w, ag)
-		}
 		if err := hs.UninstallHooks(ctx); err != nil {
 			errs = append(errs, err)
 		} else if wasInstalled {

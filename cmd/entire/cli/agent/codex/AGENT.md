@@ -31,17 +31,70 @@ Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` conf
 - Config layer stack: System (`~/.codex/`) → Project (`.codex/`) — project takes precedence
 - Hook registration: JSON file with `hooks` object containing event arrays of matcher groups
 
-**Linked-worktree hook root (see `hook_root.go`).** Entire mirrors Codex's
-`resolve_root_git_project_for_trust` from `codex-rs/git-utils/src/trust.rs`.
-Codex validates the Git metadata files, the worktree registration backlink and
-`commondir`, then requires the candidate root's `.git` entry to resolve to that
-common directory. A failed check falls back to the worktree-local
-`.codex/hooks.json`.
+### Linked-worktree discovery and ownership
 
-For `git init --separate-git-dir <storage>/.git <primary>`, Codex intentionally
-resolves `<storage>` from a linked worktree; Git records no reverse pointer to
-`<primary>`. Entire installs there because it is the file Codex reads. Roots
-inside Git metadata or colliding with `$HOME` or `CODEX_HOME` remain refused.
+Codex 0.149.0 does not necessarily load the hooks file owned by the checkout in
+which it runs. A pinned, no-model `codex app-server` integration test starts in
+a conventional linked worktree, calls `hooks/list`, and observes the primary
+checkout's hook command and `sourcePath`; a distinct linked-worktree-only hook
+is absent.
+
+Entire deliberately separates that read behavior from write ownership:
+
+- `WorktreeHooksPath` is exactly
+  `<current-checkout>/.codex/hooks.json`. Installation, removal, presence, and
+  freshness checks use this path.
+- `DiscoveredHooksPath` is the hook file Codex is expected to load for the
+  current checkout. Discovery, configuration inspection, and trust inspection
+  use it read-only.
+
+`ResolveHookDiscovery` consumes the shared `gitrepo.ResolveGitLayout` result;
+Codex does not maintain a separate `.git`, `commondir`, or worktree-marker
+parser. Conventional linked worktrees discover the primary checkout's hook
+file. Normal checkouts, ordinary submodules, and separate-Git-directory
+checkouts discover their own hook file. `.bare/worktrees`, linked submodules,
+contradictory metadata, and other unpinned layouts are reported as unresolved;
+Entire does not guess that Codex falls back to a writable location.
+
+Discovery never supplies a mutation, migration, cleanup, or lock target. Entire
+does not create or rewrite another checkout's `.codex` directory, migrate a
+worktree-local file, or remove a discovered file owned elsewhere. The
+`RepositoryWide` discovery bit describes the reach of the configuration Codex
+reported; it does not grant repository-wide mutation. The user remedies a
+linked-worktree mismatch by committing `.codex/hooks.json` and applying that
+commit to the primary checkout (usually with `git cherry-pick`), or by running
+`entire enable` in the primary checkout.
+
+Mutation is serialized only by
+`<current-checkout>/.codex/hooks.json.lock`. There is no Codex lock in the Git
+common directory and no repository-wide synchronization.
+
+Current-checkout mutation rejects redirected `.codex` directories, hook-file
+symlinks, non-regular files, unexpected destinations, and paths that do not
+identify the exact current checkout. Existing hook-file permission bits survive
+atomic replacement; new files use `0600`. Read-only inspection opens only the
+resolved `.codex` directory, rejects redirected or non-regular files, caps
+`hooks.json` at 1 MiB, reads one extra byte to detect overflow, and verifies that
+the file identity is stable before and after reading.
+
+`entire doctor` reports the current-worktree and Codex-discovered paths,
+project-layer gaps, invalid or unresolved discovery, managed-command/timeout
+drift, and missing trust records. `entire status` exposes the concise warning and
+the same structured mismatch in `codex_hooks`; SessionStart appends a bounded,
+read-only warning. Entire never computes or copies Codex trust hashes.
+
+### Pinned app-server contract
+
+`TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout` runs against
+exactly `@openai/codex@0.149.0`. It creates a repository and conventional linked
+worktree with distinct hook markers, starts `codex app-server` in the linked
+worktree with an isolated `CODEX_HOME`, then sends `initialize`, `initialized`,
+and `hooks/list` JSONL messages over stdio. The test makes no model request and
+needs no OpenAI credentials. It requires the primary marker and primary
+`sourcePath`, rejects the linked-only marker, and requires empty `warnings` and
+`errors`. Local integration runs skip when the exact binary is unavailable; CI
+installs the pinned version and sets `ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER=1`,
+so absence or version drift fails instead of skipping.
 
 **hooks.json structure:**
 ```json
@@ -100,9 +153,10 @@ inside Git metadata or colliding with `$HOME` or `CODEX_HOME` remain refused.
 | `Stop` | Agent finishes a turn | `TurnEnd` | Includes `last_assistant_message` |
 | `PostToolUse` | After tool execution | `ToolUse` | Consumed for `apply_patch` only |
 | `PreToolUse` | Before tool execution | *(pass-through)* | No lifecycle action needed |
+| `SubagentStart` | A thread-spawned subagent begins | `SubagentStart` | `agent_id` is Entire's task correlation ID |
+| `SubagentStop` | A thread-spawned subagent ends | `SubagentEnd` | `agent_transcript_path` is the subagent rollout |
 
-Not consumed by Entire: `PermissionRequest`, `PreCompact`, `PostCompact`,
-`SubagentStart`, `SubagentStop`.
+Not consumed by Entire: `PermissionRequest`, `PreCompact`, `PostCompact`.
 
 ### SessionEnd's timeout ceiling
 
@@ -250,9 +304,12 @@ The `systemMessage` field can be used to display messages to the user via the ag
 
 ## Config Preservation
 
-- Use read-modify-write on entire `hooks.json` file
-- Preserve unknown keys in the `hooks` object (future event types)
-- The `hooks.json` is separate from `config.toml` — safe to create/modify independently
+- Read-modify-write applies only to the current checkout's `hooks.json`.
+- Preserve unknown top-level fields, unknown hook event types, and user hooks.
+- Removal deletes only Entire-managed entries from the current checkout.
+- Never merge from, migrate, clean, or mutate another checkout's file.
+- The `hooks.json` is separate from `config.toml`; Entire does not write trust
+  records.
 
 ## CLI Flags
 

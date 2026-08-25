@@ -1879,7 +1879,7 @@ func TestRunStatusJSON_HooksOutdated(t *testing.T) {
 	}
 }
 
-func TestRunStatusJSON_CodexLegacyLinkedWorktreeHooksAreNotInstalled(t *testing.T) {
+func TestRunStatusJSON_CodexLinkedWorktreeHooksReportInactiveDiscovery(t *testing.T) {
 	setupTestRepo(t)
 	repoRoot, err := paths.WorktreeRoot(context.Background())
 	if err != nil {
@@ -1914,7 +1914,19 @@ func TestRunStatusJSON_CodexLegacyLinkedWorktreeHooksAreNotInstalled(t *testing.
 		t.Fatalf("ignored worktree-local hooks must not report Codex installed: %v", result.Agents)
 	}
 	if !slices.Contains(result.HooksOutdated, "codex") {
-		t.Fatalf("expected legacy Codex hooks under hooks_outdated, got %v", result.HooksOutdated)
+		t.Fatalf("current-worktree freshness must remain under hooks_outdated: %v", result.HooksOutdated)
+	}
+	if result.CodexHooks == nil {
+		t.Fatal("expected codex_hooks diagnostic")
+	}
+	if result.CodexHooks.State != codexHookStateInactiveWorktreePath {
+		t.Fatalf("codex_hooks.state = %q, want %q", result.CodexHooks.State, codexHookStateInactiveWorktreePath)
+	}
+	if result.CodexHooks.WorktreePath != resolvedHooksPath(t, linkedRoot) {
+		t.Fatalf("worktree_path = %q", result.CodexHooks.WorktreePath)
+	}
+	if result.CodexHooks.DiscoveredPath != resolvedHooksPath(t, repoRoot) {
+		t.Fatalf("discovered_path = %q", result.CodexHooks.DiscoveredPath)
 	}
 }
 

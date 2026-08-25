@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,10 @@ import (
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 )
 
-const gitDir = ".git"
+const (
+	gitDir                  = ".git"
+	maxGitMetadataFileBytes = 64 * 1024
+)
 
 // sharedObjectCache is one process-wide object cache. go-git uses the cache
 // passed to the storage as its delta-base cache, so a per-open cache makes
@@ -162,7 +166,7 @@ func resolveDotGitPath(repoRoot string) (string, error) {
 		return gitPath, nil
 	}
 
-	content, err := os.ReadFile(gitPath) //nolint:gosec // gitPath is resolved from the git worktree root.
+	content, err := readGitMetadataFile(gitPath)
 	if err != nil {
 		return "", fmt.Errorf("read .git file: %w", err)
 	}
@@ -181,7 +185,7 @@ func resolveDotGitPath(repoRoot string) (string, error) {
 }
 
 func resolveCommonGitPath(dotGitPath string) (string, error) {
-	content, err := os.ReadFile(filepath.Join(dotGitPath, "commondir")) //nolint:gosec // dotGitPath is resolved from the git worktree root.
+	content, err := readGitMetadataFile(filepath.Join(dotGitPath, "commondir"))
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
@@ -197,4 +201,47 @@ func resolveCommonGitPath(dotGitPath string) (string, error) {
 		return filepath.Clean(commonPath), nil
 	}
 	return filepath.Clean(filepath.Join(dotGitPath, commonPath)), nil
+}
+
+func readGitMetadataFile(path string) ([]byte, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect Git metadata file %q: %w", path, err)
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("git metadata path %q is not a regular file", path)
+	}
+	if before.Size() > maxGitMetadataFileBytes {
+		return nil, fmt.Errorf("git metadata file %q exceeds %d bytes", path, maxGitMetadataFileBytes)
+	}
+
+	file, err := os.Open(path) //nolint:gosec // Callers derive paths from the current repository's Git metadata.
+	if err != nil {
+		return nil, fmt.Errorf("open Git metadata file %q: %w", path, err)
+	}
+	defer func() { _ = file.Close() }()
+
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect opened Git metadata file %q: %w", path, err)
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return nil, fmt.Errorf("git metadata file %q changed while opening", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxGitMetadataFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read Git metadata file %q: %w", path, err)
+	}
+	if len(data) > maxGitMetadataFileBytes {
+		return nil, fmt.Errorf("git metadata file %q exceeds %d bytes", path, maxGitMetadataFileBytes)
+	}
+
+	after, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("reinspect Git metadata file %q: %w", path, err)
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return nil, fmt.Errorf("git metadata file %q changed while reading", path)
+	}
+	return data, nil
 }
