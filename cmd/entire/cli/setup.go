@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 
 	"charm.land/huh/v2"
@@ -521,6 +522,7 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 					Title("Manage agents").
 					Description("Use space to select/deselect, enter to confirm.").
 					Options(options...).
+					Height(uiform.SingleLineMultiSelectHeight(len(options))).
 					Value(&selectedAgentNames),
 			),
 		)
@@ -1727,6 +1729,7 @@ var promptAgentSelection = func(options []huh.Option[string]) ([]string, error) 
 				Title("Select the agents you want to use").
 				Description("Use space to select, enter to confirm.").
 				Options(options...).
+				Height(uiform.SingleLineMultiSelectHeight(len(options))).
 				Validate(func(sel []string) error {
 					if len(sel) == 0 {
 						return errors.New("please select at least one agent")
