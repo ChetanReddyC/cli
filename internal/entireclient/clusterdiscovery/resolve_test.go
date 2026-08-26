@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/discovery"
 )
@@ -174,7 +175,8 @@ func TestResolve_AdvertisedLoginURLIsTheWholeRemedy(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrNoAuthContext)
 	assert.Contains(t, err.Error(), "no auth context for cluster aws-eu-central-1.entire.io")
-	assert.Contains(t, err.Error(), "entire login --server https://auth.entire.io")
+	assert.Contains(t, err.Error(), "Log in with `entire login`,")
+	assert.NotContains(t, err.Error(), "--server")
 	assert.NotContains(t, err.Error(), "It trusts these login servers")
 	assert.NotContains(t, err.Error(), "https://eu.auth.entire.io")
 }
@@ -183,13 +185,26 @@ func TestResolve_AdvertisedLoginURLIsTheWholeRemedy(t *testing.T) {
 func TestRenderLoginInstruction(t *testing.T) {
 	t.Parallel()
 
-	t.Run("advertised login server wins", func(t *testing.T) {
+	t.Run("a non-default login server is named, padding folded", func(t *testing.T) {
 		t.Parallel()
 		got := renderLoginInstruction(loginTargets{
-			coreURLs: []string{"https://eu.auth.entire.io"},
-			loginURL: " https://auth.entire.io/ ",
+			coreURLs: []string{"https://eu.auth.partial.to"},
+			loginURL: " https://auth.partial.to/ ",
 		})
-		assert.Equal(t, "Log in with `entire login --server https://auth.entire.io`, then re-run your command.", got)
+		assert.Equal(t, "Log in with `entire login --server https://auth.partial.to`, then re-run your command.", got)
+	})
+
+	t.Run("the default login server needs no flag", func(t *testing.T) {
+		t.Parallel()
+		for _, advertised := range []string{api.DefaultAuthBaseURL, " " + api.DefaultAuthBaseURL + "/ "} {
+			got := renderLoginInstruction(loginTargets{
+				coreURLs: []string{"https://us.auth.entire.io"},
+				loginURL: advertised,
+			})
+			assert.Equal(t, "Log in with `entire login`, then re-run your command.", got,
+				"advertised as %q", advertised)
+			assert.NotContains(t, got, "--server")
+		}
 	})
 
 	t.Run("falls back to the trusted issuers", func(t *testing.T) {

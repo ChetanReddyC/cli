@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
 // Path mirrors server/cluster_discovery.go: the cluster advertises which
@@ -182,7 +184,11 @@ func renderLoginHint(subject string, t loginTargets) string {
 //
 // An advertised login server ends it — that host is the apex router, and it
 // dispatches to whichever regional core owns the operator's account, so one URL
-// serves every account on the federation.
+// serves every account on the federation. When that host is the one `entire
+// login` already defaults to, the flag is dropped: naming it would teach a flag
+// whose own help text says it is rarely needed, and a user who learns it here is
+// liable to carry it to a host it doesn't belong on. Compared against the
+// constant rather than a literal, so the message follows if the default moves.
 //
 // Without one, the trusted issuers are named instead. They are a set of
 // candidates rather than an instruction, but for anything outside the default
@@ -194,6 +200,9 @@ func renderLoginHint(subject string, t loginTargets) string {
 // the resource's own — its preferred core first.
 func renderLoginInstruction(t loginTargets) string {
 	if loginURL := normalizeCoreURL(t.loginURL); loginURL != "" {
+		if loginURL == normalizeCoreURL(api.DefaultAuthBaseURL) {
+			return "Log in with `entire login`, then re-run your command."
+		}
 		return fmt.Sprintf("Log in with `entire login --server %s`, then re-run your command.", loginURL)
 	}
 	servers := trustedLoginServers(t.coreURLs)
