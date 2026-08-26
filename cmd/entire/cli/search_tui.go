@@ -143,7 +143,7 @@ var tabOrder = []typeFilter{typeFilterCommits, typeFilterSessions, typeFilterCod
 type searchModel struct {
 	results          []search.Result
 	cursor           int  // index into the active tab's full loaded list
-	pinToEnd         bool // End/G pressed: keep the cursor on the last row as fetched pages append
+	pinToEnd         bool // End/G pressed: follow the triggered fetch's rows to the new bottom, then release
 	total            int
 	width            int
 	height           int
@@ -370,6 +370,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		m.fetchingMore = false
 		if msg.err != nil {
 			m.searchErr = RenderUserFacingError(msg.err).Error()
+			m.pinToEnd = false
 			m = m.refreshBrowseContent()
 			return m, nil
 		}
@@ -383,17 +384,21 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 			// API returned no more results — cap total so fetch-ahead stops asking.
 			m.total = len(m.results)
 		}
-		// End/G means the true bottom, not the bottom as of that keypress:
-		// follow rows the fetch appended below the cursor.
+		// End/G follows its triggered fetch to the new bottom, then releases:
+		// the pin repositions once and must not chain further fetches, or one
+		// keypress would download every remaining page. While the tab is still
+		// empty (n == 0) the pin stays armed so the sparse-tab chain below can
+		// keep hunting for the tab's first rows.
 		if m.pinToEnd {
 			if n := m.visibleCount(); n > 0 {
 				m.cursor = n - 1
+				m.pinToEnd = false
+				m = m.refreshBrowseContent()
+				m.browseVP.GotoBottom()
+				return m, nil
 			}
 		}
 		m = m.refreshBrowseContent()
-		if m.pinToEnd {
-			m.browseVP.GotoBottom()
-		}
 		// A fetched page may add nothing to the active tab (pages interleave
 		// types); keep fetching while the cursor still sits at the end and the
 		// server has more, so one keypress scrolls through sparse tabs too.
@@ -620,9 +625,12 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		}
 		return m.withFetchAhead()
 	case key.Matches(msg, keys.Confirm):
+		// Leaving browse mode releases the End pin so a fetch landing while
+		// the detail view is open can't move the highlight underneath it.
 		if m.filterType == typeFilterCode {
 			if r := m.selectedCodeResult(); r != nil {
 				m.mode = modeDetail
+				m.pinToEnd = false
 				content := m.renderCodeDetail(*r, m.width, true)
 				m.detailVP = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(max(m.height-2, 1)))
 				m.detailVP.SetContent(content)
@@ -630,6 +638,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			}
 		} else if r := m.selectedResult(); r != nil {
 			m.mode = modeDetail
+			m.pinToEnd = false
 			content := m.renderDetailContent(*r, m.width, true)
 			m.detailVP = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(max(m.height-2, 1)))
 			m.detailVP.SetContent(content)
@@ -637,6 +646,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		}
 	case key.Matches(msg, keys.Search):
 		m.mode = modeSearch
+		m.pinToEnd = false
 		m.input.Focus()
 		return m, textinput.Blink
 	default:

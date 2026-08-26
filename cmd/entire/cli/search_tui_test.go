@@ -1034,8 +1034,9 @@ func TestSearchModel_NoFetchWhenResultsLoaded(t *testing.T) {
 }
 
 // TestSearchModel_EndFollowsFetchedRows pins the End/G semantics across
-// fetch-ahead: End means the true bottom, so rows appended by the fetch pull
-// the cursor down with them instead of leaving it mid-list.
+// fetch-ahead: End jumps to the loaded bottom and pulls in the next page; the
+// rows that fetch appends pull the cursor down with them, then the pin
+// releases — one keypress must not chain through every remaining page.
 func TestSearchModel_EndFollowsFetchedRows(t *testing.T) {
 	t.Parallel()
 
@@ -1056,7 +1057,8 @@ func TestSearchModel_EndFollowsFetchedRows(t *testing.T) {
 		t.Fatal("after End: fetchingMore should be true")
 	}
 
-	// The fetched page lands: the cursor follows to the new bottom.
+	// The fetched page lands: the cursor follows to the new bottom, the pin
+	// releases, and no further fetch chains off the repositioned cursor.
 	more := make([]search.Result, 10)
 	for i := range more {
 		more[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("new-%02d", i)}}
@@ -1065,8 +1067,14 @@ func TestSearchModel_EndFollowsFetchedRows(t *testing.T) {
 	if m.cursor != 19 {
 		t.Errorf("after append while pinned: cursor = %d, want 19", m.cursor)
 	}
+	if m.pinToEnd {
+		t.Error("pin should release once the fetched rows land")
+	}
+	if m.fetchingMore {
+		t.Error("one End press must not chain another fetch after repositioning")
+	}
 
-	// Any deliberate cursor move releases the pin: later appends stay put.
+	// A later append with the pin released stays put.
 	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if m.cursor != 18 {
 		t.Fatalf("after Up: cursor = %d, want 18", m.cursor)
@@ -1075,6 +1083,48 @@ func TestSearchModel_EndFollowsFetchedRows(t *testing.T) {
 	m = updateModel(t, m, searchMoreResultsMsg{results: more[:5]})
 	if m.cursor != 18 {
 		t.Errorf("after append while unpinned: cursor = %d, want 18", m.cursor)
+	}
+}
+
+// TestSearchModel_EndPinReleasedOutsideBrowse pins that opening a detail view
+// (or entering search mode) releases the End pin, so a fetch landing while the
+// detail is open cannot move the highlight underneath it.
+func TestSearchModel_EndPinReleasedOutsideBrowse(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	results := make([]search.Result, 10)
+	for i := range results {
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+	}
+	m := newSearchModel(results, "q", 50, search.Config{}, ss, nil)
+	m.filterType = typeFilterAll
+	m.height = 40
+
+	// End arms the pin and fires a fetch; Enter then opens the detail view.
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnd})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.mode != modeDetail {
+		t.Fatalf("mode = %d, want modeDetail", m.mode)
+	}
+
+	// The in-flight fetch lands while the detail is open: the selection must
+	// not move.
+	more := make([]search.Result, 10)
+	for i := range more {
+		more[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("new-%02d", i)}}
+	}
+	m = updateModel(t, m, searchMoreResultsMsg{results: more})
+	if m.cursor != 9 {
+		t.Errorf("cursor = %d, want 9 (unchanged while detail is open)", m.cursor)
+	}
+
+	// Entering search mode releases the pin too.
+	m.mode = modeBrowse
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnd})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
+	if m.pinToEnd {
+		t.Error("pin should release when entering search mode")
 	}
 }
 
