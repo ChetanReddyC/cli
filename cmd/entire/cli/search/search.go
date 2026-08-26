@@ -42,6 +42,17 @@ var ErrCellUnavailable = errors.New("semantic search is not available in this ce
 // don't misreport a repo-level miss as a region without query-serve.
 var ErrRepoFilterUnmatched = errors.New("no requested repo was found in this cell")
 
+// HTTPStatusError reports a non-OK search-service response. It preserves the
+// long-standing message wording (asserted by callers and tests) while exposing
+// the status code so outcome telemetry can classify server errors from the
+// type rather than the message text (ENT-1938).
+type HTTPStatusError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *HTTPStatusError) Error() string { return e.Message }
+
 // WildcardQuery is the query string used when only filters are provided (no search terms).
 const WildcardQuery = "*"
 
@@ -798,9 +809,9 @@ func parseSearchResponse(statusCode int, body []byte) (*Response, error) {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("search service error (%d): %s", statusCode, errResp.Error)
+			return nil, &HTTPStatusError{StatusCode: statusCode, Message: fmt.Sprintf("search service error (%d): %s", statusCode, errResp.Error)}
 		}
-		return nil, fmt.Errorf("search service returned %d: %s", statusCode, string(body))
+		return nil, &HTTPStatusError{StatusCode: statusCode, Message: fmt.Sprintf("search service returned %d: %s", statusCode, string(body))}
 	}
 
 	var result Response

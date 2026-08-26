@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/spf13/cobra"
 )
@@ -257,7 +258,15 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			searchCfg.Limit = search.DefaultLimit
 			searchCfg.Page = 0 // let API default to page 1
 
+			searchStart := time.Now()
 			resp, err := searcher(ctx, searchCfg)
+			resultCount := 0
+			if resp != nil {
+				resultCount = len(resp.Results)
+			}
+			// Emitted here — not at command exit — so the duration covers the
+			// search request, never time spent inside the interactive TUI.
+			emitSearchOutcome(ctx, cmd, telemetry.SearchModeCheckpoint, resultCount, time.Since(searchStart), err)
 			if err != nil {
 				return fmt.Errorf("search failed: %w", err)
 			}
@@ -473,7 +482,13 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 
 	// Always fan out via searchAllCells — it fetches the repo index,
 	// resolves slugs to ULIDs, and handles single- vs multi-jurisdiction.
+	searchStart := time.Now()
 	resp, err := searchAllCells(ctx, opts)
+	resultCount := 0
+	if resp != nil {
+		resultCount = len(resp.Results)
+	}
+	emitSearchOutcome(ctx, cmd, telemetry.SearchModeCode, resultCount, time.Since(searchStart), err)
 	if err != nil {
 		return err
 	}
