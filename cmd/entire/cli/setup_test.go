@@ -1222,7 +1222,7 @@ func TestRunUninstall_Force_RemovesEntireDirectory(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "uninstalled successfully") {
+	if !strings.Contains(output, "has been removed from this repository") {
 		t.Errorf("Expected success message, got: %s", output)
 	}
 }
@@ -1337,7 +1337,7 @@ func TestRunUninstall_SummaryNamesExternalAgent(t *testing.T) {
 	}
 
 	out := stdout.String()
-	if !strings.Contains(out, "Agent hooks") {
+	if !strings.Contains(out, "agent hooks") {
 		t.Fatalf("expected the summary to list agent hooks, got:\n%s", out)
 	}
 	if !strings.Contains(out, agentName) {
@@ -1394,7 +1394,7 @@ func TestRunUninstall_ReportsUnremovedExternalAgentHooks(t *testing.T) {
 	// Entire's own uninstall did complete — every Entire-owned artifact is gone
 	// and the third-party leftover was reported with its remedy — so the closing
 	// line says so. --strict is the opt-in for leftovers to change the verdict.
-	if !strings.Contains(stdout.String(), "uninstalled successfully") {
+	if !strings.Contains(stdout.String(), "has been removed from this repository") {
 		t.Errorf("a plugin leftover without --strict must still close with success, stdout:\n%s", stdout.String())
 	}
 }
@@ -1443,11 +1443,11 @@ func TestRunUninstall_EntireDirRemovalFailureFailsTheCommand(t *testing.T) {
 		t.Errorf("expected a SilentError (the message is already printed), got %T: %v", err, err)
 	}
 
-	if !strings.Contains(stderr.String(), "Warning: failed to remove .entire directory") {
+	if !strings.Contains(stderr.String(), "failed to remove .entire directory") {
 		t.Errorf("the failure must be warned about on stderr, got:\n%s", stderr.String())
 	}
 	out := stdout.String()
-	if strings.Contains(out, "uninstalled successfully") {
+	if strings.Contains(out, "has been removed from this repository") {
 		t.Errorf("uninstall must not report success when its own step failed, stdout:\n%s", out)
 	}
 	if !strings.Contains(out, "did not complete") {
@@ -1549,7 +1549,7 @@ func TestRunUninstall_HalfUninstallRecoversOnRerun(t *testing.T) {
 	if err := runUninstall(context.Background(), &stdout, &stderr, true, false); err != nil {
 		t.Fatalf("re-run error = %v\nstderr: %s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "uninstalled successfully") {
+	if !strings.Contains(stdout.String(), "has been removed from this repository") {
 		t.Errorf("re-run must complete the uninstall, stdout:\n%s", stdout.String())
 	}
 
@@ -1594,14 +1594,16 @@ func TestRunUninstall_RerunAfterPluginFailureFinishesTheJob(t *testing.T) {
 	if err := runUninstall(context.Background(), &stdout, &stderr, true, false); err != nil {
 		t.Fatalf("re-run error = %v\nstderr: %s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "uninstalled successfully") {
+	if !strings.Contains(stdout.String(), "has been removed from this repository") {
 		t.Errorf("re-run must reach the plugin without the external_agents gate and complete the uninstall, stdout:\n%s", stdout.String())
 	}
 }
 
-// TestRunUninstall_StrictFailsOnUnremovedExternalAgentHooks pins the opt-in: the
-// output is identical, only the exit code differs, so a script that wants a
-// partial uninstall to fail can ask for it.
+// TestRunUninstall_StrictFailsOnUnremovedExternalAgentHooks pins the opt-in:
+// under --strict the command fails, so the remedy is re-running the uninstall
+// itself (which retries the plugin — discovery is ungated), not the raw
+// plugin command that the non-strict path hands out as the user's last
+// prompt to act.
 func TestRunUninstall_StrictFailsOnUnremovedExternalAgentHooks(t *testing.T) {
 	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
 	const agentName = "ext-uninstall-failure-strict-test"
@@ -1618,7 +1620,19 @@ func TestRunUninstall_StrictFailsOnUnremovedExternalAgentHooks(t *testing.T) {
 		t.Errorf("expected a SilentError (warnings are already printed), got %T: %v", err, err)
 	}
 
-	assertLeftoverPluginReported(t, stderr.String(), agentName, "hooks are still installed")
+	errOut := stderr.String()
+	if !strings.Contains(errOut, agentName) {
+		t.Errorf("stderr must name the plugin whose hooks were not removed, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "hooks are still installed") {
+		t.Errorf("stderr must say the hooks are still installed, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "entire disable --uninstall") {
+		t.Errorf("under --strict the hint must be to re-run the uninstall, got:\n%s", errOut)
+	}
+	if strings.Contains(errOut, "entire-agent-"+agentName+" uninstall-hooks") {
+		t.Errorf("under --strict the raw plugin command must not be printed, got:\n%s", errOut)
+	}
 }
 
 // TestRunUninstall_UncheckableExternalAgentReported pins the plugin that cannot
@@ -1724,8 +1738,10 @@ func TestRunUninstall_SummaryNamesUncheckableExternalAgent(t *testing.T) {
 	if !strings.Contains(out, agentName) {
 		t.Errorf("summary must name the plugin %q, got:\n%s", agentName, out)
 	}
-	if strings.Contains(out, "  - Agent hooks ("+agentName) {
-		t.Errorf("an unchecked plugin must not be listed as having hooks installed, got:\n%s", out)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "agent hooks") && strings.Contains(line, agentName) {
+			t.Errorf("an unchecked plugin must not be listed as having hooks installed, got:\n%s", out)
+		}
 	}
 }
 
@@ -1784,8 +1800,8 @@ func TestPluginUninstallCommand_PerOS(t *testing.T) {
 // assertLeftoverPluginReported checks the shape every leftover-hooks report
 // shares on stderr: the plugin named, what state its hooks are in, and a
 // runnable recovery command. The closing stdout line is deliberately not
-// checked here — without --strict a plugin leftover still ends in
-// "uninstalled successfully", because Entire's own uninstall did complete and
+// checked here — without --strict a plugin leftover still ends in the
+// success verdict, because Entire's own uninstall did complete and
 // the leftover was already reported with its remedy.
 func assertLeftoverPluginReported(t *testing.T, stderr, agentName, lead string) {
 	t.Helper()
@@ -1887,7 +1903,7 @@ func TestRunUninstall_BuiltinNotDetectedIsLeftAlone(t *testing.T) {
 // TestRunUninstall_BuiltinHookFailureFailsTheCommand pins that a built-in whose
 // removal failed fails the uninstall even without --strict. A built-in is
 // Entire's own code: its removal failing means the uninstall did not do its
-// job, and "uninstalled successfully" would assert the opposite of the warning
+// job, and a success verdict would assert the opposite of the warning
 // just printed. Only external plugins — third-party code Entire cannot fix —
 // get the strict-gated treatment.
 func TestRunUninstall_BuiltinHookFailureFailsTheCommand(t *testing.T) {
@@ -1906,12 +1922,12 @@ func TestRunUninstall_BuiltinHookFailureFailsTheCommand(t *testing.T) {
 	}
 
 	errOut := stderr.String()
-	if !strings.Contains(errOut, "Warning: failed to remove agent hooks") || !strings.Contains(errOut, string(agentName)) {
+	if !strings.Contains(errOut, "failed to remove agent hooks") || !strings.Contains(errOut, string(agentName)) {
 		t.Errorf("the failure must be warned about on stderr, naming the agent, got:\n%s", errOut)
 	}
 
 	out := stdout.String()
-	if strings.Contains(out, "uninstalled successfully") {
+	if strings.Contains(out, "has been removed from this repository") {
 		t.Errorf("uninstall must not report success when a built-in's hooks were not removed, stdout:\n%s", out)
 	}
 	if !strings.Contains(out, "did not complete") {
@@ -1955,7 +1971,7 @@ func TestRunUninstall_UncheckableBuiltinFailsTheCommand(t *testing.T) {
 	}
 
 	out := stdout.String()
-	if strings.Contains(out, "uninstalled successfully") {
+	if strings.Contains(out, "has been removed from this repository") {
 		t.Errorf("uninstall must not report success while a built-in's hooks are unverified, stdout:\n%s", out)
 	}
 	if !strings.Contains(out, "did not complete") {
@@ -1990,6 +2006,77 @@ func TestRunUninstall_UncheckedBuiltinAloneIsNotNotInstalled(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "permission denied") {
 		t.Errorf("the unreadable-config reason must reach the user, stderr:\n%s", stderr.String())
+	}
+}
+
+// cancellingHookAgent is a built-in whose UninstallHooks cancels the run's
+// context before returning, simulating Ctrl-C arriving mid-removal.
+type cancellingHookAgent struct {
+	*fakeBuiltinHookAgent
+
+	cancel context.CancelFunc
+}
+
+func (c *cancellingHookAgent) UninstallHooks(ctx context.Context) error {
+	*c.uninstallCalls++
+	c.cancel()
+	return ctx.Err()
+}
+
+// TestRunUninstall_CancellationIsNotAnAgentFault pins that a ctx cancelled
+// mid-removal (Ctrl-C) is reported as an interruption, not charged to the
+// agent whose removal it killed: no failure warning naming the agent, no
+// recovery command asserting its hooks are still installed — just the
+// interruption notice and a did-not-complete verdict, since a re-run finishes
+// the job.
+func TestRunUninstall_CancellationIsNotAnAgentFault(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	const agentName types.AgentName = "fake-builtin-cancelling"
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true}`)
+	t.Cleanup(agent.SnapshotRegistryForTesting())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	agent.Register(agentName, func() agent.Agent {
+		return &cancellingHookAgent{
+			fakeBuiltinHookAgent: &fakeBuiltinHookAgent{
+				Agent:          &vogon.Agent{},
+				name:           agentName,
+				installed:      true,
+				uninstallCalls: &calls,
+			},
+			cancel: cancel,
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(ctx, &stdout, &stderr, true, false)
+	if err == nil {
+		t.Fatalf("an interrupted uninstall must not report success, stdout:\n%s", stdout.String())
+	}
+	if calls != 1 {
+		t.Errorf("UninstallHooks calls = %d, want 1", calls)
+	}
+
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "interrupted while removing agent hooks") {
+		t.Errorf("stderr must report the interruption, got:\n%s", errOut)
+	}
+	if strings.Contains(errOut, "failed to remove agent hooks") {
+		t.Errorf("cancellation must not be reported as an agent failure, stderr:\n%s", errOut)
+	}
+	if strings.Contains(errOut, "uninstall-hooks") {
+		t.Errorf("cancellation must not print a plugin recovery command, stderr:\n%s", errOut)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "has been removed from this repository") {
+		t.Errorf("an interrupted uninstall must not close with the success verdict, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -2419,6 +2420,8 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force, strict bool) er
 	agHookState := getAgentHookState(ctx)
 	entireDirExists := checkEntireDirExists(ctx)
 
+	p := newUninstallPrinter(w, errW)
+
 	// Check if there's anything to uninstall. An unchecked built-in blocks the
 	// "not installed" claim: its config exists but could not be read, which is the
 	// one state where absence is unknowable — fall through so the removal below
@@ -2435,7 +2438,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force, strict bool) er
 
 	// Show confirmation prompt unless --force
 	if !force {
-		confirmed, err := confirmUninstall(w, errW, uninstallSummary{
+		confirmed, err := confirmUninstall(p, uninstallSummary{
 			entireDirExists:   entireDirExists,
 			gitHooksInstalled: gitHooksInstalled,
 			sessionStateCount: sessionStateCount,
@@ -2451,52 +2454,55 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force, strict bool) er
 		}
 	}
 
-	fmt.Fprintln(w, "\nUninstalling Entire CLI...")
+	p.blank()
 
 	// Each step is the expert on its own section: it prints its own report —
-	// successes to w, warnings to errW — handles its errors (strict policy
-	// included), and returns only whether it succeeded. ok is the single fact
-	// tracked across the run; the steps are otherwise isolated from each other.
-	ok := uninstallAgentHooks(ctx, w, errW, repoRoot, agHookState, strict)
-	ok = uninstallGitHooks(ctx, w, errW) && ok
-	ok = uninstallSessionStates(ctx, w, errW) && ok
-	ok = uninstallEntireDir(ctx, w, errW, entireDirExists) && ok
-	ok = uninstallShadowBranches(ctx, w, errW) && ok
+	// successes to stdout, warnings to stderr via the printer — handles its
+	// errors (strict policy included), and returns only whether it succeeded.
+	// ok is the single fact tracked across the run; the steps are otherwise
+	// isolated from each other.
+	ok := uninstallAgentHooks(ctx, p, repoRoot, agHookState, strict)
+	ok = uninstallGitHooks(ctx, p) && ok
+	ok = uninstallSessionStates(ctx, p) && ok
+	ok = uninstallEntireDir(ctx, p, entireDirExists) && ok
+	ok = uninstallShadowBranches(ctx, p) && ok
 
+	p.blank()
 	if !ok {
-		fmt.Fprintln(w, "\nEntire CLI uninstall did not complete - see the warnings above.")
+		p.failureVerdict("Uninstall did not complete — see the warnings above.")
 		return NewSilentError(errors.New("uninstall did not complete"))
 	}
-	fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")
+	p.successVerdict("Entire has been removed from this repository.")
+	p.farewell()
 	return nil
 }
 
 // uninstallGitHooks removes Entire's git hooks and reports what it did.
-func uninstallGitHooks(ctx context.Context, w, errW io.Writer) bool {
+func uninstallGitHooks(ctx context.Context, p *uninstallPrinter) bool {
 	removed, err := strategy.RemoveGitHook(ctx)
 	if err != nil {
-		fmt.Fprintf(errW, "Warning: failed to remove git hooks: %v\n", err)
+		p.warn("failed to remove git hooks: %v", err)
 		return false
 	}
 	if removed > 0 {
-		fmt.Fprintf(w, "  Removed git hooks (%d)\n", removed)
+		p.step("Removed git hooks (%d)", removed)
 	} else {
-		fmt.Fprintln(w, "  No git hooks to remove")
+		p.noop("No git hooks to remove")
 	}
 	return true
 }
 
 // uninstallSessionStates removes all session state files and reports what it did.
-func uninstallSessionStates(ctx context.Context, w, errW io.Writer) bool {
+func uninstallSessionStates(ctx context.Context, p *uninstallPrinter) bool {
 	statesRemoved, err := removeAllSessionStates(ctx)
 	if err != nil {
-		fmt.Fprintf(errW, "Warning: failed to remove session states: %v\n", err)
+		p.warn("failed to remove session states: %v", err)
 		return false
 	}
 	if statesRemoved > 0 {
-		fmt.Fprintf(w, "  Removed session states (%d)\n", statesRemoved)
+		p.step("Removed session states (%d)", statesRemoved)
 	} else {
-		fmt.Fprintln(w, "  No session states to remove")
+		p.noop("No session states to remove")
 	}
 	return true
 }
@@ -2506,30 +2512,30 @@ func uninstallSessionStates(ctx context.Context, w, errW io.Writer) bool {
 // discovery is ungated (DiscoverAndRegisterAlways): a re-run can still reach a
 // plugin whose hooks were left behind, without this step depending on how the
 // agent step went.
-func uninstallEntireDir(ctx context.Context, w, errW io.Writer, dirExists bool) bool {
+func uninstallEntireDir(ctx context.Context, p *uninstallPrinter, dirExists bool) bool {
 	if err := removeEntireDirectory(ctx); err != nil {
-		fmt.Fprintf(errW, "Warning: failed to remove .entire directory: %v\n", err)
+		p.warn("failed to remove .entire directory: %v", err)
 		return false
 	}
 	if dirExists {
-		fmt.Fprintln(w, "  Removed .entire directory")
+		p.step("Removed .entire directory")
 	} else {
-		fmt.Fprintln(w, "  No .entire directory to remove")
+		p.noop("No .entire directory to remove")
 	}
 	return true
 }
 
 // uninstallShadowBranches removes all shadow branches and reports what it did.
-func uninstallShadowBranches(ctx context.Context, w, errW io.Writer) bool {
+func uninstallShadowBranches(ctx context.Context, p *uninstallPrinter) bool {
 	branchesRemoved, err := removeAllShadowBranches(ctx)
 	if err != nil {
-		fmt.Fprintf(errW, "Warning: failed to remove shadow branches: %v\n", err)
+		p.warn("failed to remove shadow branches: %v", err)
 		return false
 	}
 	if branchesRemoved > 0 {
-		fmt.Fprintf(w, "  Removed %d shadow branches\n", branchesRemoved)
+		p.step("Removed %d shadow branches", branchesRemoved)
 	} else {
-		fmt.Fprintln(w, "  No shadow branches to remove")
+		p.noop("No shadow branches to remove")
 	}
 	return true
 }
@@ -2547,29 +2553,33 @@ type uninstallSummary struct {
 // confirmUninstall prints the removal summary and asks the user to confirm.
 // It returns false when the user declined, and an error when the confirmation
 // could not be asked at all.
-func confirmUninstall(w, errW io.Writer, summary uninstallSummary) (bool, error) {
-	fmt.Fprintln(w, "\nThis will completely remove Entire from this repository:")
-	if summary.entireDirExists {
-		fmt.Fprintln(w, "  - .entire/ directory")
-	}
-	if summary.gitHooksInstalled {
-		fmt.Fprintln(w, "  - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)")
-	}
-	if summary.sessionStateCount > 0 {
-		fmt.Fprintf(w, "  - Session state files (%d)\n", summary.sessionStateCount)
-	}
-	if summary.shadowBranchCount > 0 {
-		fmt.Fprintf(w, "  - Shadow branches (%d)\n", summary.shadowBranchCount)
-	}
+func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, error) {
+	p.blank()
+	p.plain("This will completely remove Entire from this repository:")
+	p.blank()
+	rows := make([]explainRow, 0, 6)
 	if len(summary.hookState.installed) > 0 {
-		fmt.Fprintf(w, "  - Agent hooks (%s)\n", strings.Join(agentDisplayNames(summary.hookState.installed), ", "))
+		rows = append(rows, explainRow{Label: "agent hooks", Value: strings.Join(agentDisplayNames(summary.hookState.installed), ", ")})
 	}
-	// Its own line, not folded into the one above: that line asserts hooks are
+	// Its own row, not folded into the one above: that row asserts hooks are
 	// installed, which for these plugins is exactly what we could not find out.
 	if len(summary.hookState.unchecked) > 0 {
-		fmt.Fprintf(w, "  - Agent hooks that could not be checked (%s)\n", strings.Join(agentDisplayNames(summary.hookState.uncheckedNames()), ", "))
+		rows = append(rows, explainRow{Label: "unchecked", Value: strings.Join(agentDisplayNames(summary.hookState.uncheckedNames()), ", ") + " (could not be checked)"})
 	}
-	fmt.Fprintln(w)
+	if summary.gitHooksInstalled {
+		rows = append(rows, explainRow{Label: "git hooks", Value: "prepare-commit-msg, commit-msg, post-commit, pre-push"})
+	}
+	if summary.sessionStateCount > 0 {
+		rows = append(rows, explainRow{Label: "session states", Value: strconv.Itoa(summary.sessionStateCount)})
+	}
+	if summary.shadowBranchCount > 0 {
+		rows = append(rows, explainRow{Label: "shadow branches", Value: strconv.Itoa(summary.shadowBranchCount)})
+	}
+	if summary.entireDirExists {
+		rows = append(rows, explainRow{Label: ".entire/", Value: "settings, logs, metadata"})
+	}
+	fmt.Fprint(p.w, p.out.metadataRows(rows))
+	p.blank()
 
 	// Without this guard the confirm below reaches huh, whose bubbletea
 	// program opens /dev/tty directly. A caller with no terminal gets a
@@ -2577,7 +2587,7 @@ func confirmUninstall(w, errW io.Writer, summary uninstallSummary) (bool, error)
 	// `go test` run that happens to have a controlling terminal blocks on a
 	// rendered prompt.
 	if !interactive.CanPromptInteractively() {
-		fmt.Fprintln(errW, "No terminal available to confirm the uninstall. Re-run with --force to uninstall non-interactively.")
+		fmt.Fprintln(p.errW, "No terminal available to confirm the uninstall. Re-run with --force to uninstall non-interactively.")
 		return false, NewSilentError(errors.New("uninstall confirmation requires a terminal"))
 	}
 
@@ -2681,23 +2691,35 @@ func powerShellQuote(s string) string {
 // exactly what the user was shown. An agent that cleanly reported no hooks is
 // in neither set and is left alone.
 //
-// It prints its own report as it goes — removals to w, warnings to errW — and
-// owns its own success verdict: a built-in problem (failed removal or
-// uncheckable config, always Entire's own bug to surface) fails the step, an
-// external plugin problem does so only under strict, since it is third-party
-// code Entire cannot fix — its warning, with the plugin command the user can
-// run by hand, is the whole report. A re-run can also retry the plugin
-// (uninstall discovery is ungated), but the plugin binary itself may be what
-// is broken, and invoking it directly shows its output.
-func uninstallAgentHooks(ctx context.Context, w, errW io.Writer, repoRoot string, hookState agentHookState, strict bool) bool {
+// It prints its own report as it goes — removals to stdout, warnings to
+// stderr — and owns its own success verdict: a built-in problem (failed
+// removal or uncheckable config, always Entire's own bug to surface) fails
+// the step, an external plugin problem does so only under strict, since it is
+// third-party code Entire cannot fix — its warning, with the plugin command
+// the user can run by hand, is the whole report. A re-run can also retry the
+// plugin (uninstall discovery is ungated), but the plugin binary itself may
+// be what is broken, and invoking it directly shows its output.
+//
+// Each removal runs under a live progress line naming the agent and whether
+// it is external: an external plugin's uninstall-hooks is a subprocess with
+// no bounded runtime, so a slow one must be attributable and visibly in
+// progress rather than a silent hang.
+func uninstallAgentHooks(ctx context.Context, p *uninstallPrinter, repoRoot string, hookState agentHookState, strict bool) bool {
 	if len(hookState.installed) == 0 && len(hookState.unchecked) == 0 {
-		fmt.Fprintln(w, "  No agent hooks to remove")
+		p.noop("No agent hooks to remove")
 		return true
 	}
 
 	builtinProblem := false
 	externalProblem := false
 	for _, name := range hookState.installed {
+		// A cancelled ctx (Ctrl-C) must stop the loop here, for the same two
+		// reasons the detection sweep special-cases it (see getAgentHookState):
+		// asking further agents to mutate state after the user said stop is not
+		// ours to do, and a built-in that ignores ctx would still go ahead.
+		if ctx.Err() != nil {
+			return uninstallAgentHooksInterrupted(p)
+		}
 		ag, err := agent.Get(name)
 		if err != nil {
 			continue
@@ -2707,16 +2729,43 @@ func uninstallAgentHooks(ctx context.Context, w, errW io.Writer, repoRoot string
 			continue
 		}
 
-		switch err := hs.UninstallHooks(ctx); {
-		case err != nil && external.IsExternal(ag):
+		isExternal := external.IsExternal(ag)
+		suffix := ""
+		if isExternal {
+			suffix = " (external agent)"
+		}
+		uninstallErr := p.runTimed(fmt.Sprintf("Removing %s hooks%s", agentDisplayName(name), suffix), func() error {
+			return hs.UninstallHooks(ctx)
+		})
+		switch {
+		case uninstallErr != nil && ctx.Err() != nil:
+			// The removal died because *we* were cancelled (an external plugin's
+			// subprocess is killed on ctx cancel), not because the agent failed.
+			// Blaming it — with a recovery command asserting its hooks are still
+			// installed — would charge our own Ctrl-C to third-party code.
+			return uninstallAgentHooksInterrupted(p)
+		case uninstallErr != nil && isExternal:
 			externalProblem = true
-			fmt.Fprintf(errW, "Warning: failed to remove agent hooks: %s (external): %v\n", agentDisplayName(name), err)
-			fmt.Fprintf(errW, "  %s hooks are still installed. Remove them with:\n    %s\n", agentDisplayName(name), pluginUninstallCommand(repoRoot, name))
-		case err != nil:
+			p.stepFailed("Failed to remove %s hooks%s", agentDisplayName(name), suffix)
+			p.warnUnder("failed to remove agent hooks: %v", uninstallErr)
+			if strict {
+				// Under --strict this run exits non-zero, so the natural retry is
+				// the uninstall itself (discovery is ungated, so a re-run reaches
+				// the plugin again) — not the raw plugin command.
+				p.warnUnderDetail("%s hooks are still installed. Re-run 'entire disable --uninstall' to retry.", agentDisplayName(name))
+			} else {
+				// Without --strict the uninstall still succeeds, so this warning is
+				// the user's last prompt to act — hand them the exact plugin
+				// command rather than a re-run they have no failure to notice.
+				p.warnUnderDetail("%s hooks are still installed. Remove them with:", agentDisplayName(name))
+				p.warnUnderDetail("  %s", pluginUninstallCommand(repoRoot, name))
+			}
+		case uninstallErr != nil:
 			builtinProblem = true
-			fmt.Fprintf(errW, "Warning: failed to remove agent hooks: %s: %v\n", agentDisplayName(name), err)
+			p.stepFailed("Failed to remove %s hooks", agentDisplayName(name))
+			p.warnUnder("failed to remove agent hooks: %s: %v", agentDisplayName(name), uninstallErr)
 		default:
-			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
+			p.step("Removed %s hooks%s", ag.Type(), suffix)
 		}
 	}
 
@@ -2726,15 +2775,26 @@ func uninstallAgentHooks(ctx context.Context, w, errW io.Writer, repoRoot string
 			// not ask it to remove them — asking a plugin that cannot answer to
 			// mutate state is not something to do on the user's behalf.
 			externalProblem = true
-			fmt.Fprintf(errW, "Warning: could not check whether %s hooks are installed: %v\n", agentDisplayName(u.name), u.err)
-			fmt.Fprintf(errW, "  %s hooks may still be installed. Remove them with:\n    %s\n", agentDisplayName(u.name), pluginUninstallCommand(repoRoot, u.name))
+			p.warn("could not check whether %s hooks are installed: %v", agentDisplayName(u.name), u.err)
+			p.warnDetail("%s hooks may still be installed. Remove them with:", agentDisplayName(u.name))
+			p.warnDetail("  %s", pluginUninstallCommand(repoRoot, u.name))
 		} else {
 			builtinProblem = true
-			fmt.Fprintf(errW, "Warning: could not check whether %s hooks are installed - they may or may not remain: %v\n", agentDisplayName(u.name), u.err)
+			p.warn("could not check whether %s hooks are installed - they may or may not remain: %v", agentDisplayName(u.name), u.err)
 		}
 	}
 
 	return !builtinProblem && (!strict || !externalProblem)
+}
+
+// uninstallAgentHooksInterrupted reports a user cancellation mid-removal and
+// fails the step so the closing verdict says the uninstall did not complete.
+// The unchecked-plugin warnings are deliberately skipped too: the user is
+// quitting, and a re-run (uninstall is re-runnable by design) reports them
+// again with their recovery commands.
+func uninstallAgentHooksInterrupted(p *uninstallPrinter) bool {
+	p.warn("interrupted while removing agent hooks - run 'entire disable --uninstall' again to finish")
+	return false
 }
 
 // removeAllSessionStates removes all session state files and the directory.
