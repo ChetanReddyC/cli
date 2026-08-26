@@ -84,14 +84,15 @@ func resolveHookDiscovery(worktreeRoot string) HookDiscovery {
 	if err != nil {
 		return unresolvedHookDiscoveryAt(worktreeRoot, "Git common directory could not be resolved: "+err.Error())
 	}
+	worktreeID, worktreeIDErr := paths.GetWorktreeID(worktreeRoot)
 	if commonGitPath == "" {
 		commonGitPath = dotGitPath
-		if filepath.Base(filepath.Dir(dotGitPath)) == "worktrees" {
+		if worktreeIDErr == nil && worktreeID != "" {
 			commonGitPath = filepath.Dir(filepath.Dir(dotGitPath))
 		}
 	}
 
-	if isLinkedWorktreeGitDir(dotGitPath) &&
+	if worktreeIDErr == nil && worktreeID != "" &&
 		!isSubmoduleGitDir(dotGitPath) &&
 		linkedWorktreeRegistrationMatches(dotGitPath, worktreeRoot) {
 		candidate := filepath.Dir(commonGitPath)
@@ -109,10 +110,6 @@ func resolveHookDiscovery(worktreeRoot string) HookDiscovery {
 	}
 	discovery.DiscoveredHooks = DiscoveredHooksPath{path: filepath.Join(root, ".codex", HooksFileName)}
 	return discovery
-}
-
-func isLinkedWorktreeGitDir(dotGitPath string) bool {
-	return filepath.Base(filepath.Dir(dotGitPath)) == "worktrees"
 }
 
 func isSubmoduleGitDir(dotGitPath string) bool {
