@@ -146,7 +146,7 @@ func TestResolve_ActiveContextIneligibleAndNothingElseFits(t *testing.T) {
 // loginURLCoresHandler serves a discovery document that advertises a login
 // server alongside the trusted issuers, the shape every cluster serves once
 // it is running a build that carries ENTIRE_CORE_AUTH_BASE_URL through.
-func loginURLCoresHandler(t *testing.T, loginURL string, coreURLs ...string) http.HandlerFunc {
+func loginURLCoresHandler(t *testing.T, calls *int32, loginURL string, coreURLs ...string) http.HandlerFunc {
 	t.Helper()
 	body, err := json.Marshal(Response{
 		CoreURLs:             coreURLs,
@@ -155,6 +155,9 @@ func loginURLCoresHandler(t *testing.T, loginURL string, coreURLs ...string) htt
 	})
 	require.NoError(t, err)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if calls != nil {
+			atomic.AddInt32(calls, 1)
+		}
 		assert.Equal(t, Path, r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(body) //nolint:errcheck // test
@@ -167,7 +170,7 @@ func loginURLCoresHandler(t *testing.T, loginURL string, coreURLs ...string) htt
 // issuers next to it would be noise the user has to triage.
 func TestResolve_AdvertisedLoginURLIsTheWholeRemedy(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(loginURLCoresHandler(t, "https://auth.entire.io",
+	srv := httptest.NewServer(loginURLCoresHandler(t, nil, "https://auth.entire.io",
 		"https://eu.auth.entire.io", "https://us.auth.entire.io"))
 	defer srv.Close()
 
@@ -489,17 +492,56 @@ func TestResolve_AudienceAgnosticCallersSkipPreAudienceRefetch(t *testing.T) {
 			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
 		},
 	}))
+	// SetEntry stamps the current schema version, so the only thing this
+	// entry is missing is the audience — which is what the test is about.
 	require.NoError(t, discovery.ModifyClusterCores(cacheDir, func(c discovery.ClusterCoresCache) error {
-		c["aws-eu-central-1.entire.io"] = &discovery.CoresEntry{
-			CoreURLs:  []string{"https://eu.auth.entire.io"},
-			FetchedAt: time.Now(),
-		}
+		c.SetEntry("aws-eu-central-1.entire.io", discovery.CoresEntry{
+			CoreURLs: []string{"https://eu.auth.entire.io"},
+		})
 		return nil
 	}))
 
 	_, err := ResolveContextForCluster(t.Context(), configDir, cacheDir, "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
 	require.NoError(t, err)
 	assert.Equal(t, int32(0), atomic.LoadInt32(&calls), "cores-only caller must be served from the fresh cache")
+}
+
+// TestResolve_OlderSchemaCacheRefetched: a fresh entry written before the
+// client knew about login_url is re-fetched immediately rather than pinning
+// the user to the old multi-server hint for a full TTL — a warm cache is
+// exactly what the people this change helps already have. The rewritten entry
+// is current, so the next call is served from cache even though this cluster
+// advertises no login server.
+func TestResolve_OlderSchemaCacheRefetched(t *testing.T) {
+	t.Parallel()
+	var calls int32
+	srv := httptest.NewServer(loginURLCoresHandler(t, &calls, "https://auth.partial.to", "https://eu.auth.entire.io"))
+	defer srv.Close()
+
+	// No saved logins, so resolution ends in the login hint — the message the
+	// re-fetch is supposed to improve.
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+	// Seed a FRESH pre-versioning entry: audience present (so the audience
+	// rule can't be what forces the re-fetch), no login server, no version.
+	require.NoError(t, discovery.ModifyClusterCores(cacheDir, func(c discovery.ClusterCoresCache) error {
+		c["aws-eu-central-1.entire.io"] = &discovery.CoresEntry{
+			CoreURLs:             []string{"https://eu.auth.entire.io"},
+			JurisdictionAudience: "https://eu.entire.io",
+			FetchedAt:            time.Now(),
+		}
+		return nil
+	}))
+
+	_, err := ResolveContextForCluster(t.Context(), configDir, cacheDir, "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.ErrorIs(t, err, ErrNoAuthContext)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "pre-versioning entry must trigger a live re-fetch")
+	// The whole point: the freshly discovered login server reaches the hint.
+	assert.Contains(t, err.Error(), "entire login --server https://auth.partial.to")
+
+	_, err = ResolveContextForCluster(t.Context(), configDir, cacheDir, "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.Error(t, err)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "the rewritten entry is current and must not re-fetch again")
 }
 
 // TestResolve_Unreachable: transport failure with no cached cores surfaces

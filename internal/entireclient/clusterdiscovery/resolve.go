@@ -141,6 +141,14 @@ func normalizeClusterHost(clusterHost string) string {
 // an audience-less entry is NOT used as the discovery-failure fallback:
 // returning it would make the caller misdiagnose a transient discovery
 // failure as "this cluster doesn't do jurisdiction tokens".
+//
+// An entry written against an older discovery.CoresSchemaVersion is stale for
+// every caller, because a field this client knows about cannot be told apart
+// from one the resource declined to advertise. Without this, a warm cache
+// pins a client to the old shape for a full TTL — and the people with a warm
+// entry are exactly the ones who just hit the error the new field improves.
+// It costs one re-fetch per host, after which the rewritten entry is current
+// and caches normally even when the field is genuinely absent.
 func resolveCachedCores(
 	cacheDir, host, label string,
 	requireAudience bool,
@@ -160,12 +168,14 @@ func resolveCachedCores(
 	if cache != nil {
 		if entry, fresh, ok := cache.GetEntry(host); ok {
 			preAudience := requireAudience && entry.JurisdictionAudience == ""
-			if fresh && !preAudience {
+			outdated := entry.SchemaVersion < discovery.CoresSchemaVersion
+			if fresh && !preAudience && !outdated {
 				debugf("%s %s cores from cache: %v", label, host, entry.CoreURLs)
 				return entry, nil
 			}
 			stale = entry
-			debugf("%s %s cores cache expired or pre-audience; re-fetching /.well-known", label, host)
+			debugf("%s %s cores cache expired, pre-audience, or schema v%d < v%d; re-fetching /.well-known",
+				label, host, entry.SchemaVersion, discovery.CoresSchemaVersion)
 		}
 	}
 
