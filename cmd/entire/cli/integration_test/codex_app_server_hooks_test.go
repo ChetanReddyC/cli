@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -22,14 +21,13 @@ import (
 )
 
 const (
-	pinnedCodexAppServerVersion = "0.149.0"
-	requireCodexAppServerEnv    = "ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER"
+	requireCodexAppServerEnv = "ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER"
 )
 
 func TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout(t *testing.T) {
 	t.Parallel()
 
-	codexPath := requirePinnedCodexAppServer(t)
+	codexPath := requireCodexAppServer(t)
 	env := NewTestEnv(t)
 	env.InitRepo()
 
@@ -82,7 +80,7 @@ func TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout(t *testing.T)
 func TestCodexAppServerHooksList_BareWorktreeUsesLayoutRoot(t *testing.T) {
 	t.Parallel()
 
-	codexPath := requirePinnedCodexAppServer(t)
+	codexPath := requireCodexAppServer(t)
 	tmp := t.TempDir()
 	seedRoot := filepath.Join(tmp, "seed")
 	layoutRoot := filepath.Join(tmp, "layout")
@@ -125,7 +123,7 @@ func TestCodexAppServerHooksList_BareWorktreeUsesLayoutRoot(t *testing.T) {
 	require.True(t, foundLayout, "hooks/list did not return the .bare layout-root hook")
 }
 
-func requirePinnedCodexAppServer(t *testing.T) string {
+func requireCodexAppServer(t *testing.T) string {
 	t.Helper()
 	required := os.Getenv(requireCodexAppServerEnv) == "1"
 
@@ -144,15 +142,6 @@ func requirePinnedCodexAppServer(t *testing.T) string {
 			t.Fatalf("%s=1 but codex --version failed: %v\n%s", requireCodexAppServerEnv, err, output)
 		}
 		t.Skipf("codex is not runnable: %v", err)
-	}
-	versionOutput := strings.TrimSpace(string(output))
-	versionFields := strings.Fields(versionOutput)
-	if len(versionFields) == 0 || versionFields[len(versionFields)-1] != pinnedCodexAppServerVersion {
-		message := fmt.Sprintf("codex %s is required, got %q", pinnedCodexAppServerVersion, versionOutput)
-		if required {
-			t.Fatal(message)
-		}
-		t.Skip(message)
 	}
 	return path
 }

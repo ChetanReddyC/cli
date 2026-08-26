@@ -90,11 +90,6 @@ func codexHookIssueFromDiagnostics(diagnostics codex.HookDiagnostics) *codexHook
 		return localCodexHookIssue(issue, diagnostics)
 	}
 
-	if diagnostics.PathsDiffer() && diagnostics.Worktree.State == codex.HookFileEntire {
-		issue.State = codexHookStateWorktreePathNotDiscovered
-		return issue
-	}
-
 	if !diagnostics.Discovered.Current {
 		issue.State = codexHookStateOutdated
 		issue.MissingHooks = diagnostics.Discovered.Missing
@@ -103,6 +98,10 @@ func codexHookIssueFromDiagnostics(diagnostics codex.HookDiagnostics) *codexHook
 	if len(diagnostics.Trust.Gaps) > 0 {
 		issue.State = codexHookStateTrustReview
 		issue.MissingApprovals = diagnostics.Trust.Gaps
+		return issue
+	}
+	if diagnostics.PathsDiffer() && diagnostics.Worktree.State == codex.HookFileEntire {
+		issue.State = codexHookStateWorktreePathNotDiscovered
 		return issue
 	}
 
@@ -149,7 +148,7 @@ func codexStatusWarning(issue *codexHookIssue) string {
 	case codexHookStateDiscoveryUnresolved:
 		return "Codex hook discovery unresolved · run 'entire doctor'"
 	case codexHookStateWorktreePathNotDiscovered:
-		return "Codex ignores this worktree's hooks file · run 'entire doctor'"
+		return ""
 	case codexHookStateOutdated:
 		return "Codex-discovered hooks are out of date · run 'entire doctor'"
 	case codexHookStateTrustReview:
@@ -179,7 +178,7 @@ func codexSessionStartWarning(issue *codexHookIssue) string {
 	case codexHookStateDiscoveryUnresolved:
 		return "Codex hook discovery is unresolved. Run 'entire doctor'."
 	case codexHookStateWorktreePathNotDiscovered:
-		return "Codex is not loading this worktree's hooks file. Run 'entire doctor'."
+		return ""
 	case codexHookStateTrustReview:
 		return fmt.Sprintf("%d Codex hook(s) await approval. Open /hooks.", len(issue.MissingApprovals))
 	default:

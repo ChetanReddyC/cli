@@ -26,9 +26,10 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 		require.Contains(t, out, "/repo-feature/.codex/hooks.json")
 		require.Contains(t, out, "/repo-main/.codex/hooks.json")
 		require.Contains(t, out, "Codex will read the discovered file above, not the current-worktree file above")
-		require.Contains(t, out, "Apply/merge the generated .codex/hooks.json change into the discovered project root")
-		require.Contains(t, out, "If that root is a Git checkout, run `entire enable` from that checkout")
-		require.Contains(t, out, "In a .bare layout, the discovered project root is not a worktree")
+		require.Contains(t, out, ".codex/hooks.json is tracked — commit it and make sure the root worktree has it")
+		require.Contains(t, out, "(merge to the default branch, or check that branch out there).")
+		require.NotContains(t, out, "If that root is a Git checkout")
+		require.NotContains(t, out, "In a .bare layout")
 		require.NotContains(t, out, "migrate")
 		require.NotContains(t, out, "synchronize")
 	})
@@ -47,7 +48,8 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 		require.Contains(t, out, "/repo-main/.codex/hooks.json")
 		require.Contains(t, out, "exceeds 1048576 bytes")
 		require.Contains(t, out, "Fix this discovered .codex/hooks.json file in its project root")
-		require.Contains(t, out, "In a .bare layout, the project root is not a worktree")
+		require.Contains(t, out, ".codex/hooks.json is tracked — commit it and make sure the root worktree has it")
+		require.NotContains(t, out, "In a .bare layout")
 	})
 
 	t.Run("invalid current-worktree file", func(t *testing.T) {
@@ -66,7 +68,8 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 		require.Contains(t, out, "redirected directory")
 		require.Contains(t, out, "run `entire enable --force`")
 		require.Contains(t, out, "This may not be the file Codex reads")
-		require.Contains(t, out, "do not run `entire enable` from it")
+		require.Contains(t, out, "make sure the discovered project root has it too")
+		require.NotContains(t, out, "do not run `entire enable` from it")
 	})
 
 	t.Run("missing project layer", func(t *testing.T) {
@@ -81,8 +84,8 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 		out := output.String()
 		require.Contains(t, out, "/repo-feature/.codex (missing)")
 		require.Contains(t, out, "/repo-main/.codex/hooks.json")
-		require.Contains(t, out, "Then apply/merge the generated .codex/hooks.json change into the discovered project root")
-		require.Contains(t, out, "In a .bare layout, the discovered project root is not a worktree")
+		require.Contains(t, out, ".codex/hooks.json is tracked — commit it and make sure the root worktree has it")
+		require.NotContains(t, out, "In a .bare layout")
 	})
 }
 
@@ -123,12 +126,22 @@ func TestCodexStatusWarningBehavior(t *testing.T) {
 			issue: &codexHookIssue{State: codexHookStateTrustReview, MissingApprovals: []string{"stop", "post_tool_use"}},
 			want:  "2 Codex hook(s) need approval · open /hooks",
 		},
+		{
+			name:  "active via root checkout",
+			issue: &codexHookIssue{State: codexHookStateWorktreePathNotDiscovered},
+			want:  "",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Contains(t, codexStatusWarning(tt.issue), tt.want)
+			warning := codexStatusWarning(tt.issue)
+			if tt.want == "" {
+				require.Empty(t, warning)
+				return
+			}
+			require.Contains(t, warning, tt.want)
 		})
 	}
 }
@@ -149,6 +162,9 @@ func TestCodexSessionStartWarningsStayConcise(t *testing.T) {
 	})
 	require.Equal(t, "2 Codex hook(s) await approval. Open /hooks.", trust)
 	require.NotContains(t, trust, "trusted_hash")
+
+	active := codexSessionStartWarning(&codexHookIssue{State: codexHookStateWorktreePathNotDiscovered})
+	require.Empty(t, active)
 }
 
 func TestCodexHooksStatusJSONPreservesDiagnosticPaths(t *testing.T) {

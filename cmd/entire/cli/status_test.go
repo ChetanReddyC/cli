@@ -15,6 +15,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -1928,6 +1929,36 @@ func TestRunStatusJSON_CodexLinkedWorktreeHooksReportInactiveDiscovery(t *testin
 	}
 	if result.CodexHooks.DiscoveredPath != resolvedHooksPath(t, repoRoot) {
 		t.Fatalf("discovered_path = %q", result.CodexHooks.DiscoveredPath)
+	}
+}
+
+func TestRunStatus_CodexLinkedWorktreeRootHooksAreActive(t *testing.T) {
+	tmp, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
+	ag := &codex.CodexAgent{}
+	t.Chdir(repoRoot)
+	_, err := ag.InstallHooks(context.Background(), false)
+	if err != nil {
+		t.Fatalf("install root Codex hooks: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	_, err = ag.InstallHooks(context.Background(), false)
+	if err != nil {
+		t.Fatalf("install linked-worktree Codex hooks: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	out := stdout.String()
+	if strings.Contains(out, "Codex ignores this worktree's hooks file") {
+		t.Fatalf("active root hooks should not produce a status warning: %s", out)
+	}
+	if strings.Contains(out, "CURRENT-WORKTREE FILE NOT DISCOVERED") {
+		t.Fatalf("active root hooks should not produce a doctor warning: %s", out)
 	}
 }
 

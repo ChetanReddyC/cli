@@ -748,11 +748,7 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 	case codexHookStateInactiveWorktreePath:
 		writeCodexInactiveWorktreeWarning(w, worktreePath, discoveredPath)
 	case codexHookStateWorktreePathNotDiscovered:
-		fmt.Fprintln(w, "Codex hooks: CURRENT-WORKTREE FILE NOT DISCOVERED")
-		fmt.Fprintf(w, "  Current-worktree hooks: %s\n", worktreePath)
-		fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
-		fmt.Fprintln(w, "  Codex is active from the discovered file; changes to this worktree's file do not affect it.")
-		writeCodexPrimaryCheckoutRemedy(w)
+		writeCodexActiveViaRoot(w, diagnostics)
 	case codexHookStateMalformedWorktree, codexHookStateUnavailableWorktree:
 		writeCodexWorktreeInspectionWarning(w, worktreePath, diagnostics.Worktree.State, diagnostics.Worktree.Err)
 	case codexHookStateOutdated:
@@ -778,8 +774,20 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 }
 
 func writeCodexInstalledAndTrust(w io.Writer, diagnostics codex.HookDiagnostics) {
+	writeCodexHookStatus(w, diagnostics, false)
+}
+
+func writeCodexActiveViaRoot(w io.Writer, diagnostics codex.HookDiagnostics) {
+	writeCodexHookStatus(w, diagnostics, true)
+}
+
+func writeCodexHookStatus(w io.Writer, diagnostics codex.HookDiagnostics, activeViaRoot bool) {
 	if diagnostics.Discovered.CoreInstalled {
-		fmt.Fprintln(w, "✓ Codex hooks: INSTALLED")
+		if activeViaRoot {
+			fmt.Fprintln(w, "✓ Codex hooks: ACTIVE (via root checkout)")
+		} else {
+			fmt.Fprintln(w, "✓ Codex hooks: INSTALLED")
+		}
 		fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", diagnostics.Discovery.DiscoveredHooks.Path())
 	}
 	switch {
@@ -820,7 +828,7 @@ func writeCodexWorktreeInspectionWarning(w io.Writer, worktreePath string, state
 	fmt.Fprintf(w, "  Error: %v\n", err)
 	fmt.Fprintln(w, "  Fix the current-worktree .codex path or hooks.json file, then run `entire enable --force`.")
 	fmt.Fprintln(w, "  This may not be the file Codex reads. If Codex discovers another project root, apply/merge the generated .codex/hooks.json change there too.")
-	fmt.Fprintln(w, "  In a .bare layout, that project root is not a worktree, so do not run `entire enable` from it.")
+	fmt.Fprintln(w, "  .codex/hooks.json is tracked — commit it and make sure the discovered project root has it too.")
 }
 
 func writeCodexDiscoveredInspectionWarning(w io.Writer, discoveredPath string, state codex.HookFileState, err error) {
@@ -832,8 +840,7 @@ func writeCodexDiscoveredInspectionWarning(w io.Writer, discoveredPath string, s
 	fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
 	fmt.Fprintf(w, "  Error: %v\n", err)
 	fmt.Fprintln(w, "  Fix this discovered .codex/hooks.json file in its project root.")
-	fmt.Fprintln(w, "  If that root is a Git checkout, run `entire enable` from that checkout.")
-	fmt.Fprintln(w, "  In a .bare layout, the project root is not a worktree; edit the file there instead.")
+	writeCodexTrackedHooksRemedy(w)
 }
 
 func writeCodexMissingProjectLayerWarning(w io.Writer, projectLayerPath, discoveredPath string) {
@@ -842,16 +849,17 @@ func writeCodexMissingProjectLayerWarning(w io.Writer, projectLayerPath, discove
 	fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
 	fmt.Fprintln(w, "  Current Codex needs the local .codex project layer before it loads the discovered file.")
 	fmt.Fprintln(w, "  Run `entire enable` from this worktree to create the local layer.")
-	fmt.Fprintln(w, "  Then apply/merge the generated .codex/hooks.json change into the discovered project root.")
-	fmt.Fprintln(w, "  If that root is a Git checkout, run `entire enable` from that checkout.")
-	fmt.Fprintln(w, "  In a .bare layout, the discovered project root is not a worktree; apply the file there instead.")
+	writeCodexTrackedHooksRemedy(w)
 }
 
 func writeCodexPrimaryCheckoutRemedy(w io.Writer) {
 	fmt.Fprintln(w, "  Codex will read the discovered file above, not the current-worktree file above.")
-	fmt.Fprintln(w, "  Apply/merge the generated .codex/hooks.json change into the discovered project root.")
-	fmt.Fprintln(w, "  If that root is a Git checkout, run `entire enable` from that checkout.")
-	fmt.Fprintln(w, "  In a .bare layout, the discovered project root is not a worktree; apply the file there instead.")
+	writeCodexTrackedHooksRemedy(w)
+}
+
+func writeCodexTrackedHooksRemedy(w io.Writer) {
+	fmt.Fprintln(w, "  .codex/hooks.json is tracked — commit it and make sure the root worktree has it")
+	fmt.Fprintln(w, "  (merge to the default branch, or check that branch out there).")
 }
 
 // canDeleteShadowBranch checks if a shadow branch can be safely deleted.
