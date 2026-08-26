@@ -46,8 +46,14 @@ type CoresEntry struct {
 	JurisdictionAudience string `json:"jurisdiction_audience,omitempty"`
 	// JurisdictionCoreURL is the advertised core that mints for
 	// JurisdictionAudience — the cross-jurisdiction exchange endpoint.
-	JurisdictionCoreURL string    `json:"jurisdiction_core_url,omitempty"`
-	FetchedAt           time.Time `json:"fetched_at"`
+	JurisdictionCoreURL string `json:"jurisdiction_core_url,omitempty"`
+	// LoginURL is the resource's advertised login server: the apex auth
+	// router, which dispatches an authorization request to whichever
+	// regional core owns the caller's account. Empty when the resource
+	// advertises none (or predates the field), leaving the trusted issuers
+	// as the only thing a login hint can name.
+	LoginURL  string    `json:"login_url,omitempty"`
+	FetchedAt time.Time `json:"fetched_at"`
 }
 
 // LoadClusterCores reads the cluster→cores cache. A missing or corrupt file

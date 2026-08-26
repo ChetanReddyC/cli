@@ -88,7 +88,8 @@ func resolveClusterAuth(ctx context.Context, configDir, cacheDir, clusterHost st
 		return nil, err
 	}
 
-	selected, err := requireActiveContext(f, "cluster "+clusterHost, entry.CoreURLs, debugf)
+	selected, err := requireActiveContext(f, "cluster "+clusterHost,
+		loginTargets{coreURLs: entry.CoreURLs, loginURL: entry.LoginURL}, debugf)
 	if err != nil {
 		return nil, err
 	}
@@ -204,6 +205,7 @@ func resolveClusterCores(ctx context.Context, cacheDir, clusterHost string, requ
 				CoreURLs:             body.CoreURLs,
 				JurisdictionAudience: body.JurisdictionAudience,
 				JurisdictionCoreURL:  body.JurisdictionCoreURL,
+				LoginURL:             body.LoginURL,
 			}, nil
 		}, debugf)
 }
@@ -241,7 +243,7 @@ func (e *noAuthContextError) Unwrap() error { return ErrNoAuthContext }
 // error beats a convenient guess.
 //
 // See docs/architecture/upstream-host-resolution.md#account-selection.
-func requireActiveContext(f *contexts.File, subject string, coreURLs []string, debugf DebugFunc) (*contexts.Context, error) {
+func requireActiveContext(f *contexts.File, subject string, t loginTargets, debugf DebugFunc) (*contexts.Context, error) {
 	// An explicit --context/$ENTIRE_CONTEXT naming no saved login fails here,
 	// before any eligibility talk: "that context doesn't exist" and "that context
 	// isn't trusted here" are different mistakes with different fixes.
@@ -249,15 +251,15 @@ func requireActiveContext(f *contexts.File, subject string, coreURLs []string, d
 	if err != nil {
 		return nil, err //nolint:wrapcheck // UnknownContextError is already a complete operator message
 	}
-	if sel.Context != nil && contextEligible(sel.Context, coreURLs) {
+	if sel.Context != nil && contextEligible(sel.Context, t.coreURLs) {
 		debugf("%s -> %s", subject, describeSelection(sel))
 		return sel.Context, nil
 	}
 	if sel.Context != nil {
 		debugf("%s -> %s (%s) is not trusted here", subject, describeSelection(sel), sel.Context.CoreURL)
 	}
-	eligible := eligibleContexts(f, coreURLs)
-	message := renderUnusableActiveContext(subject, sel, eligible, coreURLs)
+	eligible := eligibleContexts(f, t.coreURLs)
+	message := renderUnusableActiveContext(subject, sel, eligible, t)
 	if sel.Context == nil && len(eligible) == 0 {
 		return nil, &noAuthContextError{message: message}
 	}
@@ -344,7 +346,7 @@ func eligibleContexts(f *contexts.File, coreURLs []string) []*contexts.Context {
 //
 // Returns a string, matching renderLoginHint and leaving the single errors.New
 // to the caller.
-func renderUnusableActiveContext(subject string, sel contexts.Selection, eligible []*contexts.Context, coreURLs []string) string {
+func renderUnusableActiveContext(subject string, sel contexts.Selection, eligible []*contexts.Context, t loginTargets) string {
 	names := strings.Join(contextNames(eligible), ", ")
 	switchHint := "Switch with `entire auth use <context>`, then re-run your command."
 	if sel.Explicit() {
@@ -357,13 +359,13 @@ func renderUnusableActiveContext(subject string, sel contexts.Selection, eligibl
 		return fmt.Sprintf("no active auth context for %s.\nThese saved logins can authenticate it: %s\n%s",
 			subject, names, switchHint)
 	case sel.Context == nil:
-		return renderLoginHint(subject, coreURLs)
+		return renderLoginHint(subject, t)
 	case len(eligible) > 0:
 		return fmt.Sprintf("%s does not accept %s.\nThese saved logins can authenticate it: %s\n%s",
 			subject, loginLabel(sel), names, switchHint)
 	default:
 		return fmt.Sprintf("%s does not accept %s, and no other saved login does either.\n%s",
-			subject, loginLabel(sel), renderLoginInstruction(coreURLs))
+			subject, loginLabel(sel), renderLoginInstruction(t))
 	}
 }
 
