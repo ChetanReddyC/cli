@@ -260,13 +260,13 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			searchStart := time.Now()
 			resp, err := searcher(ctx, searchCfg)
-			resultCount := 0
+			var result searchOutcomeResult
 			if resp != nil {
-				resultCount = len(resp.Results)
+				result = searchOutcomeResult{count: len(resp.Results), coverageIncomplete: resp.CoverageIncomplete}
 			}
 			// Emitted here — not at command exit — so the duration covers the
 			// search request, never time spent inside the interactive TUI.
-			emitSearchOutcome(ctx, cmd, telemetry.SearchModeCheckpoint, resultCount, time.Since(searchStart), err)
+			emitSearchOutcome(ctx, cmd, telemetry.SearchModeCheckpoint, result, time.Since(searchStart), err)
 			if err != nil {
 				return fmt.Errorf("search failed: %w", err)
 			}
@@ -484,11 +484,14 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 	// resolves slugs to ULIDs, and handles single- vs multi-jurisdiction.
 	searchStart := time.Now()
 	resp, err := searchAllCells(ctx, opts)
-	resultCount := 0
+	var result searchOutcomeResult
 	if resp != nil {
-		resultCount = len(resp.Results)
+		result = searchOutcomeResult{
+			count:              len(resp.Results),
+			coverageIncomplete: len(resp.FailedJurisdictions) > 0 || len(resp.SkippedRepos) > 0,
+		}
 	}
-	emitSearchOutcome(ctx, cmd, telemetry.SearchModeCode, resultCount, time.Since(searchStart), err)
+	emitSearchOutcome(ctx, cmd, telemetry.SearchModeCode, result, time.Since(searchStart), err)
 	if err != nil {
 		return err
 	}

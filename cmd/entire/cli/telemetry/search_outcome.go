@@ -41,22 +41,26 @@ const (
 
 // SearchOutcome carries the outcome of one search request (ENT-1938).
 // Content-free by construction: booleans, enums, counts, and durations only —
-// never query text, result snippets, or repo names.
+// never query text, result snippets, or repo names. Success is derived —
+// ErrorClass empty means success — so the two can never disagree.
 type SearchOutcome struct {
 	// Command is the invoked cobra command path ("entire search" or
 	// "entire checkpoint search").
 	Command string
 	// Mode is SearchModeCheckpoint or SearchModeCode.
 	Mode string
-	// Success reports whether the search returned a response.
-	Success bool
-	// ErrorClass is the coarse failure class (SearchErrClass*); empty on
-	// success and omitted from the payload.
+	// ErrorClass is the coarse failure class (SearchErrClass*); empty means
+	// the search succeeded.
 	ErrorClass string
 	// ResultCount is the number of results returned; only meaningful on
 	// success (zero results is a distinct signal from failure) and omitted
 	// from the payload on failure.
 	ResultCount int
+	// CoverageIncomplete reports that a successful response warned results
+	// may be missing (failed regions, skipped repos, truncated index) —
+	// without it a degraded success is indistinguishable from a genuine
+	// zero-or-low-result search. Omitted from the payload on failure.
+	CoverageIncomplete bool
 	// DurationMS is the wall-clock duration of the search request.
 	DurationMS int64
 }
@@ -69,18 +73,20 @@ func BuildSearchOutcomePayload(outcome SearchOutcome, isEntireEnabled bool, vers
 		return nil
 	}
 
+	success := outcome.ErrorClass == ""
 	properties := map[string]any{
 		"command":         outcome.Command,
 		"mode":            outcome.Mode,
-		"success":         outcome.Success,
+		"success":         success,
 		"duration_ms":     outcome.DurationMS,
 		"isEntireEnabled": isEntireEnabled,
 		"cli_version":     version,
 		"os":              runtime.GOOS,
 		"arch":            runtime.GOARCH,
 	}
-	if outcome.Success {
+	if success {
 		properties["result_count"] = outcome.ResultCount
+		properties["coverage_incomplete"] = outcome.CoverageIncomplete
 	} else {
 		properties["error_class"] = outcome.ErrorClass
 	}

@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"time"
 
@@ -41,8 +40,10 @@ func classifySearchError(err error) string {
 		return classForHTTPStatus(httpErr.StatusCode)
 	}
 
-	var netErr net.Error
-	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &netErr) {
+	// isRecapNetworkError deliberately excludes context cancellation, so a
+	// user's Ctrl-C never inflates the network-failure rate; a timeout is a
+	// network outcome, so DeadlineExceeded is re-added explicitly.
+	if errors.Is(err, context.DeadlineExceeded) || isRecapNetworkError(err) {
 		return telemetry.SearchErrClassNetwork
 	}
 
@@ -60,11 +61,24 @@ func classForHTTPStatus(status int) string {
 	}
 }
 
+// searchOutcomeResult is the successful-response summary a call site hands to
+// emitSearchOutcome; ignored when err is non-nil.
+type searchOutcomeResult struct {
+	count int
+	// coverageIncomplete records that the response warned results may be
+	// missing (failed regions, skipped repos, truncated index), so dashboards
+	// can tell a genuine zero-result search from a degraded one.
+	coverageIncomplete bool
+}
+
 // emitSearchOutcome reports one search request's outcome when telemetry is
 // opted in (settings.Telemetry == true). Content-free: booleans, enums,
 // counts, and durations only — never query text, results, or repo names.
 // Best-effort and non-blocking; failures to load settings suppress the event.
-func emitSearchOutcome(ctx context.Context, cmd *cobra.Command, mode string, resultCount int, duration time.Duration, err error) {
+func emitSearchOutcome(ctx context.Context, cmd *cobra.Command, mode string, result searchOutcomeResult, duration time.Duration, err error) {
+	if telemetry.IsEnvOptedOut() {
+		return
+	}
 	s, loadErr := LoadEntireSettings(ctx)
 	if loadErr != nil || !s.IsTelemetryEnabled() {
 		return
@@ -73,13 +87,13 @@ func emitSearchOutcome(ctx context.Context, cmd *cobra.Command, mode string, res
 	outcome := telemetry.SearchOutcome{
 		Command:    cmd.CommandPath(),
 		Mode:       mode,
-		Success:    err == nil,
 		DurationMS: duration.Milliseconds(),
 	}
 	if err != nil {
 		outcome.ErrorClass = classifySearchError(err)
 	} else {
-		outcome.ResultCount = resultCount
+		outcome.ResultCount = result.count
+		outcome.CoverageIncomplete = result.coverageIncomplete
 	}
 	telemetry.TrackSearchOutcomeDetached(outcome, s.Enabled, versioninfo.Version)
 }

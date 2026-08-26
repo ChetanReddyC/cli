@@ -385,12 +385,13 @@ type semanticCellPage struct {
 // mid-onboarding). Neither is worth warning the user about on every search.
 func classifySemanticCells(ctx context.Context, results []cellCallResult[*search.Response]) (pages []semanticCellPage, failed []string, lastErr error) {
 	var skipped, unmatched []string
-	var skipErr, unmatchedErr error
+	var skipErrs []error
+	var unmatchedErr error
 	for _, r := range results {
 		switch {
 		case errors.Is(r.err, search.ErrCellUnavailable), errors.Is(r.err, auth.ErrNoCellForJurisdiction):
 			skipped = append(skipped, r.group.label())
-			skipErr = r.err
+			skipErrs = append(skipErrs, r.err)
 		case errors.Is(r.err, search.ErrRepoFilterUnmatched):
 			// The cell answered; the repo filter just matched nothing there.
 			// Quiet like a skip when another cell has results, but if NO cell
@@ -419,11 +420,13 @@ func classifySemanticCells(ctx context.Context, results []cellCallResult[*search
 			// its region serves semantic search.
 			lastErr = errNoRepoAvailable
 		case len(skipped) > 0:
-			// Same message as the bare sentinel, but keep the per-cell skip
+			// Same message as the bare sentinel, but keep every per-cell skip
 			// cause in the chain: the two "region" variants (gateway without
 			// query-serve vs. client-side jurisdiction skip) are different
-			// failures and telemetry classifies them from the typed cause.
-			lastErr = &hintError{msg: errNoRegionAvailable.Error(), errs: []error{errNoRegionAvailable, skipErr}}
+			// failures and telemetry classifies them from the typed causes.
+			// All causes — not just the last — so a mixed-cause fan-out
+			// classifies by the classifier's precedence, not cell order.
+			lastErr = &hintError{msg: errNoRegionAvailable.Error(), errs: skipErrs}
 		}
 	}
 	return pages, failed, lastErr

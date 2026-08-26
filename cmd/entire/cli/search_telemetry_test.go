@@ -17,10 +17,10 @@ import (
 // error chains (loginHintErr, classifySemanticCells, fmt.Errorf wrappers).
 func TestClassifySearchError(t *testing.T) {
 	t.Parallel()
-	regionSkip := func(cause error) error {
+	regionSkip := func(causes ...error) error {
 		return fmt.Errorf("semantic search: %w", &hintError{
 			msg:  errNoRegionAvailable.Error(),
-			errs: []error{errNoRegionAvailable, cause},
+			errs: causes,
 		})
 	}
 	cases := []struct {
@@ -40,6 +40,8 @@ func TestClassifySearchError(t *testing.T) {
 		{"code search 404", fmt.Errorf("code search: %w", &api.HTTPError{StatusCode: 404}), telemetry.SearchErrClassHTTPOther},
 		{"deadline exceeded", fmt.Errorf("calling search service: %w", context.DeadlineExceeded), telemetry.SearchErrClassNetwork},
 		{"network error", fmt.Errorf("calling search service: %w", &url.Error{Op: "Get", URL: "https://example.test", Err: errors.New("connection refused")}), telemetry.SearchErrClassNetwork},
+		// Ctrl-C must never inflate the network-failure rate.
+		{"user cancellation", fmt.Errorf("calling search service: %w", &url.Error{Op: "Get", URL: "https://example.test", Err: context.Canceled}), telemetry.SearchErrClassOther},
 		{"unclassified", errors.New("boom"), telemetry.SearchErrClassOther},
 	}
 	for _, tc := range cases {
@@ -47,6 +49,42 @@ func TestClassifySearchError(t *testing.T) {
 			t.Parallel()
 			if got := classifySearchError(tc.err); got != tc.want {
 				t.Errorf("classifySearchError(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// Pins the classifySemanticCells → classifySearchError contract end-to-end:
+// the all-cells-skipped error must keep every typed skip cause so the two
+// "region" variants stay distinguishable, deterministically even when a
+// fan-out mixes both causes (cell order must not decide the class).
+func TestClassifySemanticCells_SkipCausesClassify(t *testing.T) {
+	t.Parallel()
+	cell := func(name string, err error) cellCallResult[*search.Response] {
+		return cellCallResult[*search.Response]{group: cellGroup{cell: name}, err: err}
+	}
+	cases := []struct {
+		name    string
+		results []cellCallResult[*search.Response]
+		want    string
+	}{
+		{"all jurisdiction skips", []cellCallResult[*search.Response]{cell("a", auth.ErrNoCellForJurisdiction)}, telemetry.SearchErrClassCellSkip},
+		{"all gateway skips", []cellCallResult[*search.Response]{cell("a", search.ErrCellUnavailable)}, telemetry.SearchErrClassRegionUnavailable},
+		{"mixed causes, jurisdiction last", []cellCallResult[*search.Response]{cell("a", search.ErrCellUnavailable), cell("b", auth.ErrNoCellForJurisdiction)}, telemetry.SearchErrClassCellSkip},
+		{"mixed causes, gateway last", []cellCallResult[*search.Response]{cell("a", auth.ErrNoCellForJurisdiction), cell("b", search.ErrCellUnavailable)}, telemetry.SearchErrClassCellSkip},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pages, _, lastErr := classifySemanticCells(context.Background(), tc.results)
+			if len(pages) != 0 || lastErr == nil {
+				t.Fatalf("pages = %d, lastErr = %v; want no pages and an error", len(pages), lastErr)
+			}
+			if got := lastErr.Error(); got != errNoRegionAvailable.Error() {
+				t.Errorf("user-facing message = %q, want %q", got, errNoRegionAvailable.Error())
+			}
+			if got := classifySearchError(lastErr); got != tc.want {
+				t.Errorf("classifySearchError = %q, want %q", got, tc.want)
 			}
 		})
 	}
