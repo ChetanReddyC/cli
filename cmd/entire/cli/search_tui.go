@@ -140,7 +140,8 @@ var tabOrder = []typeFilter{typeFilterCommits, typeFilterSessions, typeFilterCod
 // searchModel is the bubbletea model for interactive search results.
 type searchModel struct {
 	results          []search.Result
-	cursor           int // index into the active tab's full loaded list
+	cursor           int  // index into the active tab's full loaded list
+	pinToEnd         bool // End/G pressed: keep the cursor on the last row as fetched pages append
 	total            int
 	width            int
 	height           int
@@ -358,6 +359,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		m.warning = strings.Join(msg.warnings, "; ")
 		m.apiPage = 1
 		m.cursor = 0
+		m.pinToEnd = false
 		m.browseVP.GotoTop()
 		m = m.refreshBrowseContent()
 		return m, nil
@@ -379,7 +381,17 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 			// API returned no more results — cap total so fetch-ahead stops asking.
 			m.total = len(m.results)
 		}
+		// End/G means the true bottom, not the bottom as of that keypress:
+		// follow rows the fetch appended below the cursor.
+		if m.pinToEnd {
+			if n := m.visibleCount(); n > 0 {
+				m.cursor = n - 1
+			}
+		}
 		m = m.refreshBrowseContent()
+		if m.pinToEnd {
+			m.browseVP.GotoBottom()
+		}
 		// A fetched page may add nothing to the active tab (pages interleave
 		// types); keep fetching while the cursor still sits at the end and the
 		// server has more, so one keypress scrolls through sparse tabs too.
@@ -530,6 +542,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 func (m searchModel) switchTab(f typeFilter) searchModel {
 	m.filterType = f
 	m.cursor = 0
+	m.pinToEnd = false
 	m.browseVP.GotoTop()
 	return m.refreshBrowseContent()
 }
@@ -573,15 +586,19 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	case key.Matches(msg, keys.Quit), key.Matches(msg, keys.Back), msg.String() == "h":
 		return m, tea.Quit
 	case key.Matches(msg, keys.NextTab):
-		return m.cycleTab(1), nil
+		// Fetch-ahead so a sparse tab loads rows instead of sitting on
+		// "No results for this type." while later pages may hold some.
+		return m.cycleTab(1).withFetchAhead()
 	case key.Matches(msg, keys.PrevTab):
-		return m.cycleTab(-1), nil
+		return m.cycleTab(-1).withFetchAhead()
 	case key.Matches(msg, keys.Up):
+		m.pinToEnd = false
 		if m.cursor > 0 {
 			m.cursor--
 			m = m.refreshBrowseContent()
 		}
 	case key.Matches(msg, keys.Down):
+		m.pinToEnd = false
 		if m.cursor < m.visibleCount()-1 {
 			m.cursor++
 			m = m.refreshBrowseContent()
@@ -589,9 +606,11 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		return m.withFetchAhead()
 	case key.Matches(msg, keys.Home):
 		m.cursor = 0
+		m.pinToEnd = false
 		m = m.refreshBrowseContent()
 		m.browseVP.GotoTop()
 	case key.Matches(msg, keys.End):
+		m.pinToEnd = true
 		if n := m.visibleCount(); n > 0 {
 			m.cursor = n - 1
 			m = m.refreshBrowseContent()

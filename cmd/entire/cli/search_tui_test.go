@@ -1033,6 +1033,81 @@ func TestSearchModel_NoFetchWhenResultsLoaded(t *testing.T) {
 	}
 }
 
+// TestSearchModel_EndFollowsFetchedRows pins the End/G semantics across
+// fetch-ahead: End means the true bottom, so rows appended by the fetch pull
+// the cursor down with them instead of leaving it mid-list.
+func TestSearchModel_EndFollowsFetchedRows(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	results := make([]search.Result, 10)
+	for i := range results {
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+	}
+	m := newSearchModel(results, "q", 50, search.Config{}, ss, nil)
+	m.filterType = typeFilterAll
+
+	// End jumps to the last loaded row and fires a fetch (more exist).
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnd})
+	if m.cursor != 9 {
+		t.Fatalf("after End: cursor = %d, want 9", m.cursor)
+	}
+	if !m.fetchingMore {
+		t.Fatal("after End: fetchingMore should be true")
+	}
+
+	// The fetched page lands: the cursor follows to the new bottom.
+	more := make([]search.Result, 10)
+	for i := range more {
+		more[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("new-%02d", i)}}
+	}
+	m = updateModel(t, m, searchMoreResultsMsg{results: more})
+	if m.cursor != 19 {
+		t.Errorf("after append while pinned: cursor = %d, want 19", m.cursor)
+	}
+
+	// Any deliberate cursor move releases the pin: later appends stay put.
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
+	if m.cursor != 18 {
+		t.Fatalf("after Up: cursor = %d, want 18", m.cursor)
+	}
+	m.fetchingMore = true
+	m = updateModel(t, m, searchMoreResultsMsg{results: more[:5]})
+	if m.cursor != 18 {
+		t.Errorf("after append while unpinned: cursor = %d, want 18", m.cursor)
+	}
+}
+
+// TestSearchModel_TabSwitchFetchesSparseTab pins that switching to a tab with
+// no loaded rows kicks off a fetch when the server has more pages, rather than
+// sitting on "No results for this type."
+func TestSearchModel_TabSwitchFetchesSparseTab(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	results := make([]search.Result, 10)
+	for i := range results {
+		results[i] = search.Result{Type: "checkpoint", Checkpoint: &search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+	}
+	// Checkpoint-typed results: both the Commits and Sessions tabs are empty.
+	m := newSearchModel(results, "q", 50, search.Config{}, ss, nil)
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	m, ok := updated.(searchModel)
+	if !ok {
+		t.Fatalf("Update returned %T, want searchModel", updated)
+	}
+	if m.filterType != typeFilterSessions {
+		t.Fatalf("filterType = %q, want %q", m.filterType, typeFilterSessions)
+	}
+	if !m.fetchingMore {
+		t.Error("fetchingMore should be true after switching to an empty tab with more pages")
+	}
+	if cmd == nil {
+		t.Error("expected a fetch command")
+	}
+}
+
 // TestSearchModel_AppendChainsFetchOnSparseTab pins the continuous-scroll
 // behavior on a tab the fetched page added nothing to: API pages interleave
 // types, so the model keeps fetching until the active tab gains rows or the
