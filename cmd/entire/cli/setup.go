@@ -2398,12 +2398,14 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force, strict bool) er
 	// summary, and its UninstallHooks never runs, so its hooks survive an
 	// uninstall that reports success.
 	//
-	// Gated, not Always: enabling an external agent (`entire agent add <plugin>`
-	// or `entire enable --agent <plugin>`) persists external_agents=true, so an
-	// installed external agent implies the gate is on. The gate is the user's
-	// authorization for the CLI to execute their plugins, and uninstalling is not
-	// a reason to start executing ones they never authorized.
-	external.DiscoverAndRegister(ctx)
+	// Always, not gated: the external_agents setting that gates discovery lives
+	// in .entire/, which this very command deletes. After a partial uninstall —
+	// plugin hooks left behind, .entire/ gone — a gated re-run could never see
+	// the plugin again, making the uninstall unrepeatable. Ungated discovery
+	// keeps every removal step isolated from the others, at the accepted cost of
+	// executing entire-agent-* binaries on $PATH even in repos that never
+	// enabled them.
+	external.DiscoverAndRegisterAlways(ctx)
 
 	// Gather counts for display
 	sessionStateCount := countSessionStates(ctx)
@@ -2451,71 +2453,85 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force, strict bool) er
 
 	fmt.Fprintln(w, "\nUninstalling Entire CLI...")
 
-	// 1. Remove agent hooks
-	steps := removeAgentHooks(ctx, repoRoot, agHookState, strict)
+	// Each step is the expert on its own section: it prints its own report —
+	// successes to w, warnings to errW — handles its errors (strict policy
+	// included), and returns only whether it succeeded. ok is the single fact
+	// tracked across the run; the steps are otherwise isolated from each other.
+	ok := uninstallAgentHooks(ctx, w, errW, repoRoot, agHookState, strict)
+	ok = uninstallGitHooks(ctx, w, errW) && ok
+	ok = uninstallSessionStates(ctx, w, errW) && ok
+	ok = uninstallEntireDir(ctx, w, errW, entireDirExists) && ok
+	ok = uninstallShadowBranches(ctx, w, errW) && ok
 
-	// 2. Remove git hooks
-	if removed, err := strategy.RemoveGitHook(ctx); err != nil {
-		steps = append(steps, newFailedStep(fmt.Sprintf("Warning: failed to remove git hooks: %v", err)))
-	} else if removed > 0 {
-		steps = append(steps, newSuccessStep(fmt.Sprintf("  Removed git hooks (%d)", removed)))
+	if !ok {
+		fmt.Fprintln(w, "\nEntire CLI uninstall did not complete - see the warnings above.")
+		return NewSilentError(errors.New("uninstall did not complete"))
 	}
+	fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")
+	return nil
+}
 
-	// 3. Remove session state files
-	if statesRemoved, err := removeAllSessionStates(ctx); err != nil {
-		steps = append(steps, newFailedStep(fmt.Sprintf("Warning: failed to remove session states: %v", err)))
-	} else if statesRemoved > 0 {
-		steps = append(steps, newSuccessStep(fmt.Sprintf("  Removed session states (%d)", statesRemoved)))
+// uninstallGitHooks removes Entire's git hooks and reports what it did.
+func uninstallGitHooks(ctx context.Context, w, errW io.Writer) bool {
+	removed, err := strategy.RemoveGitHook(ctx)
+	if err != nil {
+		fmt.Fprintf(errW, "Warning: failed to remove git hooks: %v\n", err)
+		return false
 	}
+	if removed > 0 {
+		fmt.Fprintf(w, "  Removed git hooks (%d)\n", removed)
+	} else {
+		fmt.Fprintln(w, "  No git hooks to remove")
+	}
+	return true
+}
 
-	// 4. Remove .entire/ directory
+// uninstallSessionStates removes all session state files and reports what it did.
+func uninstallSessionStates(ctx context.Context, w, errW io.Writer) bool {
+	statesRemoved, err := removeAllSessionStates(ctx)
+	if err != nil {
+		fmt.Fprintf(errW, "Warning: failed to remove session states: %v\n", err)
+		return false
+	}
+	if statesRemoved > 0 {
+		fmt.Fprintf(w, "  Removed session states (%d)\n", statesRemoved)
+	} else {
+		fmt.Fprintln(w, "  No session states to remove")
+	}
+	return true
+}
+
+// uninstallEntireDir removes .entire/ and reports what it did. Deleting it
+// also deletes the external_agents discovery gate, which is why uninstall's
+// discovery is ungated (DiscoverAndRegisterAlways): a re-run can still reach a
+// plugin whose hooks were left behind, without this step depending on how the
+// agent step went.
+func uninstallEntireDir(ctx context.Context, w, errW io.Writer, dirExists bool) bool {
 	if err := removeEntireDirectory(ctx); err != nil {
-		steps = append(steps, newFailedStep(fmt.Sprintf("Warning: failed to remove .entire directory: %v", err)))
-	} else if entireDirExists {
-		steps = append(steps, newSuccessStep("  Removed .entire directory"))
+		fmt.Fprintf(errW, "Warning: failed to remove .entire directory: %v\n", err)
+		return false
 	}
-
-	// 5. Remove shadow branches
-	if branchesRemoved, err := removeAllShadowBranches(ctx); err != nil {
-		steps = append(steps, newFailedStep(fmt.Sprintf("Warning: failed to remove shadow branches: %v", err)))
-	} else if branchesRemoved > 0 {
-		steps = append(steps, newSuccessStep(fmt.Sprintf("  Removed %d shadow branches", branchesRemoved)))
+	if dirExists {
+		fmt.Fprintln(w, "  Removed .entire directory")
+	} else {
+		fmt.Fprintln(w, "  No .entire directory to remove")
 	}
-
-	return reportUninstallOutcome(w, errW, steps)
+	return true
 }
 
-// removalStep is one uninstall step's outcome. The steps only gather facts and
-// pre-render their own messages; reportUninstallOutcome prints them and
-// decides the exit code.
-type removalStep struct {
-	// failed reports whether the step failed or left something behind; it
-	// selects which message prints and feeds the exit-code decision.
-	failed bool
-	// success is the line to print when the step removed something; empty when
-	// there is nothing to report.
-	success string
-	// failure is the message to print when failed is set.
-	failure string
-	// optional marks a step whose failure must not fail the uninstall: external
-	// plugin problems without --strict, which are third-party code Entire cannot
-	// fix. Every other failure is Entire's own uninstall not doing its job.
-	optional bool
-}
-
-// The constructors are the only way steps are built, so a step can never be
-// failed without a failure message, or optional without being failed.
-
-func newSuccessStep(text string) removalStep {
-	return removalStep{success: text}
-}
-
-func newFailedStep(text string) removalStep {
-	return removalStep{failed: true, failure: text}
-}
-
-func newOptionalFailedStep(text string) removalStep {
-	return removalStep{failed: true, failure: text, optional: true}
+// uninstallShadowBranches removes all shadow branches and reports what it did.
+func uninstallShadowBranches(ctx context.Context, w, errW io.Writer) bool {
+	branchesRemoved, err := removeAllShadowBranches(ctx)
+	if err != nil {
+		fmt.Fprintf(errW, "Warning: failed to remove shadow branches: %v\n", err)
+		return false
+	}
+	if branchesRemoved > 0 {
+		fmt.Fprintf(w, "  Removed %d shadow branches\n", branchesRemoved)
+	} else {
+		fmt.Fprintln(w, "  No shadow branches to remove")
+	}
+	return true
 }
 
 // uninstallSummary is what runUninstall found to remove, carried to the
@@ -2580,39 +2596,6 @@ func confirmUninstall(w, errW io.Writer, summary uninstallSummary) (bool, error)
 		return false, fmt.Errorf("confirmation cancelled: %w", err)
 	}
 	return confirmed, nil
-}
-
-// reportUninstallOutcome prints every step's message — failures to errW,
-// successes to w — and decides the exit code: any non-optional failure fails
-// the uninstall, optional failures (external plugins without --strict) only
-// demote the closing line, since they are third-party code Entire cannot fix.
-func reportUninstallOutcome(w, errW io.Writer, steps []removalStep) error {
-	requiredFailed := false
-	optionalFailed := false
-	for _, s := range steps {
-		if s.failed {
-			fmt.Fprintln(errW, s.failure)
-			if s.optional {
-				optionalFailed = true
-			} else {
-				requiredFailed = true
-			}
-		} else if s.success != "" {
-			fmt.Fprintln(w, s.success)
-		}
-	}
-
-	switch {
-	case requiredFailed:
-		fmt.Fprintln(w, "\nEntire CLI uninstall did not complete - see the warnings above.")
-		return NewSilentError(errors.New("uninstall did not complete"))
-	case optionalFailed:
-		fmt.Fprintln(w, "\nEntire CLI uninstalled, but some external agent hooks may remain - see the warnings above.")
-		return nil
-	default:
-		fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")
-		return nil
-	}
 }
 
 // countSessionStates returns the number of active session state files.
@@ -2691,30 +2674,28 @@ func powerShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// removeAgentHooks removes hooks from the agents hookState reported as
+// uninstallAgentHooks removes hooks from the agents hookState reported as
 // installed, and reports the unchecked ones. The sweep is reused rather than
 // re-detected: for an external agent AreHooksInstalled is a subprocess, and it
 // is also what the confirmation summary was built from, so this uninstalls
 // exactly what the user was shown. An agent that cleanly reported no hooks is
 // in neither set and is left alone.
 //
-// Every agent-hook outcome is returned as a removalStep with its message
-// pre-rendered: removals that succeeded, removals that failed, and agents the
-// sweep could not check. External plugin problems are optional without
-// --strict — third-party code Entire cannot fix — and their failure messages
-// carry the plugin command the user can run by hand, because .entire/ (and
-// with it the setting that gates plugin discovery) is gone by the time the
-// messages print, so a re-run cannot reach the plugin. A built-in problem is
-// never optional: it is Entire's own removal not doing its job.
-func removeAgentHooks(ctx context.Context, repoRoot string, hookState agentHookState, strict bool) []removalStep {
-	// External problems are optional without --strict: third-party code Entire
-	// cannot fix does not get to fail Entire's own uninstall unless asked.
-	newExternalProblemStep := newOptionalFailedStep
-	if strict {
-		newExternalProblemStep = newFailedStep
+// It prints its own report as it goes — removals to w, warnings to errW — and
+// owns its own success verdict: a built-in problem (failed removal or
+// uncheckable config, always Entire's own bug to surface) fails the step, an
+// external plugin problem does so only under strict, since it is third-party
+// code Entire cannot fix — its warning, with the plugin command the user can
+// run by hand, is the whole report. A re-run can also retry the plugin
+// (uninstall discovery is ungated), but the plugin binary itself may be what
+// is broken, and invoking it directly shows its output.
+func uninstallAgentHooks(ctx context.Context, w, errW io.Writer, repoRoot string, hookState agentHookState, strict bool) bool {
+	if len(hookState.installed) == 0 && len(hookState.unchecked) == 0 {
+		fmt.Fprintln(w, "  No agent hooks to remove")
+		return true
 	}
 
-	var steps []removalStep
+	builtinProblem := false
 	externalProblem := false
 	for _, name := range hookState.installed {
 		ag, err := agent.Get(name)
@@ -2729,14 +2710,13 @@ func removeAgentHooks(ctx context.Context, repoRoot string, hookState agentHookS
 		switch err := hs.UninstallHooks(ctx); {
 		case err != nil && external.IsExternal(ag):
 			externalProblem = true
-			steps = append(steps, newExternalProblemStep(
-				fmt.Sprintf("Warning: failed to remove agent hooks: %s (external): %v\n  %s hooks are still installed. Remove them with:\n    %s",
-					agentDisplayName(name), err, agentDisplayName(name), pluginUninstallCommand(repoRoot, name))))
+			fmt.Fprintf(errW, "Warning: failed to remove agent hooks: %s (external): %v\n", agentDisplayName(name), err)
+			fmt.Fprintf(errW, "  %s hooks are still installed. Remove them with:\n    %s\n", agentDisplayName(name), pluginUninstallCommand(repoRoot, name))
 		case err != nil:
-			steps = append(steps, newFailedStep(
-				fmt.Sprintf("Warning: failed to remove agent hooks: %s: %v", agentDisplayName(name), err)))
+			builtinProblem = true
+			fmt.Fprintf(errW, "Warning: failed to remove agent hooks: %s: %v\n", agentDisplayName(name), err)
 		default:
-			steps = append(steps, newSuccessStep(fmt.Sprintf("  Removed %s hooks", ag.Type())))
+			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
 		}
 	}
 
@@ -2744,27 +2724,17 @@ func removeAgentHooks(ctx context.Context, repoRoot string, hookState agentHookS
 		if u.external {
 			// "may": we never found out whether this plugin has hooks, and we did
 			// not ask it to remove them — asking a plugin that cannot answer to
-			// mutate state is not something to do on the user's behalf. The check's
-			// own error rides along: this message is the only place it can surface.
+			// mutate state is not something to do on the user's behalf.
 			externalProblem = true
-			steps = append(steps, newExternalProblemStep(
-				fmt.Sprintf("Warning: could not check whether %s hooks are installed: %v\n  %s hooks may still be installed. Remove them with:\n    %s",
-					agentDisplayName(u.name), u.err, agentDisplayName(u.name), pluginUninstallCommand(repoRoot, u.name))))
+			fmt.Fprintf(errW, "Warning: could not check whether %s hooks are installed: %v\n", agentDisplayName(u.name), u.err)
+			fmt.Fprintf(errW, "  %s hooks may still be installed. Remove them with:\n    %s\n", agentDisplayName(u.name), pluginUninstallCommand(repoRoot, u.name))
 		} else {
-			steps = append(steps, newFailedStep(
-				fmt.Sprintf("Warning: could not check whether %s hooks are installed - they may or may not remain: %v",
-					agentDisplayName(u.name), u.err)))
+			builtinProblem = true
+			fmt.Fprintf(errW, "Warning: could not check whether %s hooks are installed - they may or may not remain: %v\n", agentDisplayName(u.name), u.err)
 		}
 	}
 
-	if externalProblem {
-		// A note, not a failure of its own — always optional so it can never be
-		// the reason the uninstall fails; it only rides along with the external
-		// problems that made it relevant.
-		steps = append(steps, newOptionalFailedStep(
-			"  Re-running `entire disable --uninstall` will not reach these plugins once .entire/ is gone."))
-	}
-	return steps
+	return !builtinProblem && (!strict || !externalProblem)
 }
 
 // removeAllSessionStates removes all session state files and the directory.

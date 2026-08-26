@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1372,11 +1373,9 @@ func TestRunUninstall_SkipsUnenabledExternalAgent(t *testing.T) {
 	}
 }
 
-// TestRunUninstall_ReportsUnremovedExternalAgentHooks pins the recovery path for
-// a plugin whose uninstall-hooks fails. Uninstall deletes .entire/, and with it
-// the external_agents setting that gates discovery, so a re-run cannot even see
-// the plugin: this run is the user's only chance to learn that hooks were left
-// behind and how to reach them.
+// TestRunUninstall_ReportsUnremovedExternalAgentHooks pins the recovery path
+// for a plugin whose uninstall-hooks fails: the hooks left behind are named
+// with a run-by-hand command the user can act on immediately.
 func TestRunUninstall_ReportsUnremovedExternalAgentHooks(t *testing.T) {
 	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
 	const agentName = "ext-uninstall-failure-test"
@@ -1390,7 +1389,214 @@ func TestRunUninstall_ReportsUnremovedExternalAgentHooks(t *testing.T) {
 		t.Fatalf("a plugin failure must not fail the uninstall without --strict, got error = %v\nstderr: %s", err, stderr.String())
 	}
 
-	assertLeftoverPluginReported(t, stdout.String(), stderr.String(), agentName, "hooks are still installed")
+	assertLeftoverPluginReported(t, stderr.String(), agentName, "hooks are still installed")
+
+	// Entire's own uninstall did complete — every Entire-owned artifact is gone
+	// and the third-party leftover was reported with its remedy — so the closing
+	// line says so. --strict is the opt-in for leftovers to change the verdict.
+	if !strings.Contains(stdout.String(), "uninstalled successfully") {
+		t.Errorf("a plugin leftover without --strict must still close with success, stdout:\n%s", stdout.String())
+	}
+}
+
+// TestRunUninstall_EntireDirRemovalFailureFailsTheCommand pins the "any other
+// issue" row of the exit-code policy: a failure in one of Entire's own removal
+// steps — here .entire/ — fails the command even without --strict, unlike an
+// external plugin problem. The directory is made unremovable by denying
+// writes on a subdirectory, so os.RemoveAll cannot unlink its child.
+func TestRunUninstall_EntireDirRemovalFailureFailsTheCommand(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd.
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("permission-based removal failure is not portable to Windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true}`)
+	locked := filepath.Join(paths.EntireDir, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+	// Restore before t.TempDir's own cleanup, which fails the test if it cannot
+	// delete the tree.
+	t.Cleanup(func() {
+		if err := os.Chmod(locked, 0o755); err != nil {
+			t.Logf("restoring permissions: %v", err)
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true, false)
+	if err == nil {
+		t.Fatalf("a failed .entire removal must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError (the message is already printed), got %T: %v", err, err)
+	}
+
+	if !strings.Contains(stderr.String(), "Warning: failed to remove .entire directory") {
+		t.Errorf("the failure must be warned about on stderr, got:\n%s", stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "uninstalled successfully") {
+		t.Errorf("uninstall must not report success when its own step failed, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
+	}
+}
+
+// TestRunUninstall_HalfUninstallRecoversOnRerun pins that a half-completed
+// uninstall converges to a clean one. Three steps fail on the first run —
+// agent hooks (unreadable config), git hooks and .entire/ (write-denied
+// directories) — each printing its own warning while the others still do
+// their work. Once the causes are fixed, a re-run removes exactly what
+// survived and reports success.
+func TestRunUninstall_HalfUninstallRecoversOnRerun(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and file permissions.
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("permission-based failures are not portable to Windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	// Real Claude Code hooks, made unreadable so the sweep cannot check them.
+	claudeSettings := filepath.Join(".claude", "settings.json")
+	if err := os.MkdirAll(".claude", 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	hookJSON := `{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"entire hooks claude-code stop"}]}]}}`
+	if err := os.WriteFile(claudeSettings, []byte(hookJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(claudeSettings, 0o000); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+
+	// Real git hooks, in a directory that denies their removal.
+	if _, err := strategy.InstallGitHook(context.Background(), true, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+	hooksDir := filepath.Join(".git", "hooks")
+	if err := os.Chmod(hooksDir, 0o555); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+
+	// .entire/ with a write-denied subdirectory so RemoveAll cannot clear it.
+	locked := filepath.Join(paths.EntireDir, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+
+	// Safety net for early t.Fatal: t.TempDir's cleanup fails the test if it
+	// cannot delete the tree.
+	t.Cleanup(func() {
+		for path, mode := range map[string]os.FileMode{claudeSettings: 0o600, hooksDir: 0o755, locked: 0o755} {
+			// A path the re-run already removed is the expected end state.
+			if err := os.Chmod(path, mode); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Logf("restoring permissions on %s: %v", path, err)
+			}
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true, false)
+	if err == nil {
+		t.Fatalf("first run must fail while three steps cannot finish, stdout:\n%s", stdout.String())
+	}
+	errOut := stderr.String()
+	for _, want := range []string{
+		"could not check whether Claude Code hooks are installed",
+		"failed to remove git hooks",
+		"failed to remove .entire directory",
+	} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("first run must warn %q, stderr:\n%s", want, errOut)
+		}
+	}
+	if !strings.Contains(stdout.String(), "did not complete") {
+		t.Errorf("first run must close with did-not-complete, stdout:\n%s", stdout.String())
+	}
+
+	// Fix all three causes; the re-run should finish the job.
+	for path, mode := range map[string]os.FileMode{claudeSettings: 0o600, hooksDir: 0o755, locked: 0o755} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatalf("Chmod(%s) error = %v", path, err)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runUninstall(context.Background(), &stdout, &stderr, true, false); err != nil {
+		t.Fatalf("re-run error = %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "uninstalled successfully") {
+		t.Errorf("re-run must complete the uninstall, stdout:\n%s", stdout.String())
+	}
+
+	// Nothing of Entire's survives.
+	data, err := os.ReadFile(claudeSettings)
+	if err != nil {
+		t.Fatalf("reading claude settings: %v", err)
+	}
+	if strings.Contains(string(data), "entire hooks") {
+		t.Errorf("claude settings must no longer carry Entire hooks, got:\n%s", data)
+	}
+	if strategy.IsGitHookInstalled(context.Background()) {
+		t.Error("git hooks must be removed by the re-run")
+	}
+	if checkEntireDirExists(context.Background()) {
+		t.Error(".entire/ must be removed by the re-run")
+	}
+}
+
+// TestRunUninstall_RerunAfterPluginFailureFinishesTheJob pins that the
+// uninstall is re-runnable after a plugin failure. The first run deletes
+// .entire/ — and with it the external_agents setting that normally gates
+// discovery — so only uninstall's ungated discovery lets the re-run still see
+// the plugin, retry its uninstall-hooks, and finish the job.
+func TestRunUninstall_RerunAfterPluginFailureFinishesTheJob(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-rerun-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_FAIL_UNINSTALL_HOOKS", "1")
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true, false); err != nil {
+		t.Fatalf("first run: a plugin failure must not fail the uninstall without --strict: %v\nstderr: %s", err, stderr.String())
+	}
+	if checkEntireDirExists(context.Background()) {
+		t.Fatal("the .entire/ step is isolated from the plugin failure and must still remove the directory")
+	}
+
+	t.Setenv("ENTIRE_TEST_FAIL_UNINSTALL_HOOKS", "")
+	stdout.Reset()
+	stderr.Reset()
+	if err := runUninstall(context.Background(), &stdout, &stderr, true, false); err != nil {
+		t.Fatalf("re-run error = %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "uninstalled successfully") {
+		t.Errorf("re-run must reach the plugin without the external_agents gate and complete the uninstall, stdout:\n%s", stdout.String())
+	}
 }
 
 // TestRunUninstall_StrictFailsOnUnremovedExternalAgentHooks pins the opt-in: the
@@ -1412,7 +1618,7 @@ func TestRunUninstall_StrictFailsOnUnremovedExternalAgentHooks(t *testing.T) {
 		t.Errorf("expected a SilentError (warnings are already printed), got %T: %v", err, err)
 	}
 
-	assertLeftoverPluginReported(t, stdout.String(), stderr.String(), agentName, "hooks are still installed")
+	assertLeftoverPluginReported(t, stderr.String(), agentName, "hooks are still installed")
 }
 
 // TestRunUninstall_UncheckableExternalAgentReported pins the plugin that cannot
@@ -1442,7 +1648,7 @@ func TestRunUninstall_UncheckableExternalAgentReported(t *testing.T) {
 	if !strings.Contains(errOut, "mock probe failure") {
 		t.Errorf("stderr must carry the probe's own error, got:\n%s", errOut)
 	}
-	assertLeftoverPluginReported(t, stdout.String(), errOut, agentName, "hooks may still be installed")
+	assertLeftoverPluginReported(t, errOut, agentName, "hooks may still be installed")
 
 	data, err := os.ReadFile(execLog)
 	if err != nil {
@@ -1576,9 +1782,12 @@ func TestPluginUninstallCommand_PerOS(t *testing.T) {
 }
 
 // assertLeftoverPluginReported checks the shape every leftover-hooks report
-// shares: the plugin named, a runnable recovery command, the note that a re-run
-// cannot retry it, and no claim of success.
-func assertLeftoverPluginReported(t *testing.T, stdout, stderr, agentName, lead string) {
+// shares on stderr: the plugin named, what state its hooks are in, and a
+// runnable recovery command. The closing stdout line is deliberately not
+// checked here — without --strict a plugin leftover still ends in
+// "uninstalled successfully", because Entire's own uninstall did complete and
+// the leftover was already reported with its remedy.
+func assertLeftoverPluginReported(t *testing.T, stderr, agentName, lead string) {
 	t.Helper()
 
 	if !strings.Contains(stderr, agentName) {
@@ -1596,12 +1805,6 @@ func assertLeftoverPluginReported(t *testing.T, stdout, stderr, agentName, lead 
 		if !strings.Contains(stderr, want) {
 			t.Errorf("recovery command must carry %s, got:\n%s", want, stderr)
 		}
-	}
-	if !strings.Contains(stderr, "will not reach these plugins") {
-		t.Errorf("stderr must say a re-run cannot retry the plugin, got:\n%s", stderr)
-	}
-	if strings.Contains(stdout, "uninstalled successfully") {
-		t.Errorf("uninstall must not report success while plugin hooks may remain, stdout:\n%s", stdout)
 	}
 }
 
