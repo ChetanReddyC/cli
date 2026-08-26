@@ -11,7 +11,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
-	"github.com/spf13/cobra"
 )
 
 // classifySearchError maps a search failure to a coarse telemetry error class
@@ -81,7 +80,7 @@ type searchOutcomeResult struct {
 // opted in (settings.Telemetry == true). Content-free: booleans, enums,
 // counts, and durations only — never query text, results, or repo names.
 // Best-effort and non-blocking; failures to load settings suppress the event.
-func emitSearchOutcome(ctx context.Context, cmd *cobra.Command, mode string, result searchOutcomeResult, duration time.Duration, err error) {
+func emitSearchOutcome(ctx context.Context, command, mode string, result searchOutcomeResult, duration time.Duration, err error) {
 	if telemetry.IsEnvOptedOut() {
 		return
 	}
@@ -91,7 +90,7 @@ func emitSearchOutcome(ctx context.Context, cmd *cobra.Command, mode string, res
 	}
 
 	outcome := telemetry.SearchOutcome{
-		Command:    cmd.CommandPath(),
+		Command:    command,
 		Mode:       mode,
 		DurationMS: duration.Milliseconds(),
 	}
@@ -102,4 +101,24 @@ func emitSearchOutcome(ctx context.Context, cmd *cobra.Command, mode string, res
 		outcome.CoverageIncomplete = result.coverageIncomplete
 	}
 	telemetry.TrackSearchOutcomeDetached(outcome, s.Enabled, versioninfo.Version)
+}
+
+// instrumentSemanticSearcher wraps a semanticSearcher so EVERY invocation —
+// the one-shot command, the TUI's initial fetch, interactive re-searches, and
+// pagination — emits one cli_search_completed outcome. Instrumenting the seam
+// rather than individual call sites means new entry points are covered by
+// construction, and the timer wraps only the request, never TUI dwell time.
+// command is the invoking cobra command path, fixed at wrap time because the
+// TUI calls the searcher long after the command layer returns.
+func instrumentSemanticSearcher(command string, searcher semanticSearcher) semanticSearcher {
+	return func(ctx context.Context, cfg search.Config) (*search.Response, error) {
+		start := time.Now()
+		resp, err := searcher(ctx, cfg)
+		var result searchOutcomeResult
+		if resp != nil {
+			result = searchOutcomeResult{count: len(resp.Results), coverageIncomplete: resp.CoverageIncomplete}
+		}
+		emitSearchOutcome(ctx, command, telemetry.SearchModeCheckpoint, result, time.Since(start), err)
+		return resp, err
+	}
 }

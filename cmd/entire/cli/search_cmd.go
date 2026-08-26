@@ -144,6 +144,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 					caseSensitive: caseSensitive,
 					jsonOutput:    jsonOutput,
 					insecureHTTP:  insecureHTTPAuth,
+					commandPath:   cmd.CommandPath(),
 				})
 			}
 
@@ -214,7 +215,9 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			// Semantic search goes to the v4 query-serve path (entire-api
 			// cell gateway) via newSemanticSearcher, which fans out across
 			// cells and mints per-cell identity tokens itself (ENT-1055).
-			searcher := newSemanticSearcher(insecureHTTPAuth)
+			// Instrumented at the seam so the TUI's re-searches and
+			// pagination emit outcome telemetry too, not just this one-shot.
+			searcher := instrumentSemanticSearcher(cmd.CommandPath(), newSemanticSearcher(insecureHTTPAuth))
 
 			searchCfg := search.Config{
 				Owner:    owner,
@@ -238,7 +241,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			if query == "" && !searchCfg.HasFilters() {
 				searchCfg.Limit = search.DefaultLimit
 				styles := newStatusStyles(w)
-				model := newSearchModel(nil, "", 0, searchCfg, styles, buildCodeSearchOpts(ctx, owner, repoName, nil, false, insecureHTTPAuth))
+				model := newSearchModel(nil, "", 0, searchCfg, styles, buildCodeSearchOpts(ctx, cmd.CommandPath(), owner, repoName, nil, false, insecureHTTPAuth))
 				model.semanticSearch = searcher
 				model.mode = modeSearch
 				model.input.Focus()
@@ -258,15 +261,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			searchCfg.Limit = search.DefaultLimit
 			searchCfg.Page = 0 // let API default to page 1
 
-			searchStart := time.Now()
 			resp, err := searcher(ctx, searchCfg)
-			var result searchOutcomeResult
-			if resp != nil {
-				result = searchOutcomeResult{count: len(resp.Results), coverageIncomplete: resp.CoverageIncomplete}
-			}
-			// Emitted here — not at command exit — so the duration covers the
-			// search request, never time spent inside the interactive TUI.
-			emitSearchOutcome(ctx, cmd, telemetry.SearchModeCheckpoint, result, time.Since(searchStart), err)
 			if err != nil {
 				return fmt.Errorf("search failed: %w", err)
 			}
@@ -295,7 +290,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			}
 
 			// Interactive TUI
-			codeOpts := buildCodeSearchOpts(ctx, owner, repoName, repos, allRepos, insecureHTTPAuth)
+			codeOpts := buildCodeSearchOpts(ctx, cmd.CommandPath(), owner, repoName, repos, allRepos, insecureHTTPAuth)
 			if codeOpts != nil {
 				// Use extractInlineRepoFilters on the raw query so author:/date:/branch:
 				// tokens are preserved as literal code-search text, matching --code and
@@ -381,6 +376,10 @@ type codeSearchOpts struct {
 	caseSensitive   bool
 	jsonOutput      bool
 	insecureHTTP    bool
+	// commandPath is the invoking cobra command path, carried here because
+	// searchAllCells emits outcome telemetry and the TUI's code tab calls it
+	// long after the command layer returns.
+	commandPath string
 }
 
 // extractInlineRepoFilters extracts only repo: prefixed filters from a query
@@ -432,7 +431,7 @@ func filterRepoWildcards(repos []string) []string {
 // buildCodeSearchOpts returns a *codeSearchOpts pre-populated with repo filters.
 // It honors --repo, --all-repos, and inline repo: filters from the command line;
 // when none are specified, it falls back to the current git origin slug.
-func buildCodeSearchOpts(ctx context.Context, owner, repoName string, repos []string, allRepos, insecureHTTP bool) *codeSearchOpts {
+func buildCodeSearchOpts(ctx context.Context, commandPath, owner, repoName string, repos []string, allRepos, insecureHTTP bool) *codeSearchOpts {
 	var repoFilters []string
 	switch {
 	case allRepos:
@@ -453,6 +452,7 @@ func buildCodeSearchOpts(ctx context.Context, owner, repoName string, repos []st
 		repoFilters:  repoFilters,
 		limit:        search.DefaultLimit,
 		insecureHTTP: insecureHTTP,
+		commandPath:  commandPath,
 	}
 }
 
@@ -482,16 +482,9 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 
 	// Always fan out via searchAllCells — it fetches the repo index,
 	// resolves slugs to ULIDs, and handles single- vs multi-jurisdiction.
-	searchStart := time.Now()
+	// searchAllCells emits the outcome telemetry itself, so the TUI's code
+	// tab (which calls it directly) is covered too.
 	resp, err := searchAllCells(ctx, opts)
-	var result searchOutcomeResult
-	if resp != nil {
-		result = searchOutcomeResult{
-			count:              len(resp.Results),
-			coverageIncomplete: len(resp.FailedJurisdictions) > 0 || len(resp.SkippedRepos) > 0,
-		}
-	}
-	emitSearchOutcome(ctx, cmd, telemetry.SearchModeCode, result, time.Since(searchStart), err)
 	if err != nil {
 		return err
 	}
@@ -511,7 +504,22 @@ func runCodeSearch(ctx context.Context, cmd *cobra.Command, opts codeSearchOpts)
 //  3. Group by cell and resolve baseURLs via the shared helpers
 //  4. Fan out via fanOutCells with per-cell codesearch.Search calls
 //  5. Merge results (sorted by score, capped to limit)
-func searchAllCells(ctx context.Context, opts codeSearchOpts) (*codesearch.SearchResponse, error) {
+//
+// Every call emits one cli_search_completed outcome — this is the code-search
+// seam shared by the one-shot --code path and the TUI's code tab, so
+// instrumenting here covers both by construction.
+func searchAllCells(ctx context.Context, opts codeSearchOpts) (resp *codesearch.SearchResponse, err error) {
+	start := time.Now()
+	defer func() {
+		var result searchOutcomeResult
+		if resp != nil {
+			result = searchOutcomeResult{
+				count:              len(resp.Results),
+				coverageIncomplete: len(resp.FailedJurisdictions) > 0 || len(resp.SkippedRepos) > 0,
+			}
+		}
+		emitSearchOutcome(ctx, opts.commandPath, telemetry.SearchModeCode, result, time.Since(start), err)
+	}()
 	// Step 1: Get repos index from the control plane. *coreapi.Client
 	// satisfies cellCoreClient (passed to resolveCellBaseURLs below as such).
 	coreClient, err := coreapi.New()

@@ -309,18 +309,20 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	}
 
 	m := searchModel{
-		results:        results,
-		total:          total,
-		width:          ss.width,
-		mode:           modeBrowse,
-		input:          ti,
-		searchCfg:      cfg,
-		apiPage:        apiPage,
-		styles:         styles,
-		browseVP:       viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
-		darkBg:         termenv.HasDarkBackground(),
-		filterType:     typeFilterCommits,          // default to the leftmost tab (Commits), matching the web UI order
-		semanticSearch: newSemanticSearcher(false), // command layer overrides with its session searcher
+		results:    results,
+		total:      total,
+		width:      ss.width,
+		mode:       modeBrowse,
+		input:      ti,
+		searchCfg:  cfg,
+		apiPage:    apiPage,
+		styles:     styles,
+		browseVP:   viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
+		darkBg:     termenv.HasDarkBackground(),
+		filterType: typeFilterCommits, // default to the leftmost tab (Commits), matching the web UI order
+		// Command layer overrides with its session searcher; instrumented
+		// anyway so a forgotten override never silently drops telemetry.
+		semanticSearch: instrumentSemanticSearcher("entire search", newSemanticSearcher(false)),
 	}
 	if codeOpts != nil {
 		m.codeSearchOpts = *codeOpts
