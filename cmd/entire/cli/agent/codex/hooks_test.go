@@ -135,14 +135,15 @@ func TestInstallHooks_RejectsOversizedHooksFile(t *testing.T) {
 	tempDir := setupTestEnv(t)
 	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
 	require.NoError(t, os.MkdirAll(filepath.Dir(hooksPath), 0o750))
-	require.NoError(t, os.WriteFile(hooksPath, []byte(strings.Repeat("x", maxHooksFileBytes+1)), 0o600))
+	contents := `{"padding":"` + strings.Repeat("x", maxHooksFileBytes) + `"}`
+	require.NoError(t, os.WriteFile(hooksPath, []byte(contents), 0o600))
 
 	_, err := (&CodexAgent{}).InstallHooks(context.Background(), false)
-	require.ErrorContains(t, err, "invalid character 'x'")
+	require.ErrorContains(t, err, "exceeds 1048576 bytes")
 }
 
 func TestInstallAndUninstallHooks_RejectRedirectedTargets(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == testWindowsOS {
 		t.Skip("symlink creation is not generally available on Windows")
 	}
 	tempDir := setupTestEnv(t)
@@ -164,7 +165,7 @@ func TestInstallAndUninstallHooks_RejectRedirectedTargets(t *testing.T) {
 }
 
 func TestInstallAndUninstallHooks_RejectRedirectedHooksFile(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == testWindowsOS {
 		t.Skip("symlink creation is not generally available on Windows")
 	}
 	tempDir := setupTestEnv(t)

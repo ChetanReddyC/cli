@@ -58,11 +58,11 @@ branch or have uncommitted changes. `entire enable`, agent removal, and
 a mutating command there. They must not dirty another checkout. Doctor, status,
 SessionStart, and discovery never write hook configuration.
 
-`ResolveHookDiscovery` consumes the shared Git metadata path resolvers. Entire's
-Codex integration does not maintain a separate `.git`, `commondir`, or
-worktree-marker parser. Conventional linked worktrees discover the primary
-checkout's hook file. Normal checkouts, ordinary submodules, and
-separate-Git-directory checkouts discover their own hook file. A
+`ResolveHookDiscovery` reuses the shared `.git` and `commondir` path resolvers,
+then applies Codex-specific checks for linked-worktree registration and hook
+root ownership. Conventional linked worktrees discover the primary checkout's
+hook file. Normal checkouts, ordinary submodules, and separate-Git-directory
+checkouts discover their own hook file. A
 The pinned 0.149.0 test verifies that a `.bare/worktrees` layout discovers the
 layout root's hook file; linked submodules remain worktree-local because their
 Git metadata is submodule-owned. If the Git metadata cannot be resolved or

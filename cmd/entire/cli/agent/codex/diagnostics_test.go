@@ -73,7 +73,7 @@ func TestInspectHookDiagnostics_InvalidDiscoveredConfiguration(t *testing.T) {
 
 	t.Run("containment", func(t *testing.T) {
 		t.Parallel()
-		if runtime.GOOS == "windows" {
+		if runtime.GOOS == testWindowsOS {
 			t.Skip("symlink creation is not generally available on Windows")
 		}
 		mainRoot, linkedRoot := setupDiagnosticLinkedWorktree(t)

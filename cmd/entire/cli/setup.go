@@ -606,25 +606,10 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		}
 		return nil
 	}
-	var successfullyAddedAgents []agent.Agent
-	for _, ag := range addedAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
-		} else {
-			warnCodexHooksAfterSetup(ctx, w, ag)
-			successfullyAddedAgents = append(successfullyAddedAgents, ag)
-		}
-	}
-
-	var successfullyReinstalledAgents []agent.Agent
-	for _, ag := range reinstalledAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
-		} else {
-			warnCodexHooksAfterSetup(ctx, w, ag)
-			successfullyReinstalledAgents = append(successfullyReinstalledAgents, ag)
-		}
-	}
+	successfullyAddedAgents, setupErrs := setupAgentHookSet(ctx, w, addedAgents, opts.ForceHooks)
+	errs = append(errs, setupErrs...)
+	successfullyReinstalledAgents, setupErrs := setupAgentHookSet(ctx, w, reinstalledAgents, opts.ForceHooks)
+	errs = append(errs, setupErrs...)
 
 	var uninstalledAgents []agent.Agent
 	for _, ag := range removedAgents {
@@ -1683,6 +1668,20 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int,
 	}
 
 	return count, nil
+}
+
+func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) ([]agent.Agent, []error) {
+	var successful []agent.Agent
+	var errs []error
+	for _, ag := range agents {
+		if _, err := setupAgentHooks(ctx, ag, forceHooks); err != nil {
+			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
+			continue
+		}
+		warnCodexHooksAfterSetup(ctx, w, ag)
+		successful = append(successful, ag)
+	}
+	return successful, errs
 }
 
 func warnCodexHooksAfterSetup(ctx context.Context, w io.Writer, ag agent.Agent) {

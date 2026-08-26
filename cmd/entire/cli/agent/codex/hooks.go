@@ -102,10 +102,9 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 		return 0, err
 	}
 	hooksPath := worktreeHooks.Path()
-	existingData, readErr := os.ReadFile(hooksPath) //nolint:gosec // validated against the current worktree
-	exists := readErr == nil
-	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return 0, fmt.Errorf("read Codex hooks file %q: %w", hooksPath, readErr)
+	existingData, exists, err := readHooksFileForMutation(hooksPath)
+	if err != nil {
+		return 0, err
 	}
 	var rawHooks map[string]json.RawMessage
 	if exists {
@@ -190,12 +189,12 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 		return err
 	}
 	hooksPath := worktreeHooks.Path()
-	data, err := os.ReadFile(hooksPath) //nolint:gosec // validated against the current worktree
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+	data, exists, err := readHooksFileForMutation(hooksPath)
 	if err != nil {
-		return fmt.Errorf("read Codex hooks file %q: %w", hooksPath, err)
+		return err
+	}
+	if !exists {
+		return nil
 	}
 	var topLevel map[string]json.RawMessage
 	if err := json.Unmarshal(data, &topLevel); err != nil {
@@ -256,11 +255,8 @@ func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 	if err := validateMutableHookTarget(worktreeHooks); err != nil {
 		return false
 	}
-	data, err := os.ReadFile(worktreeHooks.Path()) //nolint:gosec // validated against the current worktree
-	if errors.Is(err, os.ErrNotExist) {
-		return false
-	}
-	if err != nil {
+	data, exists, err := readHooksFileForMutation(worktreeHooks.Path())
+	if err != nil || !exists {
 		return false
 	}
 	var topLevel map[string]json.RawMessage
@@ -565,6 +561,26 @@ func readHooksDocument(path string) (*hooksDocument, error) {
 		document.rawHooks = make(map[string]json.RawMessage)
 	}
 	return document, nil
+}
+
+func readHooksFileForMutation(path string) ([]byte, bool, error) {
+	file, err := os.Open(path) //nolint:gosec // path is validated against the current worktree
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read Codex hooks file %q: %w", path, err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxHooksFileBytes+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("read Codex hooks file %q: %w", path, err)
+	}
+	if len(data) > maxHooksFileBytes {
+		return nil, false, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
+	}
+	return data, true, nil
 }
 
 func hookFileStateForReadError(err error) HookFileState {

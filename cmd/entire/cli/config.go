@@ -171,7 +171,7 @@ func OutdatedHookAgents(ctx context.Context) []types.AgentName {
 		if err != nil {
 			continue
 		}
-		if _, ownsDiagnostics := ag.(agent.EffectiveHookDiagnostics); ownsDiagnostics {
+		if _, ownsDiagnostics := agent.AsEffectiveHookDiagnostics(ag); ownsDiagnostics {
 			continue
 		}
 		if hf, ok := agent.AsHookFreshness(ag); ok && hf.CheckHookConfig(ctx) == agent.HooksOutdated {

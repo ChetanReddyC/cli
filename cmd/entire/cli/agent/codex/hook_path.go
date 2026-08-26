@@ -50,7 +50,7 @@ func validateMutableHookTarget(hooks WorktreeHooksPath) error {
 		return fmt.Errorf("inspect Codex hooks file: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("Codex hooks path %q is not a regular file", hooks.Path())
+		return fmt.Errorf("codex hooks path %q is not a regular file", hooks.Path())
 	}
 	return nil
 }

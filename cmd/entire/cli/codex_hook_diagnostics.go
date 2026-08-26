@@ -90,6 +90,11 @@ func codexHookIssueFromDiagnostics(diagnostics codex.HookDiagnostics) *codexHook
 		return localCodexHookIssue(issue, diagnostics)
 	}
 
+	if diagnostics.PathsDiffer() && diagnostics.Worktree.State == codex.HookFileEntire {
+		issue.State = codexHookStateWorktreePathNotDiscovered
+		return issue
+	}
+
 	if !diagnostics.Discovered.Current {
 		issue.State = codexHookStateOutdated
 		issue.MissingHooks = diagnostics.Discovered.Missing
@@ -101,10 +106,6 @@ func codexHookIssueFromDiagnostics(diagnostics codex.HookDiagnostics) *codexHook
 		return issue
 	}
 
-	if diagnostics.PathsDiffer() && diagnostics.Worktree.State == codex.HookFileEntire {
-		issue.State = codexHookStateWorktreePathNotDiscovered
-		return issue
-	}
 	return localCodexHookIssue(issue, diagnostics)
 }
 

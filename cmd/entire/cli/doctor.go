@@ -694,7 +694,7 @@ func checkHookDrift(cmd *cobra.Command) {
 		if err != nil {
 			continue
 		}
-		if _, ownsDiagnostics := ag.(agent.EffectiveHookDiagnostics); ownsDiagnostics {
+		if _, ownsDiagnostics := agent.AsEffectiveHookDiagnostics(ag); ownsDiagnostics {
 			continue
 		}
 		hf, ok := agent.AsHookFreshness(ag)

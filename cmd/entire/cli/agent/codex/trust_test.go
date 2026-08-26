@@ -243,7 +243,7 @@ trusted_hash = "sha256:aaa"
 }
 
 func TestHookTrustGaps_MatchesLogicalSymlinkPath(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == testWindowsOS {
 		t.Skip("directory symlinks require privileges on Windows")
 	}
 	tmp := t.TempDir()
