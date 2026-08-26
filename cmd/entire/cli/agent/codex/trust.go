@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -146,6 +147,27 @@ func declaredCodexEventsFromDocument(document *hooksDocument) ([]string, error) 
 	return events, nil
 }
 
+// MissingEntireHooks reports the managed Codex events that are not present in
+// a repository-local hooks file. It is kept as a compatibility helper for
+// callers that only need the drift list; diagnostics use HookConfigInspection.
+func MissingEntireHooks(repoRoot string) []string {
+	document, err := readHooksDocument(filepath.Join(repoRoot, ".codex", HooksFileName))
+	if err != nil || !document.exists {
+		return nil
+	}
+	var missing []string
+	for _, hook := range managedHooks {
+		var groups []MatcherGroup
+		if err := parseHookType(document.rawHooks, hook.event, &groups); err != nil {
+			return nil
+		}
+		if !hasEntireHook(groups) {
+			missing = append(missing, hook.label)
+		}
+	}
+	return missing
+}
+
 // codexTrustStateHeaderRegex matches `[hooks.state."<key>"]` headers in
 // the user's Codex config.toml. Quote-only — Codex's own writer emits
 // quoted keys (codex-rs/tui/src/app/background_requests.rs:874), and
@@ -153,8 +175,13 @@ func declaredCodexEventsFromDocument(document *hooksDocument) ([]string, error) 
 var codexTrustStateHeaderRegex = regexp.MustCompile(`(?m)^\[hooks\.state\."([^"]+)"\]`)
 
 func readCodexTrustedKeys(configPath string) (map[string]struct{}, bool) {
-	data, err := os.ReadFile(configPath) //nolint:gosec // path resolved from CODEX_HOME or HOME
+	file, err := os.Open(configPath) //nolint:gosec // path resolved from CODEX_HOME or HOME
 	if err != nil {
+		return nil, false
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxHooksFileBytes+1))
+	if err != nil || len(data) > maxHooksFileBytes {
 		return nil, false
 	}
 	keys := make(map[string]struct{})

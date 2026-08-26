@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,11 +18,7 @@ import (
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 )
 
-const (
-	gitDir                  = ".git"
-	maxGitMetadataFileBytes = int64(64 * 1024)
-	maxGitConfigFileBytes   = int64(1024 * 1024)
-)
+const gitDir = ".git"
 
 // sharedObjectCache is one process-wide object cache. go-git uses the cache
 // passed to the storage as its delta-base cache, so a per-open cache makes
@@ -60,6 +55,18 @@ func OpenPath(repoRoot string) (*git.Repository, error) {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
 	return repo, nil
+}
+
+// ResolveDotGitPath resolves the .git entry for a worktree without opening the
+// repository. Callers that need Git metadata should use this shared resolver.
+func ResolveDotGitPath(repoRoot string) (string, error) {
+	return resolveDotGitPath(repoRoot)
+}
+
+// ResolveCommonGitPath resolves the shared Git directory for a resolved .git
+// directory. An empty result means the repository has no commondir file.
+func ResolveCommonGitPath(dotGitPath string) (string, error) {
+	return resolveCommonGitPath(dotGitPath)
 }
 
 func hasObjectAlternates(repoRoot string) (bool, error) {
@@ -167,7 +174,7 @@ func resolveDotGitPath(repoRoot string) (string, error) {
 		return gitPath, nil
 	}
 
-	content, err := readGitMetadataFile(gitPath)
+	content, err := os.ReadFile(gitPath) //nolint:gosec // gitPath is resolved from the git worktree root.
 	if err != nil {
 		return "", fmt.Errorf("read .git file: %w", err)
 	}
@@ -186,7 +193,7 @@ func resolveDotGitPath(repoRoot string) (string, error) {
 }
 
 func resolveCommonGitPath(dotGitPath string) (string, error) {
-	content, err := readGitMetadataFile(filepath.Join(dotGitPath, "commondir"))
+	content, err := os.ReadFile(filepath.Join(dotGitPath, "commondir")) //nolint:gosec // dotGitPath is resolved from the git worktree root.
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
@@ -202,55 +209,4 @@ func resolveCommonGitPath(dotGitPath string) (string, error) {
 		return filepath.Clean(commonPath), nil
 	}
 	return filepath.Clean(filepath.Join(dotGitPath, commonPath)), nil
-}
-
-func readGitMetadataFile(path string) ([]byte, error) {
-	return readStableGitFile(path, maxGitMetadataFileBytes, "Git metadata", "git metadata")
-}
-
-func readGitConfigFile(path string) ([]byte, error) {
-	return readStableGitFile(path, maxGitConfigFileBytes, "Git config", "git config")
-}
-
-func readStableGitFile(path string, maxBytes int64, title, noun string) ([]byte, error) {
-	before, err := os.Lstat(path)
-	if err != nil {
-		return nil, fmt.Errorf("inspect %s file %q: %w", title, path, err)
-	}
-	if !before.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s path %q is not a regular file", noun, path)
-	}
-	if before.Size() > maxBytes {
-		return nil, fmt.Errorf("%s file %q exceeds %d bytes", noun, path, maxBytes)
-	}
-
-	file, err := os.Open(path) //nolint:gosec // Callers derive paths from the current repository's Git metadata.
-	if err != nil {
-		return nil, fmt.Errorf("open %s file %q: %w", title, path, err)
-	}
-	defer func() { _ = file.Close() }()
-
-	opened, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("inspect opened %s file %q: %w", title, path, err)
-	}
-	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-		return nil, fmt.Errorf("%s file %q changed while opening", noun, path)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read %s file %q: %w", title, path, err)
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, fmt.Errorf("%s file %q exceeds %d bytes", noun, path, maxBytes)
-	}
-
-	after, err := os.Lstat(path)
-	if err != nil {
-		return nil, fmt.Errorf("reinspect %s file %q: %w", title, path, err)
-	}
-	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
-		return nil, fmt.Errorf("%s file %q changed while reading", noun, path)
-	}
-	return data, nil
 }

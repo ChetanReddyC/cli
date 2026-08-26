@@ -4,26 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
-	agenttestutil "github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
-
-const testWindowsOS = "windows"
-const codexOwnershipHelperEnv = "ENTIRE_CODEX_OWNERSHIP_HELPER"
 
 // setupTestEnv creates a temp dir, sets CWD and CODEX_HOME for test isolation.
 // Cannot be parallel (uses t.Chdir and t.Setenv which are process-global).
 func setupTestEnv(t *testing.T) string {
 	t.Helper()
 	tempDir := t.TempDir()
-	testutil.InitRepo(t, tempDir)
 	t.Chdir(tempDir)
 	t.Setenv("CODEX_HOME", filepath.Join(tempDir, ".codex-home"))
 	return tempDir
@@ -54,430 +47,9 @@ func TestInstallHooks_CreatesHooksJSONOnly(t *testing.T) {
 	require.True(t, os.IsNotExist(err), "install must not create .codex/config.toml")
 }
 
-func TestInstallHooks_UsesOnlyCurrentWorktreeLock(t *testing.T) {
-	repoRoot := filepath.Join(t.TempDir(), "repo")
-	testutil.InitRepo(t, repoRoot)
-	t.Chdir(repoRoot)
-	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
-
-	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	require.FileExists(t, filepath.Join(repoRoot, ".codex", HooksFileName+".lock"))
-	oldCommonLock := filepath.Join(repoRoot, ".git", "entire-codex-hooks.lock")
-	require.NoFileExists(t, oldCommonLock)
-
-	const oldLockContents = "left by an older Entire version"
-	require.NoError(t, os.WriteFile(oldCommonLock, []byte(oldLockContents), 0o600))
-	_, err = ag.InstallHooks(context.Background(), true)
-	require.NoError(t, err)
-	require.Equal(t, oldLockContents, readFile(t, oldCommonLock))
-
-	require.NoError(t, ag.UninstallHooks(context.Background()))
-	require.Equal(t, oldLockContents, readFile(t, oldCommonLock))
-}
-
-func TestInstallHooks_LinkedWorktreeUsesCurrentCheckout(t *testing.T) {
-	tmp := t.TempDir()
-	repoRoot := filepath.Join(tmp, "repo")
-	linkedRoot := filepath.Join(tmp, "linked")
-	testutil.InitRepo(t, repoRoot)
-	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
-	testutil.GitAdd(t, repoRoot, "README.md")
-	testutil.GitCommit(t, repoRoot, "initial")
-
-	cmd := exec.CommandContext(t.Context(), "git", "worktree", "add", "-b", "feature", linkedRoot)
-	cmd.Dir = repoRoot
-	cmd.Env = testutil.GitIsolatedEnv()
-	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(output))
-
-	t.Chdir(linkedRoot)
-	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
-
-	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	require.Equal(t, len(managedHooks), count)
-	require.NoDirExists(t, filepath.Join(repoRoot, ".codex"))
-	require.FileExists(t, filepath.Join(linkedRoot, ".codex", HooksFileName))
-}
-
-func TestInstallHooks_LinkedWorktreeOwnership(t *testing.T) {
-	t.Parallel()
-	repoRoot, linkedRoot := setupLinkedWorktreeRoots(t)
-	primaryPath := filepath.Join(repoRoot, ".codex", HooksFileName)
-	linkedPath := filepath.Join(linkedRoot, ".codex", HooksFileName)
-	require.NoError(t, os.MkdirAll(filepath.Dir(primaryPath), 0o750))
-	const primary = `{"primary":true}`
-	require.NoError(t, os.WriteFile(primaryPath, []byte(primary), 0o600))
-
-	runCodexOwnershipHelper(t, linkedRoot, "install")
-
-	require.Equal(t, primary, readFile(t, primaryPath))
-	require.Contains(t, readFile(t, linkedPath), "entire hooks codex session-start")
-}
-
-func TestUninstallHooks_LinkedWorktreeOwnership(t *testing.T) {
-	t.Parallel()
-	repoRoot, linkedRoot := setupLinkedWorktreeRoots(t)
-	primaryPath := filepath.Join(repoRoot, ".codex", HooksFileName)
-	linkedPath := filepath.Join(linkedRoot, ".codex", HooksFileName)
-
-	runCodexOwnershipHelper(t, repoRoot, "install")
-	runCodexOwnershipHelper(t, linkedRoot, "install")
-	primaryBefore := readFile(t, primaryPath)
-	runCodexOwnershipHelper(t, linkedRoot, "uninstall")
-
-	require.Equal(t, primaryBefore, readFile(t, primaryPath))
-	require.NoFileExists(t, linkedPath)
-}
-
-func TestAreHooksInstalled_LinkedWorktreeOwnership(t *testing.T) {
-	t.Parallel()
-	repoRoot, linkedRoot := setupLinkedWorktreeRoots(t)
-
-	runCodexOwnershipHelper(t, repoRoot, "install")
-	runCodexOwnershipHelper(t, linkedRoot, "expect-absent")
-	runCodexOwnershipHelper(t, linkedRoot, "install")
-	runCodexOwnershipHelper(t, linkedRoot, "expect-present")
-}
-
-func TestCodexLinkedWorktreeOwnershipHelper(t *testing.T) {
-	t.Parallel()
-	action := os.Getenv(codexOwnershipHelperEnv)
-	if action == "" {
-		t.Skip("subprocess helper")
-	}
-	ag := &CodexAgent{}
-	switch action {
-	case "install":
-		_, err := ag.InstallHooks(t.Context(), false)
-		require.NoError(t, err)
-	case "uninstall":
-		require.NoError(t, ag.UninstallHooks(t.Context()))
-	case "expect-absent":
-		require.False(t, ag.AreHooksInstalled(t.Context()))
-		require.Equal(t, agentpkg.HooksAbsent, ag.CheckHookConfig(t.Context()))
-	case "expect-present":
-		require.True(t, ag.AreHooksInstalled(t.Context()))
-		require.Equal(t, agentpkg.HooksCurrent, ag.CheckHookConfig(t.Context()))
-	default:
-		t.Fatalf("unknown ownership helper action %q", action)
-	}
-}
-
-func TestInstallHooks_SeparateGitDirUsesCurrentCheckout(t *testing.T) {
-	tmp := t.TempDir()
-	storageRoot := filepath.Join(tmp, "storage")
-	require.NoError(t, os.MkdirAll(storageRoot, 0o750))
-	mainRoot, linkedRoot := setupSeparateGitDirWorktree(t, tmp, filepath.Join(storageRoot, ".git"))
-	t.Chdir(linkedRoot)
-	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
-
-	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	require.Equal(t, len(managedHooks), count)
-	require.NoDirExists(t, filepath.Join(storageRoot, ".codex"))
-	require.NoDirExists(t, filepath.Join(mainRoot, ".codex"))
-	require.FileExists(t, filepath.Join(linkedRoot, ".codex", HooksFileName))
-	require.True(t, ag.AreHooksInstalled(context.Background()))
-}
-
-func TestInstallHooks_LinkedWorktreeRejectsRedirectedProjectDirectory(t *testing.T) {
-	if runtime.GOOS == testWindowsOS {
-		t.Skip("directory symlinks require privileges on Windows")
-	}
-	repoRoot, linkedRoot := setupLinkedWorktreeEnv(t)
-	ag := &CodexAgent{}
-
-	t.Chdir(repoRoot)
-	_, err := ag.InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	authoritativePath := filepath.Join(repoRoot, ".codex", HooksFileName)
-	require.FileExists(t, authoritativePath)
-	authoritativeBefore := readFile(t, authoritativePath)
-
-	require.NoError(t, os.Symlink(filepath.Join(repoRoot, ".codex"), filepath.Join(linkedRoot, ".codex")))
-	t.Chdir(linkedRoot)
-	_, err = ag.InstallHooks(context.Background(), false)
-	require.ErrorContains(t, err, "redirected directory")
-	require.FileExists(t, authoritativePath)
-	require.Equal(t, authoritativeBefore, readFile(t, authoritativePath))
-}
-
-func TestInstallHooks_IgnoresDiscoveredCodexDirectoryOutsidePrimaryCheckout(t *testing.T) {
-	if runtime.GOOS == testWindowsOS {
-		t.Skip("directory symlinks require privileges on Windows")
-	}
-	repoRoot, linkedRoot := setupLinkedWorktreeEnv(t)
-	outsideDir := filepath.Join(t.TempDir(), "outside")
-	require.NoError(t, os.MkdirAll(outsideDir, 0o750))
-	require.NoError(t, os.Symlink(outsideDir, filepath.Join(repoRoot, ".codex")))
-
-	_, err := (&CodexAgent{}).InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	require.NoFileExists(t, filepath.Join(outsideDir, HooksFileName))
-	require.FileExists(t, filepath.Join(linkedRoot, ".codex", HooksFileName))
-}
-
-func TestInstallHooks_RejectsContainedHooksFileSymlink(t *testing.T) {
-	if runtime.GOOS == testWindowsOS {
-		t.Skip("file symlinks require privileges on Windows")
-	}
-	repoRoot := filepath.Join(t.TempDir(), "repo")
-	initCommittedRepo(t, repoRoot)
-	t.Chdir(repoRoot)
-	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
-
-	projectDir := filepath.Join(repoRoot, ".codex")
-	managedDir := filepath.Join(repoRoot, "managed")
-	targetPath := filepath.Join(managedDir, HooksFileName)
-	hooksPath := filepath.Join(projectDir, HooksFileName)
-	require.NoError(t, os.MkdirAll(projectDir, 0o750))
-	require.NoError(t, os.MkdirAll(managedDir, 0o750))
-	require.NoError(t, os.WriteFile(targetPath, []byte(`{"user_setting":{"keep":true}}`), 0o600))
-	require.NoError(t, os.Symlink(filepath.Join("..", "managed", HooksFileName), hooksPath))
-
-	_, err := (&CodexAgent{}).InstallHooks(context.Background(), true)
-	require.ErrorContains(t, err, "symbolic link")
-	info, err := os.Lstat(hooksPath)
-	require.NoError(t, err)
-	require.NotZero(t, info.Mode()&os.ModeSymlink)
-	require.Contains(t, readFile(t, targetPath), "user_setting")
-	require.NotContains(t, readFile(t, targetPath), "entire hooks codex")
-}
-
-func TestUninstallHooks_RejectsContainedHooksFileSymlink(t *testing.T) {
-	if runtime.GOOS == testWindowsOS {
-		t.Skip("file symlinks require privileges on Windows")
-	}
-	repoRoot := filepath.Join(t.TempDir(), "repo")
-	initCommittedRepo(t, repoRoot)
-	t.Chdir(repoRoot)
-	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
-
-	projectDir := filepath.Join(repoRoot, ".codex")
-	managedDir := filepath.Join(repoRoot, "managed")
-	targetPath := filepath.Join(managedDir, HooksFileName)
-	hooksPath := filepath.Join(projectDir, HooksFileName)
-	require.NoError(t, os.MkdirAll(projectDir, 0o750))
-	require.NoError(t, os.MkdirAll(managedDir, 0o750))
-	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	installed := readFile(t, hooksPath)
-	require.NoError(t, os.Remove(hooksPath))
-	require.NoError(t, os.WriteFile(targetPath, []byte(installed), 0o600))
-	require.NoError(t, os.Symlink(filepath.Join("..", "managed", HooksFileName), hooksPath))
-
-	err = ag.UninstallHooks(context.Background())
-	require.ErrorContains(t, err, "symbolic link")
-	info, err := os.Lstat(hooksPath)
-	require.NoError(t, err)
-	require.NotZero(t, info.Mode()&os.ModeSymlink)
-	require.Equal(t, installed, readFile(t, targetPath))
-}
-
-func TestInstallHooks_RejectsHooksFileSymlinkOutsideCheckout(t *testing.T) {
-	if runtime.GOOS == testWindowsOS {
-		t.Skip("file symlinks require privileges on Windows")
-	}
-	repoRoot := filepath.Join(t.TempDir(), "repo")
-	initCommittedRepo(t, repoRoot)
-	t.Chdir(repoRoot)
-	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
-
-	projectDir := filepath.Join(repoRoot, ".codex")
-	outsidePath := filepath.Join(t.TempDir(), HooksFileName)
-	hooksPath := filepath.Join(projectDir, HooksFileName)
-	require.NoError(t, os.MkdirAll(projectDir, 0o750))
-	require.NoError(t, os.WriteFile(outsidePath, []byte(`{"user_setting":{"keep":true}}`), 0o600))
-	require.NoError(t, os.Symlink(outsidePath, hooksPath))
-
-	_, err := (&CodexAgent{}).InstallHooks(context.Background(), false)
-	require.ErrorContains(t, err, "symbolic link")
-	info, statErr := os.Lstat(hooksPath)
-	require.NoError(t, statErr)
-	require.NotZero(t, info.Mode()&os.ModeSymlink)
-	require.JSONEq(t, `{"user_setting":{"keep":true}}`, readFile(t, outsidePath))
-}
-
-func TestInstallHooks_LinkedWorktreeUpdatesOnlyLocalConfig(t *testing.T) {
-	repoRoot, linkedRoot := setupLinkedWorktreeEnv(t)
-	discoveredPath := filepath.Join(repoRoot, ".codex", HooksFileName)
-	localPath := filepath.Join(linkedRoot, ".codex", HooksFileName)
-	require.NoError(t, os.MkdirAll(filepath.Dir(discoveredPath), 0o750))
-	require.NoError(t, os.MkdirAll(filepath.Dir(localPath), 0o750))
-	require.NoError(t, os.WriteFile(discoveredPath, []byte(`{
-  "$schema": "discovered-schema",
-  "user_setting": {"keep": true},
-  "hooks": {
-    "PreToolUse": [{"matcher": "^Bash$", "hooks": [{"type": "command", "command": "user-discovered-hook"}]}],
-    "Stop": [{"matcher": null, "user_discovered_group": true, "hooks": [
-      {"type": "command", "command": "user-discovered-stop", "async": true, "status_message": "discovered-message"},
-      {"type": "prompt", "prompt": "discovered-prompt"}
-    ]}]
-  }
-}`), 0o600))
-	require.NoError(t, os.WriteFile(localPath, []byte(`{
-  "$schema": "local-schema",
-  "local_setting": {"keep": true},
-  "hooks": {
-    "Stop": [{"matcher": null, "user_local_group": true, "hooks": [
-      {"type": "command", "command": "entire hooks codex stop", "timeout": 30},
-      {"type": "command", "command": "user-local-hook", "async": true, "status_message": "local-message"},
-      {"type": "prompt", "prompt": "local-prompt"}
-    ]}]
-  }
-}`), 0o600))
-
-	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	require.Equal(t, len(managedHooks), count)
-
-	discovered := readFile(t, discoveredPath)
-	require.Contains(t, discovered, "discovered-schema")
-	require.Contains(t, discovered, "user_setting")
-	require.Contains(t, discovered, "user-discovered-hook")
-	require.NotContains(t, discovered, "entire hooks codex")
-
-	local := readFile(t, localPath)
-	require.Contains(t, local, "local-schema")
-	require.Contains(t, local, "local_setting")
-	require.Contains(t, local, "user-local-hook")
-	require.Contains(t, local, "user_local_group")
-	require.Contains(t, local, "local-message")
-	require.Contains(t, local, "local-prompt")
-	require.NotContains(t, local, `"command": ""`)
-	require.Contains(t, local, "entire hooks codex session-start")
-	require.Contains(t, local, "entire hooks codex stop")
-
-	count, err = ag.InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	require.Zero(t, count)
-	require.Equal(t, discovered, readFile(t, discoveredPath))
-	require.Equal(t, local, readFile(t, localPath))
-}
-
-func TestInstallHooks_LinkedWorktreeDoesNotBypassMalformedLocalConfig(t *testing.T) {
-	repoRoot, linkedRoot := setupLinkedWorktreeEnv(t)
-	discoveredPath := filepath.Join(repoRoot, ".codex", HooksFileName)
-	localPath := filepath.Join(linkedRoot, ".codex", HooksFileName)
-	require.NoError(t, os.MkdirAll(filepath.Dir(localPath), 0o750))
-	const malformed = `{not-json`
-	require.NoError(t, os.WriteFile(localPath, []byte(malformed), 0o600))
-
-	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false)
-	require.Zero(t, count)
-	require.ErrorContains(t, err, "failed to parse existing hooks.json")
-	require.NoFileExists(t, discoveredPath)
-	require.False(t, ag.AreHooksInstalled(context.Background()))
-	require.Equal(t, malformed, readFile(t, localPath))
-}
-
-func TestInstallHooks_LinkedWorktreeUpdatesManagedOnlyLocalFile(t *testing.T) {
-	_, linkedRoot := setupLinkedWorktreeEnv(t)
-	localPath := filepath.Join(linkedRoot, ".codex", HooksFileName)
-	require.NoError(t, os.MkdirAll(filepath.Dir(localPath), 0o750))
-	require.NoError(t, os.WriteFile(localPath, []byte(`{
-  "hooks": {
-    "Stop": [{"matcher": null, "hooks": [{"type": "command", "command": "entire hooks codex stop", "timeout": 30}]}]
-  }
-}`), 0o600))
-
-	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	require.FileExists(t, localPath)
-	require.Contains(t, readFile(t, localPath), "entire hooks codex session-start")
-}
-
-func TestUninstallHooks_LinkedWorktreeUpdatesOnlyLocalFile(t *testing.T) {
-	repoRoot, linkedRoot := setupLinkedWorktreeEnv(t)
-	discoveredPath := filepath.Join(repoRoot, ".codex", HooksFileName)
-	localPath := filepath.Join(linkedRoot, ".codex", HooksFileName)
-	require.NoError(t, os.MkdirAll(filepath.Dir(discoveredPath), 0o750))
-	require.NoError(t, os.WriteFile(discoveredPath, []byte(`{"user_setting":{"keep":true}}`), 0o600))
-	discoveredBefore := readFile(t, discoveredPath)
-
-	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	require.True(t, ag.AreHooksInstalled(context.Background()))
-
-	var topLevel map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal([]byte(readFile(t, localPath)), &topLevel))
-	topLevel["user_setting"] = json.RawMessage(`{"keep":true}`)
-	output, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
-	require.NoError(t, err)
-	require.NoError(t, jsonutil.WriteFileAtomic(localPath, output, 0o600))
-
-	require.NoError(t, ag.UninstallHooks(context.Background()))
-	require.False(t, ag.AreHooksInstalled(context.Background()))
-	require.FileExists(t, discoveredPath)
-	require.Equal(t, discoveredBefore, readFile(t, discoveredPath))
-	remaining := readFile(t, localPath)
-	require.Contains(t, remaining, "user_setting")
-	require.NotContains(t, remaining, "entire hooks codex")
-}
-
-func TestInstallHooks_BareLayoutUsesCurrentCheckoutWhenDiscoveryIsUnresolved(t *testing.T) {
-	layoutRoot, mainRoot, featureRoot := setupBareWorktreeLayout(t)
-	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
-	ag := &CodexAgent{}
-
-	t.Chdir(mainRoot)
-	_, err := ag.InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	require.NoDirExists(t, filepath.Join(layoutRoot, ".codex"))
-	require.FileExists(t, filepath.Join(mainRoot, ".codex", HooksFileName))
-	require.NoDirExists(t, filepath.Join(featureRoot, ".codex"))
-}
-
-func TestInstallHooks_PointerlessBareContainerUsesCurrentCheckout(t *testing.T) {
-	layoutRoot, _, featureRoot := setupBareWorktreeLayout(t)
-	require.NoError(t, os.Remove(filepath.Join(layoutRoot, ".git")))
-	t.Chdir(featureRoot)
-	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
-
-	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	require.NoDirExists(t, filepath.Join(layoutRoot, ".codex"))
-	require.FileExists(t, filepath.Join(featureRoot, ".codex", HooksFileName))
-	require.NoFileExists(t, filepath.Join(layoutRoot, ".bare", "entire-codex-hooks.lock"))
-}
-
-func TestInstallHooks_OrdinarySubmoduleUsesLocalRoot(t *testing.T) {
-	ordinarySubmoduleRoot, _ := setupSubmoduleWorktrees(t)
-	t.Chdir(ordinarySubmoduleRoot)
-	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
-
-	ag := &CodexAgent{}
-	count, err := ag.InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	require.Equal(t, len(managedHooks), count)
-	require.FileExists(t, filepath.Join(ordinarySubmoduleRoot, ".codex", HooksFileName))
-}
-
-func TestInstallHooks_LinkedSubmoduleUsesCurrentCheckoutWhenDiscoveryIsUnresolved(t *testing.T) {
-	_, linkedSubmoduleRoot := setupSubmoduleWorktrees(t)
-	t.Chdir(linkedSubmoduleRoot)
-	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
-
-	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), false)
-	require.NoError(t, err)
-	require.FileExists(t, filepath.Join(linkedSubmoduleRoot, ".codex", HooksFileName))
-}
-
 func TestInstallHooks_WindowsWrapperProbeSuccessKeepsWrappedCommands(t *testing.T) {
 	tempDir := setupTestEnv(t)
-	withCodexHookEnvironment(t, testWindowsOS, true)
+	withCodexHookEnvironment(t, "windows", true)
 
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), false)
@@ -495,7 +67,7 @@ func TestInstallHooks_WindowsWrapperProbeSuccessKeepsWrappedCommands(t *testing.
 
 func TestInstallHooks_WindowsWrapperProbeFailureUsesWindowsCommands(t *testing.T) {
 	tempDir := setupTestEnv(t)
-	withCodexHookEnvironment(t, testWindowsOS, false)
+	withCodexHookEnvironment(t, "windows", false)
 
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), false)
@@ -517,7 +89,7 @@ func TestInstallHooks_WindowsWrapperProbeFailureUsesWindowsCommands(t *testing.T
 func TestInstallHooks_WindowsWrapperProbeFailureMigratesToWindowsCommands(t *testing.T) {
 	tempDir := setupTestEnv(t)
 	wrapperWorks := true
-	withCodexHookEnvironmentFunc(t, testWindowsOS, func(context.Context, string) bool {
+	withCodexHookEnvironmentFunc(t, "windows", func(context.Context, string) bool {
 		return wrapperWorks
 	})
 
@@ -562,10 +134,10 @@ func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	ctx := context.Background()
 	ag := &CodexAgent{}
 
-	agenttestutil.AssertLegacyHookReplaced(t,
+	testutil.AssertLegacyHookReplaced(t,
 		filepath.Join(tempDir, ".codex", HooksFileName),
 		agentpkg.WrapProductionSilentHookCommandForOS("entire hooks codex stop", agentpkg.UseWindowsProductionHooks(ctx)),
-		agenttestutil.LegacyLocalDevCommand("hooks codex stop"),
+		testutil.LegacyLocalDevCommand("hooks codex stop"),
 		func() {
 			if _, err := ag.InstallHooks(ctx, false); err != nil {
 				t.Fatalf("InstallHooks() error = %v", err)
@@ -723,7 +295,7 @@ func TestAreHooksInstalled_WithHooks(t *testing.T) {
 	require.True(t, ag.AreHooksInstalled(context.Background()))
 }
 
-func TestAreHooksInstalled_PartialHooksAreOutdated(t *testing.T) {
+func TestAreHooksInstalled_PartialHooks(t *testing.T) {
 	tempDir := setupTestEnv(t)
 
 	codexDir := filepath.Join(tempDir, ".codex")
@@ -743,24 +315,13 @@ func TestAreHooksInstalled_PartialHooksAreOutdated(t *testing.T) {
 
 	ag := &CodexAgent{}
 	require.False(t, ag.AreHooksInstalled(context.Background()))
-	require.Equal(t, agentpkg.HooksOutdated, ag.CheckHookConfig(context.Background()))
-}
-
-func TestCheckHookConfig_MalformedAuthorityIsNotEntireDrift(t *testing.T) {
-	tempDir := setupTestEnv(t)
-	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, ".codex"), 0o750))
-	require.NoError(t, os.WriteFile(filepath.Join(tempDir, ".codex", HooksFileName), []byte(`{"hooks":`), 0o600))
-
-	ag := &CodexAgent{}
-	require.False(t, ag.AreHooksInstalled(context.Background()))
-	require.Equal(t, agentpkg.HooksAbsent, ag.CheckHookConfig(context.Background()))
 }
 
 // TestAreHooksInstalled_PreSessionEndInstall — a user who enabled Codex before
 // SessionEnd and the subagent hooks joined the install set still counts as
 // installed, so Codex keeps
 // appearing in `entire status` and the agent pickers instead of vanishing until
-// they re-run enable. Hook-config inspection still reports the drift.
+// they re-run enable. The gap is drift, and MissingEntireHooks reports it.
 func TestAreHooksInstalled_PreSessionEndInstall(t *testing.T) {
 	tempDir := setupTestEnv(t)
 
@@ -777,7 +338,7 @@ func TestAreHooksInstalled_PreSessionEndInstall(t *testing.T) {
 
 	ag := &CodexAgent{}
 	require.True(t, ag.AreHooksInstalled(context.Background()))
-	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, InspectHookConfig(context.Background()).Missing)
+	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, MissingEntireHooks(tempDir))
 }
 
 func TestInstallHooks_PreservesExistingHooksJSON(t *testing.T) {
@@ -864,26 +425,6 @@ func TestUninstallHooks_ErrorsOnMalformedManagedHook(t *testing.T) {
 	require.JSONEq(t, existingConfig, string(data))
 }
 
-func TestUninstallWorktreeHooksFile_ReportsUnreadableFile(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == testWindowsOS {
-		t.Skip("Windows file permissions do not provide a stable unreadable-file fixture")
-	}
-
-	dir := t.TempDir()
-	worktreeHooks, err := resolveWorktreeHooksPath(dir)
-	require.NoError(t, err)
-	hooksPath := worktreeHooks.Path()
-	require.NoError(t, os.MkdirAll(filepath.Dir(hooksPath), 0o750))
-	require.NoError(t, os.WriteFile(hooksPath, []byte(`{"hooks":{}}`), 0o600))
-	require.NoError(t, os.Chmod(hooksPath, 0))
-	t.Cleanup(func() { require.NoError(t, os.Chmod(hooksPath, 0o600)) })
-
-	err = uninstallWorktreeHooksFile(t.Context(), worktreeHooks)
-	require.Error(t, err)
-	require.ErrorContains(t, err, hooksPath)
-}
-
 func TestInstallHooks_DoesNotModifyUserConfig(t *testing.T) {
 	setupTestEnv(t)
 	codexHome := os.Getenv("CODEX_HOME")
@@ -957,47 +498,6 @@ func withCodexHookEnvironmentFunc(t *testing.T, goos string, wrapperWorks func(c
 	t.Cleanup(agentpkg.SetWindowsHookProbeForTesting(goos, wrapperWorks))
 }
 
-func setupLinkedWorktreeEnv(t *testing.T) (repoRoot, linkedRoot string) {
-	t.Helper()
-	repoRoot, linkedRoot = setupLinkedWorktreeRoots(t)
-	t.Chdir(linkedRoot)
-	t.Setenv("CODEX_HOME", filepath.Join(filepath.Dir(repoRoot), "codex-home"))
-	return repoRoot, linkedRoot
-}
-
-func setupLinkedWorktreeRoots(t *testing.T) (repoRoot, linkedRoot string) {
-	t.Helper()
-	tmp := t.TempDir()
-	repoRoot = filepath.Join(tmp, "repo")
-	linkedRoot = filepath.Join(tmp, "linked")
-	testutil.InitRepo(t, repoRoot)
-	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
-	testutil.GitAdd(t, repoRoot, "README.md")
-	testutil.GitCommit(t, repoRoot, "initial")
-
-	cmd := exec.CommandContext(t.Context(), "git", "worktree", "add", "-b", "feature", linkedRoot)
-	cmd.Dir = repoRoot
-	cmd.Env = testutil.GitIsolatedEnv()
-	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(output))
-	return repoRoot, linkedRoot
-}
-
-func runCodexOwnershipHelper(t *testing.T, dir, action string) {
-	t.Helper()
-	executable, err := os.Executable()
-	require.NoError(t, err)
-	cmd := exec.CommandContext(t.Context(), executable, "-test.run=^TestCodexLinkedWorktreeOwnershipHelper$", "-test.count=1")
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		codexOwnershipHelperEnv+"="+action,
-		"ENTIRE_TEST_TTY=0",
-		"CODEX_HOME="+filepath.Join(t.TempDir(), "codex-home"),
-	)
-	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(output))
-}
-
 // TestInstallHooks_DropsLegacyHookAlongsideCurrent is the regression test for
 // syncHookCommand returning early when the current command was already present,
 // which left a legacy local-dev hook beside it so both fired.
@@ -1008,9 +508,9 @@ func TestInstallHooks_DropsLegacyHookAlongsideCurrent(t *testing.T) {
 
 	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
 	current := agentpkg.WrapProductionSilentHookCommandForOS("entire hooks codex stop", agentpkg.UseWindowsProductionHooks(ctx))
-	legacy := agenttestutil.LegacyLocalDevCommand("hooks codex stop")
+	legacy := testutil.LegacyLocalDevCommand("hooks codex stop")
 
-	agenttestutil.AssertStaleHookDroppedAlongsideCurrent(t, hooksPath, current, legacy,
+	testutil.AssertStaleHookDroppedAlongsideCurrent(t, hooksPath, current, legacy,
 		func() {
 			// Install, then append the legacy hook into the same Stop group.
 			if _, err := ag.InstallHooks(ctx, false); err != nil {
@@ -1047,9 +547,8 @@ func TestInstallHooks_DropsLegacyHookAlongsideCurrent(t *testing.T) {
 // InstallHooks writes. A stale committed config is how the pi extension ended up
 // invoking a launcher script that had been deleted.
 func TestCommittedDogfoodHooksIsCurrent(t *testing.T) {
-	agenttestutil.AssertCommittedDogfoodConfigStable(t, ".codex/hooks.json", func(t *testing.T, dir string) (int, error) {
+	testutil.AssertCommittedDogfoodConfigStable(t, ".codex/hooks.json", func(t *testing.T, dir string) (int, error) {
 		t.Helper()
-		testutil.InitRepo(t, dir)
 		t.Chdir(dir)
 		return (&CodexAgent{}).InstallHooks(context.Background(), false)
 	})

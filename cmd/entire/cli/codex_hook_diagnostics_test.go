@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,8 +25,8 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 		require.Contains(t, out, "NOT ACTIVE IN THIS WORKTREE")
 		require.Contains(t, out, "/repo-feature/.codex/hooks.json")
 		require.Contains(t, out, "/repo-main/.codex/hooks.json")
-		require.Contains(t, out, "Commit .codex/hooks.json and apply that commit to the primary checkout")
-		require.Contains(t, out, "run `entire enable` from the primary checkout")
+		require.Contains(t, out, "Apply the generated .codex/hooks.json change to the discovered checkout")
+		require.Contains(t, out, "run `entire enable` there")
 		require.NotContains(t, out, "migrate")
 		require.NotContains(t, out, "synchronize")
 	})
@@ -33,33 +34,35 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 	t.Run("invalid discovered file", func(t *testing.T) {
 		t.Parallel()
 		var output bytes.Buffer
-		writeCodexInvalidDiscoveredWarning(
+		writeCodexDiscoveredInspectionWarning(
 			&output,
 			"/repo-main/.codex/hooks.json",
+			codex.HookFileMalformed,
 			errors.New("Codex hooks file exceeds 1048576 bytes"),
 		)
 
 		out := output.String()
 		require.Contains(t, out, "/repo-main/.codex/hooks.json")
 		require.Contains(t, out, "exceeds 1048576 bytes")
-		require.Contains(t, out, "Entire will not modify it from this worktree")
+		require.Contains(t, out, "Fix the discovered file in its owning checkout")
 	})
 
 	t.Run("invalid current-worktree file", func(t *testing.T) {
 		t.Parallel()
 		var output bytes.Buffer
-		writeCodexInvalidWorktreeWarning(
+		writeCodexWorktreeInspectionWarning(
 			&output,
 			"/repo-feature/.codex/hooks.json",
+			codex.HookFileMalformed,
 			errors.New("repository .codex path is a redirected directory"),
 		)
 
 		out := output.String()
-		require.Contains(t, out, "INVALID CURRENT-WORKTREE CONFIGURATION")
+		require.Contains(t, out, "MALFORMED CURRENT-WORKTREE CONFIGURATION")
 		require.Contains(t, out, "/repo-feature/.codex/hooks.json")
 		require.Contains(t, out, "redirected directory")
 		require.Contains(t, out, "run `entire enable --force`")
-		require.Contains(t, out, "will not follow redirected paths")
+		require.Contains(t, out, "This local file may not be the file Codex reads")
 	})
 
 	t.Run("missing project layer", func(t *testing.T) {
@@ -74,7 +77,7 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 		out := output.String()
 		require.Contains(t, out, "/repo-feature/.codex (missing)")
 		require.Contains(t, out, "/repo-main/.codex/hooks.json")
-		require.Contains(t, out, "will not copy or rewrite hooks in the other checkout")
+		require.Contains(t, out, "apply the generated change there or run `entire enable` in that checkout")
 	})
 }
 
@@ -96,14 +99,14 @@ func TestCodexStatusWarningBehavior(t *testing.T) {
 			want: "not active in this worktree",
 		},
 		{
-			name:  "invalid discovery",
-			issue: &codexHookIssue{State: codexHookStateInvalidDiscovered},
-			want:  "discovered hooks are invalid",
+			name:  "malformed discovery",
+			issue: &codexHookIssue{State: codexHookStateMalformedDiscovered},
+			want:  "discovered hooks are malformed",
 		},
 		{
-			name:  "invalid current worktree",
-			issue: &codexHookIssue{State: codexHookStateInvalidWorktree},
-			want:  "Current-worktree Codex hooks are invalid",
+			name:  "unavailable current worktree",
+			issue: &codexHookIssue{State: codexHookStateUnavailableWorktree},
+			want:  "Current-worktree Codex hooks are unavailable",
 		},
 		{
 			name:  "project layer",
@@ -132,8 +135,8 @@ func TestCodexSessionStartWarningsStayConcise(t *testing.T) {
 	require.Equal(t, "Entire hooks in this worktree are not active; Codex discovers another checkout. Run 'entire doctor'.", mismatch)
 	require.NotContains(t, mismatch, "/repo-main")
 
-	invalidWorktree := codexSessionStartWarning(&codexHookIssue{State: codexHookStateInvalidWorktree})
-	require.Equal(t, "This worktree's Codex hooks configuration is invalid. Run 'entire doctor'.", invalidWorktree)
+	malformedWorktree := codexSessionStartWarning(&codexHookIssue{State: codexHookStateMalformedWorktree})
+	require.Equal(t, "This worktree's Codex hooks configuration is malformed. Run 'entire doctor'.", malformedWorktree)
 
 	trust := codexSessionStartWarning(&codexHookIssue{
 		State:            codexHookStateTrustReview,

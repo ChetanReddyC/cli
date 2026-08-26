@@ -10,8 +10,10 @@ import (
 
 const (
 	codexHookStateInactiveWorktreePath      = "inactive_in_worktree"
-	codexHookStateInvalidWorktree           = "invalid_worktree"
-	codexHookStateInvalidDiscovered         = "invalid_discovered"
+	codexHookStateUnavailableWorktree       = "unavailable_worktree"
+	codexHookStateUnavailableDiscovered     = "unavailable_discovered"
+	codexHookStateMalformedWorktree         = "malformed_worktree"
+	codexHookStateMalformedDiscovered       = "malformed_discovered"
 	codexHookStateProjectLayerMissing       = "project_layer_missing"
 	codexHookStateDiscoveryUnresolved       = "discovery_unresolved"
 	codexHookStateWorktreePathNotDiscovered = "worktree_path_not_discovered"
@@ -33,6 +35,10 @@ func inspectCodexHookIssue(ctx context.Context) *codexHookIssue {
 	return codexHookIssueFromDiagnostics(codex.InspectHookDiagnostics(ctx))
 }
 
+func inspectCodexSessionStartHookIssue(ctx context.Context) *codexHookIssue {
+	return codexHookIssueFromDiagnostics(codex.InspectHookDiagnosticsLightweight(ctx))
+}
+
 func codexHookIssueFromDiagnostics(diagnostics codex.HookDiagnostics) *codexHookIssue {
 	issue := &codexHookIssue{
 		WorktreePath:   diagnostics.WorktreeHooks.Path(),
@@ -44,7 +50,8 @@ func codexHookIssueFromDiagnostics(diagnostics codex.HookDiagnostics) *codexHook
 
 	if diagnostics.Discovery.State != codex.HookDiscoveryResolved {
 		if diagnostics.Worktree.State != codex.HookFileEntire &&
-			diagnostics.Worktree.State != codex.HookFileInvalid &&
+			diagnostics.Worktree.State != codex.HookFileMalformed &&
+			diagnostics.Worktree.State != codex.HookFileUnavailable &&
 			!diagnostics.Discovery.ProjectLayerExists() {
 			return nil
 		}
@@ -55,27 +62,18 @@ func codexHookIssueFromDiagnostics(diagnostics codex.HookDiagnostics) *codexHook
 		return issue
 	}
 
-	if diagnostics.PathsDiffer() && diagnostics.Worktree.State == codex.HookFileInvalid {
-		issue.State = codexHookStateInvalidWorktree
-		if diagnostics.Worktree.Err != nil {
-			issue.Error = diagnostics.Worktree.Err.Error()
-		}
-		return issue
-	}
-	if diagnostics.Discovered.State == codex.HookFileInvalid {
-		issue.State = codexHookStateInvalidDiscovered
+	if diagnostics.Discovered.State == codex.HookFileMalformed {
+		issue.State = codexHookStateMalformedDiscovered
 		if diagnostics.Discovered.Err != nil {
 			issue.Error = diagnostics.Discovered.Err.Error()
 		}
 		return issue
 	}
-
-	if diagnostics.PathsDiffer() && diagnostics.Worktree.State == codex.HookFileEntire {
-		if diagnostics.Discovered.State != codex.HookFileEntire {
-			issue.State = codexHookStateInactiveWorktreePath
-			return issue
+	if diagnostics.Discovered.State == codex.HookFileUnavailable {
+		issue.State = codexHookStateUnavailableDiscovered
+		if diagnostics.Discovered.Err != nil {
+			issue.Error = diagnostics.Discovered.Err.Error()
 		}
-		issue.State = codexHookStateWorktreePathNotDiscovered
 		return issue
 	}
 
@@ -85,8 +83,13 @@ func codexHookIssueFromDiagnostics(diagnostics codex.HookDiagnostics) *codexHook
 	}
 
 	if diagnostics.Discovered.State != codex.HookFileEntire {
-		return nil
+		if diagnostics.PathsDiffer() && diagnostics.Worktree.State == codex.HookFileEntire {
+			issue.State = codexHookStateInactiveWorktreePath
+			return issue
+		}
+		return localCodexHookIssue(issue, diagnostics)
 	}
+
 	if !diagnostics.Discovered.Current {
 		issue.State = codexHookStateOutdated
 		issue.MissingHooks = diagnostics.Discovered.Missing
@@ -96,6 +99,31 @@ func codexHookIssueFromDiagnostics(diagnostics codex.HookDiagnostics) *codexHook
 		issue.State = codexHookStateTrustReview
 		issue.MissingApprovals = diagnostics.Trust.Gaps
 		return issue
+	}
+
+	if diagnostics.PathsDiffer() && diagnostics.Worktree.State == codex.HookFileEntire {
+		issue.State = codexHookStateWorktreePathNotDiscovered
+		return issue
+	}
+	return localCodexHookIssue(issue, diagnostics)
+}
+
+func localCodexHookIssue(issue *codexHookIssue, diagnostics codex.HookDiagnostics) *codexHookIssue {
+	switch diagnostics.Worktree.State {
+	case codex.HookFileMalformed:
+		issue.State = codexHookStateMalformedWorktree
+		if diagnostics.Worktree.Err != nil {
+			issue.Error = diagnostics.Worktree.Err.Error()
+		}
+		return issue
+	case codex.HookFileUnavailable:
+		issue.State = codexHookStateUnavailableWorktree
+		if diagnostics.Worktree.Err != nil {
+			issue.Error = diagnostics.Worktree.Err.Error()
+		}
+		return issue
+	case codex.HookFileAbsent, codex.HookFileUserOnly, codex.HookFileEntire:
+		return nil
 	}
 	return nil
 }
@@ -107,10 +135,14 @@ func codexStatusWarning(issue *codexHookIssue) string {
 	switch issue.State {
 	case codexHookStateInactiveWorktreePath:
 		return "Codex hooks are not active in this worktree · run 'entire doctor'"
-	case codexHookStateInvalidWorktree:
-		return "Current-worktree Codex hooks are invalid · run 'entire doctor'"
-	case codexHookStateInvalidDiscovered:
-		return "Codex-discovered hooks are invalid · run 'entire doctor'"
+	case codexHookStateMalformedWorktree:
+		return "Current-worktree Codex hooks are malformed · run 'entire doctor'"
+	case codexHookStateMalformedDiscovered:
+		return "Codex-discovered hooks are malformed · run 'entire doctor'"
+	case codexHookStateUnavailableWorktree:
+		return "Current-worktree Codex hooks are unavailable · run 'entire doctor'"
+	case codexHookStateUnavailableDiscovered:
+		return "Codex-discovered hooks are unavailable · run 'entire doctor'"
 	case codexHookStateProjectLayerMissing:
 		return "Codex project layer missing in this worktree · run 'entire doctor'"
 	case codexHookStateDiscoveryUnresolved:
@@ -133,10 +165,14 @@ func codexSessionStartWarning(issue *codexHookIssue) string {
 	switch issue.State {
 	case codexHookStateInactiveWorktreePath:
 		return "Entire hooks in this worktree are not active; Codex discovers another checkout. Run 'entire doctor'."
-	case codexHookStateInvalidWorktree:
-		return "This worktree's Codex hooks configuration is invalid. Run 'entire doctor'."
-	case codexHookStateInvalidDiscovered:
-		return "Codex-discovered hooks are invalid. Run 'entire doctor'."
+	case codexHookStateMalformedWorktree:
+		return "This worktree's Codex hooks configuration is malformed. Run 'entire doctor'."
+	case codexHookStateMalformedDiscovered:
+		return "Codex-discovered hooks are malformed. Run 'entire doctor'."
+	case codexHookStateUnavailableWorktree:
+		return "This worktree's Codex hooks could not be inspected. Run 'entire doctor'."
+	case codexHookStateUnavailableDiscovered:
+		return "Codex-discovered hooks could not be inspected. Run 'entire doctor'."
 	case codexHookStateProjectLayerMissing:
 		return "This worktree is missing the Codex project layer. Run 'entire doctor'."
 	case codexHookStateDiscoveryUnresolved:

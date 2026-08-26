@@ -718,7 +718,7 @@ func TestCheckCodexHookTrust_MalformedAuthorityReportsInvalid(t *testing.T) {
 	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
 	out := stdout.String()
-	require.Contains(t, out, "Codex hooks: INVALID DISCOVERED CONFIGURATION")
+	require.Contains(t, out, "Codex hooks: MALFORMED DISCOVERED CONFIGURATION")
 	require.Contains(t, out, resolvedHooksPath(t, dir))
 	require.Contains(t, out, "unexpected end of JSON input")
 	require.NotContains(t, out, "✓ Codex hooks: INSTALLED")
@@ -890,11 +890,11 @@ func TestCheckCodexHookTrust_LinkedWorktreeReportsInactiveCurrentWorktreeFile(t 
 	require.Contains(t, out, "Codex hooks: NOT ACTIVE IN THIS WORKTREE")
 	require.Contains(t, out, resolvedHooksPath(t, linkedRoot))
 	require.Contains(t, out, resolvedHooksPath(t, repoRoot))
-	require.Contains(t, out, "Commit .codex/hooks.json and apply that commit to the primary checkout")
-	require.Contains(t, out, "run `entire enable` from the primary checkout")
+	require.Contains(t, out, "Apply the generated .codex/hooks.json change to the discovered checkout")
+	require.Contains(t, out, "run `entire enable` there")
 	require.NotContains(t, out, "migrate")
 	require.Contains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
-	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
+	require.NotContains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
 
 func TestCheckCodexHookTrust_InvalidWorktreePrecedesDiscoveredHooks(t *testing.T) {
@@ -919,10 +919,17 @@ func TestCheckCodexHookTrust_InvalidWorktreePrecedesDiscoveredHooks(t *testing.T
 			cmd, stdout := newTestCmd(t)
 			checkCodexHookTrust(cmd)
 			out := stdout.String()
-			require.Contains(t, out, "Codex hooks: INVALID CURRENT-WORKTREE CONFIGURATION")
-			require.Contains(t, out, resolvedHooksPath(t, linkedRoot))
-			require.Contains(t, out, "redirected directory")
-			require.NotContains(t, out, "INVALID DISCOVERED CONFIGURATION")
+			if test.discovered == "{" {
+				require.Contains(t, out, "Codex hooks: MALFORMED DISCOVERED CONFIGURATION")
+			} else {
+				require.Contains(t, out, "Codex hooks: PROJECT LAYER MISSING")
+			}
+			if test.discovered == "{" {
+				require.Contains(t, out, resolvedHooksPath(t, repoRoot))
+			} else {
+				require.Contains(t, out, filepath.Dir(resolvedHooksPath(t, linkedRoot))+" (missing)")
+			}
+			require.NotContains(t, out, "INVALID CURRENT-WORKTREE CONFIGURATION")
 			require.NotContains(t, out, "✓ Codex hooks: INSTALLED")
 			require.NotContains(t, out, "Codex hook trust: REVIEW NEEDED")
 		})
@@ -990,12 +997,12 @@ func TestCheckCodexHookTrust_LinkedWorktreeReportsMissingProjectLayer(t *testing
 	require.Contains(t, out, "Codex hooks: PROJECT LAYER MISSING")
 	require.Contains(t, out, filepath.Dir(resolvedHooksPath(t, linkedRoot))+" (missing)")
 	require.Contains(t, out, resolvedHooksPath(t, repoRoot))
-	require.Contains(t, out, "will not copy or rewrite hooks in the other checkout")
+	require.Contains(t, out, "apply the generated change there or run `entire enable` in that checkout")
 	require.NotContains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
 	require.NotContains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
 
-func TestCheckCodexHookTrust_LinkedSubmoduleReportsUnresolved(t *testing.T) {
+func TestCheckCodexHookTrust_LinkedSubmoduleUsesCurrentWorktreeFallback(t *testing.T) {
 	linkedSubmoduleRoot := setupLinkedSubmoduleForDoctorTest(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(linkedSubmoduleRoot, ".codex"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(linkedSubmoduleRoot, ".codex", "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
@@ -1003,10 +1010,10 @@ func TestCheckCodexHookTrust_LinkedSubmoduleReportsUnresolved(t *testing.T) {
 
 	cmd, stdout := newTestCmd(t)
 	checkCodexHookTrust(cmd)
-	require.Contains(t, stdout.String(), "Codex hooks: UNRESOLVED")
-	require.Contains(t, stdout.String(), "linked submodules")
+	require.Contains(t, stdout.String(), "Codex hooks: OUT OF DATE")
+	require.NotContains(t, stdout.String(), "Codex hooks: UNRESOLVED")
 	require.Contains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
-	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
+	require.NotContains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
 
 func TestCheckCodexHookTrust_CodexHomeCollisionReportsUnsupported(t *testing.T) {
@@ -1021,8 +1028,7 @@ func TestCheckCodexHookTrust_CodexHomeCollisionReportsUnsupported(t *testing.T) 
 	checkCodexHookTrust(cmd)
 	require.Contains(t, stdout.String(), "Codex hooks: UNRESOLVED")
 	require.Contains(t, stdout.String(), "user-wide")
-	require.Contains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
-	require.Contains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
+	require.NotContains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
 
 func TestSetupAgentHooks_UsesCurrentCheckoutWhenCodexDiscoveryIsUnresolved(t *testing.T) {

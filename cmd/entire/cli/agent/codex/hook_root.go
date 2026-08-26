@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -36,7 +37,6 @@ func (p DiscoveredHooksPath) Path() string {
 type HookDiscovery struct {
 	State           HookDiscoveryState
 	DiscoveredHooks DiscoveredHooksPath
-	RepositoryWide  bool
 	Diagnostic      error
 	worktreeRoot    string
 }
@@ -60,53 +60,108 @@ func (e *UnresolvedHookDiscoveryError) Error() string {
 // ResolveHookDiscovery performs read-only discovery of the hook file Codex is
 // expected to load for the current checkout.
 func ResolveHookDiscovery(ctx context.Context) HookDiscovery {
-	layout, err := gitrepo.ResolveGitLayout(ctx)
+	worktreeRoot, err := resolveWorktreeRoot(ctx)
 	if err != nil {
-		return unresolvedHookDiscoveryAt(layout.WorktreeRoot, "Git layout could not be resolved: "+err.Error())
+		return unresolvedHookDiscoveryAt("", "worktree root could not be resolved: "+err.Error())
 	}
-	return hookDiscoveryFromLayout(layout)
+	return resolveHookDiscovery(worktreeRoot)
 }
 
 func resolveHookDiscovery(worktreeRoot string) HookDiscovery {
-	layout, err := gitrepo.ResolveGitLayoutAt(worktreeRoot)
-	if err != nil {
-		return unresolvedHookDiscoveryAt(layout.WorktreeRoot, "Git layout could not be resolved: "+err.Error())
+	if canonicalRoot, err := canonicalPath(worktreeRoot); err == nil {
+		worktreeRoot = canonicalRoot
 	}
-	return hookDiscoveryFromLayout(layout)
-}
-
-func hookDiscoveryFromLayout(layout gitrepo.GitLayout) HookDiscovery {
 	discovery := HookDiscovery{
 		State:        HookDiscoveryResolved,
-		worktreeRoot: layout.WorktreeRoot,
+		worktreeRoot: worktreeRoot,
 	}
-	root := layout.WorktreeRoot
-
-	switch layout.Kind {
-	case gitrepo.GitLayoutNormal:
-		discovery.RepositoryWide = layout.HasLinkedWorktrees
-	case gitrepo.GitLayoutLinkedWorktree:
-		root = layout.MainWorktreeRoot
-		discovery.RepositoryWide = true
-	case gitrepo.GitLayoutSubmodule, gitrepo.GitLayoutSeparateGitDir:
-	case gitrepo.GitLayoutBareWorktree:
-		return unresolvedHookDiscoveryAt(layout.WorktreeRoot, "Codex behavior for bare-worktree layouts is not pinned")
-	case gitrepo.GitLayoutLinkedSubmodule:
-		return unresolvedHookDiscoveryAt(layout.WorktreeRoot, "Codex behavior for linked submodules is not pinned")
-	case gitrepo.GitLayoutUnresolved:
-		return unresolvedHookDiscoveryAt(layout.WorktreeRoot, "Git layout classification is unresolved")
-	default:
-		return unresolvedHookDiscoveryAt(layout.WorktreeRoot, fmt.Sprintf("unknown Git layout kind %d", layout.Kind))
+	root := worktreeRoot
+	dotGitPath, err := gitrepo.ResolveDotGitPath(worktreeRoot)
+	if err != nil {
+		return unresolvedHookDiscoveryAt(worktreeRoot, "Git layout could not be resolved: "+err.Error())
+	}
+	commonGitPath, err := gitrepo.ResolveCommonGitPath(dotGitPath)
+	if err != nil {
+		return unresolvedHookDiscoveryAt(worktreeRoot, "Git common directory could not be resolved: "+err.Error())
+	}
+	if commonGitPath == "" {
+		commonGitPath = dotGitPath
+		if filepath.Base(filepath.Dir(dotGitPath)) == "worktrees" {
+			commonGitPath = filepath.Dir(filepath.Dir(dotGitPath))
+		}
 	}
 
-	if root == "" {
-		return unresolvedHookDiscoveryAt(layout.WorktreeRoot, "Git layout did not identify a hook root")
+	if isLinkedWorktreeGitDir(dotGitPath) &&
+		!isSubmoduleGitDir(dotGitPath) &&
+		linkedWorktreeRegistrationMatches(dotGitPath, worktreeRoot) {
+		candidate := filepath.Dir(commonGitPath)
+		if rootOwnsGitDir(candidate, commonGitPath) {
+			root = candidate
+		} else if !commonGitDirIsBare(commonGitPath) && !hasDotGitEntry(candidate) {
+			// A separate Git directory has no .git entry at the storage parent;
+			// Codex nevertheless uses that parent as its project root.
+			root = candidate
+		}
 	}
+
 	if isUserHookRoot(root) {
-		return unresolvedHookDiscoveryAt(layout.WorktreeRoot, fmt.Sprintf("derived hook root %q is user-wide", root))
+		return unresolvedHookDiscoveryAt(worktreeRoot, fmt.Sprintf("derived hook root %q is user-wide", root))
 	}
 	discovery.DiscoveredHooks = DiscoveredHooksPath{path: filepath.Join(root, ".codex", HooksFileName)}
 	return discovery
+}
+
+func isLinkedWorktreeGitDir(dotGitPath string) bool {
+	return filepath.Base(filepath.Dir(dotGitPath)) == "worktrees"
+}
+
+func isSubmoduleGitDir(dotGitPath string) bool {
+	return strings.Contains(filepath.ToSlash(dotGitPath), "/.git/modules/")
+}
+
+func linkedWorktreeRegistrationMatches(dotGitPath, worktreeRoot string) bool {
+	data, err := os.ReadFile(filepath.Join(dotGitPath, "gitdir")) //nolint:gosec // path comes from Git metadata.
+	if err != nil {
+		return false
+	}
+	registered := strings.TrimSpace(string(data))
+	if registered == "" {
+		return false
+	}
+	if !filepath.IsAbs(registered) {
+		registered = filepath.Join(dotGitPath, registered)
+	}
+	if filepath.Base(registered) != ".git" {
+		return false
+	}
+	registeredRoot, err := canonicalPath(filepath.Dir(registered))
+	return err == nil && registeredRoot == worktreeRoot
+}
+
+func rootOwnsGitDir(root, commonGitPath string) bool {
+	resolved, err := gitrepo.ResolveDotGitPath(root)
+	if err != nil {
+		return false
+	}
+	resolved, err = canonicalPath(resolved)
+	if err != nil {
+		return false
+	}
+	common, err := canonicalPath(commonGitPath)
+	return err == nil && resolved == common
+}
+
+func hasDotGitEntry(root string) bool {
+	_, err := os.Lstat(filepath.Join(root, ".git"))
+	return err == nil
+}
+
+func commonGitDirIsBare(commonGitPath string) bool {
+	data, err := os.ReadFile(filepath.Join(commonGitPath, "config")) //nolint:gosec // path comes from Git metadata.
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "bare = true")
 }
 
 func unresolvedHookDiscoveryAt(worktreeRoot, reason string) HookDiscovery {

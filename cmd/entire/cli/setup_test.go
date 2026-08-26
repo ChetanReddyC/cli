@@ -2464,8 +2464,8 @@ func assertCodexLinkedWorktreeCleanupOwnership(t *testing.T, action, description
 	if got := readSetupTestFile(t, primaryPath); got != primaryBefore {
 		t.Fatalf("primary hooks changed after linked-worktree %s\nwant: %s\n got: %s", description, primaryBefore, got)
 	}
-	if _, err := os.Stat(linkedPath); !os.IsNotExist(err) {
-		t.Fatalf("linked-worktree hooks still exist after %s: %v", description, err)
+	if data := readSetupTestFile(t, linkedPath); strings.Contains(data, "entire hooks codex") {
+		t.Fatalf("linked-worktree Entire hooks still exist after %s: %s", description, data)
 	}
 }
 

@@ -187,7 +187,7 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 
 	// Codex-only: append a bounded, read-only discovery or trust warning.
 	if ag.Name() == agent.AgentNameCodex {
-		if warning := codexSessionStartWarning(inspectCodexHookIssue(ctx)); warning != "" {
+		if warning := codexSessionStartWarning(inspectCodexSessionStartHookIssue(ctx)); warning != "" {
 			message += " " + warning
 		}
 	}

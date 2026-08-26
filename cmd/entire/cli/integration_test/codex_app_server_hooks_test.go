@@ -34,6 +34,7 @@ func TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout(t *testing.T)
 	env.InitRepo()
 
 	const primaryMarker = "primary-checkout-hook-marker"
+	const linkedMarker = "linked-worktree-hook-marker"
 	env.WriteFile("README.md", "# Test Repository")
 	env.WriteFile(filepath.Join(".codex", codex.HooksFileName), codexHookFixture(primaryMarker))
 	env.GitAdd("README.md", filepath.Join(".codex", codex.HooksFileName))
@@ -56,6 +57,7 @@ func TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout(t *testing.T)
 	require.Empty(t, withoutProjectLayerEntry.Hooks)
 
 	require.NoError(t, os.Mkdir(filepath.Join(linkedDir, ".codex"), 0o750))
+	testutil.WriteFile(t, linkedDir, filepath.Join(".codex", codex.HooksFileName), codexHookFixture(linkedMarker))
 
 	result := listCodexHooks(t, codexPath, linkedDir)
 	require.Len(t, result.Data, 1)
@@ -68,6 +70,7 @@ func TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout(t *testing.T)
 	primaryHooksPath := filepath.Join(env.RepoDir, ".codex", codex.HooksFileName)
 	var foundPrimary bool
 	for _, hook := range entry.Hooks {
+		require.NotEqual(t, linkedMarker, hook.Command, "Codex must not use the linked worktree's shadow hook")
 		if hook.Command == primaryMarker {
 			foundPrimary = true
 			require.Equal(t, primaryHooksPath, hook.SourcePath)

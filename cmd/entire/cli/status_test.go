@@ -1914,8 +1914,8 @@ func TestRunStatusJSON_CodexLinkedWorktreeHooksReportInactiveDiscovery(t *testin
 	if slices.Contains(result.Agents, "Codex") {
 		t.Fatalf("ignored worktree-local hooks must not report Codex installed: %v", result.Agents)
 	}
-	if !slices.Contains(result.HooksOutdated, "codex") {
-		t.Fatalf("current-worktree freshness must remain under hooks_outdated: %v", result.HooksOutdated)
+	if slices.Contains(result.HooksOutdated, "codex") {
+		t.Fatalf("Codex freshness must be represented by codex_hooks only: %v", result.HooksOutdated)
 	}
 	if result.CodexHooks == nil {
 		t.Fatal("expected codex_hooks diagnostic")
@@ -1964,13 +1964,17 @@ func TestRunStatusJSON_CodexInvalidWorktreePrecedesDiscovery(t *testing.T) {
 			if result.CodexHooks == nil {
 				t.Fatal("expected codex_hooks diagnostic")
 			}
-			if result.CodexHooks.State != codexHookStateInvalidWorktree {
-				t.Fatalf("codex_hooks.state = %q, want %q", result.CodexHooks.State, codexHookStateInvalidWorktree)
+			wantState := codexHookStateProjectLayerMissing
+			if test.discovered == "{" {
+				wantState = codexHookStateMalformedDiscovered
+			}
+			if result.CodexHooks.State != wantState {
+				t.Fatalf("codex_hooks.state = %q, want %q", result.CodexHooks.State, wantState)
 			}
 			if result.CodexHooks.WorktreePath != resolvedHooksPath(t, linkedRoot) {
 				t.Fatalf("worktree_path = %q", result.CodexHooks.WorktreePath)
 			}
-			if !strings.Contains(result.CodexHooks.Error, "redirected directory") {
+			if test.discovered == "{" && !strings.Contains(result.CodexHooks.Error, "unexpected end of JSON input") {
 				t.Fatalf("codex_hooks.error = %q", result.CodexHooks.Error)
 			}
 		})

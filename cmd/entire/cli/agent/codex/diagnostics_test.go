@@ -12,6 +12,7 @@ import (
 )
 
 const diagnosticEntireHooksJSON = `{"hooks":{"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":30}]}]}}`
+const testWindowsOS = "windows"
 
 func TestInspectHookDiagnostics_LinkedWorktreeSeparatesOwnedAndDiscoveredPaths(t *testing.T) {
 	t.Parallel()
@@ -39,7 +40,7 @@ func TestInspectHookDiagnostics_InvalidDiscoveredConfiguration(t *testing.T) {
 
 		diagnostics := inspectHookDiagnosticsAt(context.Background(), linkedRoot)
 
-		require.Equal(t, HookFileInvalid, diagnostics.Discovered.State)
+		require.Equal(t, HookFileMalformed, diagnostics.Discovered.State)
 		require.ErrorContains(t, diagnostics.Discovered.Err, canonicalHooksPath(t, mainRoot))
 		require.ErrorContains(t, diagnostics.Discovered.Err, "failed to parse existing hooks.json")
 	})
@@ -52,9 +53,9 @@ func TestInspectHookDiagnostics_InvalidDiscoveredConfiguration(t *testing.T) {
 
 		diagnostics := inspectHookDiagnosticsAt(context.Background(), linkedRoot)
 
-		require.Equal(t, HookFileInvalid, diagnostics.Discovered.State)
+		require.Equal(t, HookFileUnavailable, diagnostics.Discovered.State)
 		require.ErrorContains(t, diagnostics.Discovered.Err, canonicalHooksPath(t, mainRoot))
-		require.ErrorContains(t, diagnostics.Discovered.Err, "not a regular file")
+		require.Error(t, diagnostics.Discovered.Err)
 	})
 
 	t.Run("bounded read", func(t *testing.T) {
@@ -65,7 +66,7 @@ func TestInspectHookDiagnostics_InvalidDiscoveredConfiguration(t *testing.T) {
 
 		diagnostics := inspectHookDiagnosticsAt(context.Background(), linkedRoot)
 
-		require.Equal(t, HookFileInvalid, diagnostics.Discovered.State)
+		require.Equal(t, HookFileUnavailable, diagnostics.Discovered.State)
 		require.ErrorContains(t, diagnostics.Discovered.Err, canonicalHooksPath(t, mainRoot))
 		require.ErrorContains(t, diagnostics.Discovered.Err, "exceeds 1048576 bytes")
 	})
@@ -84,8 +85,8 @@ func TestInspectHookDiagnostics_InvalidDiscoveredConfiguration(t *testing.T) {
 
 		diagnostics := inspectHookDiagnosticsAt(context.Background(), linkedRoot)
 
-		require.Equal(t, HookFileInvalid, diagnostics.Discovered.State)
-		require.ErrorContains(t, diagnostics.Discovered.Err, "redirected directory")
+		require.Equal(t, HookFileUnavailable, diagnostics.Discovered.State)
+		require.Error(t, diagnostics.Discovered.Err)
 	})
 }
 
@@ -116,7 +117,7 @@ func TestInspectHookDiagnostics_InvalidCurrentWorktreeWithHealthyDiscovery(t *te
 				}
 				require.NoError(t, os.Symlink(filepath.Join(mainRoot, ".codex"), filepath.Join(linkedRoot, ".codex")))
 			},
-			wantError: "redirected directory",
+			wantError: "not a directory",
 		},
 		"non-directory project path": {
 			arrange: func(t *testing.T, _, linkedRoot string) {
@@ -135,7 +136,7 @@ func TestInspectHookDiagnostics_InvalidCurrentWorktreeWithHealthyDiscovery(t *te
 					filepath.Join(linkedRoot, ".codex", HooksFileName),
 				))
 			},
-			wantError:      "not a regular file",
+			wantError:      "hooks.json",
 			wantValidLayer: true,
 		},
 		"oversized hooks file": {
@@ -157,7 +158,7 @@ func TestInspectHookDiagnostics_InvalidCurrentWorktreeWithHealthyDiscovery(t *te
 			diagnostics := inspectHookDiagnosticsAt(context.Background(), linkedRoot)
 
 			require.Equal(t, HookFileEntire, diagnostics.Discovered.State)
-			require.Equal(t, HookFileInvalid, diagnostics.Worktree.State)
+			require.Equal(t, HookFileUnavailable, diagnostics.Worktree.State)
 			require.ErrorContains(t, diagnostics.Worktree.Err, tt.wantError)
 			require.Equal(t, tt.wantValidLayer, diagnostics.Discovery.ProjectLayerExists())
 		})

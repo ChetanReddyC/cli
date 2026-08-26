@@ -44,12 +44,12 @@ func TestHookPathAPIs_LinkedWorktreeSeparateDiscoveryFromOwnership(t *testing.T)
 func TestHookPathAPIs_UnresolvedDiscoveryKeepsWorktreeOwnership(t *testing.T) {
 	t.Parallel()
 
-	_, _, featureRoot := setupBareWorktreeLayout(t)
+	featureRoot := setupBareWorktreeLayout(t)
 
 	discovery := resolveHookDiscovery(featureRoot)
 	worktreeHooks, err := resolveWorktreeHooksPath(featureRoot)
 	require.NoError(t, err)
-	require.Equal(t, HookDiscoveryUnresolved, discovery.State)
-	require.Empty(t, discovery.DiscoveredHooks.Path())
+	require.Equal(t, HookDiscoveryResolved, discovery.State)
+	require.Equal(t, canonicalHooksPath(t, filepath.Dir(featureRoot)), discovery.DiscoveredHooks.Path())
 	require.Equal(t, canonicalHooksPath(t, featureRoot), worktreeHooks.Path())
 }

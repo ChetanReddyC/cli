@@ -18,13 +18,22 @@ type HookDiagnostics struct {
 func InspectHookDiagnostics(ctx context.Context) HookDiagnostics {
 	diagnostics := HookDiagnostics{Discovery: ResolveHookDiscovery(ctx)}
 	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
-	return finishHookDiagnostics(ctx, diagnostics, worktreeHooks, err)
+	return finishHookDiagnostics(ctx, diagnostics, worktreeHooks, err, false)
+}
+
+// InspectHookDiagnosticsLightweight collects only the checks safe to run from
+// Codex's SessionStart hook. It avoids freshness probes and platform-specific
+// command checks, which can delay the agent startup path.
+func InspectHookDiagnosticsLightweight(ctx context.Context) HookDiagnostics {
+	diagnostics := HookDiagnostics{Discovery: ResolveHookDiscovery(ctx)}
+	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
+	return finishHookDiagnostics(ctx, diagnostics, worktreeHooks, err, true)
 }
 
 func inspectHookDiagnosticsAt(ctx context.Context, worktreeRoot string) HookDiagnostics {
 	diagnostics := HookDiagnostics{Discovery: resolveHookDiscovery(worktreeRoot)}
 	worktreeHooks, err := resolveWorktreeHooksPath(worktreeRoot)
-	return finishHookDiagnostics(ctx, diagnostics, worktreeHooks, err)
+	return finishHookDiagnostics(ctx, diagnostics, worktreeHooks, err, false)
 }
 
 func finishHookDiagnostics(
@@ -32,24 +41,36 @@ func finishHookDiagnostics(
 	diagnostics HookDiagnostics,
 	worktreeHooks WorktreeHooksPath,
 	err error,
+	lightweight bool,
 ) HookDiagnostics {
 	if err != nil {
 		diagnostics.WorktreePathErr = err
-		diagnostics.Worktree = HookConfigInspection{State: HookFileInvalid, Err: err}
+		diagnostics.Worktree = HookConfigInspection{State: HookFileUnavailable, Err: err}
 	} else {
 		diagnostics.WorktreeHooks = worktreeHooks
-		diagnostics.Worktree = inspectWorktreeHookConfig(ctx, worktreeHooks)
+		if lightweight {
+			diagnostics.Worktree = inspectWorktreeHookConfigLightweight(worktreeHooks)
+		} else {
+			diagnostics.Worktree = inspectWorktreeHookConfig(ctx, worktreeHooks)
+		}
 	}
 
 	if diagnostics.Discovery.State != HookDiscoveryResolved {
 		diagnostics.Discovered = HookConfigInspection{
-			State: HookFileInvalid,
+			State: HookFileUnavailable,
 			Err:   diagnostics.Discovery.Diagnostic,
 		}
 		return diagnostics
 	}
 
-	diagnostics.Discovered = inspectDiscoveredHookConfig(ctx, diagnostics.Discovery.DiscoveredHooks)
+	switch {
+	case diagnostics.WorktreeHooks.Path() == diagnostics.Discovery.DiscoveredHooks.Path() && diagnostics.WorktreeHooks.Path() != "":
+		diagnostics.Discovered = diagnostics.Worktree
+	case lightweight:
+		diagnostics.Discovered = inspectDiscoveredHookConfigLightweight(diagnostics.Discovery.DiscoveredHooks)
+	default:
+		diagnostics.Discovered = inspectDiscoveredHookConfig(ctx, diagnostics.Discovery.DiscoveredHooks)
+	}
 	if diagnostics.Discovery.ProjectLayerExists() && diagnostics.Discovered.State == HookFileEntire {
 		diagnostics.Trust = inspectHookTrustForDeclared(
 			diagnostics.Discovery.DiscoveredHooks.Path(),

@@ -209,9 +209,6 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 
 		// Warn when installed hooks are out of date (read-only; fix is manual).
 		for _, name := range OutdatedHookAgents(ctx) {
-			if name == agent.AgentNameCodex {
-				continue
-			}
 			ag, err := agent.Get(name)
 			if err != nil {
 				continue

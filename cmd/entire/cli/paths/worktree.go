@@ -7,24 +7,6 @@ import (
 	"strings"
 )
 
-// GitDirLayout identifies the structural marker in a checkout's gitdir path.
-type GitDirLayout uint8
-
-const (
-	GitDirLayoutUnrecognized GitDirLayout = iota
-	GitDirLayoutLinkedWorktree
-	GitDirLayoutBareWorktree
-	GitDirLayoutSubmodule
-	GitDirLayoutLinkedSubmodule
-)
-
-// WorktreeGitDir is the parsed structural information from a checkout's
-// resolved gitdir path.
-type WorktreeGitDir struct {
-	Layout     GitDirLayout
-	WorktreeID string
-}
-
 // GetWorktreeID returns the internal git worktree identifier for the given path.
 // For the main worktree (where .git is a directory), returns empty string.
 // For linked worktrees (where .git is a file), extracts the name from
@@ -62,16 +44,6 @@ func GetWorktreeID(worktreePath string) (string, error) {
 }
 
 func parseWorktreeID(gitdir string) (string, bool) {
-	parsed := ParseWorktreeGitDir(gitdir)
-	if parsed.Layout == GitDirLayoutUnrecognized {
-		return "", false
-	}
-	return parsed.WorktreeID, true
-}
-
-// ParseWorktreeGitDir classifies the conventional Git path markers used for
-// linked worktrees, bare-worktree containers, and submodules.
-func ParseWorktreeGitDir(gitdir string) WorktreeGitDir {
 	gitdir = strings.TrimSuffix(strings.ReplaceAll(gitdir, "\\", "/"), "/")
 
 	// Submodule gitdirs live under .git/modules/<path>. If that submodule
@@ -81,29 +53,19 @@ func ParseWorktreeGitDir(gitdir string) WorktreeGitDir {
 	if modulesIndex := strings.LastIndex(gitdir, "/modules/"); modulesIndex >= 0 {
 		afterModules := gitdir[modulesIndex+len("/modules/"):]
 		if _, worktreeID, found := strings.Cut(afterModules, "/worktrees/"); found {
-			return WorktreeGitDir{
-				Layout:     GitDirLayoutLinkedSubmodule,
-				WorktreeID: strings.TrimSuffix(worktreeID, "/"),
-			}
+			return strings.TrimSuffix(worktreeID, "/"), true
 		}
-		return WorktreeGitDir{Layout: GitDirLayoutSubmodule}
+		return "", true
 	}
 
 	// Extract worktree name from path like /repo/.git/worktrees/<name>
 	// or /repo/.bare/worktrees/<name> (bare repo + worktree layout).
 	// The path after the marker is the worktree identifier.
-	if _, worktreeID, found := strings.Cut(gitdir, ".git/worktrees/"); found {
-		return WorktreeGitDir{
-			Layout:     GitDirLayoutLinkedWorktree,
-			WorktreeID: strings.TrimSuffix(worktreeID, "/"),
-		}
-	}
-	if _, worktreeID, found := strings.Cut(gitdir, ".bare/worktrees/"); found {
-		return WorktreeGitDir{
-			Layout:     GitDirLayoutBareWorktree,
-			WorktreeID: strings.TrimSuffix(worktreeID, "/"),
+	for _, marker := range []string{".git/worktrees/", ".bare/worktrees/"} {
+		if _, worktreeID, found := strings.Cut(gitdir, marker); found {
+			return strings.TrimSuffix(worktreeID, "/"), true
 		}
 	}
 
-	return WorktreeGitDir{Layout: GitDirLayoutUnrecognized}
+	return "", false
 }

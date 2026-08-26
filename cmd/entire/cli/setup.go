@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -1597,6 +1598,7 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 	if err := hookAgent.UninstallHooks(ctx); err != nil {
 		return fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err)
 	}
+	warnCodexHooksAfterRemoval(ctx, w, ag)
 
 	fmt.Fprintf(w, "Removed %s hooks.\n", ag.Type())
 	return nil
@@ -1651,6 +1653,7 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 		if err := hookAgent.UninstallHooks(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to uninstall %s hooks: %w", ag.Type(), err))
 		} else {
+			warnCodexHooksAfterRemoval(ctx, w, ag)
 			fmt.Fprintf(w, "Removed %s hooks\n", ag.Type())
 		}
 	}
@@ -1689,6 +1692,7 @@ func setupSelectedAgentHooks(ctx context.Context, w io.Writer, ag agent.Agent, f
 	if writeHookSetupSkipped(w, ag, result) {
 		return false, nil
 	}
+	warnCodexHooksAfterSetup(ctx, w, ag)
 	return true, nil
 }
 
@@ -1714,6 +1718,32 @@ func writeHookSetupSkipped(w io.Writer, ag agent.Agent, result hookSetupResult) 
 	}
 	fmt.Fprintf(w, "  Skipped %s hooks: %v.\n", ag.Type(), result.skipped)
 	return true
+}
+
+func warnCodexHooksAfterSetup(ctx context.Context, w io.Writer, ag agent.Agent) {
+	if ag.Name() != agent.AgentNameCodex {
+		return
+	}
+
+	diagnostics := codexagent.InspectHookDiagnosticsLightweight(ctx)
+	if !diagnostics.PathsDiffer() {
+		return
+	}
+	fmt.Fprintf(w, "  Codex discovers hooks at %s, while this worktree's hooks are at %s. Apply the generated change to the discovered checkout or run `entire enable` there.\n",
+		diagnostics.Discovery.DiscoveredHooks.Path(), diagnostics.WorktreeHooks.Path())
+}
+
+func warnCodexHooksAfterRemoval(ctx context.Context, w io.Writer, ag agent.Agent) {
+	if ag.Name() != agent.AgentNameCodex {
+		return
+	}
+
+	diagnostics := codexagent.InspectHookDiagnosticsLightweight(ctx)
+	if diagnostics.Discovered.State != codexagent.HookFileEntire {
+		return
+	}
+	fmt.Fprintf(w, "  Codex still discovers Entire hooks at %s. Remove them from that checkout or run `entire agent remove --agent codex` there.\n",
+		diagnostics.Discovery.DiscoveredHooks.Path())
 }
 
 func hooksPresentOrOutdated(ctx context.Context, hookAgent agent.HookSupport, ag agent.Agent) bool {
@@ -1937,6 +1967,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if hookSetup.skipped != nil {
 		return fmt.Errorf("cannot enable %s: no agent hooks were installed: %w", ag.Type(), hookSetup.skipped)
 	}
+	warnCodexHooksAfterSetup(ctx, w, ag)
 	if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
 		return err
 	}
@@ -2593,8 +2624,11 @@ func removeAgentHooks(ctx context.Context, w io.Writer) error {
 		wasInstalled := hooksPresentOrOutdated(ctx, hs, ag)
 		if err := hs.UninstallHooks(ctx); err != nil {
 			errs = append(errs, err)
-		} else if wasInstalled {
-			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
+		} else {
+			warnCodexHooksAfterRemoval(ctx, w, ag)
+			if wasInstalled {
+				fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
+			}
 		}
 	}
 	return errors.Join(errs...)

@@ -726,7 +726,8 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 	w := cmd.OutOrStdout()
 	if discovery.State != codex.HookDiscoveryResolved {
 		if diagnostics.Worktree.State != codex.HookFileEntire &&
-			diagnostics.Worktree.State != codex.HookFileInvalid &&
+			diagnostics.Worktree.State != codex.HookFileMalformed &&
+			diagnostics.Worktree.State != codex.HookFileUnavailable &&
 			!discovery.ProjectLayerExists() {
 			return
 		}
@@ -742,12 +743,13 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 	worktreePath := diagnostics.WorktreeHooks.Path()
 	discoveredPath := discovery.DiscoveredHooks.Path()
 	inspection := diagnostics.Discovered
-	if diagnostics.PathsDiffer() && diagnostics.Worktree.State == codex.HookFileInvalid {
-		writeCodexInvalidWorktreeWarning(w, worktreePath, diagnostics.Worktree.Err)
+	if inspection.State == codex.HookFileMalformed || inspection.State == codex.HookFileUnavailable {
+		writeCodexDiscoveredInspectionWarning(w, discoveredPath, inspection.State, inspection.Err)
 		return
 	}
-	if inspection.State == codex.HookFileInvalid {
-		writeCodexInvalidDiscoveredWarning(w, discoveredPath, inspection.Err)
+
+	if diagnostics.Discovered.State == codex.HookFileEntire && !discovery.ProjectLayerExists() {
+		writeCodexMissingProjectLayerWarning(w, filepath.Dir(worktreePath), discoveredPath)
 		return
 	}
 
@@ -764,11 +766,16 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 		writeCodexPrimaryCheckoutRemedy(w)
 	}
 
+	if diagnostics.PathsDiffer() && (diagnostics.Worktree.State == codex.HookFileMalformed || diagnostics.Worktree.State == codex.HookFileUnavailable) {
+		writeCodexWorktreeInspectionWarning(w, worktreePath, diagnostics.Worktree.State, diagnostics.Worktree.Err)
+		return
+	}
+
 	switch inspection.State {
 	case codex.HookFileAbsent, codex.HookFileUserOnly:
 		return
 	case codex.HookFileEntire:
-	case codex.HookFileInvalid:
+	case codex.HookFileMalformed, codex.HookFileUnavailable:
 		return
 	}
 
@@ -828,21 +835,29 @@ func writeCodexInactiveWorktreeWarning(w io.Writer, worktreePath, discoveredPath
 	writeCodexPrimaryCheckoutRemedy(w)
 }
 
-func writeCodexInvalidWorktreeWarning(w io.Writer, worktreePath string, err error) {
-	fmt.Fprintln(w, "Codex hooks: INVALID CURRENT-WORKTREE CONFIGURATION")
+func writeCodexWorktreeInspectionWarning(w io.Writer, worktreePath string, state codex.HookFileState, err error) {
+	if state == codex.HookFileMalformed {
+		fmt.Fprintln(w, "Codex hooks: MALFORMED CURRENT-WORKTREE CONFIGURATION")
+	} else {
+		fmt.Fprintln(w, "Codex hooks: CURRENT-WORKTREE CONFIGURATION UNAVAILABLE")
+	}
 	if worktreePath != "" {
 		fmt.Fprintf(w, "  Current-worktree hooks: %s\n", worktreePath)
 	}
 	fmt.Fprintf(w, "  Error: %v\n", err)
 	fmt.Fprintln(w, "  Fix the current-worktree .codex path or hooks.json file, then run `entire enable --force`.")
-	fmt.Fprintln(w, "  Entire will not follow redirected paths or overwrite an invalid file.")
+	fmt.Fprintln(w, "  This local file may not be the file Codex reads; apply the generated change to the discovered checkout when the paths differ.")
 }
 
-func writeCodexInvalidDiscoveredWarning(w io.Writer, discoveredPath string, err error) {
-	fmt.Fprintln(w, "Codex hooks: INVALID DISCOVERED CONFIGURATION")
+func writeCodexDiscoveredInspectionWarning(w io.Writer, discoveredPath string, state codex.HookFileState, err error) {
+	if state == codex.HookFileMalformed {
+		fmt.Fprintln(w, "Codex hooks: MALFORMED DISCOVERED CONFIGURATION")
+	} else {
+		fmt.Fprintln(w, "Codex hooks: DISCOVERED CONFIGURATION UNAVAILABLE")
+	}
 	fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
 	fmt.Fprintf(w, "  Error: %v\n", err)
-	fmt.Fprintln(w, "  Fix the discovered file in its owning checkout; Entire will not modify it from this worktree.")
+	fmt.Fprintln(w, "  Fix the discovered file in its owning checkout, or run `entire enable` there.")
 }
 
 func writeCodexMissingProjectLayerWarning(w io.Writer, projectLayerPath, discoveredPath string) {
@@ -851,12 +866,12 @@ func writeCodexMissingProjectLayerWarning(w io.Writer, projectLayerPath, discove
 	fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
 	fmt.Fprintln(w, "  Current Codex needs the local .codex project layer before it loads the discovered file.")
 	fmt.Fprintln(w, "  Run `entire enable` from this worktree to create the local layer;")
-	fmt.Fprintln(w, "  it will not copy or rewrite hooks in the other checkout.")
+	fmt.Fprintln(w, "  If Codex reads another checkout's file, apply the generated change there or run `entire enable` in that checkout.")
 }
 
 func writeCodexPrimaryCheckoutRemedy(w io.Writer) {
-	fmt.Fprintln(w, "  Commit .codex/hooks.json and apply that commit to the primary checkout,")
-	fmt.Fprintln(w, "  or run `entire enable` from the primary checkout.")
+	fmt.Fprintln(w, "  Apply the generated .codex/hooks.json change to the discovered checkout,")
+	fmt.Fprintln(w, "  or run `entire enable` there.")
 }
 
 // canDeleteShadowBranch checks if a shadow branch can be safely deleted.

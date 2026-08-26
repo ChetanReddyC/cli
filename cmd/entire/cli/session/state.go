@@ -7,15 +7,16 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -837,15 +838,20 @@ func NewStateStore(ctx context.Context) (*StateStore, error) {
 // the CWD-resolved NewStateStore writes session state into whatever repo the
 // process happens to run in, which is how test fixtures once leaked into a
 // developer's real .git/entire-sessions and hijacked commit linking.
-func NewStateStoreForWorktree(_ context.Context, worktreeRoot string) (*StateStore, error) {
+func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateStore, error) {
 	if worktreeRoot == "" {
 		return nil, errors.New("worktree root required to scope the session state store")
 	}
-	layout, err := gitrepo.ResolveGitLayoutAt(worktreeRoot)
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
+	cmd.Dir = worktreeRoot
+	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("resolve Git layout for %s: %w", worktreeRoot, err)
+		return nil, fmt.Errorf("resolve git common dir for %s: %w", worktreeRoot, err)
 	}
-	commonDir := layout.CommonDir
+	commonDir := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(worktreeRoot, commonDir)
+	}
 	// Same go-test guard as NewStateStore: an explicit root computed from the
 	// process CWD in a non-isolated test is just as accidental as the CWD
 	// itself.
@@ -1106,22 +1112,55 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 
 // ClearGitCommonDirCache clears the cached git common dir.
 // Useful for testing when changing directories.
+var (
+	gitCommonDirMu       sync.RWMutex
+	gitCommonDirCache    string
+	gitCommonDirCacheDir string
+)
+
 func ClearGitCommonDirCache() {
-	gitrepo.ClearGitLayoutCache()
+	gitCommonDirMu.Lock()
+	gitCommonDirCache = ""
+	gitCommonDirCacheDir = ""
+	gitCommonDirMu.Unlock()
 }
 
 // GetGitCommonDir returns the .git common directory for the current working
 // directory. In a regular checkout this is .git/; in a worktree, it's the
-// main repo's .git/ (not .git/worktrees/<name>/). Resolution and memoization
-// are shared with other Git-layout consumers.
+// main repo's .git/ (not .git/worktrees/<name>/). Result is cached per working
+// directory.
 func GetGitCommonDir(ctx context.Context) (string, error) {
 	return getGitCommonDir(ctx)
 }
 
 func getGitCommonDir(ctx context.Context) (string, error) {
-	layout, err := gitrepo.ResolveGitLayout(ctx)
+	cwd, err := os.Getwd() //nolint:forbidigo // used for cache key, not git-relative paths
 	if err != nil {
-		return "", fmt.Errorf("resolve Git layout: %w", err)
+		cwd = ""
 	}
-	return layout.CommonDir, nil
+
+	gitCommonDirMu.RLock()
+	if gitCommonDirCache != "" && gitCommonDirCacheDir == cwd {
+		cached := gitCommonDirCache
+		gitCommonDirMu.RUnlock()
+		return cached, nil
+	}
+	gitCommonDirMu.RUnlock()
+
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get git common dir: %w", err)
+	}
+
+	commonDir := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(cwd, commonDir)
+	}
+
+	gitCommonDirMu.Lock()
+	gitCommonDirCache = commonDir
+	gitCommonDirCacheDir = cwd
+	gitCommonDirMu.Unlock()
+	return commonDir, nil
 }
