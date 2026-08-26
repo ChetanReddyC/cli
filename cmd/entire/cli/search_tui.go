@@ -78,11 +78,13 @@ type searchStyles struct {
 
 // Search palette draws from the shared base16 palette: the primary accent
 // styles titles/tabs/selection, the detail accent frames the detail card, and
-// the link accent is reserved for links inside markdown snippets.
+// the commit accent colors commit nodes/type tags in the result list. Snippet
+// links use the same Cyan/Blue pair as mdrender so markdown reads identically
+// across the CLI.
 const (
 	searchAccent       = palette.Accent  // primary accent (titles, tabs, selection)
 	searchDetailAccent = palette.Accent2 // detail card framing
-	searchLinkAccent   = palette.Blue    // links in markdown snippets
+	searchCommitAccent = palette.Blue    // commit nodes and type tags
 )
 
 func newSearchStyles(ss statusStyles) searchStyles {
@@ -1215,7 +1217,7 @@ func resultNodeStyle(s searchStyles, resultType string, selected bool) lipgloss.
 	case search.TypeSession:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchDetailAccent))
 	case search.TypeCommit:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchLinkAccent))
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchCommitAccent))
 	default: // checkpoint and unknown
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccent))
 	}
@@ -1794,10 +1796,11 @@ func snippetMarkdownStyles(dark bool) ansi.StyleConfig {
 	s.List.Color = nil
 
 	// Links are the one place we *want* a colour: an underline alone is easy
-	// to miss inline.
-	linkColor := searchLinkAccent
+	// to miss inline. Match mdrender's link pair (Cyan URL, Blue link text).
+	linkColor := palette.Cyan
+	linkTextColor := palette.Blue
 	s.Link.Color = &linkColor
-	s.LinkText.Color = &linkColor
+	s.LinkText.Color = &linkTextColor
 
 	return s
 }
