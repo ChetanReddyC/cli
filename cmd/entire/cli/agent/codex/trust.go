@@ -127,20 +127,8 @@ func declaredCodexEventsFromDocument(document *hooksDocument) ([]string, error) 
 		}
 		return nil
 	}
-	for _, event := range []struct {
-		name  string
-		label string
-	}{
-		{name: "SessionStart", label: "session_start"},
-		{name: "SessionEnd", label: "session_end"},
-		{name: "UserPromptSubmit", label: "user_prompt_submit"},
-		{name: "Stop", label: "stop"},
-		{name: "PreToolUse", label: "pre_tool_use"},
-		{name: "PostToolUse", label: "post_tool_use"},
-		{name: "SubagentStart", label: "subagent_start"},
-		{name: "SubagentStop", label: "subagent_stop"},
-	} {
-		if err := add(event.name, event.label); err != nil {
+	for _, event := range HookEventSpecs() {
+		if err := add(event.Event, event.Label); err != nil {
 			return nil, err
 		}
 	}

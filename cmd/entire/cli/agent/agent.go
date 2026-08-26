@@ -161,11 +161,11 @@ type HookFreshness interface {
 	CheckHookConfig(ctx context.Context) HookConfigState
 }
 
-// HookInstallationSkipError marks a permanent limitation that should warn the
-// user without failing setup for other selected agents.
-type HookInstallationSkipError interface {
-	error
-	HookInstallationSkipped()
+// EffectiveHookDiagnostics marks agents whose effective hook state is reported
+// by an agent-owned diagnostic surface rather than generic freshness output.
+type EffectiveHookDiagnostics interface {
+	Agent
+	OwnsEffectiveHookDiagnostics()
 }
 
 // FileWatcher is implemented by agents that use file-based detection.

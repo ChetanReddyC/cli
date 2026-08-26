@@ -167,11 +167,11 @@ func InstalledAgentDisplayNames(ctx context.Context) []string {
 func OutdatedHookAgents(ctx context.Context) []types.AgentName {
 	var outdated []types.AgentName
 	for _, name := range agent.List() {
-		if name == agent.AgentNameCodex {
-			continue
-		}
 		ag, err := agent.Get(name)
 		if err != nil {
+			continue
+		}
+		if _, ownsDiagnostics := ag.(agent.EffectiveHookDiagnostics); ownsDiagnostics {
 			continue
 		}
 		if hf, ok := agent.AsHookFreshness(ag); ok && hf.CheckHookConfig(ctx) == agent.HooksOutdated {

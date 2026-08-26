@@ -31,6 +31,30 @@ func validateWorktreeHookTarget(hooks WorktreeHooksPath) (string, error) {
 	return projectDir, nil
 }
 
+// validateMutableHookTarget permits a missing local project layer, but rejects
+// redirected directories and files before a lifecycle command writes to them.
+func validateMutableHookTarget(hooks WorktreeHooksPath) error {
+	projectDir, err := validateWorktreeHookTarget(hooks)
+	if err != nil {
+		return err
+	}
+	if err := validateExistingProjectDir(projectDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	info, err := os.Lstat(hooks.Path())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect Codex hooks file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("Codex hooks path %q is not a regular file", hooks.Path())
+	}
+	return nil
+}
+
 func validateDiscoveredHookTarget(hooks DiscoveredHooksPath) error {
 	if hooks.path == "" {
 		return errors.New("invalid empty discovered Codex hooks path")

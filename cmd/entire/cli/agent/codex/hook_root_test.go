@@ -68,6 +68,24 @@ func TestResolveHookDiscovery_SupportedFallbackLayouts(t *testing.T) {
 		require.Equal(t, canonicalHooksPath(t, filepath.Dir(featureRoot)), discovery.DiscoveredHooks.Path())
 	})
 
+	t.Run("pointerless bare container falls back to current worktree", func(t *testing.T) {
+		t.Parallel()
+		featureRoot := setupPointerlessBareWorktreeLayout(t)
+
+		discovery := resolveHookDiscovery(featureRoot)
+		require.Equal(t, HookDiscoveryResolved, discovery.State)
+		require.Equal(t, canonicalHooksPath(t, featureRoot), discovery.DiscoveredHooks.Path())
+	})
+
+	t.Run("standalone bare repository falls back to current worktree", func(t *testing.T) {
+		t.Parallel()
+		featureRoot := setupStandaloneBareRepositoryWorktree(t)
+
+		discovery := resolveHookDiscovery(featureRoot)
+		require.Equal(t, HookDiscoveryResolved, discovery.State)
+		require.Equal(t, canonicalHooksPath(t, featureRoot), discovery.DiscoveredHooks.Path())
+	})
+
 	t.Run("linked submodule", func(t *testing.T) {
 		t.Parallel()
 		_, linkedRoot := setupSubmoduleWorktrees(t)
@@ -119,6 +137,32 @@ func setupBareWorktreeLayout(t *testing.T) string {
 	runGit(t, tmp, "clone", "--bare", seedRoot, bareRoot)
 	require.NoError(t, os.WriteFile(filepath.Join(layoutRoot, ".git"), []byte("gitdir: ./.bare\n"), 0o600))
 	runGitWithDir(t, tmp, "--git-dir", bareRoot, "worktree", "add", mainRoot)
+	runGitWithDir(t, tmp, "--git-dir", bareRoot, "worktree", "add", "-b", "feature", featureRoot)
+	return featureRoot
+}
+
+func setupPointerlessBareWorktreeLayout(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	seedRoot := filepath.Join(tmp, "seed")
+	layoutRoot := filepath.Join(tmp, "layout")
+	bareRoot := filepath.Join(layoutRoot, ".bare")
+	featureRoot := filepath.Join(layoutRoot, "feature")
+	initCommittedRepo(t, seedRoot)
+	require.NoError(t, os.MkdirAll(layoutRoot, 0o750))
+	runGit(t, tmp, "clone", "--bare", seedRoot, bareRoot)
+	runGitWithDir(t, tmp, "--git-dir", bareRoot, "worktree", "add", "-b", "feature", featureRoot)
+	return featureRoot
+}
+
+func setupStandaloneBareRepositoryWorktree(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	seedRoot := filepath.Join(tmp, "seed")
+	bareRoot := filepath.Join(tmp, "repo.git")
+	featureRoot := filepath.Join(tmp, "feature")
+	initCommittedRepo(t, seedRoot)
+	runGit(t, tmp, "clone", "--bare", seedRoot, bareRoot)
 	runGitWithDir(t, tmp, "--git-dir", bareRoot, "worktree", "add", "-b", "feature", featureRoot)
 	return featureRoot
 }

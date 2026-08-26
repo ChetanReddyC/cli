@@ -165,6 +165,31 @@ func TestInspectHookDiagnostics_InvalidCurrentWorktreeWithHealthyDiscovery(t *te
 	}
 }
 
+func TestInspectHookDiagnosticsLightweight_RejectsRedirectedProjectLayer(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == testWindowsOS {
+		t.Skip("directory symlinks require privileges on Windows")
+	}
+	mainRoot, linkedRoot := setupDiagnosticLinkedWorktree(t)
+	writeDiagnosticHooks(t, mainRoot, diagnosticEntireHooksJSON)
+	require.NoError(t, os.Symlink(filepath.Join(mainRoot, ".codex"), filepath.Join(linkedRoot, ".codex")))
+
+	discovery := resolveHookDiscovery(linkedRoot)
+	worktreeHooks, err := resolveWorktreeHooksPath(linkedRoot)
+	require.NoError(t, err)
+	diagnostics := finishHookDiagnostics(
+		context.Background(),
+		HookDiagnostics{Discovery: discovery},
+		worktreeHooks,
+		nil,
+		true,
+	)
+
+	require.Equal(t, HookFileUnavailable, diagnostics.Worktree.State)
+	require.ErrorContains(t, diagnostics.Worktree.Err, "not a directory")
+	require.Equal(t, HookFileEntire, diagnostics.Discovered.State)
+}
+
 func setupDiagnosticLinkedWorktree(t *testing.T) (string, string) {
 	t.Helper()
 	tmp := t.TempDir()

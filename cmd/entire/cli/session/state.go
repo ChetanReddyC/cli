@@ -839,6 +839,9 @@ func NewStateStore(ctx context.Context) (*StateStore, error) {
 // process happens to run in, which is how test fixtures once leaked into a
 // developer's real .git/entire-sessions and hijacked commit linking.
 func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateStore, error) {
+	// An empty root would silently degrade to the process CWD (cmd.Dir = ""),
+	// reproducing exactly the accidental-repo leak this constructor exists to
+	// prevent.
 	if worktreeRoot == "" {
 		return nil, errors.New("worktree root required to scope the session state store")
 	}
@@ -1110,14 +1113,16 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 	return states, nil
 }
 
-// ClearGitCommonDirCache clears the cached git common dir.
-// Useful for testing when changing directories.
+// gitCommonDirCache caches the git common dir to avoid repeated subprocess calls.
+// Keyed by working directory to handle directory changes (same pattern as paths.WorktreeRoot).
 var (
 	gitCommonDirMu       sync.RWMutex
 	gitCommonDirCache    string
 	gitCommonDirCacheDir string
 )
 
+// ClearGitCommonDirCache clears the cached git common dir.
+// Useful for testing when changing directories.
 func ClearGitCommonDirCache() {
 	gitCommonDirMu.Lock()
 	gitCommonDirCache = ""
@@ -1127,18 +1132,24 @@ func ClearGitCommonDirCache() {
 
 // GetGitCommonDir returns the .git common directory for the current working
 // directory. In a regular checkout this is .git/; in a worktree, it's the
-// main repo's .git/ (not .git/worktrees/<name>/). Result is cached per working
-// directory.
+// main repo's .git/ (not .git/worktrees/<name>/). Result is cached per
+// working directory. This is a public wrapper around the package-internal
+// helper for callers outside this package.
 func GetGitCommonDir(ctx context.Context) (string, error) {
 	return getGitCommonDir(ctx)
 }
 
+// getGitCommonDir returns the path to the shared git directory.
+// In a regular checkout, this is .git/
+// In a worktree, this is the main repo's .git/ (not .git/worktrees/<name>/)
+// The result is cached per working directory.
 func getGitCommonDir(ctx context.Context) (string, error) {
 	cwd, err := os.Getwd() //nolint:forbidigo // used for cache key, not git-relative paths
 	if err != nil {
 		cwd = ""
 	}
 
+	// Check cache with read lock first
 	gitCommonDirMu.RLock()
 	if gitCommonDirCache != "" && gitCommonDirCacheDir == cwd {
 		cached := gitCommonDirCache
@@ -1147,20 +1158,27 @@ func getGitCommonDir(ctx context.Context) (string, error) {
 	}
 	gitCommonDirMu.RUnlock()
 
+	// Cache miss — resolve via git subprocess
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
+	cmd.Dir = "."
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get git common dir: %w", err)
 	}
 
 	commonDir := strings.TrimSpace(string(output))
+
+	// git rev-parse --git-common-dir returns relative paths from the working directory,
+	// so we need to make it absolute if it isn't already
 	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(cwd, commonDir)
+		commonDir = filepath.Join(".", commonDir)
 	}
+	commonDir = filepath.Clean(commonDir)
 
 	gitCommonDirMu.Lock()
 	gitCommonDirCache = commonDir
 	gitCommonDirCacheDir = cwd
 	gitCommonDirMu.Unlock()
+
 	return commonDir, nil
 }

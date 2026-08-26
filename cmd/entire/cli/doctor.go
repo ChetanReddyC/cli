@@ -690,11 +690,11 @@ func checkHookDrift(cmd *cobra.Command) {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	for _, name := range GetAgentsWithHooksInstalled(ctx) {
-		if name == agent.AgentNameCodex {
-			continue
-		}
 		ag, err := agent.Get(name)
 		if err != nil {
+			continue
+		}
+		if _, ownsDiagnostics := ag.(agent.EffectiveHookDiagnostics); ownsDiagnostics {
 			continue
 		}
 		hf, ok := agent.AsHookFreshness(ag)
@@ -722,81 +722,46 @@ func checkHookDrift(cmd *cobra.Command) {
 // are structural; Entire never computes or copies Codex trust hashes.
 func checkCodexHookTrust(cmd *cobra.Command) {
 	diagnostics := codex.InspectHookDiagnostics(cmd.Context())
-	discovery := diagnostics.Discovery
 	w := cmd.OutOrStdout()
-	if discovery.State != codex.HookDiscoveryResolved {
-		if diagnostics.Worktree.State != codex.HookFileEntire &&
-			diagnostics.Worktree.State != codex.HookFileMalformed &&
-			diagnostics.Worktree.State != codex.HookFileUnavailable &&
-			!discovery.ProjectLayerExists() {
-			return
+	issue := codexHookIssueFromDiagnostics(diagnostics)
+	if issue == nil {
+		if diagnostics.Discovered.State == codex.HookFileEntire && diagnostics.Discovery.ProjectLayerExists() {
+			writeCodexInstalledAndTrust(w, diagnostics)
 		}
-		fmt.Fprintln(w, "Codex hooks: UNRESOLVED")
-		if diagnostics.WorktreeHooks.Path() != "" {
-			fmt.Fprintf(w, "  Current-worktree hooks: %s\n", diagnostics.WorktreeHooks.Path())
-		}
-		fmt.Fprintf(w, "  Entire could not resolve the hooks file Codex discovers: %v\n", discovery.Diagnostic)
-		fmt.Fprintln(w, "  Inspect the Git layout manually; Entire will not guess or write to another checkout.")
 		return
 	}
 
 	worktreePath := diagnostics.WorktreeHooks.Path()
-	discoveredPath := discovery.DiscoveredHooks.Path()
-	inspection := diagnostics.Discovered
-	if inspection.State == codex.HookFileMalformed || inspection.State == codex.HookFileUnavailable {
-		writeCodexDiscoveredInspectionWarning(w, discoveredPath, inspection.State, inspection.Err)
-		return
-	}
-
-	if diagnostics.Discovered.State == codex.HookFileEntire && !discovery.ProjectLayerExists() {
-		writeCodexMissingProjectLayerWarning(w, filepath.Dir(worktreePath), discoveredPath)
-		return
-	}
-
-	if diagnostics.PathsDiffer() && diagnostics.Worktree.State == codex.HookFileEntire {
-		if inspection.State != codex.HookFileEntire {
-			writeCodexInactiveWorktreeWarning(w, worktreePath, discoveredPath)
-			return
+	discoveredPath := diagnostics.Discovery.DiscoveredHooks.Path()
+	switch issue.State {
+	case codexHookStateDiscoveryUnresolved:
+		fmt.Fprintln(w, "Codex hooks: UNRESOLVED")
+		if worktreePath != "" {
+			fmt.Fprintf(w, "  Current-worktree hooks: %s\n", worktreePath)
 		}
-
+		fmt.Fprintf(w, "  Entire could not resolve the hooks file Codex discovers: %v\n", diagnostics.Discovery.Diagnostic)
+		fmt.Fprintln(w, "  Inspect the Git layout manually; Entire will not guess or write to another checkout.")
+	case codexHookStateMalformedDiscovered, codexHookStateUnavailableDiscovered:
+		writeCodexDiscoveredInspectionWarning(w, discoveredPath, diagnostics.Discovered.State, diagnostics.Discovered.Err)
+	case codexHookStateProjectLayerMissing:
+		writeCodexMissingProjectLayerWarning(w, filepath.Dir(worktreePath), discoveredPath)
+	case codexHookStateInactiveWorktreePath:
+		writeCodexInactiveWorktreeWarning(w, worktreePath, discoveredPath)
+	case codexHookStateWorktreePathNotDiscovered:
 		fmt.Fprintln(w, "Codex hooks: CURRENT-WORKTREE FILE NOT DISCOVERED")
 		fmt.Fprintf(w, "  Current-worktree hooks: %s\n", worktreePath)
 		fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
 		fmt.Fprintln(w, "  Codex is active from the discovered file; changes to this worktree's file do not affect it.")
 		writeCodexPrimaryCheckoutRemedy(w)
-	}
-
-	if diagnostics.PathsDiffer() && (diagnostics.Worktree.State == codex.HookFileMalformed || diagnostics.Worktree.State == codex.HookFileUnavailable) {
+	case codexHookStateMalformedWorktree, codexHookStateUnavailableWorktree:
 		writeCodexWorktreeInspectionWarning(w, worktreePath, diagnostics.Worktree.State, diagnostics.Worktree.Err)
-		return
-	}
-
-	switch inspection.State {
-	case codex.HookFileAbsent, codex.HookFileUserOnly:
-		return
-	case codex.HookFileEntire:
-	case codex.HookFileMalformed, codex.HookFileUnavailable:
-		return
-	}
-
-	if !discovery.ProjectLayerExists() {
-		writeCodexMissingProjectLayerWarning(w, filepath.Dir(worktreePath), discoveredPath)
-		return
-	}
-	missing := inspection.Missing
-	trust := diagnostics.Trust
-
-	if inspection.CoreInstalled {
-		fmt.Fprintln(w, "✓ Codex hooks: INSTALLED")
-		fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
-	}
-
-	if !inspection.Current {
+	case codexHookStateOutdated:
+		writeCodexInstalledAndTrust(w, diagnostics)
 		fmt.Fprintln(w, "Codex hooks: OUT OF DATE")
 		fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
-		if len(missing) > 0 {
-			fmt.Fprintf(w, "  %d hook(s) the CLI installs today aren't declared there:\n", len(missing))
-			for _, ev := range missing {
+		if len(diagnostics.Discovered.Missing) > 0 {
+			fmt.Fprintf(w, "  %d hook(s) the CLI installs today aren't declared there:\n", len(diagnostics.Discovered.Missing))
+			for _, ev := range diagnostics.Discovered.Missing {
 				fmt.Fprintf(w, "    - %s\n", ev)
 			}
 		} else {
@@ -807,21 +772,29 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 		} else {
 			fmt.Fprintln(w, "  Run `entire enable --force` from this worktree to refresh it.")
 		}
+	case codexHookStateTrustReview:
+		writeCodexInstalledAndTrust(w, diagnostics)
 	}
+}
 
+func writeCodexInstalledAndTrust(w io.Writer, diagnostics codex.HookDiagnostics) {
+	if diagnostics.Discovered.CoreInstalled {
+		fmt.Fprintln(w, "✓ Codex hooks: INSTALLED")
+		fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", diagnostics.Discovery.DiscoveredHooks.Path())
+	}
 	switch {
-	case len(trust.Declared) > 0 && !trust.Known:
+	case len(diagnostics.Trust.Declared) > 0 && !diagnostics.Trust.Known:
 		fmt.Fprintln(w, "Codex hook trust: UNKNOWN")
 		fmt.Fprintln(w, "  The hooks are installed, but Codex's local approval records could not be read.")
 		fmt.Fprintln(w, "  Open /hooks inside Codex to review their active state.")
-	case len(trust.Gaps) > 0:
+	case len(diagnostics.Trust.Gaps) > 0:
 		fmt.Fprintln(w, "Codex hook trust: REVIEW NEEDED")
-		fmt.Fprintf(w, "  %d installed hook(s) have no approval record at the Codex-discovered path:\n", len(trust.Gaps))
-		for _, ev := range trust.Gaps {
+		fmt.Fprintf(w, "  %d installed hook(s) have no approval record at the Codex-discovered path:\n", len(diagnostics.Trust.Gaps))
+		for _, ev := range diagnostics.Trust.Gaps {
 			fmt.Fprintf(w, "    - %s\n", ev)
 		}
 		fmt.Fprintln(w, "  Open /hooks inside Codex to approve them.")
-	case len(trust.Declared) > 0:
+	case len(diagnostics.Trust.Declared) > 0:
 		fmt.Fprintln(w, "✓ Codex hook approval records: PRESENT")
 	}
 }

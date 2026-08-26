@@ -1063,10 +1063,9 @@ func TestSetupAgentHooks_UsesCurrentCheckoutWhenCodexDiscoveryIsUnresolved(t *te
 	t.Setenv("CODEX_HOME", filepath.Join(repoRoot, ".codex"))
 	ag := &codex.CodexAgent{}
 
-	result, err := setupAgentHooks(context.Background(), ag, false)
+	installed, err := setupAgentHooks(context.Background(), ag, false)
 	require.NoError(t, err)
-	require.NoError(t, result.skipped)
-	require.Equal(t, 7, result.installed)
+	require.Equal(t, 7, installed)
 	require.FileExists(t, filepath.Join(linkedRoot, ".codex", "hooks.json"))
 	require.NoFileExists(t, filepath.Join(repoRoot, ".codex", "hooks.json"))
 }

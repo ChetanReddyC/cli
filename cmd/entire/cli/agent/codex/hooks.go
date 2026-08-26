@@ -13,7 +13,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // HooksFileName is the hooks config file used by Codex.
@@ -25,10 +24,39 @@ const maxHooksFileBytes = 1 << 20
 // run between turns, where Codex allows up to its standard 600s.
 const defaultHookTimeoutSec = 30
 
-// managedHook describes one hooks.json event Entire owns. Keeping the event
-// key, verb, timeout and production wrapper together means adding or removing
-// an event is a single table edit rather than parallel edits in InstallHooks,
-// UninstallHooks and AreHooksInstalled.
+// HookEventSpec is the shared Codex event metadata used by installation,
+// trust inspection, and the Codex integration tests.
+type HookEventSpec struct {
+	Event       string
+	Label       string
+	Verb        string
+	Timeout     int
+	Managed     bool
+	Core        bool
+	JSONWarning bool
+}
+
+var hookEventSpecs = []HookEventSpec{
+	{Event: "SessionStart", Label: "session_start", Verb: HookNameSessionStart, Timeout: defaultHookTimeoutSec, Managed: true, Core: true, JSONWarning: true},
+	{Event: "SessionEnd", Label: "session_end", Verb: HookNameSessionEnd, Timeout: SessionEndTimeoutSec, Managed: true},
+	{Event: "UserPromptSubmit", Label: "user_prompt_submit", Verb: HookNameUserPromptSubmit, Timeout: defaultHookTimeoutSec, Managed: true, Core: true},
+	{Event: "Stop", Label: "stop", Verb: HookNameStop, Timeout: defaultHookTimeoutSec, Managed: true, Core: true},
+	{Event: "PostToolUse", Label: "post_tool_use", Verb: HookNamePostToolUse, Timeout: defaultHookTimeoutSec, Managed: true, Core: true},
+	{Event: "SubagentStart", Label: "subagent_start", Verb: HookNameSubagentStart, Timeout: defaultHookTimeoutSec, Managed: true},
+	{Event: "SubagentStop", Label: "subagent_stop", Verb: HookNameSubagentStop, Timeout: defaultHookTimeoutSec, Managed: true},
+	{Event: "PreToolUse", Label: "pre_tool_use"},
+	{Event: "PermissionRequest", Label: "permission_request"},
+	{Event: "PreCompact", Label: "pre_compact"},
+	{Event: "PostCompact", Label: "post_compact"},
+}
+
+// HookEventSpecs returns a copy so callers cannot mutate the canonical table.
+func HookEventSpecs() []HookEventSpec {
+	return append([]HookEventSpec(nil), hookEventSpecs...)
+}
+
+// managedHook adds the platform-specific command wrapper to one canonical
+// event specification.
 type managedHook struct {
 	event   string // hooks.json key
 	label   string // Codex trust-state key
@@ -42,46 +70,42 @@ type managedHook struct {
 	core bool
 }
 
-// managedHooks is the full set of Codex events Entire installs.
-var managedHooks = []managedHook{
-	{event: "SessionStart", label: "session_start", verb: HookNameSessionStart, timeout: defaultHookTimeoutSec, core: true, wrap: func(cmd string, windows bool) string {
-		return agent.WrapProductionJSONWarningHookCommandForOS(cmd, agent.WarningFormatSingleLine, windows)
-	}},
-	// SessionEnd is the one event Codex clamps: it caps handlers at
-	// SESSION_END_MAX_TIMEOUT_SEC and warns at every startup when a config asks
-	// for more, so it is installed at exactly the ceiling. See SessionEndTimeoutSec.
-	//
-	// Not core: it postdates the four events below, so requiring it would
-	// un-enable Codex for everyone who enabled it before this release.
-	{event: "SessionEnd", label: "session_end", verb: HookNameSessionEnd, timeout: SessionEndTimeoutSec, wrap: agent.WrapProductionSilentHookCommandForOS},
-	{event: "UserPromptSubmit", label: "user_prompt_submit", verb: HookNameUserPromptSubmit, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
-	{event: "Stop", label: "stop", verb: HookNameStop, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
-	{event: "PostToolUse", label: "post_tool_use", verb: HookNamePostToolUse, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
-	// Codex keys hooks.json by PascalCase event name (its own fixtures do the
-	// same), even though HookEventName serializes snake_case elsewhere in its
-	// protocol — following that would install hooks that never fire.
-	//
-	// Not core, for the same reason as SessionEnd: both postdate the four events
-	// above, so requiring them would un-enable Codex for anyone who enabled it
-	// before this release.
-	{event: "SubagentStart", label: "subagent_start", verb: HookNameSubagentStart, timeout: defaultHookTimeoutSec, wrap: agent.WrapProductionSilentHookCommandForOS},
-	{event: "SubagentStop", label: "subagent_stop", verb: HookNameSubagentStop, timeout: defaultHookTimeoutSec, wrap: agent.WrapProductionSilentHookCommandForOS},
+func buildManagedHooks() []managedHook {
+	managed := make([]managedHook, 0, len(hookEventSpecs))
+	for _, spec := range hookEventSpecs {
+		if !spec.Managed {
+			continue
+		}
+		wrap := agent.WrapProductionSilentHookCommandForOS
+		if spec.JSONWarning {
+			wrap = func(cmd string, windows bool) string {
+				return agent.WrapProductionJSONWarningHookCommandForOS(cmd, agent.WarningFormatSingleLine, windows)
+			}
+		}
+		managed = append(managed, managedHook{
+			event: spec.Event, label: spec.Label, verb: spec.Verb,
+			timeout: spec.Timeout, core: spec.Core, wrap: wrap,
+		})
+	}
+	return managed
 }
+
+var managedHooks = buildManagedHooks()
 
 // InstallHooks installs Codex hooks in .codex/hooks.json.
 func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests)
-		if err != nil {
-			return 0, fmt.Errorf("failed to get current directory: %w", err)
-		}
-	}
-
-	hooksPath := filepath.Join(repoRoot, ".codex", HooksFileName)
-	existingData, exists, err := readHooksFileForMutation(hooksPath)
+	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
 	if err != nil {
 		return 0, err
+	}
+	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+		return 0, err
+	}
+	hooksPath := worktreeHooks.Path()
+	existingData, readErr := os.ReadFile(hooksPath) //nolint:gosec // validated against the current worktree
+	exists := readErr == nil
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return 0, fmt.Errorf("read Codex hooks file %q: %w", hooksPath, readErr)
 	}
 	var rawHooks map[string]json.RawMessage
 	if exists {
@@ -137,6 +161,9 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o750); err != nil {
 		return 0, fmt.Errorf("failed to create .codex directory: %w", err)
 	}
+	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+		return 0, err
+	}
 	output, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks.json: %w", err)
@@ -155,17 +182,20 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 
 // UninstallHooks removes Entire hooks from Codex hooks.json.
 func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		repoRoot = "."
-	}
-	hooksPath := filepath.Join(repoRoot, ".codex", HooksFileName)
-	data, exists, err := readHooksFileForMutation(hooksPath)
+	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
 	if err != nil {
 		return err
 	}
-	if !exists {
+	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+		return err
+	}
+	hooksPath := worktreeHooks.Path()
+	data, err := os.ReadFile(hooksPath) //nolint:gosec // validated against the current worktree
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read Codex hooks file %q: %w", hooksPath, err)
 	}
 	var topLevel map[string]json.RawMessage
 	if err := json.Unmarshal(data, &topLevel); err != nil {
@@ -200,6 +230,9 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal hooks.json: %w", err)
 	}
+	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+		return err
+	}
 	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
 		return fmt.Errorf("failed to write hooks.json: %w", err)
 	}
@@ -216,12 +249,18 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 // against today's set is part of hook-config inspection, which `entire doctor`
 // reports with the fix (`entire enable`).
 func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
 	if err != nil {
-		repoRoot = "."
+		return false
 	}
-	data, exists, err := readHooksFileForMutation(filepath.Join(repoRoot, ".codex", HooksFileName))
-	if err != nil || !exists {
+	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+		return false
+	}
+	data, err := os.ReadFile(worktreeHooks.Path()) //nolint:gosec // validated against the current worktree
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
 		return false
 	}
 	var topLevel map[string]json.RawMessage
@@ -356,7 +395,14 @@ func inspectDiscoveredHookConfig(ctx context.Context, hooks DiscoveredHooksPath)
 }
 
 func inspectWorktreeHookConfigLightweight(hooks WorktreeHooksPath) HookConfigInspection {
-	if _, err := validateWorktreeHookTarget(hooks); err != nil {
+	projectDir, err := validateWorktreeHookTarget(hooks)
+	if err != nil {
+		return HookConfigInspection{State: HookFileUnavailable, Err: err}
+	}
+	if err := validateExistingProjectDir(projectDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return HookConfigInspection{State: HookFileAbsent}
+		}
 		return HookConfigInspection{State: HookFileUnavailable, Err: err}
 	}
 	return inspectHookConfigLightweightAt(hooks.Path())
@@ -519,26 +565,6 @@ func readHooksDocument(path string) (*hooksDocument, error) {
 		document.rawHooks = make(map[string]json.RawMessage)
 	}
 	return document, nil
-}
-
-func readHooksFileForMutation(path string) ([]byte, bool, error) {
-	file, err := os.Open(path) //nolint:gosec // path is derived from the current worktree root
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("read Codex hooks file %q: %w", path, err)
-	}
-	defer file.Close()
-
-	data, err := io.ReadAll(io.LimitReader(file, maxHooksFileBytes+1))
-	if err != nil {
-		return nil, false, fmt.Errorf("read Codex hooks file %q: %w", path, err)
-	}
-	if len(data) > maxHooksFileBytes {
-		return nil, false, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
-	}
-	return data, true, nil
 }
 
 func hookFileStateForReadError(err error) HookFileState {

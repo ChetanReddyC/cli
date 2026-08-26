@@ -427,7 +427,7 @@ func selectAllAgents(available []string) ([]string, error) {
 // hookAgentOptions builds selector options for every registered agent that
 // supports hooks and isn't test-only (e.g. the Vogon canary), preselecting
 // the names in selected.
-func hookAgentOptions(_ context.Context, selected map[types.AgentName]struct{}) []huh.Option[string] {
+func hookAgentOptions(selected map[types.AgentName]struct{}) []huh.Option[string] {
 	agentNames := agent.List()
 	options := make([]huh.Option[string], 0, len(agentNames))
 	for _, name := range agentNames {
@@ -453,7 +453,7 @@ func hookAgentOptions(_ context.Context, selected map[types.AgentName]struct{}) 
 // runManageAgents shows which agents are currently enabled and lets the user
 // add or remove agents. Deselecting an installed agent removes its hooks.
 func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selectFn func(available []string) ([]string, error)) error {
-	installedNames := removableAgentHookNames(ctx)
+	installedNames := GetAgentsWithHooksInstalled(ctx)
 
 	// Show currently installed agents
 	if len(installedNames) > 0 {
@@ -496,7 +496,7 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 	// during setup the setting doesn't exist yet.
 	external.DiscoverAndRegisterAlways(ctx)
 
-	options := hookAgentOptions(ctx, installedSet)
+	options := hookAgentOptions(installedSet)
 	if len(options) == 0 {
 		return errors.New("no agents with hook support available")
 	}
@@ -606,10 +606,25 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		}
 		return nil
 	}
-	successfullyAddedAgents, setupErrs := setupAgentHookSet(ctx, w, addedAgents, opts.ForceHooks)
-	errs = append(errs, setupErrs...)
-	successfullyReinstalledAgents, setupErrs := setupAgentHookSet(ctx, w, reinstalledAgents, opts.ForceHooks)
-	errs = append(errs, setupErrs...)
+	var successfullyAddedAgents []agent.Agent
+	for _, ag := range addedAgents {
+		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
+			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
+		} else {
+			warnCodexHooksAfterSetup(ctx, w, ag)
+			successfullyAddedAgents = append(successfullyAddedAgents, ag)
+		}
+	}
+
+	var successfullyReinstalledAgents []agent.Agent
+	for _, ag := range reinstalledAgents {
+		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
+			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
+		} else {
+			warnCodexHooksAfterSetup(ctx, w, ag)
+			successfullyReinstalledAgents = append(successfullyReinstalledAgents, ag)
+		}
+	}
 
 	var uninstalledAgents []agent.Agent
 	for _, ag := range removedAgents {
@@ -1241,13 +1256,11 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	}
 
 	// Setup agent hooks for all selected agents
-	hasHookCoverage := false
 	for _, ag := range agents {
-		installed, err := setupSelectedAgentHooks(ctx, w, ag, opts.ForceHooks)
-		if err != nil {
+		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
 		}
-		hasHookCoverage = hasHookCoverage || installed
+		warnCodexHooksAfterSetup(ctx, w, ag)
 		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
 			return err
 		}
@@ -1255,10 +1268,6 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 			return err
 		}
 	}
-	if !hasHookCoverage {
-		return errors.New("cannot enable Entire: no agent hooks were installed")
-	}
-
 	// Setup .entire directory
 	if _, err := setupEntireDirectory(ctx); err != nil {
 		return fmt.Errorf("failed to setup .entire directory: %w", err)
@@ -1590,7 +1599,7 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 		return fmt.Errorf("agent %s does not support hooks", name)
 	}
 
-	if !hooksPresentOrOutdated(ctx, hookAgent, ag) {
+	if !hookAgent.AreHooksInstalled(ctx) {
 		fmt.Fprintf(w, "%s hooks are not installed.\n", ag.Type())
 		return nil
 	}
@@ -1627,7 +1636,7 @@ func checkDisabledGuard(ctx context.Context, w io.Writer) bool {
 // installed but are not in the selected list. This handles the case where a user
 // re-runs `entire enable` and deselects an agent.
 func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAgents []agent.Agent) error {
-	installedNames := removableAgentHookNames(ctx)
+	installedNames := GetAgentsWithHooksInstalled(ctx)
 	if len(installedNames) == 0 {
 		return nil
 	}
@@ -1660,64 +1669,20 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 	return errors.Join(errs...)
 }
 
-type hookSetupResult struct {
-	installed int
-	skipped   error
-}
-
 // setupAgentHooks sets up hooks for a given agent.
-func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (hookSetupResult, error) {
+// Returns the number of hooks installed (0 if already installed).
+func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int, error) {
 	hookAgent, ok := agent.AsHookSupport(ag)
 	if !ok {
-		return hookSetupResult{}, fmt.Errorf("agent %s does not support hooks", ag.Name())
+		return 0, fmt.Errorf("agent %s does not support hooks", ag.Name())
 	}
 
 	count, err := hookAgent.InstallHooks(ctx, forceHooks)
 	if err != nil {
-		var skipped agent.HookInstallationSkipError
-		if errors.As(err, &skipped) {
-			return hookSetupResult{skipped: err}, nil
-		}
-		return hookSetupResult{}, fmt.Errorf("failed to install %s hooks: %w", ag.Name(), err)
+		return 0, fmt.Errorf("failed to install %s hooks: %w", ag.Name(), err)
 	}
 
-	return hookSetupResult{installed: count}, nil
-}
-
-func setupSelectedAgentHooks(ctx context.Context, w io.Writer, ag agent.Agent, forceHooks bool) (bool, error) {
-	result, err := setupAgentHooks(ctx, ag, forceHooks)
-	if err != nil {
-		return false, err
-	}
-	if writeHookSetupSkipped(w, ag, result) {
-		return false, nil
-	}
-	warnCodexHooksAfterSetup(ctx, w, ag)
-	return true, nil
-}
-
-func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) ([]agent.Agent, []error) {
-	var successful []agent.Agent
-	var errs []error
-	for _, ag := range agents {
-		installed, err := setupSelectedAgentHooks(ctx, w, ag, forceHooks)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
-			continue
-		}
-		if installed {
-			successful = append(successful, ag)
-		}
-	}
-	return successful, errs
-}
-
-func writeHookSetupSkipped(w io.Writer, ag agent.Agent, result hookSetupResult) bool {
-	if result.skipped == nil {
-		return false
-	}
-	fmt.Fprintf(w, "  Skipped %s hooks: %v.\n", ag.Type(), result.skipped)
-	return true
+	return count, nil
 }
 
 func warnCodexHooksAfterSetup(ctx context.Context, w io.Writer, ag agent.Agent) {
@@ -1750,14 +1715,6 @@ func warnCodexHooksAfterRemoval(ctx context.Context, w io.Writer, ag agent.Agent
 	fmt.Fprintln(w, "  Remove them from that discovered project root.")
 	fmt.Fprintln(w, "  If it is a Git checkout, run `entire agent remove --agent codex` from that checkout.")
 	fmt.Fprintln(w, "  In a .bare layout, the discovered project root is not a worktree; edit that file directly.")
-}
-
-func hooksPresentOrOutdated(ctx context.Context, hookAgent agent.HookSupport, ag agent.Agent) bool {
-	if hookAgent.AreHooksInstalled(ctx) {
-		return true
-	}
-	freshness, ok := ag.(agent.HookFreshness)
-	return ok && freshness.CheckHookConfig(ctx) == agent.HooksOutdated
 }
 
 // promptAgentSelection shows the interactive multi-select agent picker and
@@ -1875,7 +1832,7 @@ func detectOrSelectAgent(ctx context.Context, w io.Writer, selectFn func(availab
 		}
 	}
 
-	options := hookAgentOptions(ctx, preSelectedSet)
+	options := hookAgentOptions(preSelectedSet)
 	if len(options) == 0 {
 		return nil, errors.New("no agents with hook support available")
 	}
@@ -1966,12 +1923,9 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	fmt.Fprintf(w, "  Agent: %s\n", ag.Type())
 
 	// Install agent hooks (agent hooks don't depend on settings)
-	hookSetup, err := setupAgentHooks(ctx, ag, opts.ForceHooks)
+	installedHooks, err := setupAgentHooks(ctx, ag, opts.ForceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
-	}
-	if hookSetup.skipped != nil {
-		return fmt.Errorf("cannot enable %s: no agent hooks were installed: %w", ag.Type(), hookSetup.skipped)
 	}
 	warnCodexHooksAfterSetup(ctx, w, ag)
 	if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
@@ -2065,14 +2019,14 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	}
 	strategy.CheckAndWarnHookManagers(ctx, w, hookAbsoluteGitHookPath)
 
-	if hookSetup.installed == 0 {
+	if installedHooks == 0 {
 		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
 		if ag.IsPreview() {
 			msg += " (Preview)"
 		}
 		fmt.Fprintf(w, "  %s\n", msg)
 	} else {
-		msg := fmt.Sprintf("Installed %d hooks for %s", hookSetup.installed, ag.Description())
+		msg := fmt.Sprintf("Installed %d hooks for %s", installedHooks, ag.Description())
 		if ag.IsPreview() {
 			msg += " (Preview)"
 		}
@@ -2474,7 +2428,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// version is stale but still ours, and uninstall must still offer to remove
 	// it rather than reporting that Entire is not installed here.
 	gitHooksInstalled := strategy.AnyGitHookInstalled(ctx)
-	agentsWithRemovableHooks := removableAgentHookNames(ctx)
+	agentsWithRemovableHooks := GetAgentsWithHooksInstalled(ctx)
 	entireDirExists := checkEntireDirExists(ctx)
 
 	// Check if there's anything to uninstall
@@ -2599,21 +2553,6 @@ func checkEntireDirExists(ctx context.Context) bool {
 	return err == nil
 }
 
-func removableAgentHookNames(ctx context.Context) []types.AgentName {
-	var names []types.AgentName
-	for _, name := range agent.List() {
-		ag, err := agent.Get(name)
-		if err != nil {
-			continue
-		}
-		hookAgent, ok := agent.AsHookSupport(ag)
-		if ok && hooksPresentOrOutdated(ctx, hookAgent, ag) {
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
 // removeAgentHooks sweeps every hook-capable agent so legacy configurations
 // that predate an agent's current detection logic are still cleaned up.
 func removeAgentHooks(ctx context.Context, w io.Writer) error {
@@ -2627,7 +2566,7 @@ func removeAgentHooks(ctx context.Context, w io.Writer) error {
 		if !ok {
 			continue
 		}
-		wasInstalled := hooksPresentOrOutdated(ctx, hs, ag)
+		wasInstalled := hs.AreHooksInstalled(ctx)
 		if err := hs.UninstallHooks(ctx); err != nil {
 			errs = append(errs, err)
 		} else {
