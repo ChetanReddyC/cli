@@ -36,6 +36,8 @@ func TestClassifySearchError(t *testing.T) {
 		{"repo not indexed", fmt.Errorf("semantic search: %w", errNoRepoAvailable), telemetry.SearchErrClassRepoUnavailable},
 		{"search service 5xx", &search.HTTPStatusError{StatusCode: 502, Message: "search service returned 502"}, telemetry.SearchErrClassServer},
 		{"search service 401", &search.HTTPStatusError{StatusCode: 401, Message: "search service error (401): Invalid token"}, telemetry.SearchErrClassAuth},
+		{"malformed 200 body", fmt.Errorf("semantic search: %w", &search.MalformedResponseError{Message: "unexpected response from search service: <html>"}), telemetry.SearchErrClassServer},
+		{"error field in 200 body", fmt.Errorf("semantic search: %w", &search.MalformedResponseError{Message: "search service error: index rebuilding"}), telemetry.SearchErrClassServer},
 		{"code search 5xx", fmt.Errorf("code search: %w", &api.HTTPError{StatusCode: 500}), telemetry.SearchErrClassServer},
 		{"code search 404", fmt.Errorf("code search: %w", &api.HTTPError{StatusCode: 404}), telemetry.SearchErrClassHTTPOther},
 		{"deadline exceeded", fmt.Errorf("calling search service: %w", context.DeadlineExceeded), telemetry.SearchErrClassNetwork},

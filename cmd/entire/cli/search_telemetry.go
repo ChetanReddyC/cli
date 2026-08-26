@@ -39,6 +39,12 @@ func classifySearchError(err error) string {
 	if errors.As(err, &httpErr) {
 		return classForHTTPStatus(httpErr.StatusCode)
 	}
+	// A 200 whose body was unusable is the service misbehaving, not an
+	// unclassifiable client-side failure.
+	var malformedErr *search.MalformedResponseError
+	if errors.As(err, &malformedErr) {
+		return telemetry.SearchErrClassServer
+	}
 
 	// isRecapNetworkError deliberately excludes context cancellation, so a
 	// user's Ctrl-C never inflates the network-failure rate; a timeout is a

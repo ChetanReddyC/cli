@@ -31,7 +31,8 @@ const (
 	SearchErrClassRepoUnavailable = "repo_unavailable"
 	// SearchErrClassNetwork: network failure or timeout.
 	SearchErrClassNetwork = "network"
-	// SearchErrClassServer: a 5xx response.
+	// SearchErrClassServer: a 5xx response, or a 200 whose body was unusable
+	// (undecodable, or carrying an application-level error field).
 	SearchErrClassServer = "server"
 	// SearchErrClassHTTPOther: a non-5xx, non-auth HTTP error status.
 	SearchErrClassHTTPOther = "http_other"

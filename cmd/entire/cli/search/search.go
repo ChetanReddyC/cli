@@ -53,6 +53,17 @@ type HTTPStatusError struct {
 
 func (e *HTTPStatusError) Error() string { return e.Message }
 
+// MalformedResponseError reports a 200 whose body was not a usable search
+// response: undecodable JSON, or a decoded body carrying an application-level
+// error field. Typed for the same reason as HTTPStatusError — the service
+// answered unusably, which outcome telemetry counts as a server failure, not
+// an unclassified one. Message wording is preserved verbatim.
+type MalformedResponseError struct {
+	Message string
+}
+
+func (e *MalformedResponseError) Error() string { return e.Message }
+
 // WildcardQuery is the query string used when only filters are provided (no search terms).
 const WildcardQuery = "*"
 
@@ -816,11 +827,11 @@ func parseSearchResponse(statusCode int, body []byte) (*Response, error) {
 
 	var result Response
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("unexpected response from search service: %s", string(body))
+		return nil, &MalformedResponseError{Message: "unexpected response from search service: " + string(body)}
 	}
 
 	if result.Error != "" {
-		return nil, fmt.Errorf("search service error: %s", result.Error)
+		return nil, &MalformedResponseError{Message: "search service error: " + result.Error}
 	}
 
 	return &result, nil

@@ -231,6 +231,12 @@ func TestCellV4_ErrorFieldOn200(t *testing.T) {
 	if !strings.Contains(err.Error(), "user not found") {
 		t.Errorf("error = %q, want message containing 'user not found'", err.Error())
 	}
+	// Outcome telemetry classifies a 200-with-error-field as a server
+	// failure, so the error must be typed.
+	var malformedErr *MalformedResponseError
+	if !errors.As(err, &malformedErr) {
+		t.Fatalf("error is %T, want *MalformedResponseError", err)
+	}
 }
 
 func TestCellV4_SuccessWithResults(t *testing.T) {
