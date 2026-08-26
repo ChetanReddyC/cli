@@ -542,6 +542,18 @@ func TestResolve_OlderSchemaCacheRefetched(t *testing.T) {
 	_, err = ResolveContextForCluster(t.Context(), configDir, cacheDir, "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
 	require.Error(t, err)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "the rewritten entry is current and must not re-fetch again")
+	// Served from cache, and the hint is unchanged — the login server survives
+	// the round-trip through cluster_cores.json rather than living only in the
+	// response that fetched it.
+	assert.Contains(t, err.Error(), "entire login --server https://auth.partial.to")
+
+	cache, cacheErr := discovery.LoadClusterCores(cacheDir)
+	require.NoError(t, cacheErr)
+	cached, fresh, ok := cache.GetEntry("aws-eu-central-1.entire.io")
+	require.True(t, ok)
+	assert.True(t, fresh)
+	assert.Equal(t, "https://auth.partial.to", cached.LoginURL)
+	assert.Equal(t, discovery.CoresSchemaVersion, cached.SchemaVersion)
 }
 
 // TestResolve_Unreachable: transport failure with no cached cores surfaces
