@@ -103,6 +103,49 @@ func TestTrailResourceToMetadataUsesID(t *testing.T) {
 	}
 }
 
+func TestTrailResourceToMetadataPreservesBranchState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		branch         string
+		originalBranch string
+	}{
+		{name: "linked", branch: "feature/current", originalBranch: "feature/original"},
+		{name: "unlinked", originalBranch: "feature/former"},
+		{name: "empty original branch", branch: "feature/current"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			encoded, err := json.Marshal((&TrailResource{
+				Branch:         tt.branch,
+				OriginalBranch: tt.originalBranch,
+			}).ToMetadata())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				Branch         string  `json:"branch"`
+				OriginalBranch *string `json:"original_branch"`
+			}
+			if err := json.Unmarshal(encoded, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Branch != tt.branch {
+				t.Errorf("Branch = %q, want %q", got.Branch, tt.branch)
+			}
+			if got.OriginalBranch == nil {
+				t.Fatal("original_branch is absent")
+			}
+			if *got.OriginalBranch != tt.originalBranch {
+				t.Errorf("OriginalBranch = %q, want %q", *got.OriginalBranch, tt.originalBranch)
+			}
+		})
+	}
+}
+
 func TestToMetadataMapsTypePriorityReviewers(t *testing.T) {
 	t.Parallel()
 	login := "octocat"
