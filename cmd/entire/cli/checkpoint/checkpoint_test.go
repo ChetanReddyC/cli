@@ -4607,6 +4607,75 @@ func TestWriteCommitted_TaskPayload_UnavailableTranscript_RecordsReasonWithoutJS
 	}
 }
 
+// TestWriteCommitted_TaskDescriptionRedacted: task.json's task_description is
+// the agent's free text for the Task call and is pushed with the checkpoint,
+// so the writer must redact it like the summary fields — the transcript beside
+// it is pre-redacted by condensation, but the description used to be copied
+// verbatim. A low-entropy AWS-key shaped secret keeps this deterministic on
+// the regex-only pipeline.
+func TestWriteCommitted_TaskDescriptionRedacted(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	checkpointID := id.MustCheckpointID("aabbccddeefc")
+
+	err := store.Write(context.Background(), Session{
+		CheckpointID:     checkpointID,
+		SessionID:        "task-description-session",
+		Strategy:         "manual-commit",
+		Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+		Tasks: []TaskPayload{
+			{
+				ToolUseID:       "toolu_desc",
+				AgentID:         "agent3",
+				SubagentType:    "general-purpose",
+				TaskDescription: "rotate key=AKIAYRWQG5EJLPZLBYNP in staging",
+				Transcript:      redact.AlreadyRedacted([]byte(`{"msg":"child"}` + "\n")),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get branch ref: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("failed to get commit: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+	taskFile, err := tree.File(checkpointID.Path() + "/tasks/toolu_desc/task.json")
+	if err != nil {
+		t.Fatalf("task.json should exist: %v", err)
+	}
+	taskContent, err := taskFile.Contents()
+	if err != nil {
+		t.Fatalf("failed to read task.json: %v", err)
+	}
+	if strings.Contains(taskContent, "AKIAYRWQG5EJLPZLBYNP") {
+		t.Errorf("task.json still carries the secret: %s", taskContent)
+	}
+	var meta taskRecordMetadata
+	if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
+		t.Fatalf("failed to unmarshal task.json: %v", err)
+	}
+	if !strings.Contains(meta.TaskDescription, "REDACTED") || !strings.HasPrefix(meta.TaskDescription, "rotate key=") {
+		t.Errorf("task_description = %q, want the secret replaced in place", meta.TaskDescription)
+	}
+	if meta.SubagentType != "general-purpose" {
+		t.Errorf("subagent_type = %q, want it untouched", meta.SubagentType)
+	}
+}
+
 // TestWriteCommitted_NoTasks_NoTaskDirectory guards the no-op path: an empty
 // Tasks slice (every session before subagent-work durability landed, and
 // every ordinary session with no subagent work) must not create a tasks/

@@ -509,11 +509,15 @@ func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, ent
 		}
 	}
 
+	// The description is the agent's free text for the Task call (it can carry
+	// whatever the prompt carried), and task.json is pushed with the checkpoint,
+	// so it goes through the same redactor as the summary fields — see
+	// RedactSummary. The transcript beside it arrives pre-redacted.
 	metadata := taskRecordMetadata{
 		ToolUseID:                   task.ToolUseID,
 		AgentID:                     task.AgentID,
 		SubagentType:                task.SubagentType,
-		TaskDescription:             task.TaskDescription,
+		TaskDescription:             redact.String(task.TaskDescription),
 		Files:                       task.Files,
 		TokenUsage:                  task.TokenUsage,
 		StartedAt:                   task.StartedAt,
