@@ -2444,35 +2444,28 @@ func TestUninstallDeselectedAgentHooks_CodexIgnoresPrimaryOnlyHooks(t *testing.T
 
 func TestUninstallDeselectedAgentHooks_CodexLinkedWorktreeOwnership(t *testing.T) {
 	t.Parallel()
-	repoRoot, linkedRoot := setupCodexOwnershipWorktrees(t)
-	primaryPath := filepath.Join(repoRoot, ".codex", "hooks.json")
-	linkedPath := filepath.Join(linkedRoot, ".codex", "hooks.json")
-	primaryBefore := readSetupTestFile(t, primaryPath)
-
-	runSetupCodexOwnershipHelper(t, linkedRoot, "deselect")
-
-	if got := readSetupTestFile(t, primaryPath); got != primaryBefore {
-		t.Fatalf("primary hooks changed after linked-worktree deselection\nwant: %s\n got: %s", primaryBefore, got)
-	}
-	if _, err := os.Stat(linkedPath); !os.IsNotExist(err) {
-		t.Fatalf("linked-worktree hooks still exist after deselection: %v", err)
-	}
+	assertCodexLinkedWorktreeCleanupOwnership(t, "deselect", "deselection")
 }
 
 func TestRemoveAgentHooks_CodexLinkedWorktreeOwnership(t *testing.T) {
 	t.Parallel()
+	assertCodexLinkedWorktreeCleanupOwnership(t, "clean", "clean")
+}
+
+func assertCodexLinkedWorktreeCleanupOwnership(t *testing.T, action, description string) {
+	t.Helper()
 	repoRoot, linkedRoot := setupCodexOwnershipWorktrees(t)
 	primaryPath := filepath.Join(repoRoot, ".codex", "hooks.json")
 	linkedPath := filepath.Join(linkedRoot, ".codex", "hooks.json")
 	primaryBefore := readSetupTestFile(t, primaryPath)
 
-	runSetupCodexOwnershipHelper(t, linkedRoot, "clean")
+	runSetupCodexOwnershipHelper(t, linkedRoot, action)
 
 	if got := readSetupTestFile(t, primaryPath); got != primaryBefore {
-		t.Fatalf("primary hooks changed after linked-worktree clean\nwant: %s\n got: %s", primaryBefore, got)
+		t.Fatalf("primary hooks changed after linked-worktree %s\nwant: %s\n got: %s", description, primaryBefore, got)
 	}
 	if _, err := os.Stat(linkedPath); !os.IsNotExist(err) {
-		t.Fatalf("linked-worktree hooks still exist after clean: %v", err)
+		t.Fatalf("linked-worktree hooks still exist after %s: %v", description, err)
 	}
 }
 
