@@ -846,7 +846,8 @@ func writeCodexWorktreeInspectionWarning(w io.Writer, worktreePath string, state
 	}
 	fmt.Fprintf(w, "  Error: %v\n", err)
 	fmt.Fprintln(w, "  Fix the current-worktree .codex path or hooks.json file, then run `entire enable --force`.")
-	fmt.Fprintln(w, "  This local file may not be the file Codex reads; apply the generated change to the discovered checkout when the paths differ.")
+	fmt.Fprintln(w, "  This may not be the file Codex reads. If Codex discovers another project root, apply/merge the generated .codex/hooks.json change there too.")
+	fmt.Fprintln(w, "  In a .bare layout, that project root is not a worktree, so do not run `entire enable` from it.")
 }
 
 func writeCodexDiscoveredInspectionWarning(w io.Writer, discoveredPath string, state codex.HookFileState, err error) {
@@ -857,7 +858,9 @@ func writeCodexDiscoveredInspectionWarning(w io.Writer, discoveredPath string, s
 	}
 	fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
 	fmt.Fprintf(w, "  Error: %v\n", err)
-	fmt.Fprintln(w, "  Fix the discovered file in its owning checkout, or run `entire enable` there.")
+	fmt.Fprintln(w, "  Fix this discovered .codex/hooks.json file in its project root.")
+	fmt.Fprintln(w, "  If that root is a Git checkout, run `entire enable` from that checkout.")
+	fmt.Fprintln(w, "  In a .bare layout, the project root is not a worktree; edit the file there instead.")
 }
 
 func writeCodexMissingProjectLayerWarning(w io.Writer, projectLayerPath, discoveredPath string) {
@@ -865,13 +868,17 @@ func writeCodexMissingProjectLayerWarning(w io.Writer, projectLayerPath, discove
 	fmt.Fprintf(w, "  Current-worktree project layer: %s (missing)\n", projectLayerPath)
 	fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
 	fmt.Fprintln(w, "  Current Codex needs the local .codex project layer before it loads the discovered file.")
-	fmt.Fprintln(w, "  Run `entire enable` from this worktree to create the local layer;")
-	fmt.Fprintln(w, "  If Codex reads another checkout's file, apply the generated change there or run `entire enable` in that checkout.")
+	fmt.Fprintln(w, "  Run `entire enable` from this worktree to create the local layer.")
+	fmt.Fprintln(w, "  Then apply/merge the generated .codex/hooks.json change into the discovered project root.")
+	fmt.Fprintln(w, "  If that root is a Git checkout, run `entire enable` from that checkout.")
+	fmt.Fprintln(w, "  In a .bare layout, the discovered project root is not a worktree; apply the file there instead.")
 }
 
 func writeCodexPrimaryCheckoutRemedy(w io.Writer) {
-	fmt.Fprintln(w, "  Apply the generated .codex/hooks.json change to the discovered checkout,")
-	fmt.Fprintln(w, "  or run `entire enable` there.")
+	fmt.Fprintln(w, "  Codex will read the discovered file above, not the current-worktree file above.")
+	fmt.Fprintln(w, "  Apply/merge the generated .codex/hooks.json change into the discovered project root.")
+	fmt.Fprintln(w, "  If that root is a Git checkout, run `entire enable` from that checkout.")
+	fmt.Fprintln(w, "  In a .bare layout, the discovered project root is not a worktree; apply the file there instead.")
 }
 
 // canDeleteShadowBranch checks if a shadow branch can be safely deleted.

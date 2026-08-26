@@ -4,12 +4,10 @@
 
 Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` config files with JSON stdin/stdout transport. The hook mechanism closely mirrors Claude Code's architecture (matcher-based hook groups, JSON on stdin, structured JSON output on stdout). Eleven hook events are available: PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, and Stop.
 
-**Verified against** codex `main` @ `1c042dd4d8` (2026-08-10); installed
-reference `codex-cli 0.147.0`. The linked-worktree behavior described below is
-pinned separately to exactly `codex-cli 0.149.0`. The integration test, not a
+**Verified against** the pinned `codex-cli 0.149.0`. The integration test, not a
 source comment or a reimplementation of Codex's Git traversal, is the contract
-for that behavior. Re-run the no-model `hooks/list` test before changing the
-pin. Re-check `codex-rs/hooks/schema/generated/` and
+for linked-worktree behavior. Re-run the no-model `hooks/list` test before
+changing the pin. Re-check `codex-rs/hooks/schema/generated/` and
 `codex-rs/config/src/hook_config.rs` when revisiting the general hook protocol.
 
 ## Static Checks
@@ -18,7 +16,7 @@ pin. Re-check `codex-rs/hooks/schema/generated/` and
 |-------|--------|-------|
 | Binary present | PASS | `codex` found on PATH |
 | Help available | PASS | `codex --help` shows full subcommand list |
-| Version info | PASS | `codex-cli 0.147.0` (assessed at 0.116.0) |
+| Version info | PASS | `codex-cli 0.149.0` |
 | Hook keywords | PASS | Hook system via `hooks.json` config files |
 | Session keywords | PASS | `resume`, `fork` subcommands; session stored as threads in SQLite + JSONL rollout files |
 | Config directory | PASS | `~/.codex/` (overridable via `CODEX_HOME`) |
@@ -27,7 +25,7 @@ pin. Re-check `codex-rs/hooks/schema/generated/` and
 ## Binary
 
 - Name: `codex`
-- Version: `codex-cli 0.147.0` (SessionEnd requires 0.146+)
+- Version: `codex-cli 0.149.0` (SessionEnd requires 0.146+)
 - Install: `npm install -g @openai/codex` or build from source
 
 ## Hook Mechanism
@@ -40,10 +38,9 @@ pin. Re-check `codex-rs/hooks/schema/generated/` and
 ### Linked-worktree discovery and ownership
 
 Codex 0.149.0 does not necessarily load the hooks file owned by the checkout in
-which it runs. A pinned, no-model `codex app-server` integration test starts in
-a conventional linked worktree and calls `hooks/list` twice. Without a local
-`.codex` project layer it observes no project hooks; after creating an empty
-local layer it observes the primary checkout's hook command and `sourcePath`.
+which it runs. Pinned, no-model `codex app-server` integration tests call
+`hooks/list` from both a conventional linked worktree and a `.bare/worktrees`
+layout. The tests are the contract for which project root Codex actually uses.
 
 Entire deliberately separates that read behavior from write ownership:
 
@@ -61,35 +58,28 @@ branch or have uncommitted changes. `entire enable`, agent removal, and
 a mutating command there. They must not dirty another checkout. Doctor, status,
 SessionStart, and discovery never write hook configuration.
 
-`ResolveHookDiscovery` consumes the shared `gitrepo.ResolveGitLayout` result.
-Entire's Codex integration does not maintain a separate `.git`, `commondir`, or
+`ResolveHookDiscovery` consumes the shared Git metadata path resolvers. Entire's
+Codex integration does not maintain a separate `.git`, `commondir`, or
 worktree-marker parser. Conventional linked worktrees discover the primary
 checkout's hook file. Normal checkouts, ordinary submodules, and
-separate-Git-directory checkouts discover their own hook file.
-`.bare/worktrees`, linked submodules, contradictory metadata, and other
-unpinned layouts are reported as unresolved. Entire does not guess that Codex
-falls back to a writable location.
+separate-Git-directory checkouts discover their own hook file. A
+The pinned 0.149.0 test verifies that a `.bare/worktrees` layout discovers the
+layout root's hook file; linked submodules remain worktree-local because their
+Git metadata is submodule-owned. If the Git metadata cannot be resolved or
+would point at a user-wide root, Entire reports discovery as unresolved rather
+than guessing.
 
 Discovery never supplies a mutation, migration, cleanup, or lock target. Entire
 does not create or rewrite another checkout's `.codex` directory, migrate a
-worktree-local file, or remove a discovered file owned elsewhere. The
-`RepositoryWide` discovery bit describes the expected reach of the discovered
-configuration; it does not grant repository-wide mutation. The user remedies a
-linked-worktree mismatch by committing `.codex/hooks.json` and applying that
-commit to the primary checkout (usually with `git cherry-pick`), or by running
-`entire enable` in the primary checkout.
+worktree-local file, or remove a discovered file owned elsewhere. Mutating
+commands continue to operate only on the current checkout's hook file and warn
+when Codex discovers a different path. Doctor, status, SessionStart, and
+discovery never write hook configuration.
 
-Mutation is serialized only by
-`<current-checkout>/.codex/hooks.json.lock`. There is no Codex lock in the Git
-common directory and no repository-wide synchronization.
-
-Current-checkout mutation rejects redirected `.codex` directories, hook-file
-symlinks, non-regular files, unexpected destinations, and paths that do not
-identify the exact current checkout. Existing hook-file permission bits survive
-atomic replacement; new files use `0600`. Read-only inspection opens only the
-resolved `.codex` directory, rejects redirected or non-regular files, caps
-`hooks.json` at 1 MiB, reads one extra byte to detect overflow, and verifies that
-the file identity is stable before and after reading.
+Read-only inspection opens only the resolved `.codex` directory, rejects
+redirected or non-regular files, caps `hooks.json` at 1 MiB, reads one extra
+byte to detect overflow, and verifies that the file identity is stable before
+and after reading.
 
 `entire doctor` reports the current-worktree and Codex-discovered paths,
 project-layer gaps, invalid or unresolved discovery, managed-command/timeout
@@ -97,25 +87,27 @@ drift, and missing trust records. `entire status` exposes the concise warning an
 the same structured mismatch in `codex_hooks`; SessionStart appends a bounded,
 read-only warning. Entire never computes or copies Codex trust hashes.
 
-When the two paths differ, an invalid current-checkout destination takes
-priority and status reports `invalid_worktree`. A malformed same-path file keeps
-the existing `invalid_discovered` state. An unsupported layout remains
+When the two paths differ, status and doctor report that the current-worktree
+file is not active and identify the discovered project root. If that root is a
+normal Git checkout, the user can run `entire enable` there; in a `.bare`
+layout, the project root is not a worktree, so the generated `.codex/hooks.json`
+change must be applied there directly. Malformed or unavailable discovered files
+take priority over local shadows. An unsupported layout remains
 `discovery_unresolved`.
 
 ### Pinned app-server contract
 
-`TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout` runs against
-exactly `@openai/codex@0.149.0`. It creates a repository and conventional linked
-worktree, starts `codex app-server` in the linked worktree with an isolated
-`CODEX_HOME`, then sends `initialize`, `initialized`, and `hooks/list` JSONL
-messages over stdio. With no local `.codex` layer it requires an empty hook
-list; after creating an empty local layer it requires the primary marker and
-primary `sourcePath`. Both responses must have empty `warnings` and `errors`.
-The test makes no model request and needs no OpenAI credentials. Local
-integration runs skip when the exact binary is unavailable. CI installs the
-pinned version and sets `ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER=1`, so absence or
-version drift fails instead of skipping. Do not relax that guard or replace the
-exact version with a range.
+`TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout` and
+`TestCodexAppServerHooksList_BareWorktreeUsesLayoutRoot` run against exactly
+`@openai/codex@0.149.0`. They start `codex app-server` with an isolated
+`CODEX_HOME`, then send `initialize`, `initialized`, and `hooks/list` JSONL
+messages over stdio. The conventional case requires Codex's primary checkout
+path; the `.bare` case requires the layout-root path. The tests make no model
+request and need no OpenAI credentials. Local integration runs skip when the
+exact binary is unavailable. CI installs the pinned version and sets
+`ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER=1`, so absence or version drift fails
+instead of skipping. Do not relax that guard or replace the exact version with
+a range.
 
 **hooks.json structure:**
 ```json

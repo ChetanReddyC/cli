@@ -1729,8 +1729,12 @@ func warnCodexHooksAfterSetup(ctx context.Context, w io.Writer, ag agent.Agent) 
 	if !diagnostics.PathsDiffer() {
 		return
 	}
-	fmt.Fprintf(w, "  Codex discovers hooks at %s, while this worktree's hooks are at %s. Apply the generated change to the discovered checkout or run `entire enable` there.\n",
-		diagnostics.Discovery.DiscoveredHooks.Path(), diagnostics.WorktreeHooks.Path())
+	fmt.Fprintf(w, "  Codex reads hooks from: %s\n", diagnostics.Discovery.DiscoveredHooks.Path())
+	fmt.Fprintf(w, "  Entire configured this worktree at: %s\n", diagnostics.WorktreeHooks.Path())
+	fmt.Fprintln(w, "  Hooks in the current-worktree file will not run here.")
+	fmt.Fprintln(w, "  Apply/merge the generated .codex/hooks.json change into the discovered project root.")
+	fmt.Fprintln(w, "  If that root is a Git checkout, run `entire enable` from that checkout.")
+	fmt.Fprintln(w, "  In a .bare layout, the discovered project root is not a worktree; apply the file there instead.")
 }
 
 func warnCodexHooksAfterRemoval(ctx context.Context, w io.Writer, ag agent.Agent) {
@@ -1742,8 +1746,10 @@ func warnCodexHooksAfterRemoval(ctx context.Context, w io.Writer, ag agent.Agent
 	if diagnostics.Discovered.State != codexagent.HookFileEntire {
 		return
 	}
-	fmt.Fprintf(w, "  Codex still discovers Entire hooks at %s. Remove them from that checkout or run `entire agent remove --agent codex` there.\n",
-		diagnostics.Discovery.DiscoveredHooks.Path())
+	fmt.Fprintf(w, "  Codex still reads Entire hooks from: %s\n", diagnostics.Discovery.DiscoveredHooks.Path())
+	fmt.Fprintln(w, "  Remove them from that discovered project root.")
+	fmt.Fprintln(w, "  If it is a Git checkout, run `entire agent remove --agent codex` from that checkout.")
+	fmt.Fprintln(w, "  In a .bare layout, the discovered project root is not a worktree; edit that file directly.")
 }
 
 func hooksPresentOrOutdated(ctx context.Context, hookAgent agent.HookSupport, ag agent.Agent) bool {

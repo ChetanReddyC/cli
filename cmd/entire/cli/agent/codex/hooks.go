@@ -79,9 +79,12 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 	}
 
 	hooksPath := filepath.Join(repoRoot, ".codex", HooksFileName)
+	existingData, exists, err := readHooksFileForMutation(hooksPath)
+	if err != nil {
+		return 0, err
+	}
 	var rawHooks map[string]json.RawMessage
-	existingData, readErr := os.ReadFile(hooksPath) //nolint:gosec // path constructed from repo root
-	if readErr == nil {
+	if exists {
 		var hooksFile map[string]json.RawMessage
 		if err := json.Unmarshal(existingData, &hooksFile); err != nil {
 			return 0, fmt.Errorf("failed to parse existing hooks.json: %w", err)
@@ -123,8 +126,8 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 	}
 
 	topLevel := make(map[string]json.RawMessage)
-	if readErr == nil {
-		_ = json.Unmarshal(existingData, &topLevel) //nolint:errcheck // best-effort preservation
+	if exists {
+		_ = json.Unmarshal(existingData, &topLevel) //nolint:errcheck // parsed above
 	}
 	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 	if err != nil {
@@ -157,9 +160,12 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 		repoRoot = "."
 	}
 	hooksPath := filepath.Join(repoRoot, ".codex", HooksFileName)
-	data, err := os.ReadFile(hooksPath) //nolint:gosec // path constructed from repo root
+	data, exists, err := readHooksFileForMutation(hooksPath)
 	if err != nil {
-		return nil //nolint:nilerr // No hooks.json means nothing to uninstall
+		return err
+	}
+	if !exists {
+		return nil
 	}
 	var topLevel map[string]json.RawMessage
 	if err := json.Unmarshal(data, &topLevel); err != nil {
@@ -214,8 +220,8 @@ func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 	if err != nil {
 		repoRoot = "."
 	}
-	data, err := os.ReadFile(filepath.Join(repoRoot, ".codex", HooksFileName)) //nolint:gosec // path constructed from repo root
-	if err != nil {
+	data, exists, err := readHooksFileForMutation(filepath.Join(repoRoot, ".codex", HooksFileName))
+	if err != nil || !exists {
 		return false
 	}
 	var topLevel map[string]json.RawMessage
@@ -513,6 +519,26 @@ func readHooksDocument(path string) (*hooksDocument, error) {
 		document.rawHooks = make(map[string]json.RawMessage)
 	}
 	return document, nil
+}
+
+func readHooksFileForMutation(path string) ([]byte, bool, error) {
+	file, err := os.Open(path) //nolint:gosec // path is derived from the current worktree root
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read Codex hooks file %q: %w", path, err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxHooksFileBytes+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("read Codex hooks file %q: %w", path, err)
+	}
+	if len(data) > maxHooksFileBytes {
+		return nil, false, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
+	}
+	return data, true, nil
 }
 
 func hookFileStateForReadError(err error) HookFileState {

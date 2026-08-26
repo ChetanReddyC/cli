@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -127,6 +128,16 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	count2, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 	require.Equal(t, 0, count2)
+}
+
+func TestInstallHooks_RejectsOversizedHooksFile(t *testing.T) {
+	tempDir := setupTestEnv(t)
+	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(hooksPath), 0o750))
+	require.NoError(t, os.WriteFile(hooksPath, []byte(strings.Repeat("x", maxHooksFileBytes+1)), 0o600))
+
+	_, err := (&CodexAgent{}).InstallHooks(context.Background(), false)
+	require.ErrorContains(t, err, "exceeds 1048576 bytes")
 }
 
 func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {

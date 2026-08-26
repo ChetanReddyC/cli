@@ -79,6 +79,52 @@ func TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout(t *testing.T)
 	require.True(t, foundPrimary, "hooks/list did not return the primary checkout hook")
 }
 
+func TestCodexAppServerHooksList_BareWorktreeUsesLayoutRoot(t *testing.T) {
+	t.Parallel()
+
+	codexPath := requirePinnedCodexAppServer(t)
+	tmp := t.TempDir()
+	seedRoot := filepath.Join(tmp, "seed")
+	layoutRoot := filepath.Join(tmp, "layout")
+	bareRoot := filepath.Join(layoutRoot, ".bare")
+	mainRoot := filepath.Join(layoutRoot, "main")
+	linkedRoot := filepath.Join(layoutRoot, "feature")
+
+	testutil.InitRepo(t, seedRoot)
+	testutil.WriteFile(t, seedRoot, "README.md", "# Test Repository")
+	testutil.GitAdd(t, seedRoot, "README.md")
+	testutil.GitCommit(t, seedRoot, "initial commit")
+	require.NoError(t, os.MkdirAll(layoutRoot, 0o750))
+	testutil.RunGit(t, tmp, "clone", "--bare", seedRoot, bareRoot)
+	require.NoError(t, os.WriteFile(filepath.Join(layoutRoot, ".git"), []byte("gitdir: ./.bare\n"), 0o600))
+	testutil.RunGit(t, tmp, "--git-dir", bareRoot, "worktree", "add", mainRoot)
+	testutil.RunGit(t, tmp, "--git-dir", bareRoot, "worktree", "add", "-b", "feature", linkedRoot)
+
+	const layoutMarker = "bare-layout-root-hook-marker"
+	const linkedMarker = "bare-linked-worktree-hook-marker"
+	testutil.WriteFile(t, layoutRoot, filepath.Join(".codex", codex.HooksFileName), codexHookFixture(layoutMarker))
+	testutil.WriteFile(t, linkedRoot, filepath.Join(".codex", codex.HooksFileName), codexHookFixture(linkedMarker))
+
+	result := listCodexHooks(t, codexPath, linkedRoot)
+	require.Len(t, result.Data, 1)
+	entry := result.Data[0]
+	require.Equal(t, linkedRoot, entry.CWD)
+	require.Empty(t, entry.Warnings)
+	require.Empty(t, entry.Errors)
+	require.NotEmpty(t, entry.Hooks, "hooks/list result: %+v", result)
+
+	layoutHooksPath := filepath.Join(layoutRoot, ".codex", codex.HooksFileName)
+	var foundLayout bool
+	for _, hook := range entry.Hooks {
+		require.NotEqual(t, linkedMarker, hook.Command, "Codex must not use the linked worktree's shadow hook")
+		if hook.Command == layoutMarker {
+			foundLayout = true
+			require.Equal(t, layoutHooksPath, hook.SourcePath)
+		}
+	}
+	require.True(t, foundLayout, "hooks/list did not return the .bare layout-root hook")
+}
+
 func requirePinnedCodexAppServer(t *testing.T) string {
 	t.Helper()
 	required := os.Getenv(requireCodexAppServerEnv) == "1"

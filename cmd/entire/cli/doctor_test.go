@@ -890,11 +890,35 @@ func TestCheckCodexHookTrust_LinkedWorktreeReportsInactiveCurrentWorktreeFile(t 
 	require.Contains(t, out, "Codex hooks: NOT ACTIVE IN THIS WORKTREE")
 	require.Contains(t, out, resolvedHooksPath(t, linkedRoot))
 	require.Contains(t, out, resolvedHooksPath(t, repoRoot))
-	require.Contains(t, out, "Apply the generated .codex/hooks.json change to the discovered checkout")
-	require.Contains(t, out, "run `entire enable` there")
+	require.Contains(t, out, "Codex will read the discovered file above, not the current-worktree file above")
+	require.Contains(t, out, "Apply/merge the generated .codex/hooks.json change into the discovered project root")
+	require.Contains(t, out, "If that root is a Git checkout, run `entire enable` from that checkout")
 	require.NotContains(t, out, "migrate")
 	require.Contains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
 	require.NotContains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
+}
+
+// TestCheckCodexHookTrust_BareWorktreeReportsInactiveCurrentWorktreeFile
+// verifies the warning when a linked worktree belongs to a .bare repository
+// layout and Codex discovers the layout root's project hooks.
+func TestCheckCodexHookTrust_BareWorktreeReportsInactiveCurrentWorktreeFile(t *testing.T) {
+	tmp, layoutRoot, linkedRoot := setupBareRepoForDoctorTest(t)
+	writeCodexHooksForDiagnosticTest(t, layoutRoot, canonicalCodexHooksJSON())
+	writeCodexHooksForDiagnosticTest(t, linkedRoot, canonicalCodexHooksJSON())
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	cmd, stdout := newTestCmd(t)
+	checkCodexHookTrust(cmd)
+	out := stdout.String()
+	require.Contains(t, out, "Codex hooks: CURRENT-WORKTREE FILE NOT DISCOVERED")
+	require.Contains(t, out, resolvedHooksPath(t, linkedRoot))
+	require.Contains(t, out, resolvedHooksPath(t, layoutRoot))
+	require.Contains(t, out, "Codex will read the discovered file above, not the current-worktree file above")
+	require.Contains(t, out, "Apply/merge the generated .codex/hooks.json change into the discovered project root")
+	require.Contains(t, out, "In a .bare layout, the discovered project root is not a worktree")
 }
 
 func TestCheckCodexHookTrust_InvalidWorktreePrecedesDiscoveredHooks(t *testing.T) {
@@ -997,7 +1021,8 @@ func TestCheckCodexHookTrust_LinkedWorktreeReportsMissingProjectLayer(t *testing
 	require.Contains(t, out, "Codex hooks: PROJECT LAYER MISSING")
 	require.Contains(t, out, filepath.Dir(resolvedHooksPath(t, linkedRoot))+" (missing)")
 	require.Contains(t, out, resolvedHooksPath(t, repoRoot))
-	require.Contains(t, out, "apply the generated change there or run `entire enable` in that checkout")
+	require.Contains(t, out, "Then apply/merge the generated .codex/hooks.json change into the discovered project root")
+	require.Contains(t, out, "In a .bare layout, the discovered project root is not a worktree")
 	require.NotContains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
 	require.NotContains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
@@ -1068,6 +1093,27 @@ func setupLinkedRepoForDoctorTest(t *testing.T) (tmp, repoRoot, linkedRoot strin
 	testutil.GitCommit(t, repoRoot, "initial")
 	runGitForDoctorTest(t, repoRoot, "worktree", "add", "-b", "feature", linkedRoot)
 	return tmp, repoRoot, linkedRoot
+}
+
+func setupBareRepoForDoctorTest(t *testing.T) (tmp, layoutRoot, linkedRoot string) {
+	t.Helper()
+	tmp = setupTestDir(t)
+	seedRoot := filepath.Join(tmp, "seed")
+	layoutRoot = filepath.Join(tmp, "layout")
+	bareRoot := filepath.Join(layoutRoot, ".bare")
+	mainRoot := filepath.Join(layoutRoot, "main")
+	linkedRoot = filepath.Join(layoutRoot, "feature")
+
+	testutil.InitRepo(t, seedRoot)
+	testutil.WriteFile(t, seedRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, seedRoot, "README.md")
+	testutil.GitCommit(t, seedRoot, "initial")
+	require.NoError(t, os.MkdirAll(layoutRoot, 0o750))
+	runGitForDoctorTest(t, tmp, "clone", "--bare", seedRoot, bareRoot)
+	require.NoError(t, os.WriteFile(filepath.Join(layoutRoot, ".git"), []byte("gitdir: ./.bare\n"), 0o600))
+	runGitForDoctorTest(t, tmp, "--git-dir", bareRoot, "worktree", "add", mainRoot)
+	runGitForDoctorTest(t, tmp, "--git-dir", bareRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	return tmp, layoutRoot, linkedRoot
 }
 
 func setupLinkedSubmoduleForDoctorTest(t *testing.T) string {

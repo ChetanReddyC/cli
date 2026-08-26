@@ -33,6 +33,8 @@ jobs:
       - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
       - name: Install pinned Codex CLI
         run: npm install --global @openai/codex@0.149.0
+      - name: Verify pinned Codex CLI
+        run: test "$(codex --version | awk '{print $NF}')" = "0.149.0"
       - name: Integration Tests
         env:
           ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER: "1"
