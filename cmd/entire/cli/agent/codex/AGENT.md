@@ -4,7 +4,13 @@
 
 Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` config files with JSON stdin/stdout transport. The hook mechanism closely mirrors Claude Code's architecture (matcher-based hook groups, JSON on stdin, structured JSON output on stdout). Eleven hook events are available: PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, and Stop.
 
-**Verified against** codex `main` @ `1c042dd4d8` (2026-08-10); installed reference `codex-cli 0.147.0`. Hook-root resolution below was re-verified against `codex-cli 0.149.0` / tag `rust-v0.149.0` (2026-08-20). Re-check `codex-rs/hooks/schema/generated/` and `codex-rs/config/src/hook_config.rs` when revisiting — this surface moves; for hook-root resolution the source of truth is `codex-rs/git-utils/src/trust.rs`.
+**Verified against** codex `main` @ `1c042dd4d8` (2026-08-10); installed
+reference `codex-cli 0.147.0`. The linked-worktree behavior described below is
+pinned separately to exactly `codex-cli 0.149.0`. The integration test, not a
+source comment or a reimplementation of Codex's Git traversal, is the contract
+for that behavior. Re-run the no-model `hooks/list` test before changing the
+pin. Re-check `codex-rs/hooks/schema/generated/` and
+`codex-rs/config/src/hook_config.rs` when revisiting the general hook protocol.
 
 ## Static Checks
 
@@ -48,19 +54,27 @@ Entire deliberately separates that read behavior from write ownership:
   current checkout. Discovery, configuration inspection, and trust inspection
   use it read-only.
 
-`ResolveHookDiscovery` consumes the shared `gitrepo.ResolveGitLayout` result;
-Codex does not maintain a separate `.git`, `commondir`, or worktree-marker
-parser. Conventional linked worktrees discover the primary checkout's hook
-file. Normal checkouts, ordinary submodules, and separate-Git-directory
-checkouts discover their own hook file. `.bare/worktrees`, linked submodules,
-contradictory metadata, and other unpinned layouts are reported as unresolved;
-Entire does not guess that Codex falls back to a writable location.
+The checkout where a command runs is the write boundary because worktrees share
+Git objects, not working-tree state. Another checkout may be on a different
+branch or have uncommitted changes. `entire enable`, agent removal, and
+`entire clean` may update the current checkout because the user explicitly ran
+a mutating command there. They must not dirty another checkout. Doctor, status,
+SessionStart, and discovery never write hook configuration.
+
+`ResolveHookDiscovery` consumes the shared `gitrepo.ResolveGitLayout` result.
+Entire's Codex integration does not maintain a separate `.git`, `commondir`, or
+worktree-marker parser. Conventional linked worktrees discover the primary
+checkout's hook file. Normal checkouts, ordinary submodules, and
+separate-Git-directory checkouts discover their own hook file.
+`.bare/worktrees`, linked submodules, contradictory metadata, and other
+unpinned layouts are reported as unresolved. Entire does not guess that Codex
+falls back to a writable location.
 
 Discovery never supplies a mutation, migration, cleanup, or lock target. Entire
 does not create or rewrite another checkout's `.codex` directory, migrate a
 worktree-local file, or remove a discovered file owned elsewhere. The
-`RepositoryWide` discovery bit describes the reach of the configuration Codex
-reported; it does not grant repository-wide mutation. The user remedies a
+`RepositoryWide` discovery bit describes the expected reach of the discovered
+configuration; it does not grant repository-wide mutation. The user remedies a
 linked-worktree mismatch by committing `.codex/hooks.json` and applying that
 commit to the primary checkout (usually with `git cherry-pick`), or by running
 `entire enable` in the primary checkout.
@@ -83,6 +97,11 @@ drift, and missing trust records. `entire status` exposes the concise warning an
 the same structured mismatch in `codex_hooks`; SessionStart appends a bounded,
 read-only warning. Entire never computes or copies Codex trust hashes.
 
+When the two paths differ, an invalid current-checkout destination takes
+priority and status reports `invalid_worktree`. A malformed same-path file keeps
+the existing `invalid_discovered` state. An unsupported layout remains
+`discovery_unresolved`.
+
 ### Pinned app-server contract
 
 `TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout` runs against
@@ -93,9 +112,10 @@ messages over stdio. With no local `.codex` layer it requires an empty hook
 list; after creating an empty local layer it requires the primary marker and
 primary `sourcePath`. Both responses must have empty `warnings` and `errors`.
 The test makes no model request and needs no OpenAI credentials. Local
-integration runs skip when the exact binary is unavailable; CI installs the
+integration runs skip when the exact binary is unavailable. CI installs the
 pinned version and sets `ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER=1`, so absence or
-version drift fails instead of skipping.
+version drift fails instead of skipping. Do not relax that guard or replace the
+exact version with a range.
 
 **hooks.json structure:**
 ```json
