@@ -554,7 +554,7 @@ where a user is actively waiting on a command (review, rewind, and
 #### `git status` Is a Write - Always Pass `--no-optional-locks`
 
 **Every `git status` Entire runs must pass `--no-optional-locks`.** A guard test
-(`TestGitStatusCallSitesPassNoOptionalLocks` in `checkpoint/`) fails the build on
+(`TestGitStatusCallSitesPassNoOptionalLocks` in `cmd/entire/cli/gitrepo/`) fails the build on
 any call site that omits it.
 
 `git status` is not a read. It refreshes the index's stat cache and, whenever any
