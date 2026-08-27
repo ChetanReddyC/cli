@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -146,13 +147,22 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		fmt.Fprintln(w, formatSettingsStatus("Project", projectSettings, sty))
 	}
 
-	// Show local settings if it exists
+	// Show local settings if it exists. LoadFromFile is ungated, so this
+	// renders the file's own contents — say so when the loader ignored them,
+	// or the display contradicts the settings actually in effect.
 	if localExists {
 		localSettings, err := settings.LoadFromFile(localSettingsPath)
 		if err != nil {
 			return fmt.Errorf("failed to load local settings: %w", err)
 		}
-		fmt.Fprintln(w, formatSettingsStatus("Local", localSettings, sty))
+		label := "Local"
+		if effectiveSettings.LocalLayerRejection() != "" {
+			label = "Local (ignored)"
+		}
+		fmt.Fprintln(w, formatSettingsStatus(label, localSettings, sty))
+		if reason := effectiveSettings.LocalLayerRejection(); reason != "" {
+			fmt.Fprintf(w, "  %s\n  fix with: git rm --cached %s\n", reason, settings.EntireSettingsLocalFile)
+		}
 	}
 
 	if effectiveSettings.Enabled {
@@ -198,10 +208,18 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		}
 
 		// Warn when installed hooks are out of date (read-only; fix is manual).
-		for _, displayName := range OutdatedHookAgentDisplayNames(ctx) {
+		for _, name := range OutdatedHookAgents(ctx) {
+			ag, err := agent.Get(name)
+			if err != nil {
+				continue
+			}
 			b.WriteString("\n")
-			b.WriteString(sty.render(sty.yellow, "  ! "+displayName+" hooks out of date"))
+			b.WriteString(sty.render(sty.yellow, "  ! "+string(ag.Type())+" hooks out of date"))
 			b.WriteString(sty.render(sty.dim, " · run 'entire enable --force'"))
+		}
+		if warning := codexStatusWarning(inspectCodexHookIssue(ctx)); warning != "" {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.yellow, "  ! "+warning))
 		}
 	}
 
@@ -209,6 +227,10 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 	// checkpoints have not reached it yet. Local-only computation.
 	if s.Enabled {
 		writeCheckpointSyncLines(ctx, &b, s, sty)
+	}
+
+	if s.Enabled {
+		writeSecretScannersLine(&b, s, sty)
 	}
 
 	// Show review status for HEAD's checkpoint, if any.
@@ -232,6 +254,34 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 	}
 
 	return b.String()
+}
+
+// nonDefaultSecretScanners reports the enabled engines (betterleaks, then
+// goredact) when the selection differs from the default (betterleaks only);
+// nil otherwise. Both disabled is unreachable via these callers:
+// validateScannerSettings fail-closes merged settings before status loads them.
+func nonDefaultSecretScanners(s *EntireSettings) []string {
+	if s.BetterleaksEnabled() && !s.GoredactEnabled() {
+		return nil
+	}
+	var parts []string
+	if s.BetterleaksEnabled() {
+		parts = append(parts, "betterleaks")
+	}
+	if s.GoredactEnabled() {
+		parts = append(parts, "goredact")
+	}
+	return parts
+}
+
+func writeSecretScannersLine(b *strings.Builder, s *EntireSettings, sty statusStyles) {
+	parts := nonDefaultSecretScanners(s)
+	if len(parts) == 0 {
+		return
+	}
+	b.WriteString("\n")
+	b.WriteString(sty.render(sty.dim, "  Secret scanners · "))
+	b.WriteString(strings.Join(parts, ", "))
 }
 
 // formatSettingsStatus formats a settings status line with source prefix.
@@ -427,11 +477,11 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 		return
 	}
 
-	// Finalize any ACTIVE session whose agent process has exited without a
+	// Finalize any non-ended session whose agent process has exited without a
 	// SessionStop hook firing, so it doesn't linger as "active" until the
 	// inactivity timeout. The sweep marks them ended in place, so the filter
 	// below drops them.
-	if n := finalizeExitedSessions(ctx, states); n > 0 {
+	if n := finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget)); n > 0 {
 		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("Finalized %d exited session(s) (agent process gone).", n)))
 	}
 
@@ -561,6 +611,11 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				fmt.Fprintln(w, sty.render(sty.dim, statsLine))
 			}
 			if warning := divergenceWarnings[st.SessionID]; warning != "" {
+				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
+			}
+			if st.CaptureDegradedAt != nil {
+				warning := fmt.Sprintf("capture degraded %s: status scan over budget; new-file detection skipped (see 'entire doctor logs')",
+					timeAgo(*st.CaptureDegradedAt))
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
 			fmt.Fprintln(w)
@@ -745,6 +800,9 @@ type statusJSON struct {
 	// HooksOutdated lists agents whose installed hook config is out of date and
 	// should be refreshed with `entire enable --force`.
 	HooksOutdated []string `json:"hooks_outdated,omitempty"`
+	// CodexHooks reports effective discovery/trust warnings separately from
+	// current-checkout installation and freshness semantics.
+	CodexHooks *codexHooksStatusJSON `json:"codex_hooks,omitempty"`
 	// CheckpointSyncRemote is the elected checkpoint sync remote name, or the
 	// org/repo slug in dedicated checkpoint_remote mode. Deliberately not named
 	// checkpoint_remote, which is the existing GitHub-coupled setting.
@@ -752,13 +810,43 @@ type statusJSON struct {
 	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|default|sole|first|dedicated
 	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
 	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
-	Error                      string `json:"error,omitempty"`
+	// SecretScanners lists the enabled engines when non-default; omitted when default.
+	SecretScanners []string `json:"secret_scanners,omitempty"`
+	Error          string   `json:"error,omitempty"`
+}
+
+type codexHooksStatusJSON struct {
+	State            string   `json:"state"`
+	WorktreePath     string   `json:"worktree_path,omitempty"`
+	DiscoveredPath   string   `json:"discovered_path,omitempty"`
+	ProjectLayerPath string   `json:"project_layer_path,omitempty"`
+	Error            string   `json:"error,omitempty"`
+	MissingHooks     []string `json:"missing_hooks,omitempty"`
+	MissingApprovals []string `json:"missing_approvals,omitempty"`
+}
+
+func codexHooksStatusFromIssue(issue *codexHookIssue) *codexHooksStatusJSON {
+	if issue == nil {
+		return nil
+	}
+	return &codexHooksStatusJSON{
+		State:            issue.State,
+		WorktreePath:     issue.WorktreePath,
+		DiscoveredPath:   issue.DiscoveredPath,
+		ProjectLayerPath: issue.ProjectLayerPath,
+		Error:            issue.Error,
+		MissingHooks:     issue.MissingHooks,
+		MissingApprovals: issue.MissingApprovals,
+	}
 }
 
 type sessionBriefJSON struct {
 	Agent  string `json:"agent"`
 	Model  string `json:"model,omitempty"`
 	Status string `json:"status"`
+	// CaptureDegraded reports that a session for this agent last turned with a
+	// status scan over budget, so new-file detection was skipped.
+	CaptureDegraded bool `json:"capture_degraded,omitempty"`
 }
 
 func runStatusJSON(ctx context.Context, w io.Writer) error {
@@ -809,9 +897,12 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 			result.Agents = names
 		}
 
+		result.SecretScanners = nonDefaultSecretScanners(s)
+
 		for _, name := range OutdatedHookAgents(ctx) {
 			result.HooksOutdated = append(result.HooksOutdated, string(name))
 		}
+		result.CodexHooks = codexHooksStatusFromIssue(inspectCodexHookIssue(ctx))
 
 		// Same computation as the text path (writeCheckpointSyncLines);
 		// empty fields drop out via omitempty when nothing resolved.
@@ -824,9 +915,9 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		if store, err := session.NewStateStore(ctx); err == nil {
 			if states, err := store.List(ctx); err == nil {
 				// Finalize sessions whose agent has exited (matches the human
-				// status path) so --json doesn't leave them orphaned ACTIVE or
+				// status path) so --json doesn't leave them orphaned or
 				// report them under active_sessions.
-				finalizeExitedSessions(ctx, states)
+				finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget))
 				// Deduplicate by agent: one entry per agent, "active" wins over "idle".
 				type agentEntry struct {
 					brief    sessionBriefJSON
@@ -848,12 +939,16 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 							existing.brief.Status = sessionStatusLabel(st)
 							existing.isActive = true
 						}
+						// Degradation is sticky across the dedupe: any degraded
+						// session for this agent must not be hidden by a healthy one.
+						existing.brief.CaptureDegraded = existing.brief.CaptureDegraded || st.CaptureDegradedAt != nil
 					} else {
 						byAgent[agent] = &agentEntry{
 							brief: sessionBriefJSON{
-								Agent:  agent,
-								Model:  st.ModelName,
-								Status: sessionStatusLabel(st),
+								Agent:           agent,
+								Model:           st.ModelName,
+								Status:          sessionStatusLabel(st),
+								CaptureDegraded: st.CaptureDegradedAt != nil,
 							},
 							isActive: active,
 						}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -23,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 
 	"charm.land/huh/v2"
@@ -522,6 +524,7 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 					Title("Manage agents").
 					Description("Use space to select/deselect, enter to confirm.").
 					Options(options...).
+					Height(uiform.SingleLineMultiSelectHeight(len(options))).
 					Value(&selectedAgentNames),
 			),
 		)
@@ -607,23 +610,10 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		}
 		return nil
 	}
-	var successfullyAddedAgents []agent.Agent
-	for _, ag := range addedAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
-		} else {
-			successfullyAddedAgents = append(successfullyAddedAgents, ag)
-		}
-	}
-
-	var successfullyReinstalledAgents []agent.Agent
-	for _, ag := range reinstalledAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
-		} else {
-			successfullyReinstalledAgents = append(successfullyReinstalledAgents, ag)
-		}
-	}
+	successfullyAddedAgents, setupErrs := setupAgentHookSet(ctx, w, addedAgents, opts.ForceHooks)
+	errs = append(errs, setupErrs...)
+	successfullyReinstalledAgents, setupErrs := setupAgentHookSet(ctx, w, reinstalledAgents, opts.ForceHooks)
+	errs = append(errs, setupErrs...)
 
 	var uninstalledAgents []agent.Agent
 	for _, ag := range removedAgents {
@@ -910,24 +900,12 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				selectedAgent = ag
 			}
 
-			// Route setup's logging to .entire/logs/ like every other command.
-			// Without Init the package logger stays nil and every logging.*
-			// call under setup — agent detection, hook install, session import,
-			// the checkpoint layer's push/remote warnings — falls back to
-			// slog.Default(), which prints them straight onto the user's
-			// terminal mid-flow (and writes nothing to the log file).
-			//
-			// Placement is load-bearing in both directions: after the git-repo
-			// check above so it cannot create .entire/logs/ outside a
-			// repository, and after every check that can still reject this
-			// invocation, because Init CREATES .entire/logs/ — a rejected
-			// enable must leave a previously untouched repo untouched rather
-			// than seeding it with an untracked directory Entire's gitignore
-			// entry does not exist yet to cover.
-			logging.SetLogLevelGetter(GetLogLevel)
-			if err := logging.Init(ctx, ""); err == nil {
-				defer logging.Close()
-			}
+			// enable runs before the repo is set up, which is exactly when the
+			// root pre-run's IsSetUpAny gate declines to build a logger. Placed
+			// after every check that can still reject this invocation, so a
+			// rejected enable leaves an untouched repo untouched.
+			ensureLogger(cmd)
+			ctx = cmd.Context()
 
 			if selectedAgent != nil {
 				// --agent is a targeted operation: set up this specific agent without
@@ -1001,12 +979,11 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 // repo, trails probe failure) is swallowed — the web onboarding surfaces the
 // "install the GitHub App" nudge, so the CLI stays quiet.
 func reportRepoEnabled(ctx context.Context, insecureHTTPAuth bool) {
-	// This runs synchronously on the enable success path, so bound it: a backend
-	// that accepts the connection but never responds must not hang the command
-	// after it has already printed success.
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
+	// This runs synchronously on the enable success path, so every network step
+	// below is bounded: a backend that accepts the connection but never responds
+	// must not hang the command after it has already printed success. The bounds
+	// live on the individual steps rather than on one shared parent here — see
+	// the call site at the bottom for why that distinction matters.
 	rawURL, err := gitremote.GetRemoteURL(ctx, "origin")
 	if err != nil || strings.TrimSpace(rawURL) == "" {
 		// Local-only repo with no origin yet — nothing to report.
@@ -1029,15 +1006,37 @@ func reportRepoEnabled(ctx context.Context, insecureHTTPAuth bool) {
 		return
 	}
 
+	// Sequential, but each under its OWN deadline rather than sharing one: the
+	// trails probe now costs ~4 sequential round trips (repos index, cluster
+	// catalog, identity-token exchange, TrailsEnabled) since it moved onto the
+	// repo's cell, so a slow enable report sharing a single budget could starve
+	// it to nothing. Separate budgets give the probe a floor it cannot lose,
+	// and their sum is the same 5s ceiling this function used to impose.
+	//
+	// The probe gets the larger share because it is the step that grew, and
+	// because its failure self-heals — SessionStart's detached refresh retries
+	// it — whereas the enable report has no retry.
 	reportEnableToBackend(ctx, insecureHTTPAuth, info)
 	probeAndCacheTrailsEnablement(ctx, insecureHTTPAuth, info)
 }
+
+const (
+	// enableReportBudget bounds the best-effort backend enable report, and
+	// enableTrailsProbeBudget the trails-enablement probe that follows it. See
+	// reportRepoEnabled's call site for why they are separate deadlines rather
+	// than one shared budget; their sum is the total this path may spend.
+	enableReportBudget      = 2 * time.Second
+	enableTrailsProbeBudget = 3 * time.Second
+)
 
 // reportEnableToBackend tells the backend which repo was just enabled, purely
 // for the web onboarding UI and the GitHub-App-reachability nudge. Best-effort
 // and independent of the trails probe: a failure here (not logged in, network
 // error, backend rejects the URL) must not block that probe.
 func reportEnableToBackend(ctx context.Context, insecureHTTPAuth bool, info *gitremote.Info) {
+	ctx, cancel := context.WithTimeout(ctx, enableReportBudget)
+	defer cancel()
+
 	client, err := NewAuthenticatedAPIClient(ctx, insecureHTTPAuth)
 	if err != nil {
 		// Not logged in / token unavailable — enable already succeeded locally.
@@ -1054,12 +1053,16 @@ func reportEnableToBackend(ctx context.Context, insecureHTTPAuth bool, info *git
 // trailRefreshAPIClient (see its doc for why) rather than the generic
 // data-API/BFF client.
 func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, info *gitremote.Info) {
-	client, handled, err := trailsClientOrCacheNotOnboarded(ctx, insecureHTTPAuth, info.Owner+"/"+info.Repo, func() error {
-		return saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, false)
-	})
-	if handled {
-		if err != nil {
-			logging.Debug(ctx, "failed to cache trails enablement", "error", err)
+	// The deadline bounds the NETWORK work only. The cache writes keep the
+	// caller's ctx: saveTrailsEnabledForScope, the single writer they funnel
+	// through, already guarantees a spent deadline cannot lose the answer.
+	probeCtx, cancel := context.WithTimeout(ctx, enableTrailsProbeBudget)
+	defer cancel()
+
+	client, notOnboarded, err := trailsCellClient(probeCtx, insecureHTTPAuth, info.Owner+"/"+info.Repo)
+	if notOnboarded {
+		if saveErr := saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, false); saveErr != nil {
+			logging.Debug(ctx, "failed to cache trails enablement", "error", saveErr)
 		}
 		return
 	}
@@ -1067,7 +1070,7 @@ func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, i
 		logging.Debug(ctx, "trails enablement probe client unavailable", "error", err)
 		return
 	}
-	enabled, err := client.TrailsEnabled(ctx, info.Forge, info.Owner, info.Repo)
+	enabled, err := client.TrailsEnabled(probeCtx, info.Forge, info.Owner, info.Repo)
 	if err != nil {
 		logging.Debug(ctx, "trails enablement probe failed", "error", err)
 		return
@@ -1251,6 +1254,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
 		}
+		warnCodexHooksAfterSetup(ctx, w, ag)
 		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
 			return err
 		}
@@ -1258,7 +1262,6 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 			return err
 		}
 	}
-
 	// Setup .entire directory
 	if _, err := setupEntireDirectory(ctx); err != nil {
 		return fmt.Errorf("failed to setup .entire directory: %w", err)
@@ -1607,6 +1610,7 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 	if err := hookAgent.UninstallHooks(ctx); err != nil {
 		return fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err)
 	}
+	warnCodexHooksAfterRemoval(ctx, w, ag)
 
 	fmt.Fprintf(w, "Removed %s hooks.\n", ag.Type())
 	return nil
@@ -1661,6 +1665,7 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 		if err := hookAgent.UninstallHooks(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to uninstall %s hooks: %w", ag.Type(), err))
 		} else {
+			warnCodexHooksAfterRemoval(ctx, w, ag)
 			fmt.Fprintf(w, "Removed %s hooks\n", ag.Type())
 		}
 	}
@@ -1683,6 +1688,48 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int,
 	return count, nil
 }
 
+func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) ([]agent.Agent, []error) {
+	var successful []agent.Agent
+	var errs []error
+	for _, ag := range agents {
+		if _, err := setupAgentHooks(ctx, ag, forceHooks); err != nil {
+			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
+			continue
+		}
+		warnCodexHooksAfterSetup(ctx, w, ag)
+		successful = append(successful, ag)
+	}
+	return successful, errs
+}
+
+func warnCodexHooksAfterSetup(ctx context.Context, w io.Writer, ag agent.Agent) {
+	if ag.Name() != agent.AgentNameCodex {
+		return
+	}
+
+	diagnostics := codexagent.InspectHookDiagnosticsLightweight(ctx)
+	if !diagnostics.PathsDiffer() {
+		return
+	}
+	fmt.Fprintf(w, "  Codex reads hooks from: %s\n", diagnostics.Discovery.DiscoveredHooks.Path())
+	fmt.Fprintf(w, "  Entire configured this worktree at: %s\n", diagnostics.WorktreeHooks.Path())
+	fmt.Fprintln(w, "  Hooks in the current-worktree file will not run here.")
+	writeCodexPrimaryCheckoutRemedy(w)
+}
+
+func warnCodexHooksAfterRemoval(ctx context.Context, w io.Writer, ag agent.Agent) {
+	if ag.Name() != agent.AgentNameCodex {
+		return
+	}
+
+	diagnostics := codexagent.InspectHookDiagnosticsLightweight(ctx)
+	if diagnostics.Discovered.State != codexagent.HookFileEntire {
+		return
+	}
+	fmt.Fprintf(w, "  Codex still reads Entire hooks from: %s\n", diagnostics.Discovery.DiscoveredHooks.Path())
+	fmt.Fprintln(w, "  .codex/hooks.json is tracked — remove the Entire-managed entries there and commit the change.")
+}
+
 // promptAgentSelection shows the interactive multi-select agent picker and
 // returns the chosen agent names. It is a package-level var so tests can
 // substitute it — no real TTY/form is available under `go test`.
@@ -1694,6 +1741,7 @@ var promptAgentSelection = func(options []huh.Option[string]) ([]string, error) 
 				Title("Select the agents you want to use").
 				Description("Use space to select, enter to confirm.").
 				Options(options...).
+				Height(uiform.SingleLineMultiSelectHeight(len(options))).
 				Validate(func(sel []string) error {
 					if len(sel) == 0 {
 						return errors.New("please select at least one agent")
@@ -1893,6 +1941,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
 	}
+	warnCodexHooksAfterSetup(ctx, w, ag)
 	if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
 		return err
 	}
@@ -1997,7 +2046,6 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		}
 		fmt.Fprintf(w, "  %s\n", msg)
 	}
-
 	fmt.Fprintln(w, "  ✓ Configured project")
 	fmt.Fprintf(w, "    %s\n", configDisplay)
 
@@ -2767,6 +2815,7 @@ func uninstallAgentHooks(ctx context.Context, p *uninstallPrinter, repoRoot stri
 			p.warnUnder("failed to remove agent hooks: %s: %v", agentDisplayName(name), uninstallErr)
 		default:
 			p.step("Removed %s hooks%s", agentDisplayName(name), suffix)
+			warnCodexHooksStillDiscovered(ctx, p, ag)
 		}
 	}
 
@@ -2796,6 +2845,24 @@ func uninstallAgentHooks(ctx context.Context, p *uninstallPrinter, repoRoot stri
 // The unchecked-plugin warnings are deliberately skipped too: the user is
 // quitting, and a re-run (uninstall is re-runnable by design) reports them
 // again with their recovery commands.
+// warnCodexHooksStillDiscovered is warnCodexHooksAfterRemoval on the uninstall
+// report's printer: Codex may read its hooks from a checkout other than this
+// worktree, and removing this worktree's file leaves those entries running. It
+// qualifies a removal that otherwise succeeded, so it prints under that step
+// and does not fail the run — the file it names is tracked, so only a commit
+// can remove it.
+func warnCodexHooksStillDiscovered(ctx context.Context, p *uninstallPrinter, ag agent.Agent) {
+	if ag.Name() != agent.AgentNameCodex {
+		return
+	}
+	diagnostics := codexagent.InspectHookDiagnosticsLightweight(ctx)
+	if diagnostics.Discovered.State != codexagent.HookFileEntire {
+		return
+	}
+	p.warnUnder("Codex still reads Entire hooks from: %s", diagnostics.Discovery.DiscoveredHooks.Path())
+	p.warnUnderDetail(".codex/hooks.json is tracked — remove the Entire-managed entries there and commit the change.")
+}
+
 func uninstallAgentHooksInterrupted(p *uninstallPrinter) bool {
 	p.warn("interrupted while removing agent hooks - run 'entire disable --uninstall' again to finish")
 	return false

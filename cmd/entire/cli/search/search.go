@@ -42,6 +42,28 @@ var ErrCellUnavailable = errors.New("semantic search is not available in this ce
 // don't misreport a repo-level miss as a region without query-serve.
 var ErrRepoFilterUnmatched = errors.New("no requested repo was found in this cell")
 
+// HTTPStatusError reports a non-OK search-service response. It preserves the
+// long-standing message wording (asserted by callers and tests) while exposing
+// the status code so outcome telemetry can classify server errors from the
+// type rather than the message text (ENT-1938).
+type HTTPStatusError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *HTTPStatusError) Error() string { return e.Message }
+
+// MalformedResponseError reports a 200 whose body was not a usable search
+// response: undecodable JSON, or a decoded body carrying an application-level
+// error field. Typed for the same reason as HTTPStatusError — the service
+// answered unusably, which outcome telemetry counts as a server failure, not
+// an unclassified one. Message wording is preserved verbatim.
+type MalformedResponseError struct {
+	Message string
+}
+
+func (e *MalformedResponseError) Error() string { return e.Message }
+
 // WildcardQuery is the query string used when only filters are provided (no search terms).
 const WildcardQuery = "*"
 
@@ -364,9 +386,10 @@ func (r *Result) ResultAuthor() string {
 }
 
 // ResultID returns the primary ID for any result type. Types without a typed
-// struct (repo, pr) fall back to the "id" field of the raw payload, so a
-// cross-cell merge can still identify the same logical result returned by two
-// cells (e.g. a repo mirrored in both).
+// struct (repo, pr) fall back to the "id" field of the raw payload; for a repo
+// row that is the placement ULID query-serve keys the namespace on (ENT-1912,
+// entire-search#198), the same identifier the repo index and the `repo` filter
+// use.
 func (r *Result) ResultID() string {
 	if id := resultField(r,
 		func(c *CheckpointResult) string { return c.ID },
@@ -450,13 +473,6 @@ func (r *Result) ResultTitle() string {
 	return r.rawString("title", "name", "fullName")
 }
 
-// ResultDescription returns the repo description for raw-payload rows
-// (searcher.RepoResult). Typed rows return "" — rawFields is never populated
-// for them.
-func (r *Result) ResultDescription() string {
-	return r.rawString("description")
-}
-
 // ResultCheckpointCount returns the indexed checkpoint count for raw-payload
 // repo rows (searcher.RepoResult), 0 elsewhere.
 func (r *Result) ResultCheckpointCount() int {
@@ -496,6 +512,16 @@ type Response struct {
 	Timing   *Timing     `json:"timing,omitempty"`
 	Reranked *bool       `json:"reranked,omitempty"`
 	Counts   *TypeCounts `json:"counts,omitempty"`
+
+	// Completeness metadata, same names and semantics as the BFF's merged
+	// response (entire.io api/src/routes/search.ts mergeCellResponses) so web
+	// and CLI surface identical signals (ENT-1777). Parsed from each cell and
+	// re-synthesized by the CLI's own merge.
+	Partial            bool            `json:"partial,omitempty"`
+	Truncated          bool            `json:"truncated,omitempty"`
+	CoverageIncomplete bool            `json:"coverage_incomplete,omitempty"`
+	TruncatedTypes     map[string]bool `json:"truncated_types,omitempty"`
+	CountsLowerBound   map[string]bool `json:"counts_lower_bound,omitempty"`
 
 	// Warnings are client-side completeness notes (e.g. a truncated repo
 	// index or a failed region in a cross-cell fan-out) surfaced to the user
@@ -794,18 +820,18 @@ func parseSearchResponse(statusCode int, body []byte) (*Response, error) {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("search service error (%d): %s", statusCode, errResp.Error)
+			return nil, &HTTPStatusError{StatusCode: statusCode, Message: fmt.Sprintf("search service error (%d): %s", statusCode, errResp.Error)}
 		}
-		return nil, fmt.Errorf("search service returned %d: %s", statusCode, string(body))
+		return nil, &HTTPStatusError{StatusCode: statusCode, Message: fmt.Sprintf("search service returned %d: %s", statusCode, string(body))}
 	}
 
 	var result Response
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("unexpected response from search service: %s", string(body))
+		return nil, &MalformedResponseError{Message: "unexpected response from search service: " + string(body)}
 	}
 
 	if result.Error != "" {
-		return nil, fmt.Errorf("search service error: %s", result.Error)
+		return nil, &MalformedResponseError{Message: "search service error: " + result.Error}
 	}
 
 	return &result, nil

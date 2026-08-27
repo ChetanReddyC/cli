@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -1289,6 +1292,62 @@ func TestRunStatus_ShowsEnabledAgents(t *testing.T) {
 	}
 }
 
+// TestRunStatus_ScannerSelectionLine covers the "Secret scanners · ..." line
+// across both effective-settings call sites (short and --detailed) and both
+// the non-default and default (line absent) cases.
+func TestRunStatus_ScannerSelectionLine(t *testing.T) {
+	tests := []struct {
+		name        string
+		settings    string
+		detailed    bool
+		want        string // substring checked for presence or absence per wantPresent
+		wantPresent bool
+	}{
+		{
+			name:        "goredact only, short",
+			settings:    testSettingsGoredactOnly,
+			want:        "Secret scanners · goredact",
+			wantPresent: true,
+		},
+		{
+			name:        "both enabled, short",
+			settings:    `{"enabled": true, "redaction": {"betterleaks": {"enabled": true}, "goredact": {"enabled": true}}}`,
+			want:        "Secret scanners · betterleaks, goredact",
+			wantPresent: true,
+		},
+		{
+			name:        "default, short",
+			settings:    testSettingsEnabled,
+			want:        "Secret scanners",
+			wantPresent: false,
+		},
+		{
+			name:        "goredact only, detailed",
+			settings:    testSettingsGoredactOnly,
+			detailed:    true,
+			want:        "Secret scanners · goredact",
+			wantPresent: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTestRepo(t)
+			writeSettings(t, tc.settings)
+
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, tc.detailed, false); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
+
+			output := stdout.String()
+			if got := strings.Contains(output, tc.want); got != tc.wantPresent {
+				t.Errorf("strings.Contains(output, %q) = %v, want %v; output: %s", tc.want, got, tc.wantPresent, output)
+			}
+		})
+	}
+}
+
 func TestRunStatus_EnabledNoAgentsHidesHooksLine(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
@@ -1752,6 +1811,38 @@ func TestRunStatusJSON_Enabled(t *testing.T) {
 	}
 }
 
+// secret_scanners is omitted for the default selection and lists the enabled
+// engines for a non-default one.
+func TestRunStatusJSON_SecretScanners(t *testing.T) {
+	cases := []struct {
+		name     string
+		settings string
+		want     []string // nil: field omitted for the default selection
+	}{
+		{"default omitted", testSettingsEnabled, nil},
+		{"goredact only listed", testSettingsGoredactOnly, []string{"goredact"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTestRepo(t)
+			writeSettings(t, tc.settings)
+
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
+
+			var result statusJSON
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if !slices.Equal(result.SecretScanners, tc.want) {
+				t.Errorf("secret_scanners = %v, want %v", result.SecretScanners, tc.want)
+			}
+		})
+	}
+}
+
 // TestRunStatusJSON_HooksOutdated — when Claude Code hooks are installed under
 // the outdated Task/TodoWrite matchers, `entire status --json` reports the agent
 // under hooks_outdated so scripts/agents can detect the drift.
@@ -1787,6 +1878,137 @@ func TestRunStatusJSON_HooksOutdated(t *testing.T) {
 	}
 	if !slices.Contains(result.HooksOutdated, "claude-code") {
 		t.Errorf("Expected hooks_outdated to contain 'claude-code', got %v", result.HooksOutdated)
+	}
+}
+
+func TestRunStatusJSON_CodexLinkedWorktreeHooksReportInactiveDiscovery(t *testing.T) {
+	setupTestRepo(t)
+	repoRoot, err := paths.WorktreeRoot(context.Background())
+	if err != nil {
+		t.Fatalf("WorktreeRoot() error = %v", err)
+	}
+	linkedRoot := filepath.Join(t.TempDir(), "linked")
+	cmd := exec.CommandContext(t.Context(), "git", "worktree", "add", "-b", "codex-linked-status", linkedRoot)
+	cmd.Dir = repoRoot
+	cmd.Env = testutil.GitIsolatedEnv()
+	if output, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
+		t.Fatalf("git worktree add: %v: %s", cmdErr, output)
+	}
+	t.Chdir(linkedRoot)
+	writeSettings(t, testSettingsEnabled)
+	if err := os.MkdirAll(".codex", 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	legacy := `{"hooks":{"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop"}]}]}}`
+	if err := os.WriteFile(filepath.Join(".codex", "hooks.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if slices.Contains(result.Agents, "Codex") {
+		t.Fatalf("ignored worktree-local hooks must not report Codex installed: %v", result.Agents)
+	}
+	if slices.Contains(result.HooksOutdated, "codex") {
+		t.Fatalf("Codex freshness must be represented by codex_hooks only: %v", result.HooksOutdated)
+	}
+	if result.CodexHooks == nil {
+		t.Fatal("expected codex_hooks diagnostic")
+	}
+	if result.CodexHooks.State != codexHookStateInactiveWorktreePath {
+		t.Fatalf("codex_hooks.state = %q, want %q", result.CodexHooks.State, codexHookStateInactiveWorktreePath)
+	}
+	if result.CodexHooks.WorktreePath != resolvedHooksPath(t, linkedRoot) {
+		t.Fatalf("worktree_path = %q", result.CodexHooks.WorktreePath)
+	}
+	if result.CodexHooks.DiscoveredPath != resolvedHooksPath(t, repoRoot) {
+		t.Fatalf("discovered_path = %q", result.CodexHooks.DiscoveredPath)
+	}
+}
+
+func TestRunStatus_CodexLinkedWorktreeRootHooksAreActive(t *testing.T) {
+	tmp, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
+	ag := &codex.CodexAgent{}
+	t.Chdir(repoRoot)
+	_, err := ag.InstallHooks(context.Background(), false)
+	if err != nil {
+		t.Fatalf("install root Codex hooks: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	_, err = ag.InstallHooks(context.Background(), false)
+	if err != nil {
+		t.Fatalf("install linked-worktree Codex hooks: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	out := stdout.String()
+	if strings.Contains(out, "Codex ignores this worktree's hooks file") {
+		t.Fatalf("active root hooks should not produce a status warning: %s", out)
+	}
+	if strings.Contains(out, "CURRENT-WORKTREE FILE NOT DISCOVERED") {
+		t.Fatalf("active root hooks should not produce a doctor warning: %s", out)
+	}
+}
+
+func TestRunStatusJSON_CodexInvalidWorktreePrecedesDiscovery(t *testing.T) {
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("directory symlinks require privileges on Windows")
+	}
+
+	for _, test := range []struct {
+		name       string
+		discovered string
+	}{
+		{name: "healthy discovered hooks", discovered: canonicalCodexHooksJSON()},
+		{name: "invalid discovered hooks", discovered: "{"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tmp, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
+			writeCodexHooksForDiagnosticTest(t, repoRoot, test.discovered)
+			if err := os.Symlink(filepath.Join(repoRoot, ".codex"), filepath.Join(linkedRoot, ".codex")); err != nil {
+				t.Fatalf("create redirected project layer: %v", err)
+			}
+			t.Chdir(linkedRoot)
+			t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+			writeSettings(t, testSettingsEnabled)
+
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
+			var result statusJSON
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if result.CodexHooks == nil {
+				t.Fatal("expected codex_hooks diagnostic")
+			}
+			wantState := codexHookStateProjectLayerMissing
+			if test.discovered == "{" {
+				wantState = codexHookStateMalformedDiscovered
+			}
+			if result.CodexHooks.State != wantState {
+				t.Fatalf("codex_hooks.state = %q, want %q", result.CodexHooks.State, wantState)
+			}
+			if result.CodexHooks.WorktreePath != resolvedHooksPath(t, linkedRoot) {
+				t.Fatalf("worktree_path = %q", result.CodexHooks.WorktreePath)
+			}
+			if test.discovered == "{" && !strings.Contains(result.CodexHooks.Error, "unexpected end of JSON input") {
+				t.Fatalf("codex_hooks.error = %q", result.CodexHooks.Error)
+			}
+		})
 	}
 }
 
