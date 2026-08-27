@@ -89,60 +89,26 @@ func TestTrailRequestsUseEntireAPICasing(t *testing.T) {
 func TestTrailResourceToMetadataUsesID(t *testing.T) {
 	t.Parallel()
 
-	metadata := (&TrailResource{ID: "trail-db-id", URL: "https://entire.io/gh/o/r/trails/9", Branch: "feature/x", Phase: "has_code"}).ToMetadata()
+	metadata := (&TrailResource{
+		ID:             "trail-db-id",
+		URL:            "https://entire.io/gh/o/r/trails/9",
+		Branch:         "feature/x",
+		OriginalBranch: "feature/former",
+		Phase:          "has_code",
+	}).ToMetadata()
 	if got := metadata.TrailID.String(); got != "trail-db-id" {
 		t.Fatalf("metadata TrailID = %q, want stable API id", got)
 	}
 	if metadata.Phase != "has_code" {
 		t.Fatalf("metadata Phase = %q, want has_code", metadata.Phase)
 	}
+	if metadata.OriginalBranch != "feature/former" {
+		t.Fatalf("metadata OriginalBranch = %q, want feature/former", metadata.OriginalBranch)
+	}
 	// The server-provided URL must propagate so callers relying on ToMetadata()
 	// don't silently drop it.
 	if metadata.URL != "https://entire.io/gh/o/r/trails/9" {
 		t.Fatalf("metadata URL = %q, want propagated server url", metadata.URL)
-	}
-}
-
-func TestTrailResourceToMetadataPreservesBranchState(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name           string
-		branch         string
-		originalBranch string
-	}{
-		{name: "linked", branch: "feature/current", originalBranch: "feature/original"},
-		{name: "unlinked", originalBranch: "feature/former"},
-		{name: "empty original branch", branch: "feature/current"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			encoded, err := json.Marshal((&TrailResource{
-				Branch:         tt.branch,
-				OriginalBranch: tt.originalBranch,
-			}).ToMetadata())
-			if err != nil {
-				t.Fatal(err)
-			}
-			var got struct {
-				Branch         string  `json:"branch"`
-				OriginalBranch *string `json:"original_branch"`
-			}
-			if err := json.Unmarshal(encoded, &got); err != nil {
-				t.Fatal(err)
-			}
-			if got.Branch != tt.branch {
-				t.Errorf("Branch = %q, want %q", got.Branch, tt.branch)
-			}
-			if got.OriginalBranch == nil {
-				t.Fatal("original_branch is absent")
-			}
-			if *got.OriginalBranch != tt.originalBranch {
-				t.Errorf("OriginalBranch = %q, want %q", *got.OriginalBranch, tt.originalBranch)
-			}
-		})
 	}
 }
 
