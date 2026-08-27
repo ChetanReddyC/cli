@@ -475,7 +475,9 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 // producer ever set (#2058's "dead writer": the whole path was unreachable).
 // Transcript content is expected pre-redacted by the caller (the condensation
 // materializer runs the same sanitize -> externalize -> redact pipeline the
-// session transcript gets); this writer does no redaction of its own.
+// session transcript gets), so this writer does not redact it again. The one
+// thing it does redact is task.json's free-text task_description, which the
+// record carries verbatim — see writeTaskRecordEntry.
 func (s *treeWriter) writeTaskRecordEntries(opts WriteOptions, basePath string, entries map[string]object.TreeEntry) error {
 	for _, task := range opts.Tasks {
 		if err := validation.ValidateToolUseID(task.ToolUseID); err != nil {
