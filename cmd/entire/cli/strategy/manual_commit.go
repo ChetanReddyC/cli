@@ -6,8 +6,10 @@ import (
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // ManualCommitStrategy implements the manual-commit strategy for session management.
@@ -85,6 +87,41 @@ func (s *ManualCommitStrategy) SetBlobFetcher(f checkpoint.BlobFetchFunc) {
 // Used in tests to verify the strategy is properly wired for treeless fetch support.
 func (s *ManualCommitStrategy) HasBlobFetcher() bool {
 	return s.blobFetcher != nil
+}
+
+// hookCheckpointStoreOptions is the store envelope for a git-hook read: the
+// bounded ref probe, the bounded blob fetch, and the read-candidate chain. The
+// two bounds live together because a hook that has one and not the other still
+// fails — a ref fetcher with no blob fetcher resolves the checkpoint's ref and
+// then reads its filtered-out metadata.json as absent, reporting a checkpoint
+// that exists as missing.
+func (s *ManualCommitStrategy) hookCheckpointStoreOptions(ctx context.Context) checkpoint.OpenOptions {
+	return checkpoint.OpenOptions{
+		RefFetcher:  remote.HookCheckpointRefFetcher(),
+		BlobFetcher: s.hookBlobFetcher(),
+		ReadRemotes: CheckpointReadRemotes(ctx),
+	}
+}
+
+// hookBlobFetcher returns the strategy's blob fetcher bounded for git-hook
+// contexts: the write-probe budget over the whole call plus BatchMode SSH, the
+// same envelope remote.HookCheckpointRefFetcher puts around the ref probe those
+// hooks already run. Reads there must not inherit the interactive read chain's
+// minutes while a user's git command waits on the hook.
+//
+// It fires only when a checkpoint blob is genuinely absent from the local
+// object store, which on a full clone never happens — the cost lands on
+// partial clones, where the alternative is not "no network" but a checkpoint
+// read that reports the checkpoint missing.
+func (s *ManualCommitStrategy) hookBlobFetcher() checkpoint.BlobFetchFunc {
+	if s.blobFetcher == nil {
+		return nil
+	}
+	return func(ctx context.Context, hashes []plumbing.Hash) error {
+		ctx, cancel := context.WithTimeout(remote.WithNonInteractiveSSH(ctx), remote.WriteProbeFetchBudget)
+		defer cancel()
+		return s.blobFetcher(ctx, hashes)
+	}
 }
 
 // ValidateRepository validates that the repository is suitable for this strategy.
