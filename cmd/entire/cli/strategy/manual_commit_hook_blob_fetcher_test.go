@@ -73,7 +73,7 @@ func TestHookBlobFetcher_BoundsTheCallAndPassesHashes(t *testing.T) {
 	require.Equal(t, want, gotHashes)
 	require.True(t, gotBatchSSH, "a hook fetch must not be able to prompt for an SSH passphrase")
 	require.True(t, gotHasDeadline, "a hook fetch must carry a deadline at all")
-	require.WithinDuration(t, time.Now().Add(remote.WriteProbeFetchBudget), gotDeadline, remote.WriteProbeFetchBudget,
+	require.WithinDuration(t, time.Now().Add(remote.WriteProbeFetchBudget), gotDeadline, 2*time.Second,
 		"the hook fetch must carry the write-probe budget, not the interactive read chain's")
 	require.Less(t, time.Until(gotDeadline), remote.ReadChainBudget,
 		"the hook fetch must be bounded well inside the interactive read chain")
