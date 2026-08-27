@@ -403,7 +403,9 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 }
 
 // loadClaudeSettings reads and parses .claude/settings.json from the repo root.
-// Returns ok=false when the file is missing or unparseable.
+// A missing file returns the zero settings and no error — that is the answer
+// "nothing configured". An unreadable or malformed file returns an error: the
+// answer could not be read, which is a different thing.
 func loadClaudeSettings(ctx context.Context) (ClaudeSettings, error) {
 	// Use repo root to find .claude directory when run from a subdirectory
 	repoRoot, err := paths.WorktreeRoot(ctx)

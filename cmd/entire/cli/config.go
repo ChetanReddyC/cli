@@ -118,13 +118,16 @@ type agentHookState struct {
 type uncheckedAgent struct {
 	name types.AgentName
 	err  error
-	// external distinguishes the two remedies. A plugin owns its own hooks, so
-	// only its binary can remove them and the user may have to run it by hand; a
-	// built-in's hooks are removed in-process regardless of what its check said.
+	// external distinguishes the two remedies offered to the user. Neither kind
+	// is uninstalled blind — a check that failed is not a licence to mutate the
+	// agent's config — but a plugin owns its own hooks, so its warning can hand
+	// out the exact binary invocation that removes them; a built-in's config is
+	// ours to read, so the only honest remedy is to say what broke and let a
+	// re-run retry it.
 	external bool
 }
 
-// names returns the unchecked agents' registry names, for display.
+// uncheckedNames returns the unchecked agents' registry names, for display.
 func (s agentHookState) uncheckedNames() []types.AgentName {
 	names := make([]types.AgentName, 0, len(s.unchecked))
 	for _, u := range s.unchecked {

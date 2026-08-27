@@ -2424,8 +2424,8 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// Check if there's anything to uninstall. Any unchecked agent blocks the
 	// "not installed" claim: its hooks may or may not be on disk, which is not
 	// the same as cleanly reporting none — fall through so the removal below
-	// attempts (built-in) or reports (plugin) it, and the run exits non-zero
-	// rather than asserting an absence it could not verify.
+	// reports it with its remedy, and the run exits non-zero rather than
+	// asserting an absence it could not verify.
 	if !entireDirExists && !gitHooksInstalled && sessionStateCount == 0 &&
 		shadowBranchCount == 0 && len(agHookState.installed) == 0 &&
 		len(agHookState.unchecked) == 0 {
@@ -2692,6 +2692,12 @@ func powerShellQuote(s string) string {
 // is also what the confirmation summary was built from, so this uninstalls
 // exactly what the user was shown. An agent that cleanly reported no hooks is
 // in neither set and is left alone.
+//
+// An unchecked agent is reported, never uninstalled blind — built-in included.
+// A check that failed is not a licence to rewrite that agent's config: whatever
+// broke the read (an unreadable or malformed file) is the same thing a removal
+// would have to parse, and guessing at it risks destroying a config that is not
+// ours. The warning says so, and the run exits non-zero.
 //
 // It prints its own report as it goes — removals to stdout, warnings to
 // stderr — and owns its own success verdict: any problem fails the step,
