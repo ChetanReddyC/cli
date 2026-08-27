@@ -28,6 +28,13 @@ type ManualCommitStrategy struct {
 	// blobFetcher, when set, is passed to the checkpoint store to enable
 	// on-demand blob fetching after treeless fetches. Set via SetBlobFetcher.
 	blobFetcher checkpoint.BlobFetchFunc
+
+	// blobFetchBudget bounds one blob fetch on a git-hook path. Zero means
+	// remote.WriteProbeFetchBudget. Per-instance rather than a package var so
+	// tests can shorten it without mutating process-global state, which
+	// t.Parallel() makes a data race (CLAUDE.md: "Tests that modify
+	// process-global state cannot be parallelized").
+	blobFetchBudget time.Duration
 }
 
 // getStateStore returns the session state store, initializing it lazily if needed.
@@ -149,7 +156,11 @@ func (s *ManualCommitStrategy) hookBlobFetcher() checkpoint.BlobFetchFunc {
 			return prior
 		}
 
-		fetchCtx, cancel := context.WithTimeout(remote.WithNonInteractiveSSH(ctx), hookBlobFetchBudget)
+		budget := s.blobFetchBudget
+		if budget == 0 {
+			budget = remote.WriteProbeFetchBudget
+		}
+		fetchCtx, cancel := context.WithTimeout(remote.WithNonInteractiveSSH(ctx), budget)
 		defer cancel()
 		err := s.blobFetcher(fetchCtx, hashes)
 		if err != nil && ctx.Err() == nil && errors.Is(fetchCtx.Err(), context.DeadlineExceeded) {
@@ -161,19 +172,6 @@ func (s *ManualCommitStrategy) hookBlobFetcher() checkpoint.BlobFetchFunc {
 		}
 		return err
 	}
-}
-
-// hookBlobFetchBudget bounds one blob fetch on a git-hook path. A var, not a
-// const, only so tests can shorten it; production always uses the write-probe
-// budget the ref probe on the same hooks already uses.
-var hookBlobFetchBudget = remote.WriteProbeFetchBudget
-
-// setHookBlobFetchBudgetForTesting shortens the per-fetch budget and returns a
-// func restoring it.
-func setHookBlobFetchBudgetForTesting(d time.Duration) (restore func()) {
-	orig := hookBlobFetchBudget
-	hookBlobFetchBudget = d
-	return func() { hookBlobFetchBudget = orig }
 }
 
 // ValidateRepository validates that the repository is suitable for this strategy.

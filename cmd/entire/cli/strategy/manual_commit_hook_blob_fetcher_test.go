@@ -133,8 +133,7 @@ func TestHookBlobFetcher_MemoizesBudgetExhaustion(t *testing.T) {
 		return ctx.Err()
 	})
 
-	restore := setHookBlobFetchBudgetForTesting(20 * time.Millisecond)
-	defer restore()
+	s.blobFetchBudget = 20 * time.Millisecond
 
 	fetch := s.hookBlobFetcher()
 	for range 5 {
@@ -190,8 +189,7 @@ func TestHookBlobFetcher_DoesNotMemoizeCallerCancellation(t *testing.T) {
 	cancel()
 	require.Error(t, fetch(cancelled, []plumbing.Hash{plumbing.ZeroHash}))
 
-	restore := setHookBlobFetchBudgetForTesting(20 * time.Millisecond)
-	defer restore()
+	s.blobFetchBudget = 20 * time.Millisecond
 	require.Error(t, fetch(context.Background(), []plumbing.Hash{plumbing.ZeroHash}))
 
 	require.Equal(t, 2, calls, "caller cancellation must not memoize a network verdict")
