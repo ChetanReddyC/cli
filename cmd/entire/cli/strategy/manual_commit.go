@@ -2,8 +2,10 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
@@ -113,15 +115,65 @@ func (s *ManualCommitStrategy) hookCheckpointStoreOptions(ctx context.Context) c
 // object store, which on a full clone never happens — the cost lands on
 // partial clones, where the alternative is not "no network" but a checkpoint
 // read that reports the checkpoint missing.
+//
+// The returned fetcher also memoizes budget exhaustion for its own lifetime
+// (one hook invocation), which is the blob-side counterpart of
+// gitRefsStore.fetchFailure. The ref memo is consulted only in
+// resolveRefMaybeFetch, so it does not cover blob reads: those go through
+// NewFetchingTree, which holds no memo. Without one, finalizeAllTurnCheckpoints
+// looping state.TurnCheckpointIDs against a single store paid
+// WriteProbeFetchBudget PER CHECKPOINT on a dead network — and FetchingTree.File
+// fetches one hash at a time, so a read touching several missing blobs paid it
+// several times. Nothing bounds the total: newGitHookContext adds no deadline,
+// and an agent kills the hook long before the loop ends.
+//
+// Only budget exhaustion is memoized, deliberately. It is the dead-network
+// signature and the only failure expensive enough to be worth not repeating; a
+// fast error is cheap to retry and may be one blob's genuine remote absence,
+// which must not stop the next blob from being fetched. As in the ref memo, a
+// cancellation originating from the CALLER says nothing about the remote and is
+// never memoized.
 func (s *ManualCommitStrategy) hookBlobFetcher() checkpoint.BlobFetchFunc {
 	if s.blobFetcher == nil {
 		return nil
 	}
+	var (
+		mu        sync.Mutex
+		exhausted error
+	)
 	return func(ctx context.Context, hashes []plumbing.Hash) error {
-		ctx, cancel := context.WithTimeout(remote.WithNonInteractiveSSH(ctx), remote.WriteProbeFetchBudget)
+		mu.Lock()
+		prior := exhausted
+		mu.Unlock()
+		if prior != nil {
+			return prior
+		}
+
+		fetchCtx, cancel := context.WithTimeout(remote.WithNonInteractiveSSH(ctx), hookBlobFetchBudget)
 		defer cancel()
-		return s.blobFetcher(ctx, hashes)
+		err := s.blobFetcher(fetchCtx, hashes)
+		if err != nil && ctx.Err() == nil && errors.Is(fetchCtx.Err(), context.DeadlineExceeded) {
+			mu.Lock()
+			if exhausted == nil {
+				exhausted = err
+			}
+			mu.Unlock()
+		}
+		return err
 	}
+}
+
+// hookBlobFetchBudget bounds one blob fetch on a git-hook path. A var, not a
+// const, only so tests can shorten it; production always uses the write-probe
+// budget the ref probe on the same hooks already uses.
+var hookBlobFetchBudget = remote.WriteProbeFetchBudget
+
+// setHookBlobFetchBudgetForTesting shortens the per-fetch budget and returns a
+// func restoring it.
+func setHookBlobFetchBudgetForTesting(d time.Duration) (restore func()) {
+	orig := hookBlobFetchBudget
+	hookBlobFetchBudget = d
+	return func() { hookBlobFetchBudget = orig }
 }
 
 // ValidateRepository validates that the repository is suitable for this strategy.

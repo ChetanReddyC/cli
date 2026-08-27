@@ -1131,8 +1131,10 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	// The hook store envelope (see hookCheckpointStoreOptions): the attribution
 	// backfill's absence probe fetches a ref that exists remotely but not
 	// locally, and on a partial clone the checkpoint's own blobs need fetching
-	// too. Bounded budgets + the store's failure memo keep a dead network from
-	// stalling the post-commit hook.
+	// too. Bounded budgets keep a dead network from stalling the post-commit
+	// hook: the ref store memoizes a failed ref fetch (gitRefsStore.fetchFailure)
+	// and hookBlobFetcher memoizes an exhausted blob fetch, so the two paths are
+	// bounded independently.
 	stores, err := checkpoint.Open(ctx, repo, s.hookCheckpointStoreOptions(ctx))
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
@@ -3166,8 +3168,11 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// The hook store envelope (see hookCheckpointStoreOptions): the transcript
 	// finalize targets existing checkpoints whose refs — and, on a partial
 	// clone, whose blobs — may live only on the remote (resumed/adopted
-	// multi-machine sessions). Bounded budgets + the store's failure memo keep
-	// a dead network from stalling the stop hook N times.
+	// multi-machine sessions). This loops over every checkpoint of the turn
+	// against one store, so both fetch paths need their own memo or a dead
+	// network costs the budget N times: gitRefsStore.fetchFailure covers refs,
+	// and hookBlobFetcher memoizes an exhausted blob fetch. Nothing else bounds
+	// the total — newGitHookContext adds no deadline.
 	stores, err := checkpoint.Open(ctx, repo, s.hookCheckpointStoreOptions(ctx))
 	if err != nil {
 		logging.Warn(logCtx, "finalize: failed to open checkpoint store",

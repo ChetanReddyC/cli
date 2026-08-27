@@ -50,16 +50,17 @@ func TestHookBlobFetcher_BoundsTheCallAndPassesHashes(t *testing.T) {
 	sentinel := errors.New("fetch failed")
 
 	var (
-		gotHashes   []plumbing.Hash
-		gotDeadline time.Time
-		gotBatchSSH bool
-		called      int
+		gotHashes      []plumbing.Hash
+		gotDeadline    time.Time
+		gotHasDeadline bool
+		gotBatchSSH    bool
+		called         int
 	)
 	s := NewManualCommitStrategy()
 	s.SetBlobFetcher(func(ctx context.Context, hashes []plumbing.Hash) error {
 		called++
 		gotHashes = hashes
-		gotDeadline, _ = ctx.Deadline()
+		gotDeadline, gotHasDeadline = ctx.Deadline()
 		gotBatchSSH = remote.IsNonInteractiveSSH(ctx)
 		return sentinel
 	})
@@ -71,6 +72,7 @@ func TestHookBlobFetcher_BoundsTheCallAndPassesHashes(t *testing.T) {
 	require.Equal(t, 1, called)
 	require.Equal(t, want, gotHashes)
 	require.True(t, gotBatchSSH, "a hook fetch must not be able to prompt for an SSH passphrase")
+	require.True(t, gotHasDeadline, "a hook fetch must carry a deadline at all")
 	require.WithinDuration(t, time.Now().Add(remote.WriteProbeFetchBudget), gotDeadline, remote.WriteProbeFetchBudget,
 		"the hook fetch must carry the write-probe budget, not the interactive read chain's")
 	require.Less(t, time.Until(gotDeadline), remote.ReadChainBudget,
@@ -83,10 +85,13 @@ func TestHookBlobFetcher_BoundsTheCallAndPassesHashes(t *testing.T) {
 func TestHookBlobFetcher_DoesNotExtendACallerDeadline(t *testing.T) {
 	t.Parallel()
 
-	var gotDeadline time.Time
+	var (
+		gotDeadline    time.Time
+		gotHasDeadline bool
+	)
 	s := NewManualCommitStrategy()
 	s.SetBlobFetcher(func(ctx context.Context, _ []plumbing.Hash) error {
-		gotDeadline, _ = ctx.Deadline()
+		gotDeadline, gotHasDeadline = ctx.Deadline()
 		return nil
 	})
 
@@ -95,5 +100,99 @@ func TestHookBlobFetcher_DoesNotExtendACallerDeadline(t *testing.T) {
 	defer cancel()
 	require.NoError(t, s.hookBlobFetcher()(ctx, []plumbing.Hash{plumbing.ZeroHash}))
 
+	// Assert the deadline EXISTS before comparing it. Without this the test is a
+	// false positive in the direction that matters most: if the wrapper stopped
+	// propagating a deadline, ctx.Deadline() returns (time.Time{}, false),
+	// gotDeadline stays at the zero time — year 1 — and time.Until of that is
+	// hugely negative, so the upper bound below is satisfied and an unbounded
+	// hook fetch passes as bounded.
+	require.True(t, gotHasDeadline, "bounding must not drop the caller's deadline entirely")
 	require.LessOrEqual(t, time.Until(gotDeadline), tight)
+}
+
+// TestHookBlobFetcher_MemoizesBudgetExhaustion is the guard for the N-times
+// stall the ref path already avoids and the blob path did not.
+//
+// gitRefsStore.fetchFailure memoizes a dead network for the store's lifetime,
+// and its doc comment names the exact scenario: "a loop over N missing refs
+// (e.g. a stop hook finalizing every checkpoint of a turn) pays a dead network
+// once instead of N times". But it is consulted only in resolveRefMaybeFetch —
+// the ref path. Blob reads go through NewFetchingTree, which holds no memo, so
+// finalizeAllTurnCheckpoints looping TurnCheckpointIDs with one store paid
+// WriteProbeFetchBudget per checkpoint (and File() fetches one hash at a time,
+// so a read touching several missing blobs paid it several times). Nothing
+// encloses that: newGitHookContext adds no deadline.
+func TestHookBlobFetcher_MemoizesBudgetExhaustion(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	s := NewManualCommitStrategy()
+	s.SetBlobFetcher(func(ctx context.Context, _ []plumbing.Hash) error {
+		calls++
+		<-ctx.Done() // a dead network: burn the whole budget
+		return ctx.Err()
+	})
+
+	restore := setHookBlobFetchBudgetForTesting(20 * time.Millisecond)
+	defer restore()
+
+	fetch := s.hookBlobFetcher()
+	for range 5 {
+		require.Error(t, fetch(context.Background(), []plumbing.Hash{plumbing.ZeroHash}))
+	}
+
+	require.Equal(t, 1, calls,
+		"a budget-exhausted blob fetch must be memoized for the hook's lifetime; "+
+			"otherwise a stop hook finalizing N checkpoints pays the budget N times")
+}
+
+// TestHookBlobFetcher_DoesNotMemoizeAFastFailure keeps the memo from poisoning
+// recoverable reads. Only budget exhaustion — the dead-network signature, and
+// the only failure expensive enough to be worth not repeating — is memoized. A
+// fast error may be one blob's genuine absence, and must not stop the next
+// blob from being fetched.
+func TestHookBlobFetcher_DoesNotMemoizeAFastFailure(t *testing.T) {
+	t.Parallel()
+
+	sentinel := errors.New("remote has no such blob")
+	var calls int
+	s := NewManualCommitStrategy()
+	s.SetBlobFetcher(func(context.Context, []plumbing.Hash) error {
+		calls++
+		return sentinel
+	})
+
+	fetch := s.hookBlobFetcher()
+	for range 3 {
+		require.ErrorIs(t, fetch(context.Background(), []plumbing.Hash{plumbing.ZeroHash}), sentinel)
+	}
+
+	require.Equal(t, 3, calls, "a fast failure is cheap to repeat and may be per-blob absence")
+}
+
+// TestHookBlobFetcher_DoesNotMemoizeCallerCancellation mirrors the ref memo's
+// guard: a cancellation originating from the CALLER's context says nothing
+// about the remote and must not poison later fetches on this hook.
+func TestHookBlobFetcher_DoesNotMemoizeCallerCancellation(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	s := NewManualCommitStrategy()
+	s.SetBlobFetcher(func(ctx context.Context, _ []plumbing.Hash) error {
+		calls++
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	fetch := s.hookBlobFetcher()
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.Error(t, fetch(cancelled, []plumbing.Hash{plumbing.ZeroHash}))
+
+	restore := setHookBlobFetchBudgetForTesting(20 * time.Millisecond)
+	defer restore()
+	require.Error(t, fetch(context.Background(), []plumbing.Hash{plumbing.ZeroHash}))
+
+	require.Equal(t, 2, calls, "caller cancellation must not memoize a network verdict")
 }
