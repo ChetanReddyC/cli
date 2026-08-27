@@ -124,21 +124,6 @@ type uncheckedAgent struct {
 	external bool
 }
 
-// uncheckedInternal returns the built-ins among the unchecked ones. Their
-// removal is attempted in-process regardless, but the check and the removal
-// read the same config file, so a failed check usually means the removal
-// failed on the same unreadable file — a caller must not report a success it
-// could not verify.
-func (s agentHookState) uncheckedInternal() []uncheckedAgent {
-	var builtins []uncheckedAgent
-	for _, u := range s.unchecked {
-		if !u.external {
-			builtins = append(builtins, u)
-		}
-	}
-	return builtins
-}
-
 // names returns the unchecked agents' registry names, for display.
 func (s agentHookState) uncheckedNames() []types.AgentName {
 	names := make([]types.AgentName, 0, len(s.unchecked))
