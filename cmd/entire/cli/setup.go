@@ -2766,7 +2766,7 @@ func uninstallAgentHooks(ctx context.Context, p *uninstallPrinter, repoRoot stri
 			p.stepFailed("Failed to remove %s hooks", agentDisplayName(name))
 			p.warnUnder("failed to remove agent hooks: %s: %v", agentDisplayName(name), uninstallErr)
 		default:
-			p.step("Removed %s hooks%s", ag.Type(), suffix)
+			p.step("Removed %s hooks%s", agentDisplayName(name), suffix)
 		}
 	}
 
