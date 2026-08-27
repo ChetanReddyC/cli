@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -15,7 +16,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const windowsOS = "windows"
+
 func TestFetchingTreeReadFileViaGitDisablesLazyFetch(t *testing.T) {
+	if runtime.GOOS == windowsOS {
+		t.Skip("fake git uses a POSIX shell script")
+	}
+
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
 	testutil.WriteFile(t, repoDir, "fixture.txt", "checkpoint content")
