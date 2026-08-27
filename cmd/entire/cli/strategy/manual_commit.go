@@ -149,6 +149,16 @@ func (s *ManualCommitStrategy) hookBlobFetcher() checkpoint.BlobFetchFunc {
 		exhausted error
 	)
 	return func(ctx context.Context, hashes []plumbing.Hash) error {
+		// The lock covers the read and is then released — deliberately not held
+		// across the check and fetch below. Two things forbid widening it: the
+		// fetch is a bounded network call, and the memo write further down
+		// re-acquires this same non-reentrant mutex, so holding it here
+		// deadlocks. That leaves a check-then-act window where two concurrent
+		// first-callers would both fetch, which is acceptable: every caller on
+		// these paths is sequential (finalizeAllTurnCheckpoints loops one
+		// checkpoint at a time; FetchingTree.File and PreFetch are sequential
+		// within a read), and if it were ever reached the cost is one duplicate
+		// fetch, not a wrong answer.
 		mu.Lock()
 		prior := exhausted
 		mu.Unlock()
