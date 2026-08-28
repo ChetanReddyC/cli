@@ -844,10 +844,11 @@ func LoadFromBytes(data []byte) (*EntireSettings, error) {
 // but as "path escapes from parent", which describes neither the cause nor the
 // fix. All four now give the same verdict and the same remedy.
 //
-// The Lstat goes through the same root handle as the open, so the two cannot
-// disagree about which file they are talking about. It is the only check made
-// on the entry: any Lstat failure falls through to the open, which reports it in
-// the terms callers already classify.
+// Lstat and Open are separate operations, so checking only before the open
+// leaves a race: the entry can become an in-root symlink between them and
+// os.Root will follow it. After opening, validate that the path is still a real
+// file and names the same object as the open descriptor. Once that succeeds,
+// later path swaps do not matter because the read uses the already-open file.
 //
 // This overlaps paths.ValidateEntireDirAt, which rejects a symlinked entry in
 // `.entire` before a command runs at all. The duplication is deliberate: that
@@ -862,7 +863,11 @@ func readConfined(filePath string) ([]byte, error) {
 	defer root.Close()
 
 	base := filepath.Base(filePath)
-	if info, lerr := root.Lstat(base); lerr == nil && info.Mode()&fs.ModeSymlink != 0 {
+	info, err := root.Lstat(base)
+	if err != nil {
+		return nil, fmt.Errorf("inspect settings file: %w", err)
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
 		//nolint:wrapcheck // sentinel surfaces verbatim for the caller's errors.Is; callers add the reading-context prefix
 		return nil, paths.SymlinkedEntryError(filePath)
 	}
@@ -873,11 +878,39 @@ func readConfined(filePath string) ([]byte, error) {
 	}
 	defer f.Close()
 
+	if err := validateOpenedFile(root, base, filePath, f); err != nil {
+		return nil, err
+	}
+
 	data, err := io.ReadAll(f)
 	if err != nil {
 		return nil, fmt.Errorf("read settings file: %w", err)
 	}
 	return data, nil
+}
+
+// validateOpenedFile closes the Lstat/Open race in readConfined. The path must
+// still be a non-symlink and must identify the object held by f. A replacement
+// after this check cannot redirect the read, because f is already bound to the
+// validated object.
+func validateOpenedFile(root *os.Root, base, filePath string, f *os.File) error {
+	pathInfo, err := root.Lstat(base)
+	if err != nil {
+		return fmt.Errorf("reinspect settings file: %w", err)
+	}
+	if pathInfo.Mode()&fs.ModeSymlink != 0 {
+		//nolint:wrapcheck // sentinel surfaces verbatim for the caller's errors.Is; callers add the reading-context prefix
+		return paths.SymlinkedEntryError(filePath)
+	}
+
+	openedInfo, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect opened settings file: %w", err)
+	}
+	if !os.SameFile(pathInfo, openedInfo) {
+		return fmt.Errorf("settings file changed while it was being opened: %s", filePath)
+	}
+	return nil
 }
 
 // loadFromFile loads settings from a specific file path.
