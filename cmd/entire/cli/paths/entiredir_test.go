@@ -302,8 +302,8 @@ func TestValidateEntireDirAt_SymlinkedEntries(t *testing.T) {
 				if err == nil {
 					t.Fatal("ValidateEntireDirAt returned nil, want error")
 				}
-				if !errors.Is(err, ErrEntireDirSymlinkedEntry) {
-					t.Errorf("error does not wrap ErrEntireDirSymlinkedEntry: %v", err)
+				if !errors.Is(err, ErrEntireDirUnsupportedEntry) {
+					t.Errorf("error does not wrap ErrEntireDirUnsupportedEntry: %v", err)
 				}
 				if errors.Is(err, ErrEntireDirNotDirectory) {
 					t.Errorf("a symlinked entry must not read as `.entire` being the wrong type: %v", err)
@@ -418,7 +418,7 @@ func TestValidateEntireDirAt_UnlistableDirectoryIsUnreadable(t *testing.T) {
 	if !errors.Is(err, ErrEntireDirUnreadable) {
 		t.Fatalf("want ErrEntireDirUnreadable, got %v", err)
 	}
-	if errors.Is(err, ErrEntireDirNotDirectory) || errors.Is(err, ErrEntireDirSymlinkedEntry) {
+	if errors.Is(err, ErrEntireDirNotDirectory) || errors.Is(err, ErrEntireDirUnsupportedEntry) {
 		t.Errorf("a listing failure must not read as a verdict about the contents: %v", err)
 	}
 	if !errors.Is(err, fs.ErrPermission) {
@@ -674,8 +674,8 @@ func TestEntireDirErrorsAreDistinguishable(t *testing.T) {
 		symlinkOrSkip(t, root, filepath.Join(entire, "metadata"))
 
 		err := ValidateEntireDirAt(root)
-		if !errors.Is(err, ErrEntireDirSymlinkedEntry) {
-			t.Fatalf("want ErrEntireDirSymlinkedEntry, got %v", err)
+		if !errors.Is(err, ErrEntireDirUnsupportedEntry) {
+			t.Fatalf("want ErrEntireDirUnsupportedEntry, got %v", err)
 		}
 		if errors.Is(err, ErrEntireDirNotDirectory) {
 			t.Errorf("a symlinked entry must not read as `.entire` being the wrong type: %v", err)

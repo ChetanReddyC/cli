@@ -20,12 +20,13 @@ var (
 	// directory. The remedy is to inspect and replace the path.
 	ErrEntireDirNotDirectory = errors.New("not a directory")
 
-	// ErrEntireDirSymlinkedEntry reports that an entry directly under `.entire`
-	// is a symbolic link. The remedy is to inspect that entry and replace it,
-	// which is the same shape as ErrEntireDirNotDirectory's but not the same
-	// sentence: `.entire/settings.json` is not required to be a directory, so
-	// telling someone it is not one names the wrong problem.
-	ErrEntireDirSymlinkedEntry = errors.New("is a symbolic link")
+	// ErrEntireDirUnsupportedEntry reports that an entry directly under
+	// `.entire` is neither a regular file nor a directory. The remedy is to
+	// inspect that entry and replace it, which is the same shape as
+	// ErrEntireDirNotDirectory's but not the same sentence:
+	// `.entire/settings.json` is not required to be a directory, so telling
+	// someone it is not one names the wrong problem.
+	ErrEntireDirUnsupportedEntry = errors.New("not a regular file or directory")
 
 	// ErrEntireDirUnreadable reports that `.entire` could not be inspected at
 	// all — a permission failure, an I/O error, a dead mount. Nothing is known
@@ -51,10 +52,12 @@ var (
 // path someone else controls the far end of is not a path we write through.
 //
 // The same reasoning covers one level down, so the entries directly inside are
-// checked too: a symlinked `.entire/metadata` redirects transcripts, and a
+// checked too, and there the rule is an allowlist: Entire only ever creates
+// regular files and directories under `.entire`, so anything else arrived some
+// other way. A symlinked `.entire/metadata` redirects transcripts, and a
 // symlinked `.entire/settings.local.json` redirects the file that names the
 // command Entire executes at pre-push. See validateEntireDirEntries for why the
-// scan stops there.
+// scan stops there, and unsupportedEntryType for the one type it tolerates.
 //
 // The settings package refuses a symlinked settings file at the read itself as
 // well (readConfined). Neither check subsumes the other: this one stops a
@@ -81,29 +84,27 @@ func ValidateEntireDirAt(worktreeRoot string) error {
 	return validateEntireDirEntries(path)
 }
 
-// validateEntireDirEntries rejects a symbolic link sitting directly inside a
-// `.entire` already established to be a real directory.
+// validateEntireDirEntries rejects anything other than a regular file or a
+// directory sitting directly inside a `.entire` already established to be a
+// real directory.
 //
 // The entries one level down are Entire's own — `logs`, `metadata`, `tmp`, and
 // the two settings files — so the reasoning that rejects a symlinked `.entire`
 // applies to them unchanged: the far end is outside Entire's control, and for
 // the settings files it decides what may be committed.
 //
-// Deliberately not recursive, and not a stricter type check. Walking deeper
-// would mean traversing every session's transcripts on every command, and the
-// checkpoint writer already skips symlinks as it walks the metadata directory.
-// Entries of some other wrong type are also left alone: a FIFO at
-// `.entire/settings.json` is a hang rather than a redirection, which is a
-// different failure with a different fix.
+// Deliberately not recursive. Walking deeper would mean traversing every
+// session's transcripts on every command, and the checkpoint writer already
+// skips symlinks as it walks the metadata directory.
 func validateEntireDirEntries(dir string) error {
 	entries, err := os.ReadDir(dir)
 
 	// Checked before err, not after. os.ReadDir returns what it managed to read
-	// alongside a partial-read error, and a symlink among those entries is a
+	// alongside a partial-read error, and an unsupported entry among those is a
 	// positive finding — a stronger statement than "the listing failed", and
 	// one with an actionable remedy.
-	if symlinkErr := firstSymlinkedEntry(dir, entries); symlinkErr != nil {
-		return symlinkErr
+	if entryErr := firstUnsupportedEntry(dir, entries); entryErr != nil {
+		return entryErr
 	}
 	if err != nil {
 		return fmt.Errorf("%s %w: %w", dir, ErrEntireDirUnreadable, err)
@@ -111,12 +112,12 @@ func validateEntireDirEntries(dir string) error {
 	return nil
 }
 
-// firstSymlinkedEntry names the first symlink among entries and counts the
-// rest, or returns nil when there is none.
+// firstUnsupportedEntry names the first entry that is neither a regular file
+// nor a directory and counts the rest, or returns nil when there is none.
 //
 // One error naming one entry, rather than one per entry: the remedy is the same
 // for all of them, and a user who has to rerun the command once per planted
-// link pays for our formatting choice. The named entry is the first in
+// entry pays for our formatting choice. The named entry is the first in
 // os.ReadDir's sorted order, so the message is deterministic.
 //
 // No Lstat of our own. DirEntry.Type() comes from the directory read itself on
@@ -125,28 +126,70 @@ func validateEntireDirEntries(dir string) error {
 // between the read and the stat, and surfacing any other failure as the
 // partial-read error validateEntireDirEntries reports. Adding an Lstat here
 // would reintroduce the vanished-entry race that os.ReadDir already handles.
-func firstSymlinkedEntry(dir string, entries []os.DirEntry) error {
-	var first string
+func firstUnsupportedEntry(dir string, entries []os.DirEntry) error {
+	var first os.DirEntry
 	others := 0
 	for _, entry := range entries {
-		if entry.Type()&fs.ModeSymlink == 0 {
+		if !unsupportedEntryType(entry.Type()) {
 			continue
 		}
-		if first != "" {
+		if first != nil {
 			others++
 			continue
 		}
-		first = filepath.Join(dir, entry.Name())
+		first = entry
 	}
-	if first == "" {
+	if first == nil {
 		return nil
 	}
 
-	err := SymlinkedEntryError(first)
+	err := unsupportedEntryError(filepath.Join(dir, first.Name()), first.Type())
 	if others > 0 {
-		err = fmt.Errorf("%w%s", err, otherSymlinksClause(others, dir))
+		err = fmt.Errorf("%w%s", err, otherUnsupportedClause(others, dir))
 	}
 	return err
+}
+
+// unsupportedEntryType reports whether an entry directly under `.entire` is a
+// type Entire never creates there. It is an allowlist — regular files and
+// directories are the whole of Entire's own layout — so a mode bit nobody has
+// considered yet is refused rather than waved through, which is the safer
+// direction for a path holding transcripts and the redaction settings.
+//
+// fs.ModeIrregular is the deliberate exception, and it has to be an exception
+// rather than an allowlist member because Windows overloads it. Go maps every
+// reparse tag it has no category for onto that one bit (see the default arm of
+// fileStat.mode in os/types_windows.go), which lands NTFS directory junctions
+// and OneDrive Files On-Demand placeholders in the same bucket. Refusing the
+// bucket would hard-fail every command in a repo inside a synced folder, with a
+// remedy the user cannot act on, and the placeholder arrives with nobody
+// attacking anything. The junction it would also catch cannot arrive by
+// checkout at all — git has no tree-object mode for one — so planting it
+// already requires local code execution, at which point this check is not what
+// stands in the way. Tolerating the ambiguous bit is the cheaper mistake.
+//
+// The bit is tolerated only on its own: anything carrying a type we do reject
+// is rejected whatever else it carries.
+func unsupportedEntryType(mode fs.FileMode) bool {
+	switch {
+	case mode.IsRegular(), mode.IsDir():
+		return false
+	case mode == fs.ModeIrregular:
+		return false
+	default:
+		return true
+	}
+}
+
+// unsupportedEntryError reports that path is a type Entire does not put under
+// `.entire`, naming what was found. A symlink goes through SymlinkedEntryError
+// so that the message also names where it points, which is what the user needs
+// in order to decide what to do with the far end.
+func unsupportedEntryError(path string, mode fs.FileMode) error {
+	if mode&fs.ModeSymlink != 0 {
+		return SymlinkedEntryError(path)
+	}
+	return fmt.Errorf("%s is %s, %w", path, describeMode(mode), ErrEntireDirUnsupportedEntry)
 }
 
 // SymlinkedEntryError reports that path is a symbolic link, naming the target
@@ -159,18 +202,20 @@ func firstSymlinkedEntry(dir string, entries []os.DirEntry) error {
 // two cannot drift into describing the same condition differently.
 func SymlinkedEntryError(path string) error {
 	if target, err := os.Readlink(path); err == nil {
-		return fmt.Errorf("%s %w to %s", path, ErrEntireDirSymlinkedEntry, target)
+		return fmt.Errorf("%s is a symbolic link to %s, %w", path, target, ErrEntireDirUnsupportedEntry)
 	}
-	return fmt.Errorf("%s %w", path, ErrEntireDirSymlinkedEntry)
+	return fmt.Errorf("%s is a symbolic link, %w", path, ErrEntireDirUnsupportedEntry)
 }
 
-// otherSymlinksClause accounts for symlinked entries beyond the one named.
-// Number and verb are built together so they cannot disagree.
-func otherSymlinksClause(n int, dir string) string {
+// otherUnsupportedClause accounts for unsupported entries beyond the one named.
+// Number and verb are built together so they cannot disagree, and the wording
+// is type-neutral because the entries it counts need not share the named one's
+// type.
+func otherUnsupportedClause(n int, dir string) string {
 	if n == 1 {
-		return fmt.Sprintf(" (and 1 other entry under %s is too)", dir)
+		return fmt.Sprintf(" (and 1 other entry under %s is unsupported too)", dir)
 	}
-	return fmt.Sprintf(" (and %d other entries under %s are too)", n, dir)
+	return fmt.Sprintf(" (and %d other entries under %s are unsupported too)", n, dir)
 }
 
 // RequireEntireDir validates the current worktree's `.entire`.
@@ -205,9 +250,9 @@ func RequireEntireDir(ctx context.Context) error {
 	}
 }
 
-// describeMode names what was found. The sentinel supplies the "not a
-// directory" half of the sentence, so these read as the first half of "X is a
-// symbolic link, not a directory".
+// describeMode names what was found. The sentinel supplies the rest of the
+// sentence, so these read as the first half of "X is a symbolic link, not a
+// directory" or "X is a named pipe, not a regular file or directory".
 func describeMode(mode fs.FileMode) string {
 	switch {
 	case mode&fs.ModeSymlink != 0:

@@ -446,10 +446,15 @@ symlink — **including a symlink pointing at a perfectly good directory** — a
 FIFO, a socket, or a device is a broken repo, and a command that would read or
 write through the path stops instead.
 
-**The entries directly inside it must not be symlinks either.** A symlinked
+**The entries directly inside it must be regular files or directories.** That is
+an allowlist, not a list of known-bad types: Entire only ever creates files and
+directories under `.entire`, so anything else arrived some other way and a mode
+bit nobody has considered yet is refused by default. A symlinked
 `.entire/metadata` redirects transcripts; a symlinked `.entire/settings.local.json`
-redirects the file that names the command Entire executes at pre-push. The scan
-is one level deep, and it is a symlink check only — see the non-goals below.
+redirects the file that names the command Entire executes at pre-push; a FIFO in
+either place hangs the read instead. The scan is one level deep, and
+`fs.ModeIrregular` is its one deliberate exception — see the entry-scan
+mechanics below.
 
 `paths.ValidateEntireDirAt(worktreeRoot)` / `paths.RequireEntireDir(ctx)`
 (`paths/entiredir.go`) are the only implementation. The stat is `Lstat`, not
@@ -464,8 +469,8 @@ to the `git rev-parse` that precedes them, and a cached "it was fine" is stale i
 a long-lived `entire mcp`.
 
 **Four failure conditions, each identified positively.** `ErrEntireDirNotDirectory`
-(the path exists and is the wrong type), `ErrEntireDirSymlinkedEntry` (an entry
-directly inside it is a symlink), `ErrEntireDirUnreadable` (`Lstat` or the
+(the path exists and is the wrong type), `ErrEntireDirUnsupportedEntry` (an entry
+directly inside it is neither a regular file nor a directory), `ErrEntireDirUnreadable` (`Lstat` or the
 directory listing failed, so nothing is known about the path), and
 `ErrRepositoryUnresolved` (the worktree root would not resolve, so there is no
 path to inspect yet). Callers print a remedy, and the remedies are different
@@ -478,11 +483,11 @@ labelled variant: BROKEN / UNREADABLE / UNVERIFIED) both take the error as a
 parameter so every branch is reachable in a test; staging a genuinely
 unreadable `.entire` is impractical, since removing execute permission on the
 repo root breaks worktree-root discovery first and exercises the wrong branch.
-A symlinked entry and a wrong-typed `.entire` share doctor's BROKEN heading:
+An unsupported entry and a wrong-typed `.entire` share doctor's BROKEN heading:
 to the reader they are one condition — something replaced a path Entire owns —
 differing only in which path and what to put back.
 
-**`ErrEntireDirNotDirectory` is not reused for a symlinked entry**, even though
+**`ErrEntireDirNotDirectory` is not reused for an unsupported entry**, even though
 both remedies are "replace it". `.entire/settings.json` is not required to be a
 directory, so telling someone it is not one names the wrong problem. The entry
 remedy says "replace it with a real file or directory"; the `.entire` remedy says
@@ -490,25 +495,48 @@ remedy says "replace it with a real file or directory"; the `.entire` remedy say
 asserts neither branch prints the other's phrase.
 
 **Entry-scan mechanics.** `validateEntireDirEntries` does one `os.ReadDir` and
-tests `DirEntry.Type()&fs.ModeSymlink`, with **no `Lstat` of its own** — the type
-comes from the directory read where the platform reports one, and where it does
-not, `os.ReadDir` does the `Lstat` internally, *skipping an entry that vanished
-between the read and the stat*. Adding an `Lstat` here reintroduces that race,
-which matters because `.entire/tmp` and `.entire/metadata/<session>` churn under
-concurrent hooks. The entries are checked **before** `ReadDir`'s error, because
-`os.ReadDir` returns what it managed to read alongside a partial-read error and a
-symlink among those is a positive finding — a stronger statement than "the
-listing failed". One error names the first offender in `ReadDir`'s sorted order
-(so the message is deterministic) and counts the rest, rather than one error per
-entry: the remedy is identical for all of them, and a user who reruns the command
-once per planted link is paying for our formatting.
+passes each `DirEntry.Type()` to `unsupportedEntryType`, with **no `Lstat` of its
+own** — the type comes from the directory read where the platform reports one,
+and where it does not, `os.ReadDir` does the `Lstat` internally, *skipping an
+entry that vanished between the read and the stat*. `DirEntry.Type()` is
+therefore never unresolved, and `Type() == 0` means a regular file, not unknown
+(`direntType` returns `^FileMode(0)` for unknown, which sets every bit including
+`ModeSymlink`, so even a leak would fail closed). Adding an `Lstat` here
+reintroduces that race, which matters because `.entire/tmp` and
+`.entire/metadata/<session>` churn under concurrent hooks. The entries are
+checked **before** `ReadDir`'s error, because `os.ReadDir` returns what it
+managed to read alongside a partial-read error and an unsupported entry among
+those is a positive finding — a stronger statement than "the listing failed". One
+error names the first offender in `ReadDir`'s sorted order (so the message is
+deterministic) and counts the rest, rather than one error per entry: the remedy
+is identical for all of them, and a user who reruns the command once per planted
+entry is paying for our formatting.
+
+**`fs.ModeIrregular` is tolerated, and that is the one place the allowlist
+bends.** Windows overloads the bit: Go maps every reparse tag it has no category
+for onto it (the `default` arm of `fileStat.mode` in `os/types_windows.go`),
+which lands NTFS directory junctions *and* OneDrive Files On-Demand placeholders
+in the same bucket, indistinguishable from a `DirEntry`. Refusing the bucket
+would hard-fail every command in a repo inside a synced folder, with a remedy the
+user cannot act on, and the placeholder arrives with nobody attacking anything.
+The junction it would also catch cannot arrive by checkout — git has no
+tree-object mode for one — so planting it already requires local code execution,
+at which point this check is not what stands in the way. The bit is tolerated
+only on its own: anything carrying a rejected type is rejected whatever else it
+carries. Distinguishing the two would mean reading the reparse tag through a
+Windows-only syscall (`FindFirstFile`, then `Reserved0 & 0x20000000` for the
+name-surrogate tags); that is the upgrade path if junctions ever become worth
+catching.
 
 **A settings file is never read through a link, and the settings reader enforces
 that itself.** `readConfined` (`settings/settings.go`) — the chokepoint every
 settings read funnels through, including `LoadFromFile`, `LoadProjectRaw`,
 `LoadLocalRaw`, and clone preferences — `Lstat`s the entry through its own
 `os.Root` handle and refuses a symlink outright, wrapping
-`paths.ErrEntireDirSymlinkedEntry` via the shared `paths.SymlinkedEntryError`.
+`paths.ErrEntireDirUnsupportedEntry` via the shared `paths.SymlinkedEntryError`
+(the symlink-specific message builder, which names the link target; the entry
+scan reaches it through `unsupportedEntryError` and describes other types with
+`describeMode`).
 
 This is deliberately redundant with the `.entire` entry scan, because the two
 cover different callers: the scan hangs off the root pre-run and
@@ -538,12 +566,11 @@ than writing through it.
 
 **Non-goals, deliberately.** The scan is *not* recursive — walking deeper would
 traverse every session's transcripts on every command, and the checkpoint writer
-already skips symlinks as it walks the metadata directory. It is *not* a general
-type check either: a FIFO at `.entire/settings.json` would still hang the
-settings read, which is a hang rather than a redirection, so it is a different
-failure with a different fix. Relocating `.entire/logs` and `.entire/tmp` out of
-the worktree is a separate change; until then, redirecting them with a symlink is
-refused rather than supported, and the remedy text says so.
+already skips symlinks as it walks the metadata directory. It does *not* look at
+permissions or ownership, only at type. Relocating `.entire/logs` and
+`.entire/tmp` out of the worktree is a separate change; until then, redirecting
+them with a symlink is refused rather than supported, and the remedy text says
+so.
 
 Cost of the second phase: measured 8.2µs against 1.0µs for the `Lstat` alone, on
 a `.entire` holding six subdirectories, three files, and 51 session directories

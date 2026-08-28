@@ -68,8 +68,8 @@ func TestLoad_RejectsSymlinkedSettingsFile(t *testing.T) {
 				if err == nil {
 					t.Fatalf("Load read %s through a symbolic link", name)
 				}
-				if !errors.Is(err, paths.ErrEntireDirSymlinkedEntry) {
-					t.Errorf("error does not wrap ErrEntireDirSymlinkedEntry: %v", err)
+				if !errors.Is(err, paths.ErrEntireDirUnsupportedEntry) {
+					t.Errorf("error does not wrap ErrEntireDirUnsupportedEntry: %v", err)
 				}
 				if msg := err.Error(); !strings.Contains(msg, name) {
 					t.Errorf("message %q does not name the offending file", msg)
@@ -134,22 +134,22 @@ func TestSingleFileReaders_RejectSymlinkedSettingsFile(t *testing.T) {
 
 	t.Run("LoadFromFile", func(t *testing.T) {
 		_, err := LoadFromFile(filepath.Join(entireDir, "settings.json"))
-		if !errors.Is(err, paths.ErrEntireDirSymlinkedEntry) {
-			t.Fatalf("want ErrEntireDirSymlinkedEntry, got %v", err)
+		if !errors.Is(err, paths.ErrEntireDirUnsupportedEntry) {
+			t.Fatalf("want ErrEntireDirUnsupportedEntry, got %v", err)
 		}
 	})
 
 	t.Run("LoadProjectRaw", func(t *testing.T) {
 		_, _, _, err := LoadProjectRaw(context.Background())
-		if !errors.Is(err, paths.ErrEntireDirSymlinkedEntry) {
-			t.Fatalf("want ErrEntireDirSymlinkedEntry, got %v", err)
+		if !errors.Is(err, paths.ErrEntireDirUnsupportedEntry) {
+			t.Fatalf("want ErrEntireDirUnsupportedEntry, got %v", err)
 		}
 	})
 
 	t.Run("LoadLocalRaw", func(t *testing.T) {
 		_, _, _, err := LoadLocalRaw(context.Background())
-		if !errors.Is(err, paths.ErrEntireDirSymlinkedEntry) {
-			t.Fatalf("want ErrEntireDirSymlinkedEntry, got %v", err)
+		if !errors.Is(err, paths.ErrEntireDirUnsupportedEntry) {
+			t.Fatalf("want ErrEntireDirUnsupportedEntry, got %v", err)
 		}
 	})
 }
@@ -176,8 +176,8 @@ func TestLoadClonePreferences_RejectsSymlink(t *testing.T) {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 
-	if _, err := Load(WithWorktreeRoot(context.Background(), root)); !errors.Is(err, paths.ErrEntireDirSymlinkedEntry) {
-		t.Fatalf("want ErrEntireDirSymlinkedEntry, got %v", err)
+	if _, err := Load(WithWorktreeRoot(context.Background(), root)); !errors.Is(err, paths.ErrEntireDirUnsupportedEntry) {
+		t.Fatalf("want ErrEntireDirUnsupportedEntry, got %v", err)
 	}
 }
 

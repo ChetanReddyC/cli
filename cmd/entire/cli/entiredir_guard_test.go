@@ -457,8 +457,10 @@ func TestEntireDirRemedyMatchesTheCondition(t *testing.T) {
 	t.Parallel()
 
 	wrongType := fmt.Errorf("/repo/.entire is a symbolic link, %w", paths.ErrEntireDirNotDirectory)
-	symlinkedEntry := fmt.Errorf("/repo/.entire/settings.local.json %w to /elsewhere.json",
-		paths.ErrEntireDirSymlinkedEntry)
+	symlinkedEntry := fmt.Errorf("/repo/.entire/settings.local.json is a symbolic link to /elsewhere.json, %w",
+		paths.ErrEntireDirUnsupportedEntry)
+	pipedEntry := fmt.Errorf("/repo/.entire/settings.json is a named pipe, %w",
+		paths.ErrEntireDirUnsupportedEntry)
 	unreadable := fmt.Errorf("/repo/.entire %w: %w", paths.ErrEntireDirUnreadable, fs.ErrPermission)
 	unresolved := fmt.Errorf("%w, so .entire cannot be verified: %w",
 		paths.ErrRepositoryUnresolved, errors.New("fatal: detected dubious ownership"))
@@ -482,6 +484,14 @@ func TestEntireDirRemedyMatchesTheCondition(t *testing.T) {
 			// told it is not one names the wrong problem.
 			name:    "symlinked entry points at the entry",
 			err:     symlinkedEntry,
+			want:    []string{"replace it with a real file or directory"},
+			exclude: []string{"safe.directory", "PATH", "ownership", "replace it with a real directory"},
+		},
+		{
+			// An entry can be unsupported without being a link, and the remedy
+			// is the same one. The wording must not assume a far end to inspect.
+			name:    "unsupported entry that is not a link shares the remedy",
+			err:     pipedEntry,
 			want:    []string{"replace it with a real file or directory"},
 			exclude: []string{"safe.directory", "PATH", "ownership", "replace it with a real directory"},
 		},
@@ -600,8 +610,8 @@ func TestCheckEntireDirBeforeRun_SymlinkedEntryFailsGuardedCommand(t *testing.T)
 			if safe {
 				t.Error("checkEntireDirBeforeRun reported the path safe")
 			}
-			if !errors.Is(err, paths.ErrEntireDirSymlinkedEntry) {
-				t.Errorf("error does not wrap ErrEntireDirSymlinkedEntry: %v", err)
+			if !errors.Is(err, paths.ErrEntireDirUnsupportedEntry) {
+				t.Errorf("error does not wrap ErrEntireDirUnsupportedEntry: %v", err)
 			}
 			if report := stderr.String(); !strings.Contains(report, entry) {
 				t.Errorf("stderr does not name the offending entry:\n%s", report)
@@ -624,8 +634,8 @@ func TestLoadEntireSettings_RefusesSymlinkedSettingsFile(t *testing.T) {
 			if err == nil {
 				t.Fatalf("LoadEntireSettings read settings through a symlinked %s", entry)
 			}
-			if !errors.Is(err, paths.ErrEntireDirSymlinkedEntry) {
-				t.Errorf("error does not wrap ErrEntireDirSymlinkedEntry: %v", err)
+			if !errors.Is(err, paths.ErrEntireDirUnsupportedEntry) {
+				t.Errorf("error does not wrap ErrEntireDirUnsupportedEntry: %v", err)
 			}
 		})
 	}
@@ -658,8 +668,8 @@ func TestLoadEntireSettings_RefusesSettingsSymlinkedWithinEntireDir(t *testing.T
 	if err == nil {
 		t.Fatal("LoadEntireSettings read settings through a link pointing inside .entire")
 	}
-	if !errors.Is(err, paths.ErrEntireDirSymlinkedEntry) {
-		t.Errorf("error does not wrap ErrEntireDirSymlinkedEntry: %v", err)
+	if !errors.Is(err, paths.ErrEntireDirUnsupportedEntry) {
+		t.Errorf("error does not wrap ErrEntireDirUnsupportedEntry: %v", err)
 	}
 }
 
@@ -698,8 +708,8 @@ func TestDoctor_ReportsSymlinkedEntireDirEntry(t *testing.T) {
 			if err == nil {
 				t.Fatalf("`entire %s` succeeded on a repo with a symlinked .entire entry", name)
 			}
-			if !errors.Is(err, paths.ErrEntireDirSymlinkedEntry) {
-				t.Fatalf("error does not wrap ErrEntireDirSymlinkedEntry: %v", err)
+			if !errors.Is(err, paths.ErrEntireDirUnsupportedEntry) {
+				t.Fatalf("error does not wrap ErrEntireDirUnsupportedEntry: %v", err)
 			}
 
 			report := stdout.String() + stderr.String()
