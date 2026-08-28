@@ -9,10 +9,28 @@ import (
 	"path/filepath"
 )
 
-// ErrEntireDirNotDirectory reports that `.entire` exists but is not a real
-// directory. Callers match it with errors.Is to distinguish a broken repo from
-// a stat that simply failed.
-var ErrEntireDirNotDirectory = errors.New("not a directory")
+// The three ways validating `.entire` can fail. Each is identified positively
+// and carries a different remedy, which is why they are separate sentinels
+// rather than one error plus an else branch: callers print the fix, and telling
+// someone to reinstall git because their filesystem returned EACCES sends them
+// after the wrong thing. A caller matching none of these must offer no remedy
+// rather than guess at one.
+var (
+	// ErrEntireDirNotDirectory reports that `.entire` exists and is not a real
+	// directory. The remedy is to inspect and replace the path.
+	ErrEntireDirNotDirectory = errors.New("not a directory")
+
+	// ErrEntireDirUnreadable reports that `.entire` could not be inspected at
+	// all — a permission failure, an I/O error, a dead mount. Nothing is known
+	// about what is at the path. The remedy is ownership, permissions, or the
+	// filesystem itself.
+	ErrEntireDirUnreadable = errors.New("cannot be inspected")
+
+	// ErrRepositoryUnresolved reports that the worktree root could not be
+	// determined for a reason other than there being no repository, so there is
+	// no `.entire` path to inspect yet. The remedy is git.
+	ErrRepositoryUnresolved = errors.New("cannot determine which repository this directory belongs to")
+)
 
 // ValidateEntireDirAt reports whether worktreeRoot's `.entire` is safe to read
 // and write through. It is safe when the path is absent (Entire is not enabled
@@ -35,7 +53,7 @@ func ValidateEntireDirAt(worktreeRoot string) error {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil
 	case err != nil:
-		return fmt.Errorf("cannot determine whether %s is a directory: %w", path, err)
+		return fmt.Errorf("%s %w: %w", path, ErrEntireDirUnreadable, err)
 	case info.Mode().IsDir():
 		return nil
 	}
@@ -70,7 +88,7 @@ func RequireEntireDir(ctx context.Context) error {
 	case errors.Is(err, ErrNotARepository):
 		return nil
 	default:
-		return fmt.Errorf("cannot locate the repository holding %s, so it cannot be verified: %w", EntireDir, err)
+		return fmt.Errorf("%w, so %s cannot be verified: %w", ErrRepositoryUnresolved, EntireDir, err)
 	}
 }
 

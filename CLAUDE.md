@@ -457,6 +457,21 @@ is not evidence it holds either, and the caller's next move is to write there.
 Not memoized, deliberately: the `Lstat` is free next to the `git rev-parse` that
 precedes it, and a cached "it was fine" is stale in a long-lived `entire mcp`.
 
+**Three failure conditions, each identified positively.** `ErrEntireDirNotDirectory`
+(the path exists and is the wrong type), `ErrEntireDirUnreadable` (`Lstat`
+itself failed, so nothing is known about the path), and
+`ErrRepositoryUnresolved` (the worktree root would not resolve, so there is no
+path to inspect yet). Callers print a remedy, and the three remedies are
+different things: replace the path, fix ownership/permissions, fix git. Match
+them with `errors.Is` and give an unmatched error **no** remedy — an `else`
+branch is how a filesystem `EACCES` came to be answered with advice about
+`safe.directory`, printed directly under a line that already said "permission
+denied". `writeEntireDirRemedy` and `writeEntireDirDiagnosis` (doctor's
+labelled variant: BROKEN / UNREADABLE / UNVERIFIED) both take the error as a
+parameter so every branch is reachable in a test; staging a genuinely
+unreadable `.entire` is impractical, since removing execute permission on the
+repo root breaks worktree-root discovery first and exercises the wrong branch.
+
 **Guarded is the default.** The root `PersistentPreRunE` runs the check for every
 command, above both `settings.IsSetUpAny` and `ensureLogger` because each of
 those already touches the path. A command opts out with

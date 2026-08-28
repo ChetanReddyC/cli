@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -443,5 +446,84 @@ func TestDoctor_ReportsUnverifiedWhenDiscoveryFails(t *testing.T) {
 	}
 	if strings.Contains(report, "BROKEN") {
 		t.Errorf("report calls .entire broken on evidence that says nothing about it:\n%s", report)
+	}
+}
+
+// The printed remedy is branched on which condition actually occurred. These
+// drive the writers with a synthesized error for each: staging a real
+// unreadable .entire at CLI level would need an unreadable repo root, which
+// breaks worktree-root discovery first and so tests the wrong branch.
+func TestEntireDirRemedyMatchesTheCondition(t *testing.T) {
+	t.Parallel()
+
+	wrongType := fmt.Errorf("/repo/.entire is a symbolic link, %w", paths.ErrEntireDirNotDirectory)
+	unreadable := fmt.Errorf("/repo/.entire %w: %w", paths.ErrEntireDirUnreadable, fs.ErrPermission)
+	unresolved := fmt.Errorf("%w, so .entire cannot be verified: %w",
+		paths.ErrRepositoryUnresolved, errors.New("fatal: detected dubious ownership"))
+	unknown := errors.New("something nobody classified")
+
+	tests := []struct {
+		name    string
+		err     error
+		want    []string
+		exclude []string
+	}{
+		{
+			name:    "wrong file type points at the path",
+			err:     wrongType,
+			want:    []string{"replace it with a real directory"},
+			exclude: []string{"safe.directory", "PATH", "permissions"},
+		},
+		{
+			name:    "unreadable points at the filesystem",
+			err:     unreadable,
+			want:    []string{"ownership", "permissions"},
+			exclude: []string{"safe.directory", "replace it with a real directory"},
+		},
+		{
+			name:    "unresolved repository points at git",
+			err:     unresolved,
+			want:    []string{"safe.directory"},
+			exclude: []string{"replace it with a real directory"},
+		},
+		{
+			name: "unclassified invents no remedy",
+			err:  unknown,
+			// No remedy can be right for an error nobody classified, and a
+			// wrong one costs more than none.
+			exclude: []string{"safe.directory", "replace it with a real directory", "ownership"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, write := range []struct {
+				label string
+				fn    func(io.Writer, error)
+			}{
+				{"guard", writeEntireDirRemedy},
+				{"doctor", writeEntireDirDiagnosis},
+			} {
+				var buf bytes.Buffer
+				write.fn(&buf, tt.err)
+				got := buf.String()
+
+				if !strings.Contains(got, tt.err.Error()) {
+					t.Errorf("%s: output does not restate the error:\n%s", write.label, got)
+				}
+				for _, want := range tt.want {
+					if !strings.Contains(got, want) {
+						t.Errorf("%s: output is missing %q:\n%s", write.label, want, got)
+					}
+				}
+				for _, exclude := range tt.exclude {
+					if strings.Contains(got, exclude) {
+						t.Errorf("%s: output wrongly mentions %q:\n%s", write.label, exclude, got)
+					}
+				}
+			}
+		})
 	}
 }

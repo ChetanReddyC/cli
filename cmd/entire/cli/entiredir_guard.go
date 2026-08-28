@@ -76,34 +76,50 @@ func checkEntireDirBeforeRun(cmd *cobra.Command) (safe bool, err error) {
 // writeEntireDirRemedy prints what is wrong and what to do about it. The error
 // alone names the problem but not the way out, and the way out is not obvious:
 // the natural guess is that Entire is misconfigured, when in fact something has
-// replaced a directory Entire owns, or git cannot say which repository this is.
+// replaced a directory Entire owns, or the path cannot be inspected, or git
+// cannot say which repository this is.
 //
-// Those two are separate remedies, and printing the wrong one is worse than
-// printing none. A discovery failure has established nothing about `.entire`,
-// so telling the user to go replace it sends them after a file that may be
-// perfectly fine.
+// Those are three separate remedies, matched positively. Printing the wrong one
+// is worse than printing none — a filesystem EACCES sent through the git branch
+// tells the user to check safe.directory right after a line that already said
+// "permission denied" — so an error matching none of them gets no remedy at all.
 func writeEntireDirRemedy(w io.Writer, err error) {
 	fmt.Fprintf(w, "%v\n", err)
 	fmt.Fprintf(w, "\n")
 
-	if !errors.Is(err, paths.ErrEntireDirNotDirectory) {
-		fmt.Fprintf(w, "Entire cannot tell which repository this directory belongs to, so it cannot\n")
-		fmt.Fprintf(w, "verify that %s is a directory it owns, and will not read or write through\n", paths.EntireDir)
-		fmt.Fprintf(w, "it on the strength of a guess.\n")
+	switch {
+	case errors.Is(err, paths.ErrEntireDirNotDirectory):
+		fmt.Fprintf(w, "Entire keeps session metadata, transcripts, and the redaction settings that\n")
+		fmt.Fprintf(w, "decide what may be committed under %s, and will not read or write through a\n", paths.EntireDir)
+		fmt.Fprintf(w, "path that is not a real directory it owns.\n")
+		fmt.Fprintf(w, "\n")
+		fmt.Fprintf(w, "Fix: inspect the path, then either replace it with a real directory or remove\n")
+		fmt.Fprintf(w, "it and run `entire enable` again.\n")
+
+	case errors.Is(err, paths.ErrEntireDirUnreadable):
+		fmt.Fprintf(w, "Nothing is known about what is at that path — the check itself failed, so\n")
+		fmt.Fprintf(w, "Entire will not read or write through it.\n")
+		fmt.Fprintf(w, "\n")
+		fmt.Fprintf(w, "Fix: this is a filesystem error, not a git or Entire one. Check ownership and\n")
+		fmt.Fprintf(w, "permissions on %s and the directory holding it, and whether the mount it\n", paths.EntireDir)
+		fmt.Fprintf(w, "lives on is healthy.\n")
+
+	case errors.Is(err, paths.ErrRepositoryUnresolved):
+		fmt.Fprintf(w, "Entire cannot verify that %s is a directory it owns without knowing which\n", paths.EntireDir)
+		fmt.Fprintf(w, "repository this is, and will not read or write through it on a guess.\n")
 		fmt.Fprintf(w, "\n")
 		fmt.Fprintf(w, "Fix: resolve the git error above. Common causes are git missing from PATH\n")
 		fmt.Fprintf(w, "and git's ownership check on a mounted or shared repository, which names\n")
 		fmt.Fprintf(w, "the `git config --global --add safe.directory` line to add.\n")
-		return
+
+	default:
+		// No remedy: an unclassified error gives no grounds to name one, and a
+		// confidently wrong fix costs the user more than silence.
+		fmt.Fprintf(w, "Entire could not verify %s, so it will not read or write through it.\n", paths.EntireDir)
 	}
 
-	fmt.Fprintf(w, "Entire keeps session metadata, transcripts, and the redaction settings that\n")
-	fmt.Fprintf(w, "decide what may be committed under %s, and will not read or write through a\n", paths.EntireDir)
-	fmt.Fprintf(w, "path that is not a real directory it owns.\n")
 	fmt.Fprintf(w, "\n")
-	fmt.Fprintf(w, "Fix: inspect the path, then either replace it with a real directory or remove\n")
-	fmt.Fprintf(w, "it and run `entire enable` again. `entire doctor` still works here, and\n")
-	fmt.Fprintf(w, "`entire <command> --help` is unaffected.\n")
+	fmt.Fprintf(w, "`entire doctor` still works here, and `entire <command> --help` is unaffected.\n")
 }
 
 // reportBrokenEntireDir is doctor's half of the guard. doctor is exempt from the
@@ -122,27 +138,52 @@ func reportBrokenEntireDir(cmd *cobra.Command) error {
 	if err == nil {
 		return nil
 	}
+	writeEntireDirDiagnosis(cmd.OutOrStdout(), err)
+	return NewSilentError(err)
+}
 
-	w := cmd.OutOrStdout()
+// writeEntireDirDiagnosis is doctor's rendering of the same three conditions
+// writeEntireDirRemedy covers. It is separate because doctor's report has its
+// own shape (a labelled heading and indented detail, matching the other
+// checks), and it takes the error as a parameter so each branch is reachable in
+// a test without staging the filesystem condition that produces it.
+//
+// The heading distinguishes the conditions too: calling `.entire` BROKEN when
+// the only thing established is that git would not answer states something we
+// do not know.
+func writeEntireDirDiagnosis(w io.Writer, err error) {
+	switch {
+	case errors.Is(err, paths.ErrEntireDirNotDirectory):
+		fmt.Fprintf(w, "%s: BROKEN\n", paths.EntireDir)
+		fmt.Fprintf(w, "  %v\n", err)
+		fmt.Fprintf(w, "  Entire has refused to read or write through it, so every other command\n")
+		fmt.Fprintf(w, "  in this repository is stopped and no session data is being captured.\n")
+		fmt.Fprintf(w, "  Fix: inspect the path, then either replace it with a real directory or\n")
+		fmt.Fprintf(w, "  remove it and run `entire enable` again.\n")
+		fmt.Fprintf(w, "  Not auto-fixed: what is there may be someone's data, and deleting it is\n")
+		fmt.Fprintf(w, "  not a call doctor should make on your behalf.\n")
 
-	if !errors.Is(err, paths.ErrEntireDirNotDirectory) {
+	case errors.Is(err, paths.ErrEntireDirUnreadable):
+		fmt.Fprintf(w, "%s: UNREADABLE\n", paths.EntireDir)
+		fmt.Fprintf(w, "  %v\n", err)
+		fmt.Fprintf(w, "  The check itself failed, so nothing is known about what is at that path\n")
+		fmt.Fprintf(w, "  and every other command here is stopped.\n")
+		fmt.Fprintf(w, "  Fix: this is a filesystem error, not a git or Entire one. Check ownership\n")
+		fmt.Fprintf(w, "  and permissions on the path and the directory holding it, and whether the\n")
+		fmt.Fprintf(w, "  mount it lives on is healthy.\n")
+
+	case errors.Is(err, paths.ErrRepositoryUnresolved):
 		fmt.Fprintf(w, "%s: UNVERIFIED\n", paths.EntireDir)
 		fmt.Fprintf(w, "  %v\n", err)
 		fmt.Fprintf(w, "  Entire cannot tell which repository this directory belongs to, so it\n")
 		fmt.Fprintf(w, "  cannot verify %s and every other command here is stopped.\n", paths.EntireDir)
 		fmt.Fprintf(w, "  Fix: resolve the git error above. Common causes are git missing from\n")
-		fmt.Fprintf(w, "  PATH and git's ownership check on a mounted or shared repository.\n")
-		return NewSilentError(err)
+		fmt.Fprintf(w, "  PATH and git's ownership check on a mounted or shared repository, which\n")
+		fmt.Fprintf(w, "  names the `git config --global --add safe.directory` line to add.\n")
+
+	default:
+		fmt.Fprintf(w, "%s: UNVERIFIED\n", paths.EntireDir)
+		fmt.Fprintf(w, "  %v\n", err)
+		fmt.Fprintf(w, "  Entire could not verify %s, so every other command here is stopped.\n", paths.EntireDir)
 	}
-
-	fmt.Fprintf(w, "%s: BROKEN\n", paths.EntireDir)
-	fmt.Fprintf(w, "  %v\n", err)
-	fmt.Fprintf(w, "  Entire has refused to read or write through it, so every other command\n")
-	fmt.Fprintf(w, "  in this repository is stopped and no session data is being captured.\n")
-	fmt.Fprintf(w, "  Fix: inspect the path, then either replace it with a real directory or\n")
-	fmt.Fprintf(w, "  remove it and run `entire enable` again.\n")
-	fmt.Fprintf(w, "  Not auto-fixed: what is there may be someone's data, and deleting it is\n")
-	fmt.Fprintf(w, "  not a call doctor should make on your behalf.\n")
-
-	return NewSilentError(err)
 }

@@ -3,6 +3,7 @@ package paths
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -345,5 +346,81 @@ exit 128`)
 	}
 	if !strings.Contains(err.Error(), "dubious ownership") {
 		t.Errorf("git's fatal was swallowed: %v", err)
+	}
+}
+
+// The three failure conditions are distinguished positively, because each has a
+// different remedy and callers print it. Classification by elimination is how a
+// stat error came to be reported as a git problem.
+func TestEntireDirErrorsAreDistinguishable(t *testing.T) {
+	t.Parallel()
+
+	t.Run("wrong file type", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, EntireDir), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		err := ValidateEntireDirAt(root)
+		if !errors.Is(err, ErrEntireDirNotDirectory) {
+			t.Fatalf("want ErrEntireDirNotDirectory, got %v", err)
+		}
+		if errors.Is(err, ErrEntireDirUnreadable) {
+			t.Errorf("a wrong file type must not read as unreadable: %v", err)
+		}
+	})
+
+	t.Run("stat failure", func(t *testing.T) {
+		t.Parallel()
+		if runtime.GOOS == osWindows {
+			t.Skip("directory permission bits do not gate stat on Windows")
+		}
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses directory permission bits")
+		}
+
+		root := filepath.Join(t.TempDir(), "repo")
+		if err := os.Mkdir(root, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(root, EntireDir), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(root, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := os.Chmod(root, 0o750); err != nil {
+				t.Logf("restore permissions on %s: %v", root, err)
+			}
+		})
+
+		err := ValidateEntireDirAt(root)
+		if !errors.Is(err, ErrEntireDirUnreadable) {
+			t.Fatalf("want ErrEntireDirUnreadable, got %v", err)
+		}
+		if errors.Is(err, ErrEntireDirNotDirectory) {
+			t.Errorf("a stat failure must not read as a wrong file type: %v", err)
+		}
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("the underlying cause was dropped: %v", err)
+		}
+	})
+}
+
+// Separate from the table above because it needs t.Chdir, which cannot run
+// under a parallel parent.
+func TestRequireEntireDir_UnresolvedRepositoryIsItsOwnCondition(t *testing.T) {
+	inDirWithSymlinkedEntireDir(t)
+	withFakeGit(t, `echo "fatal: detected dubious ownership in repository at '/repo'" >&2
+exit 128`)
+
+	err := RequireEntireDir(context.Background())
+	if !errors.Is(err, ErrRepositoryUnresolved) {
+		t.Fatalf("want ErrRepositoryUnresolved, got %v", err)
+	}
+	if errors.Is(err, ErrEntireDirNotDirectory) || errors.Is(err, ErrEntireDirUnreadable) {
+		t.Errorf("an unresolved repository must not read as a problem with the path: %v", err)
 	}
 }
