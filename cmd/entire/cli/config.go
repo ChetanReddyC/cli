@@ -125,6 +125,14 @@ func newLogger(ctx context.Context) (*logging.Logger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
+	// The log sink lives under .entire, so it is a write through that path like
+	// any other. The root pre-run has already refused a guarded command by the
+	// time we get here; this covers the callers that build a logger outside it
+	// (`enable`, the hook handlers) and the exempt commands, which run but must
+	// not create .entire/logs through a symlink someone else controls.
+	if err := paths.ValidateEntireDirAt(root); err != nil {
+		return nil, fmt.Errorf("refusing to open log sink: %w", err)
+	}
 	l, err := logging.New(logging.Config{
 		Dir:   filepath.Join(root, logging.LogsDir),
 		Level: resolveLogLevel(ctx),
