@@ -168,17 +168,30 @@ func firstUnsupportedEntry(dir string, entries []os.DirEntry) error {
 // already requires local code execution, at which point this check is not what
 // stands in the way. Tolerating the ambiguous bit is the cheaper mistake.
 //
-// The bit is tolerated only on its own: anything carrying a type we do reject
-// is rejected whatever else it carries.
+// So the bit is masked off rather than matched on, because it does not arrive
+// alone. Go only skips ModeDir for a reparse tag that is a name surrogate (the
+// !isReparseTagNameSurrogate branch of the same function), and the cloud tags
+// are not surrogates, so a placeholder directory reports ModeDir|ModeIrregular
+// while a junction, which is a surrogate, reports ModeIrregular by itself.
+// `.entire`'s own entries are mostly directories, so demanding the bit stand
+// alone would reject `metadata`, `logs`, and `tmp` in exactly the synced folder
+// this exception exists to keep working.
+//
+// What masking does not do is excuse the rest of the field: anything carrying a
+// type we reject is rejected whatever else it carries, ModeIrregular included.
+//
+// The remainder is then compared against the whole type field, fs.FileMode.
+// Type(), and not tested with IsRegular and IsDir. Those two examine single
+// bits rather than the field: IsDir is `mode&ModeDir != 0`. A mode carrying
+// ModeDir alongside ModeSymlink or ModeNamedPipe therefore satisfies IsDir, as
+// does the all-bits-set mode os.ReadDir's direntType returns when a type cannot
+// be resolved at all. An allowlist a rejected type can enter by also setting an
+// accepted bit is not an allowlist. Permission bits and the non-type bits above
+// ModeType (setuid, sticky, and friends) sit outside the field, so they do not
+// affect the answer, which is what IsRegular already did.
 func unsupportedEntryType(mode fs.FileMode) bool {
-	switch {
-	case mode.IsRegular(), mode.IsDir():
-		return false
-	case mode == fs.ModeIrregular:
-		return false
-	default:
-		return true
-	}
+	t := mode.Type() &^ fs.ModeIrregular
+	return t != 0 && t != fs.ModeDir
 }
 
 // unsupportedEntryError reports that path is a type Entire does not put under

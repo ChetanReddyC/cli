@@ -521,9 +521,27 @@ would hard-fail every command in a repo inside a synced folder, with a remedy th
 user cannot act on, and the placeholder arrives with nobody attacking anything.
 The junction it would also catch cannot arrive by checkout — git has no
 tree-object mode for one — so planting it already requires local code execution,
-at which point this check is not what stands in the way. The bit is tolerated
-only on its own: anything carrying a rejected type is rejected whatever else it
-carries. Distinguishing the two would mean reading the reparse tag through a
+at which point this check is not what stands in the way. **The bit is masked
+out of the type, not matched against it** — `mode.Type() &^ fs.ModeIrregular`
+must equal `0` or `fs.ModeDir` — because Windows does not hand it over alone:
+`ModeDir` is withheld only for a *name-surrogate* reparse tag, and the cloud
+tags are not surrogates, so a placeholder **directory** arrives as
+`ModeDir|ModeIrregular` while a junction (a surrogate) arrives as
+`ModeIrregular` by itself. `.entire`'s own entries are mostly directories, so an
+exact match on the bare bit would reject `metadata`, `logs`, and `tmp` in exactly
+the synced folder the tolerance exists for. Masking does not soften the rest of
+the field: anything carrying a rejected type is rejected whatever else it
+carries, `ModeIrregular` included.
+
+**The comparison is against the whole type field, never `IsRegular`/`IsDir`.**
+Those examine single bits (`IsDir` is `mode&ModeDir != 0`), so an allowlist
+keyed on them lets a rejected type in by *also* setting an accepted bit:
+`ModeDir|ModeSymlink` and `ModeDir|ModeNamedPipe` both satisfy `IsDir`, and so
+does the all-bits-set unknown mode above — which is what made the "even a leak
+would fail closed" claim false until it was fixed. An allowlist a rejected type
+can enter by setting an extra bit is not an allowlist.
+`TestUnsupportedEntryType` pins each combination. Distinguishing junction from
+placeholder would mean reading the reparse tag through a
 Windows-only syscall (`FindFirstFile`, then `Reserved0 & 0x20000000` for the
 name-surrogate tags); that is the upgrade path if junctions ever become worth
 catching.

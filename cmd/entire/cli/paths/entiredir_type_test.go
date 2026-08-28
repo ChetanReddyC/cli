@@ -18,6 +18,11 @@ import (
 // the placeholder gets there without anyone attacking anything, while a
 // junction cannot arrive by checkout at all: git has no tree-object mode for
 // one. Tolerating the ambiguous bit is the cheaper mistake.
+//
+// It is tolerated by being masked out rather than matched on, because Windows
+// hands it over alongside ModeDir whenever the reparse tag is not a name
+// surrogate, which is what a placeholder directory is. Rejected types are
+// rejected regardless of the bit.
 func TestUnsupportedEntryType(t *testing.T) {
 	t.Parallel()
 
@@ -33,13 +38,72 @@ func TestUnsupportedEntryType(t *testing.T) {
 		{name: "socket", mode: fs.ModeSocket, want: true},
 		{name: "block device", mode: fs.ModeDevice, want: true},
 		{name: "character device", mode: fs.ModeDevice | fs.ModeCharDevice, want: true},
-		{name: "irregular is tolerated", mode: fs.ModeIrregular},
+		{
+			// A junction, or a cloud placeholder standing in for a file.
+			name: "irregular is tolerated",
+			mode: fs.ModeIrregular,
+		},
+		{
+			// A cloud placeholder standing in for a directory. Go withholds
+			// ModeDir only for a name-surrogate reparse tag, and the cloud tags
+			// are not surrogates, so this is the shape `.entire/metadata`,
+			// `logs`, and `tmp` take inside a synced folder. Demanding
+			// ModeIrregular stand alone would reject the very case it is
+			// tolerated for.
+			name: "irregular alongside a directory is tolerated",
+			mode: fs.ModeDir | fs.ModeIrregular,
+		},
 		{
 			// Nothing produces this today, and if something starts to, the
 			// symlink half is the half that matters.
 			name: "irregular alongside a rejected bit is still rejected",
 			mode: fs.ModeIrregular | fs.ModeSymlink,
 			want: true,
+		},
+		{
+			name: "irregular alongside a directory and a rejected bit is still rejected",
+			mode: fs.ModeDir | fs.ModeIrregular | fs.ModeNamedPipe,
+			want: true,
+		},
+		{
+			// The allowlist is exclusive, so the directory bit does not
+			// launder a rejected one. fs.FileMode.IsDir tests a single bit,
+			// which is why this must be checked against the whole type rather
+			// than against IsDir.
+			name: "directory alongside a rejected bit is still rejected",
+			mode: fs.ModeDir | fs.ModeSymlink,
+			want: true,
+		},
+		{
+			name: "directory alongside a named pipe is still rejected",
+			mode: fs.ModeDir | fs.ModeNamedPipe,
+			want: true,
+		},
+		{
+			// What os.ReadDir's direntType returns when the platform reports
+			// no type and the internal Lstat cannot supply one. Every bit is
+			// set, the directory bit among them, so an allowlist keyed on
+			// IsDir would wave it through.
+			name: "unknown type is rejected",
+			mode: ^fs.FileMode(0),
+			want: true,
+		},
+		{
+			// Permission and non-type bits do not change what an entry is.
+			name: "regular file with permission bits",
+			mode: 0o644,
+		},
+		{
+			name: "irregular with permission bits is tolerated",
+			mode: fs.ModeIrregular | 0o644,
+		},
+		{
+			name: "setuid regular file",
+			mode: fs.ModeSetuid | 0o755,
+		},
+		{
+			name: "directory with permission bits",
+			mode: fs.ModeDir | 0o755,
 		},
 	}
 
