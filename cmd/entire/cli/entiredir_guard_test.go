@@ -380,3 +380,68 @@ func TestLoadEntireSettings_OutsideRepositoryStillLoads(t *testing.T) {
 		t.Fatalf("LoadEntireSettings outside a repository: %v", err)
 	}
 }
+
+// withoutGit strips git from PATH so worktree-root discovery fails for a reason
+// that is not "no repository". Not parallel: PATH is process-global.
+func withoutGit(t *testing.T) {
+	t.Helper()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	t.Chdir(repoDir)
+	t.Setenv("PATH", t.TempDir())
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+}
+
+// A discovery failure has established nothing about `.entire`. Sending the user
+// off to replace a file that may be perfectly fine is worse than saying
+// nothing, so the two failures carry different remedies.
+func TestCheckEntireDirBeforeRun_DiscoveryFailureDoesNotBlameTheDirectory(t *testing.T) {
+	withoutGit(t)
+
+	var stderr bytes.Buffer
+	cmd := &cobra.Command{Use: "status"}
+	cmd.SetContext(context.Background())
+	cmd.SetErr(&stderr)
+
+	safe, err := checkEntireDirBeforeRun(cmd)
+	if err == nil {
+		t.Fatal("a guarded command ran with the worktree root unresolved")
+	}
+	if safe {
+		t.Error("checkEntireDirBeforeRun reported the path safe")
+	}
+	if errors.Is(err, paths.ErrEntireDirNotDirectory) {
+		t.Errorf("a discovery failure was reported as a wrong file type: %v", err)
+	}
+
+	msg := stderr.String()
+	if strings.Contains(msg, "replace it with a real directory") {
+		t.Errorf("remedy blames .entire for a failure that says nothing about it:\n%s", msg)
+	}
+	if !strings.Contains(msg, "safe.directory") {
+		t.Errorf("remedy does not name the common cause:\n%s", msg)
+	}
+}
+
+func TestDoctor_ReportsUnverifiedWhenDiscoveryFails(t *testing.T) {
+	withoutGit(t)
+
+	var stdout bytes.Buffer
+	cmd := &cobra.Command{Use: "doctor"}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+
+	if err := reportBrokenEntireDir(cmd); err == nil {
+		t.Fatal("doctor did not report the unresolved worktree root")
+	}
+
+	report := stdout.String()
+	if !strings.Contains(report, "UNVERIFIED") {
+		t.Errorf("report is not labelled UNVERIFIED:\n%s", report)
+	}
+	if strings.Contains(report, "BROKEN") {
+		t.Errorf("report calls .entire broken on evidence that says nothing about it:\n%s", report)
+	}
+}

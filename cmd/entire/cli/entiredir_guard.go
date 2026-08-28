@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -72,13 +73,30 @@ func checkEntireDirBeforeRun(cmd *cobra.Command) (safe bool, err error) {
 	return true, nil
 }
 
-// writeEntireDirRemedy prints what is wrong and what to do about it. The
-// sentinel error alone names the path but not the way out, and the way out is
-// not obvious: the natural guess is that Entire is misconfigured, when in fact
-// something has replaced a directory Entire owns.
+// writeEntireDirRemedy prints what is wrong and what to do about it. The error
+// alone names the problem but not the way out, and the way out is not obvious:
+// the natural guess is that Entire is misconfigured, when in fact something has
+// replaced a directory Entire owns, or git cannot say which repository this is.
+//
+// Those two are separate remedies, and printing the wrong one is worse than
+// printing none. A discovery failure has established nothing about `.entire`,
+// so telling the user to go replace it sends them after a file that may be
+// perfectly fine.
 func writeEntireDirRemedy(w io.Writer, err error) {
 	fmt.Fprintf(w, "%v\n", err)
 	fmt.Fprintf(w, "\n")
+
+	if !errors.Is(err, paths.ErrEntireDirNotDirectory) {
+		fmt.Fprintf(w, "Entire cannot tell which repository this directory belongs to, so it cannot\n")
+		fmt.Fprintf(w, "verify that %s is a directory it owns, and will not read or write through\n", paths.EntireDir)
+		fmt.Fprintf(w, "it on the strength of a guess.\n")
+		fmt.Fprintf(w, "\n")
+		fmt.Fprintf(w, "Fix: resolve the git error above. Common causes are git missing from PATH\n")
+		fmt.Fprintf(w, "and git's ownership check on a mounted or shared repository, which names\n")
+		fmt.Fprintf(w, "the `git config --global --add safe.directory` line to add.\n")
+		return
+	}
+
 	fmt.Fprintf(w, "Entire keeps session metadata, transcripts, and the redaction settings that\n")
 	fmt.Fprintf(w, "decide what may be committed under %s, and will not read or write through a\n", paths.EntireDir)
 	fmt.Fprintf(w, "path that is not a real directory it owns.\n")
@@ -106,6 +124,17 @@ func reportBrokenEntireDir(cmd *cobra.Command) error {
 	}
 
 	w := cmd.OutOrStdout()
+
+	if !errors.Is(err, paths.ErrEntireDirNotDirectory) {
+		fmt.Fprintf(w, "%s: UNVERIFIED\n", paths.EntireDir)
+		fmt.Fprintf(w, "  %v\n", err)
+		fmt.Fprintf(w, "  Entire cannot tell which repository this directory belongs to, so it\n")
+		fmt.Fprintf(w, "  cannot verify %s and every other command here is stopped.\n", paths.EntireDir)
+		fmt.Fprintf(w, "  Fix: resolve the git error above. Common causes are git missing from\n")
+		fmt.Fprintf(w, "  PATH and git's ownership check on a mounted or shared repository.\n")
+		return NewSilentError(err)
+	}
+
 	fmt.Fprintf(w, "%s: BROKEN\n", paths.EntireDir)
 	fmt.Fprintf(w, "  %v\n", err)
 	fmt.Fprintf(w, "  Entire has refused to read or write through it, so every other command\n")

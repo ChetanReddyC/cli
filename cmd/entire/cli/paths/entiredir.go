@@ -43,23 +43,35 @@ func ValidateEntireDirAt(worktreeRoot string) error {
 	return fmt.Errorf("%s is %s, %w", path, describeMode(info.Mode()), ErrEntireDirNotDirectory)
 }
 
-// RequireEntireDir validates the current worktree's `.entire`. Outside a git
-// repository there is no worktree root and so nothing to validate, which is not
-// an error: commands that need a repository report its absence themselves, with
-// a message about the repository rather than about `.entire`.
+// RequireEntireDir validates the current worktree's `.entire`.
+//
+// Outside a git repository there is no worktree root and so nothing to
+// validate, which is not an error: commands that need a repository report its
+// absence themselves, with a message about the repository rather than about
+// `.entire`. That skip requires git's positive ErrNotARepository verdict.
+//
+// Every other discovery failure — git missing from PATH, a cancelled context, a
+// permission failure, dubious ownership, malformed output — fails closed. Those
+// mean "we could not find out", and the consequence of guessing "no repository"
+// is not merely a skipped check: settings resolution falls back to a path
+// relative to the current directory when the root will not resolve
+// (settingsAbsPaths in the settings package), so a guess would read
+// ./.entire/settings.json — through the very symlink this exists to reject.
+// Refusing to run on a machine whose git is broken is the cheaper mistake.
 //
 // Deliberately not memoized. The Lstat is free next to the `git rev-parse` that
 // WorktreeRoot runs, and a cached "it was fine" is a stale answer in a
 // long-lived process such as `entire mcp`.
 func RequireEntireDir(ctx context.Context) error {
 	root, err := WorktreeRoot(ctx)
-	if err != nil {
-		//nolint:nilerr // No repository means no `.entire` to validate. Reporting
-		// the rev-parse failure here would make every command outside a repo fail
-		// with a message about `.entire` instead of about the missing repository.
+	switch {
+	case err == nil:
+		return ValidateEntireDirAt(root)
+	case errors.Is(err, ErrNotARepository):
 		return nil
+	default:
+		return fmt.Errorf("cannot locate the repository holding %s, so it cannot be verified: %w", EntireDir, err)
 	}
-	return ValidateEntireDirAt(root)
 }
 
 // describeMode names what was found. The sentinel supplies the "not a

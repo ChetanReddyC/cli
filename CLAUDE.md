@@ -485,6 +485,23 @@ and the check is skipped rather than failing. Commands that need a repository
 report its absence themselves, with a message about the repository rather than
 about `.entire`.
 
+**That skip requires git's positive verdict, not merely a failed lookup.**
+`WorktreeRoot` classifies its own failure and wraps `paths.ErrNotARepository`
+only when git ran, exited non-zero, and said "not a git repository"; exit code
+128 alone is not the signal, since git also uses it for dubious ownership and
+permission failures, both of which happen *inside* a repository. Locale
+variables are pinned to C for that subprocess so the message is recognisable on
+a translated machine. Every other outcome — git missing from `PATH`, a cancelled
+context, a killed child, success with empty output — fails closed.
+
+The reason is that "we could not find out" is not the same as "there is nothing
+here", and guessing costs more than a skipped check: `settingsAbsPaths` falls
+back to a path relative to the *current directory* when the root will not
+resolve, so a wrong guess reads `./.entire/settings.json` — through the very
+symlink the guard exists to reject. Refusing to run on a machine whose git is
+broken is the cheaper mistake. Do not "simplify" `RequireEntireDir` back to
+treating any `WorktreeRoot` error as absence.
+
 Every exemption needs an entry in `entireDirCheckExemptions`
 (`entiredir_guard_test.go`) giving the reason; `TestEntireDirCheckExemptions`
 fails both on an unlisted exemption and on a stale entry, so an exemption added
