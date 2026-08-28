@@ -37,7 +37,22 @@ type EntireSettings = settings.EntireSettings
 // then applies any overrides from .entire/settings.local.json if it exists.
 // Returns default settings if neither file exists.
 // Works correctly from any subdirectory within the repository.
+//
+// Fails when `.entire` is not a real directory. The root pre-run already made
+// that check for anything that reaches a command's RunE, so for those callers
+// this is a second Lstat — but the pre-run does not cover everything. External
+// plugins are dispatched from main.go before cobra runs at all, and commands
+// exempt from the pre-run still reach settings through the post-run telemetry
+// path. Settings are read FROM the directory in question, which makes this the
+// one operation those callers have in common and so the place to guarantee the
+// check happens at least once.
+//
+// Outside a repository there is nothing to validate and the check is skipped,
+// so settings still resolve to defaults there.
 func LoadEntireSettings(ctx context.Context) (*settings.EntireSettings, error) {
+	if err := paths.RequireEntireDir(ctx); err != nil {
+		return nil, fmt.Errorf("refusing to load settings: %w", err)
+	}
 	s, err := settings.Load(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("loading settings: %w", err)

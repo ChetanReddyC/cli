@@ -472,6 +472,19 @@ mean "write through it anyway": `checkEntireDirBeforeRun` returns
 `ensureLogger` from creating `.entire/logs` through the symlink. `newLogger`
 repeats the check for the callers that build a logger outside the pre-run.
 
+The pre-run is not the only enforcement point. `LoadEntireSettings` repeats the
+check, because the pre-run does not cover everything: external plugins are
+dispatched from `main.go` before cobra runs at all, and exempt commands still
+reach settings through the post-run telemetry path. Settings are read *from* the
+directory in question, so loading them is the one operation those callers have
+in common — the duplicated `Lstat` on the ordinary path buys the guarantee that
+the check happens at least once on the unusual ones.
+
+Outside a git repository there is no worktree root and so nothing to validate,
+and the check is skipped rather than failing. Commands that need a repository
+report its absence themselves, with a message about the repository rather than
+about `.entire`.
+
 Every exemption needs an entry in `entireDirCheckExemptions`
 (`entiredir_guard_test.go`) giving the reason; `TestEntireDirCheckExemptions`
 fails both on an unlisted exemption and on a stale entry, so an exemption added

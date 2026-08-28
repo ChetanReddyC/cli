@@ -1,6 +1,7 @@
 package paths
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -162,5 +163,27 @@ func TestValidateEntireDirAt_MessageNamesPathAndType(t *testing.T) {
 	}
 	if !strings.Contains(msg, "symbolic link") {
 		t.Errorf("message %q does not say what was found", msg)
+	}
+}
+
+// Outside a git repository there is no worktree root, so there is no `.entire`
+// to validate and the check is skipped. Commands that need a repository report
+// its absence themselves, with a message about the repository rather than one
+// about `.entire`.
+//
+// The stray `.entire` file proves the skip is real: were the check resolving a
+// root some other way, this would trip it.
+func TestRequireEntireDir_OutsideRepositoryIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, EntireDir), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(dir)
+	ClearWorktreeRootCache()
+	t.Cleanup(ClearWorktreeRootCache)
+
+	if err := RequireEntireDir(context.Background()); err != nil {
+		t.Fatalf("RequireEntireDir outside a repository: %v", err)
 	}
 }

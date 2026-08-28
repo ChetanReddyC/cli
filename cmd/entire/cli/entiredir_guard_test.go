@@ -334,3 +334,49 @@ func TestDoctor_HealthyEntireDirIsNotReported(t *testing.T) {
 		t.Errorf("healthy repo produced a report:\n%s", stdout.String())
 	}
 }
+
+// The root pre-run does not cover everything. External plugins are dispatched
+// before cobra ever runs, and exempt commands reach settings through the
+// post-run telemetry path. Settings are read FROM .entire, so loading them is
+// the one operation every such caller has in common — checking here means the
+// guard runs at least once even where the pre-run did not. Callers that already
+// went through the pre-run just pay a second Lstat.
+func TestLoadEntireSettings_RefusesSymlinkedEntireDir(t *testing.T) {
+	newRepoWithSymlinkedEntireDir(t)
+
+	_, err := LoadEntireSettings(context.Background())
+	if err == nil {
+		t.Fatal("LoadEntireSettings read settings through a symlinked .entire")
+	}
+	if !errors.Is(err, paths.ErrEntireDirNotDirectory) {
+		t.Errorf("error does not wrap ErrEntireDirNotDirectory: %v", err)
+	}
+}
+
+func TestLoadEntireSettings_HealthyRepoLoads(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	if err := os.Mkdir(filepath.Join(repoDir, paths.EntireDir), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repoDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	if _, err := LoadEntireSettings(context.Background()); err != nil {
+		t.Fatalf("LoadEntireSettings on a healthy repo: %v", err)
+	}
+}
+
+// Outside a repository the check is skipped, so settings still resolve to
+// defaults rather than failing with a message about `.entire`.
+func TestLoadEntireSettings_OutsideRepositoryStillLoads(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	if _, err := LoadEntireSettings(context.Background()); err != nil {
+		t.Fatalf("LoadEntireSettings outside a repository: %v", err)
+	}
+}
