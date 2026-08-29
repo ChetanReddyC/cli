@@ -4,12 +4,40 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/require"
+
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 )
+
+func TestUpdatePersistentRef_StopsWaitingWhenContextDeadlineExpires(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	refName := plumbing.ReferenceName("refs/entire/test-deadline")
+
+	_, commonDir, err := repositoryDirs(context.Background(), repo)
+	require.NoError(t, err)
+	lockPath, err := persistentRefLockPath(commonDir, refName)
+	require.NoError(t, err)
+	release, err := flock.Acquire(lockPath)
+	require.NoError(t, err)
+	t.Cleanup(release)
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	buildCalled := false
+	err = updatePersistentRef(ctx, repo, refName, func() (plumbing.Hash, plumbing.Hash, error) {
+		buildCalled = true
+		return plumbing.ZeroHash, plumbing.ZeroHash, nil
+	})
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.False(t, buildCalled, "the ref builder must not run without the lock")
+}
 
 func TestUpdatePersistentRef_RebuildsAfterCASConflict(t *testing.T) {
 	t.Parallel()
@@ -17,13 +45,15 @@ func TestUpdatePersistentRef_RebuildsAfterCASConflict(t *testing.T) {
 	repo, initial := setupBranchTestRepo(t)
 	refName := plumbing.ReferenceName("refs/entire/test-cas")
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, initial)))
+	repoRoot, _, err := repositoryDirs(ctx, repo)
+	require.NoError(t, err)
 
 	var (
 		calls       int
 		seenParents []plumbing.Hash
 		externalTip plumbing.Hash
 	)
-	err := updatePersistentRef(ctx, repo, refName, func() (plumbing.Hash, plumbing.Hash, error) {
+	err = updatePersistentRef(ctx, repo, refName, func() (plumbing.Hash, plumbing.Hash, error) {
 		calls++
 		ref, err := repo.Reference(refName, true)
 		if err != nil {
@@ -57,7 +87,7 @@ func TestUpdatePersistentRef_RebuildsAfterCASConflict(t *testing.T) {
 			if err != nil {
 				return plumbing.ZeroHash, plumbing.ZeroHash, err
 			}
-			if err := repo.Storer.SetReference(plumbing.NewHashReference(refName, externalTip)); err != nil {
+			if err := casUpdateRef(ctx, repoRoot, refName, externalTip, parent); err != nil {
 				return plumbing.ZeroHash, plumbing.ZeroHash, err
 			}
 		}
@@ -87,9 +117,11 @@ func TestUpdatePersistentRef_NoOpConflictKeepsExistingCommit(t *testing.T) {
 	repo, initial := setupBranchTestRepo(t)
 	refName := plumbing.ReferenceName("refs/entire/test-cas-noop")
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, initial)))
+	repoRoot, _, err := repositoryDirs(ctx, repo)
+	require.NoError(t, err)
 
 	calls := 0
-	err := updatePersistentRef(ctx, repo, refName, func() (plumbing.Hash, plumbing.Hash, error) {
+	err = updatePersistentRef(ctx, repo, refName, func() (plumbing.Hash, plumbing.Hash, error) {
 		calls++
 		ref, err := repo.Reference(refName, true)
 		if err != nil {
@@ -105,7 +137,7 @@ func TestUpdatePersistentRef_NoOpConflictKeepsExistingCommit(t *testing.T) {
 			if err != nil {
 				return plumbing.ZeroHash, plumbing.ZeroHash, err
 			}
-			if err := repo.Storer.SetReference(plumbing.NewHashReference(refName, external)); err != nil {
+			if err := casUpdateRef(ctx, repoRoot, refName, external, current); err != nil {
 				return plumbing.ZeroHash, plumbing.ZeroHash, err
 			}
 		}

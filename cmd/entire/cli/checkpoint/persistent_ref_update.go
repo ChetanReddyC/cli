@@ -68,12 +68,12 @@ func persistentRefLockPath(commonDir string, refName plumbing.ReferenceName) (st
 	return filepath.Join(lockDir, safe+".lock"), nil
 }
 
-func withPersistentRefFlock(commonDir string, refName plumbing.ReferenceName, fn func() error) error {
+func withPersistentRefFlock(ctx context.Context, commonDir string, refName plumbing.ReferenceName, fn func() error) error {
 	path, err := persistentRefLockPath(commonDir, refName)
 	if err != nil {
 		return err
 	}
-	release, err := flock.Acquire(path)
+	release, err := flock.AcquireContext(ctx, path)
 	if err != nil {
 		return fmt.Errorf("acquire persistent ref flock %s: %w", refName, err)
 	}
@@ -90,7 +90,7 @@ func updatePersistentRef(ctx context.Context, repo *git.Repository, refName plum
 		return fmt.Errorf("resolve repository directories: %w", err)
 	}
 
-	return withPersistentRefFlock(commonDir, refName, func() error {
+	return withPersistentRefFlock(ctx, commonDir, refName, func() error {
 		for attempt := range shadowRefMaxRetries {
 			newHash, expectedHash, buildErr := build()
 			if buildErr != nil {
