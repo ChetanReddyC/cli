@@ -101,11 +101,11 @@ func updatePersistentRef(ctx context.Context, repo *git.Repository, refName plum
 			if refErr == nil {
 				return nil
 			}
-			if newHash != expectedHash {
-				tryDeleteLooseObject(commonDir, newHash)
-			}
 			if !errors.Is(refErr, ErrShadowRefBusy) {
 				return fmt.Errorf("update persistent ref %s: %w", refName, refErr)
+			}
+			if newHash != expectedHash {
+				tryDeleteLooseObject(commonDir, newHash)
 			}
 
 			if backoffErr := shadowRefBackoff(ctx, attempt); backoffErr != nil {
